@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+  x:Class="GoWinUI.App.Pages.LogsPage"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+  xmlns:models="using:GoWinUI.Core.Models"
+  xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+  Background="Transparent"
+  Loaded="OnLoaded"
+  mc:Ignorable="d">
+
+  <Grid Padding="24" RowSpacing="16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <Grid ColumnSpacing="10">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <StackPanel>
+        <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Logs" />
+        <TextBlock
+          Margin="0,4,0,0"
+          Foreground="{ThemeResource GoMutedTextBrush}"
+          Text="Flüchtige Laufzeitdiagnose ohne Prompts, Dokumentinhalte oder AI-Tokens." />
+      </StackPanel>
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+        <Button Click="OnCopySelected" Content="Kopieren" />
+        <Button Click="OnExportText" Content="Text exportieren" />
+        <Button Click="OnExportJson" Content="JSON exportieren" />
+        <Button Click="OnClear" Content="Leeren" Foreground="{ThemeResource GoDangerBrush}" />
+      </StackPanel>
+    </Grid>
+
+    <Border Grid.Row="1" Style="{StaticResource GoCardStyle}" Padding="12">
+      <Grid ColumnSpacing="10">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="2*" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <TextBox
+          PlaceholderText="Logs durchsuchen"
+          Text="{x:Bind ViewModel.Search, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+          TextChanged="OnFilterChanged" />
+        <ComboBox
+          x:Name="LevelFilter"
+          Grid.Column="1"
+          MinWidth="115"
+          Header="Mindestlevel"
+          SelectedIndex="0"
+          SelectionChanged="OnLevelChanged">
+          <x:String>Trace</x:String>
+          <x:String>Debug</x:String>
+          <x:String>Information</x:String>
+          <x:String>Warning</x:String>
+          <x:String>Error</x:String>
+          <x:String>Critical</x:String>
+        </ComboBox>
+        <TextBox
+          Grid.Column="2"
+          Header="Kategorie"
+          PlaceholderText="z. B. LM Studio"
+          Text="{x:Bind ViewModel.Category, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+          TextChanged="OnFilterChanged" />
+        <ToggleSwitch
+          Grid.Column="3"
+          Header="Pause"
+          IsOn="{x:Bind ViewModel.IsPaused, Mode=TwoWay}" />
+        <ToggleSwitch
+          Grid.Column="4"
+          Header="Auto-Scroll"
+          IsOn="{x:Bind ViewModel.AutoScroll, Mode=TwoWay}" />
+      </Grid>
+    </Border>
+
+    <InfoBar
+      x:Name="ErrorBar"
+      Grid.Row="2"
+      IsClosable="True"
+      IsOpen="False"
+      Severity="Error"
+      Title="Log-Aktion fehlgeschlagen" />
+
+    <Border Grid.Row="3" Style="{StaticResource GoCardStyle}" Padding="0">
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Grid
+          Padding="13,9"
+          Background="{ThemeResource GoLayerStrongBrush}"
+          BorderBrush="{ThemeResource GoStrokeBrush}"
+          BorderThickness="0,0,0,1"
+          ColumnSpacing="12">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="175" />
+            <ColumnDefinition Width="100" />
+            <ColumnDefinition Width="220" />
+            <ColumnDefinition Width="*" />
+          </Grid.ColumnDefinitions>
+          <TextBlock FontWeight="SemiBold" Text="Zeitpunkt" />
+          <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="Level" />
+          <TextBlock Grid.Column="2" FontWeight="SemiBold" Text="Kategorie" />
+          <TextBlock Grid.Column="3" FontWeight="SemiBold" Text="Meldung" />
+        </Grid>
+        <ListView
+          x:Name="LogList"
+          Grid.Row="1"
+          IsItemClickEnabled="True"
+          ItemsSource="{x:Bind ViewModel.Entries, Mode=OneWay}"
+          SelectionMode="Single">
+          <ListView.ItemTemplate>
+            <DataTemplate x:DataType="models:SessionLogEntry">
+              <Grid MinHeight="40" Padding="5" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="175" />
+                  <ColumnDefinition Width="100" />
+                  <ColumnDefinition Width="220" />
+                  <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock FontFamily="Cascadia Mono" FontSize="12" Text="{x:Bind Timestamp}" />
+                <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="{x:Bind Level}" />
+                <TextBlock Grid.Column="2" Text="{x:Bind Category}" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="3" Text="{x:Bind Message}" TextTrimming="CharacterEllipsis" />
+              </Grid>
+            </DataTemplate>
+          </ListView.ItemTemplate>
+        </ListView>
+      </Grid>
+    </Border>
+  </Grid>
+</Page>

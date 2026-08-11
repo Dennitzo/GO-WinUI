@@ -1,0 +1,13 @@
+artifacts/
+bin/
+obj/
+.vs/
+*.user
+*.suo
+TestResults/
+coverage/
+node_modules/
+*.gobackup
+*.db
+*.db-shm
+*.db-wal

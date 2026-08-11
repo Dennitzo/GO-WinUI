@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
+  <title>GO AI Assistent</title>
+  <link rel="stylesheet" href="vendor/katex/0.16.10/katex.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="session-pane" aria-label="Sitzungen">
+      <div class="session-pane__header">
+        <button id="new-session" class="primary compact" type="button" title="Neue Sitzung">
+          <span aria-hidden="true">＋</span><span>Neuer Chat</span>
+        </button>
+        <button id="collapse-sessions" class="icon-button mobile-only" type="button" aria-label="Sitzungen schließen">×</button>
+      </div>
+      <label class="search-field">
+        <span aria-hidden="true">⌕</span>
+        <input id="session-search" type="search" autocomplete="off" placeholder="Chats durchsuchen">
+      </label>
+      <div id="session-list" class="session-list" role="list"></div>
+      <div class="session-pane__footer">
+        <span class="privacy-dot" aria-hidden="true"></span>
+        <span>Nur lokal gespeichert</span>
+      </div>
+    </aside>
+
+    <main class="chat-pane">
+      <header class="chat-header">
+        <div class="chat-title-row">
+          <button id="open-sessions" class="icon-button mobile-only" type="button" aria-label="Sitzungen öffnen">☰</button>
+          <div>
+            <h1 id="chat-title">AI Assistent</h1>
+            <p id="chat-subtitle">Allgemeiner Chat mit deinem lokalen Modell</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <span id="connection-pill" class="status-pill offline"><span class="status-dot"></span><span>LM Studio nicht verbunden</span></span>
+          <button id="export-pdf" class="icon-button" type="button" title="Chat als PDF exportieren" aria-label="Chat als PDF exportieren">⇩</button>
+        </div>
+      </header>
+
+      <section id="message-scroll" class="message-scroll" aria-live="polite">
+        <div id="welcome" class="welcome">
+          <div class="go-orb" aria-hidden="true">GO</div>
+          <h2>Wobei kann ich helfen?</h2>
+          <p>Nutze dein lokales LM-Studio-Modell, füge Dokumente als Kontext hinzu oder arbeite mit einem Workflow.</p>
+          <div class="suggestions">
+            <button type="button" data-prompt="Erkläre mir das Thema Schritt für Schritt."><strong>Etwas verstehen</strong><span>Komplexe Inhalte verständlich aufbereiten</span></button>
+            <button type="button" data-prompt="Hilf mir, einen klaren und umsetzbaren Plan zu erstellen."><strong>Einen Plan erstellen</strong><span>Ziele in konkrete Schritte zerlegen</span></button>
+            <button type="button" data-prompt="Analysiere das beigefügte Dokument und fasse die Kernaussagen zusammen."><strong>Dokument analysieren</strong><span>PDF, DOCX oder Text als Kontext nutzen</span></button>
+          </div>
+        </div>
+        <div id="message-list" class="message-list"></div>
+      </section>
+
+      <section class="composer-region" aria-label="Nachricht verfassen">
+        <div id="context-strip" class="context-strip" hidden>
+          <div id="workflow-chip" class="context-chip" hidden>
+            <span aria-hidden="true">⌘</span><span id="workflow-chip-name"></span>
+            <button id="remove-workflow" type="button" aria-label="Workflow entfernen">×</button>
+          </div>
+          <div id="document-chips" class="document-chips"></div>
+        </div>
+        <div class="composer">
+          <textarea id="prompt" rows="1" maxlength="100000" placeholder="Nachricht an GO" aria-label="Nachricht"></textarea>
+          <div class="composer-toolbar">
+            <div class="toolbar-group">
+              <button id="pick-document" class="tool-button" type="button" title="Dokument hinzufügen"><span aria-hidden="true">＋</span><span>Datei</span></button>
+              <button id="open-workflows" class="tool-button" type="button" title="Workflow wählen"><span aria-hidden="true">⌘</span><span>Workflow</span></button>
+              <label class="reasoning-control" title="Reasoning-Aufwand">
+                <span>Reasoning</span>
+                <select id="reasoning">
+                  <option value="low">Niedrig</option>
+                  <option value="medium" selected>Mittel</option>
+                  <option value="high">Hoch</option>
+                </select>
+              </label>
+            </div>
+            <div class="toolbar-group context-meter-wrap">
+              <span id="context-meter" class="context-meter">0 / 8k</span>
+              <button id="send" class="send-button" type="button" aria-label="Senden">↑</button>
+              <button id="stop" class="stop-button" type="button" aria-label="Antwort stoppen" hidden>■</button>
+            </div>
+          </div>
+        </div>
+        <p class="composer-note">GO kann Fehler machen. Prüfe wichtige Angaben und Dokumentquellen.</p>
+      </section>
+    </main>
+  </div>
+
+  <div id="workflow-overlay" class="modal-backdrop" hidden>
+    <section class="workflow-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-title">
+      <header class="modal-header">
+        <div><h2 id="workflow-title">Workflows</h2><p>Wiederverwendbaren Fachkontext verwalten</p></div>
+        <button id="close-workflows" class="icon-button" type="button" aria-label="Schließen">×</button>
+      </header>
+      <div class="workflow-layout">
+        <aside class="workflow-browser">
+          <div class="workflow-tools">
+            <input id="workflow-search" type="search" placeholder="Workflows durchsuchen">
+            <button id="new-workflow" class="primary compact" type="button">Neu</button>
+          </div>
+          <div id="workflow-list" class="workflow-list"></div>
+        </aside>
+        <form id="workflow-editor" class="workflow-editor">
+          <input id="workflow-id" type="hidden">
+          <input id="workflow-revision" type="hidden">
+          <label>Titel<input id="workflow-name" required maxlength="160"></label>
+          <div class="form-grid">
+            <label>Fachgebiet<input id="workflow-domain" maxlength="120"></label>
+            <label>Tags<input id="workflow-tags" placeholder="Planung, DIN, Prüfung"></label>
+          </div>
+          <label>Beschreibung<textarea id="workflow-description" rows="2"></textarea></label>
+          <label>Kontextzusammenfassung<textarea id="workflow-summary" rows="3"></textarea></label>
+          <label>Inhalt (JSON)<textarea id="workflow-content" class="code-editor" rows="10" spellcheck="false">{}</textarea></label>
+          <p id="workflow-lock-note" class="inline-note" hidden>Dieser integrierte Workflow ist schreibgeschützt. Du kannst ihn klonen.</p>
+          <div class="editor-actions">
+            <button id="delete-workflow" class="danger" type="button">Löschen</button>
+            <span class="spacer"></span>
+            <button id="clone-workflow" type="button">Klonen</button>
+            <button id="select-workflow" type="button">Als Kontext wählen</button>
+            <button id="save-workflow" class="primary" type="submit">Speichern</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="assertive"></div>
+  <script src="vendor/katex/0.16.10/katex.min.js"></script>
+  <script src="bridge.js"></script>
+  <script src="markdown.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,247 @@
+{
+    "schema": "barebone.general.workflow.v1",
+    "kind": "general",
+    "id": "bemessung_der_trinkwasserinstallation_nach_din_1988_300",
+    "title": "Bemessung der Trinkwasserinstallation nach DIN 1988-300",
+    "description": "Strukturierter Workflow zur Bemessung von Kalt- und Warmwasserleitungen nach DIN 1988-300:2012-05. Der Workflow führt von den Entnahmestellen über Summen- und Spitzendurchfluss, Druckbilanz, Rohrreibung, Einzelwiderstände und Standardrohrauswahl bis zur Ergebnisdokumentation. Normative Tabellenwerte, Herstellerdaten und projektbezogene Randbedingungen müssen aus der gültigen Norm beziehungsweise aus freigegebenen Produktdaten übernommen werden.",
+    "domain": "TGA / Trinkwasser",
+    "contextSummary": "Workflow zur Trinkwasser-Rohrdimensionierung nach DIN 1988-300:2012-05 mit differenziertem Berechnungsgang, Nutzungseinheiten, Summen- und Spitzendurchfluss, Druckbilanz, verfügbarem Rohrreibungsdruckgefälle, Rohrreibungs- und Einzelwiderstandsnachweis, Standardrohrauswahl, Beispielrechnung und Dokumentationscheckliste. Normative Tabellen- und Herstellerwerte sind projektbezogen einzusetzen.",
+    "display": {
+        "blocks": [
+            {
+                "id": "normstand_und_abgrenzung",
+                "title": "Normstand und Abgrenzung",
+                "text": "Dieser Workflow behandelt die Ermittlung der Rohrdurchmesser für Trinkwasser-Installationen nach DIN 1988-300:2012-05. DIN Media führt diese Ausgabe als aktuelle Norm. Die Norm gilt im Zusammenhang mit der Normenreihe DIN 1988 und DIN EN 806 für Planung, Errichtung, Änderung, Instandhaltung und Betrieb von Trinkwasser-Installationen in Gebäuden und auf Grundstücken.\n\nZiel der Bemessung ist, bei Spitzenbelastung die Mindestdurchflüsse an allen Entnahmestellen mit möglichst kleinen, hygienisch und hydraulisch zulässigen Innendurchmessern sicherzustellen. Das differenzierte Berechnungsverfahren ist für alle Gebäudearten anzuwenden. Für Kalt- und Warmwasserverbrauchsleitungen in Gebäuden mit bis zu sechs Wohnungen kann DIN EN 806-3 nur dann verwendet werden, wenn Versorgungsdruck und Hygieneanforderungen erfüllt sind.\n\nDieser Workflow ersetzt keine lizenzierte Norm. Tabellenwerte, Berechnungsdurchflüsse, Gleichzeitigkeitsansätze, zulässige Geschwindigkeiten, Referenzwerte für Einzelwiderstände und Herstellerdaten sind immer aus den gültigen Projektunterlagen beziehungsweise der Norm zu übernehmen."
+            },
+            {
+                "id": "eingangsdaten",
+                "title": "Eingangsdaten",
+                "text": "Für jede Teilstrecke werden mindestens diese Daten benötigt:\n\n| Gruppe | Eingabe |\n|---|---|\n| Gebäude und Nutzung | Gebäudeart, Nutzungseinheiten, Nutzungshäufigkeit, Kaltwasser, Warmwasser, Zirkulation |\n| Versorgung | Mindestdruck nach Wasserzähler, Ruhedruck, Druckminderer, geodätische Höhe, Sicherheitszuschläge |\n| Entnahmestellen | Armaturentyp, Berechnungsdurchfluss \\(\\dot{V}_{\\mathrm{R}}\\), Mindestfließdruck \\(p_{\\mathrm{min,FL}}\\), Gleichzeitigkeit |\n| Rohrnetz | Strangschema, Teilstrecken, Längen \\(l\\), Höhenunterschiede \\(h\\), Rohrwerkstoff, Innenrauheit, Innendurchmesser |\n| Apparate | Wasserzähler, Filter, Enthärtung, Sicherungsarmaturen, Druckverluste bei bekannten Betriebsdaten |\n| Formstücke | Bögen, T-Stücke, Reduzierungen, Absperrarmaturen, Hersteller-\\(\\zeta\\)-Werte oder zulässige Referenzwerte |\n| Wasserwerte | Temperaturabhängige Dichte \\(\\rho\\), kinematische Viskosität \\(\\nu\\), Werkstoff- und Herstellerdaten |\n\nAlle Einheiten werden in Formeln auf SI-Basis geführt. Volumenströme werden als zeitliche Ableitung mit Punkt geschrieben: \\(\\dot{V}\\). Die Ersatzschreibweise V Punkt wird nicht verwendet. Einheiten stehen in KaTeX immer aufrecht, zum Beispiel \\(\\frac{\\mathrm{l}}{\\mathrm{s}}\\), \\(\\frac{\\mathrm{m}^{3}}{\\mathrm{s}}\\) und \\(\\mathrm{hPa}\\)."
+            },
+            {
+                "id": "berechnungsgang",
+                "title": "Berechnungsgang",
+                "text": "Der Workflow folgt dieser Reihenfolge:\n\n1. Entnahmestellen und Berechnungsdurchflüsse je Verbraucher erfassen.\n2. Für jede Teilstrecke den Summendurchfluss \\(\\sum \\dot{V}_{\\mathrm{R}}\\) bilden.\n3. Nutzungseinheiten und Gleichzeitigkeiten prüfen.\n4. Spitzendurchfluss \\(\\dot{V}_{\\mathrm{S}}\\) mit den normativen, nutzungsabhängigen Parametern ermitteln.\n5. Druckbilanz vom Mindestversorgungsdruck nach Wasserzähler bis zur ungünstigsten Entnahmestelle aufstellen.\n6. Verfügbares Rohrreibungsdruckgefälle \\(R_{\\mathrm{V}}\\) je Fließweg bestimmen.\n7. Rohrdurchmesser vordimensionieren, Standardrohre auswählen und tatsächliche Geschwindigkeit prüfen.\n8. Rohrreibung, Einzelwiderstände und Apparatedruckverluste berechnen.\n9. Ergebnis gegen verfügbaren Druckverlust, Mindestfließdruck, zulässige Geschwindigkeit und hygienische Anforderungen prüfen.\n10. Iterieren, bis die ungünstigste Strecke und alle Teilstrecken bestanden sind.\n\nDie Bemessung beginnt nach DIN 1988-300 mit dem vom Wasserversorgungsunternehmen angegebenen Mindestdruck nach dem Wasserzähler. Vereinfachte Rechengänge werden nicht als Ersatz für den differenzierten Nachweis verwendet."
+            },
+            {
+                "id": "summen_und_spitzendurchfluss",
+                "title": "Summen- und Spitzendurchfluss",
+                "text": "Der Summendurchfluss einer Teilstrecke ist die Summe der Berechnungsdurchflüsse aller nachgeschalteten Entnahmestellen:\n\n\\[\\sum \\dot{V}_{\\mathrm{R}} = \\dot{V}_{\\mathrm{R,1}} + \\dot{V}_{\\mathrm{R,2}} + \\dots + \\dot{V}_{\\mathrm{R,n}}\\]\n\nDer Spitzendurchfluss wird nicht als einfache Summe aller Entnahmestellen angesetzt, sondern mit der normativen Gleichzeitigkeitsbeziehung der jeweiligen Nutzung bestimmt. Für eine einheitliche Darstellung wird die Eingabe hier auf \\(1\\,\\frac{\\mathrm{l}}{\\mathrm{s}}\\) normiert:\n\n\\[\\dot{V}_{\\mathrm{S}} = \\left[a \\cdot \\left(\\frac{\\sum \\dot{V}_{\\mathrm{R}}}{1\\,\\frac{\\mathrm{l}}{\\mathrm{s}}}\\right)^{b} - c\\right] \\cdot 1\\,\\frac{\\mathrm{l}}{\\mathrm{s}}\\]\n\nDie Koeffizienten \\(a\\), \\(b\\) und \\(c\\) sind nicht frei wählbar. Sie werden aus der in der Norm beziehungsweise im Projekt freigegebenen Tabelle für die jeweilige Nutzung übernommen; der Einheitenbezug der jeweiligen Tabelle ist dabei einzuhalten. Negative oder unplausible Ergebnisse sind gegen die normativen Mindestansätze zu prüfen.\n\nFür Nutzungseinheiten wird endständig geprüft, ob eine oder mehrere Entnahmestellen gleichzeitig anzusetzen sind. Die beiden größten Einzeldurchflüsse können für die endständige Betrachtung maßgebend sein; anschließend wird mit der Teilstreckenberechnung abgeglichen."
+            },
+            {
+                "id": "druckbilanz",
+                "title": "Druckbilanz",
+                "text": "Für den ungünstigsten Fließweg wird die verfügbare Druckdifferenz ermittelt. Typische Bestandteile sind Versorgungsdruck, geodätische Druckdifferenz, Mindestfließdruck der Entnahmestelle, Apparatedruckverluste, Sicherheitsanteile, Rohrreibung und Einzelwiderstände.\n\n\\[p_{\\mathrm{geo}} = \\rho \\cdot g \\cdot h\\]\n\n\\[\\Delta p_{\\mathrm{verf}} = p_{\\mathrm{min,Vers}} - p_{\\mathrm{geo}} - p_{\\mathrm{min,FL}} - \\sum \\Delta p_{\\mathrm{App}} - \\Delta p_{\\mathrm{Sicher}}\\]\n\nDas verfügbare Rohrreibungsdruckgefälle ergibt sich aus dem Restdruck für Rohrreibung und Einzelwiderstände bezogen auf die zugehörige Rohrlänge:\n\n\\[R_{\\mathrm{V}} = \\frac{\\Delta p_{\\mathrm{verf}} - \\sum \\Delta p_{\\mathrm{E}}}{\\sum l}\\]\n\nAlle Indizes mit mehreren Buchstaben werden gruppiert, zum Beispiel \\(\\Delta p_{\\mathrm{gesamt}}\\), \\(p_{\\mathrm{min,FL}}\\) und \\(R_{\\mathrm{V}}\\)."
+            },
+            {
+                "id": "rohrdurchmesser_und_geschwindigkeit",
+                "title": "Rohrdurchmesser und Geschwindigkeit",
+                "text": "Die erste Rohrdimension kann über die zulässige Geschwindigkeit oder über Tabellen- beziehungsweise Herstellerdaten abgeschätzt werden. Danach wird immer mit dem tatsächlichen Innendurchmesser des gewählten Rohres weitergerechnet.\n\n\\[A = \\frac{\\dot{V}}{v}\\]\n\n\\[d_{\\mathrm{i,erf}} = \\sqrt{\\frac{4 \\cdot \\dot{V}}{\\pi \\cdot v_{\\mathrm{zul}}}}\\]\n\n\\[v = \\frac{\\dot{V}}{A} = \\frac{4 \\cdot \\dot{V}}{\\pi \\cdot d_{\\mathrm{i}}^{2}}\\]\n\nWichtig: Die Geschwindigkeit allein reicht nicht als Nachweis. Eine größere Dimension kann zwar Geschwindigkeit und Rohrreibung senken, erhöht aber Wasserinhalt und kann hygienisch ungünstig sein. Eine kleinere Dimension kann hydraulisch scheitern, selbst wenn einzelne Teilstrecken kurz erscheinen. Deshalb werden Geschwindigkeit, Druckverlust, Mindestfließdruck und Hygiene zusammen geprüft."
+            },
+            {
+                "id": "rohrreibung",
+                "title": "Rohrreibung",
+                "text": "Für die normgerechte Bemessung sind Rohrreibungsdruckgefälle, Tabellenwerte und Herstellerdaten des verwendeten Rohrsystems maßgebend. Eine hydraulische Plausibilitätsrechnung kann mit Darcy-Weisbach erfolgen, ersetzt aber keine normativ geforderte Tabelle oder Herstellerangabe.\n\n\\[Re = \\frac{v \\cdot d_{\\mathrm{i}}}{\\nu}\\]\n\n\\[\\Delta p_{\\mathrm{R}} = \\lambda \\cdot \\frac{l}{d_{\\mathrm{i}}} \\cdot \\frac{\\rho \\cdot v^{2}}{2}\\]\n\n\\[R = \\frac{\\Delta p_{\\mathrm{R}}}{l}\\]\n\nDabei ist \\(Re\\) dimensionslos, wenn \\(v\\) in \\(\\frac{\\mathrm{m}}{\\mathrm{s}}\\), \\(d_{\\mathrm{i}}\\) in \\(\\mathrm{m}\\) und \\(\\nu\\) in \\(\\frac{\\mathrm{m}^{2}}{\\mathrm{s}}\\) eingesetzt werden. \\(\\lambda\\) ist ebenfalls dimensionslos. Wenn ein Reibungsfaktor rechnerisch plausibilisiert wird, ist eine KaTeX-kompatible Form zum Beispiel:\n\n\\[\\lambda = \\frac{0{,}25}{\\left[\\log_{10}\\left(\\frac{\\varepsilon}{3{,}7 \\cdot d_{\\mathrm{i}}} + \\frac{5{,}74}{Re^{0{,}9}}\\right)\\right]^{2}}\\]\n\nIn dieser Schreibweise müssen \\(\\varepsilon\\) und \\(d_{\\mathrm{i}}\\) dieselbe Längeneinheit haben, damit der Logarithmus dimensionslos ist. Die temperaturabhängigen Stoffwerte sind zu berücksichtigen. Für Wasser bei \\(20\\,{}^\\circ\\mathrm{C}\\) wird in Plausibilitätsrechnungen häufig \\(\\nu \\approx 1{,}0 \\cdot 10^{-6}\\,\\frac{\\mathrm{m}^{2}}{\\mathrm{s}}\\) verwendet; das Projekt muss den passenden Temperaturwert festlegen."
+            },
+            {
+                "id": "einzelwiderstaende_und_apparate",
+                "title": "Einzelwiderstände und Apparate",
+                "text": "Einzelwiderstände werden mit Hersteller-\\(\\zeta\\)-Werten oder mit zulässigen Referenzwerten des Projekts berechnet. \\(\\zeta\\) ist dimensionslos. Für produktneutrale Ausschreibungen dürfen nur die dafür vorgesehenen Referenzwerte verwendet werden.\n\n\\[\\Delta p_{\\mathrm{E}} = \\zeta \\cdot \\frac{\\rho \\cdot v^{2}}{2}\\]\n\nApparate wie Wasserzähler, Filter oder Sicherungsarmaturen werden mit Herstellerdaten oder bekannten Betriebspunkten angesetzt:\n\n\\[\\Delta p_{\\mathrm{App}} = \\Delta p_{\\mathrm{g}} \\cdot \\left(\\frac{\\dot{V}_{\\mathrm{S}}}{\\dot{V}_{\\mathrm{g}}}\\right)^{2}\\]\n\nAlternativ kann ein freigegebener \\(k_{\\mathrm{v}}\\)-Wert verwendet werden:\n\n\\[\\Delta p_{\\mathrm{App}} = 1000\\,\\mathrm{hPa} \\cdot \\left(\\frac{\\dot{V}_{\\mathrm{S}}}{k_{\\mathrm{v}}}\\right)^{2}\\]\n\nDie Einheit und Definition des \\(k_{\\mathrm{v}}\\)-Werts müssen aus dem Herstellerdatenblatt übernommen werden. In der Quotientenbildung müssen \\(\\dot{V}_{\\mathrm{S}}\\), \\(\\dot{V}_{\\mathrm{g}}\\) und \\(k_{\\mathrm{v}}\\) in kompatiblen Volumenstromeinheiten stehen, damit die Klammern dimensionslos sind."
+            },
+            {
+                "id": "beispielrechnung",
+                "title": "Beispielrechnung: Norm-Neubau-Wohneinheit",
+                "text": "Die folgende Beispielrechnung ist didaktisch und bildet eine typische Neubau-Wohneinheit mit Bad, Gäste-WC und Küche ab. Normative Tabellenwerte, Werkstoffdaten und Herstellerdaten müssen im realen Projekt ersetzt werden.\n\n| Größe | Wert |\n|---|---:|\n| Summendurchfluss | \\(\\sum \\dot{V}_{\\mathrm{R}} = 1{,}0\\,\\frac{\\mathrm{l}}{\\mathrm{s}}\\) |\n| Beispiel-Koeffizienten | \\(a = 0{,}70\\), \\(b = 0{,}48\\), \\(c = 0{,}13\\), bezogen auf Eingabe in \\(\\frac{\\mathrm{l}}{\\mathrm{s}}\\) |\n| Gewählte Beispielstrecke | \\(l = 12\\,\\mathrm{m}\\) |\n| Zulässige Beispielgeschwindigkeit | \\(v_{\\mathrm{zul}} = 1{,}5\\,\\frac{\\mathrm{m}}{\\mathrm{s}}\\) |\n| Gewähltes Beispielrohr | Mehrschichtverbundrohr \\(32\\,\\mathrm{mm} \\times 3{,}0\\,\\mathrm{mm}\\) mit \\(d_{\\mathrm{i}} = 26{,}0\\,\\mathrm{mm}\\) |\n| Reibungsfaktor zur Plausibilisierung | \\(\\lambda = 0{,}025\\) dimensionslos |\n| Dichte | \\(\\rho = 999{,}7\\,\\frac{\\mathrm{kg}}{\\mathrm{m}^{3}}\\) |\n\nSpitzendurchfluss:\n\n\\[\\dot{V}_{\\mathrm{S}} = \\left[0{,}70 \\cdot \\left(\\frac{1{,}0\\,\\frac{\\mathrm{l}}{\\mathrm{s}}}{1\\,\\frac{\\mathrm{l}}{\\mathrm{s}}}\\right)^{0{,}48} - 0{,}13\\right] \\cdot 1\\,\\frac{\\mathrm{l}}{\\mathrm{s}} = 0{,}57\\,\\frac{\\mathrm{l}}{\\mathrm{s}}\\]\n\n\\[\\dot{V}_{\\mathrm{S}} = 0{,}57\\,\\frac{\\mathrm{l}}{\\mathrm{s}} \\cdot 10^{-3}\\,\\frac{\\mathrm{m}^{3}}{\\mathrm{l}} = 0{,}00057\\,\\frac{\\mathrm{m}^{3}}{\\mathrm{s}}\\]\n\nErforderlicher Innendurchmesser bei \\(v_{\\mathrm{zul}} = 1{,}5\\,\\frac{\\mathrm{m}}{\\mathrm{s}}\\):\n\n\\[d_{\\mathrm{i,erf}} = \\sqrt{\\frac{4 \\cdot 0{,}00057\\,\\frac{\\mathrm{m}^{3}}{\\mathrm{s}}}{\\pi \\cdot 1{,}5\\,\\frac{\\mathrm{m}}{\\mathrm{s}}}} = 0{,}0220\\,\\mathrm{m} = 22{,}0\\,\\mathrm{mm}\\]\n\nDas gewählte Standardrohr mit \\(d_{\\mathrm{i}} = 26{,}0\\,\\mathrm{mm}\\) liegt darüber und ergibt eine realistische Geschwindigkeit:\n\n\\[v = \\frac{4 \\cdot 0{,}00057\\,\\frac{\\mathrm{m}^{3}}{\\mathrm{s}}}{\\pi \\cdot (0{,}0260\\,\\mathrm{m})^{2}} = 1{,}07\\,\\frac{\\mathrm{m}}{\\mathrm{s}}\\]\n\nDamit ist die Dimension für dieses Beispiel hydraulisch plausibel. Der endgültige Nachweis erfolgt über Druckverlust, Mindestfließdruck und projektbezogene Herstellerdaten."
+            },
+            {
+                "id": "beispiel_druckverlust",
+                "title": "Beispielrechnung: Druckverlust",
+                "text": "Für das gewählte Rohr mit \\(d_{\\mathrm{i}} = 0{,}0260\\,\\mathrm{m}\\), \\(v = 1{,}074\\,\\frac{\\mathrm{m}}{\\mathrm{s}}\\), \\(l = 12\\,\\mathrm{m}\\), \\(\\lambda = 0{,}025\\) dimensionslos und \\(\\rho = 999{,}7\\,\\frac{\\mathrm{kg}}{\\mathrm{m}^{3}}\\):\n\n\\[\\frac{\\rho \\cdot v^{2}}{2} = \\frac{999{,}7\\,\\frac{\\mathrm{kg}}{\\mathrm{m}^{3}} \\cdot \\left(1{,}074\\,\\frac{\\mathrm{m}}{\\mathrm{s}}\\right)^{2}}{2} = 576{,}1\\,\\mathrm{Pa}\\]\n\n\\[\\Delta p_{\\mathrm{R}} = 0{,}025 \\cdot \\frac{12\\,\\mathrm{m}}{0{,}0260\\,\\mathrm{m}} \\cdot 576{,}1\\,\\mathrm{Pa} = 6647{,}6\\,\\mathrm{Pa} = 66{,}5\\,\\mathrm{hPa}\\]\n\n\\[R = \\frac{66{,}5\\,\\mathrm{hPa}}{12\\,\\mathrm{m}} = 5{,}54\\,\\frac{\\mathrm{hPa}}{\\mathrm{m}}\\]\n\nFür mehrere Formstücke der Beispielstrecke wird zusammen \\(\\sum \\zeta = 3{,}20\\) dimensionslos angesetzt:\n\n\\[\\Delta p_{\\mathrm{E}} = 3{,}20 \\cdot 576{,}1\\,\\mathrm{Pa} = 1843{,}6\\,\\mathrm{Pa} = 18{,}4\\,\\mathrm{hPa}\\]\n\nFür diese Beispielstrecke ergibt sich:\n\n\\[\\Delta p_{\\mathrm{gesamt}} = 66{,}5\\,\\mathrm{hPa} + 18{,}4\\,\\mathrm{hPa} = 84{,}9\\,\\mathrm{hPa}\\]\n\nDieser Wert wird anschließend mit der verfügbaren Druckdifferenz, den Apparatedruckverlusten und dem Mindestfließdruck der ungünstigsten Entnahmestelle abgeglichen."
+            },
+            {
+                "id": "zirkulation_und_warmwasser",
+                "title": "Warmwasser und Zirkulation",
+                "text": "DIN 1988-300 umfasst auch die Bestimmung von Bauteilgrößen für Zirkulationssysteme. Für Warmwasserleitungen sind daher zusätzlich Temperaturhaltung, Zirkulationsvolumenströme, Wärmeverluste, Pumpenauslegung, Drosselventile und hygienische Anforderungen zu prüfen.\n\nDieser Workflow behandelt die Rohrdurchmesser der Verbrauchsleitungen und legt eine Stelle für den Zirkulationsnachweis an. Für die vollständige Projektberechnung müssen ergänzt werden:\n\n- Wärmeverlust je Zirkulationsstrecke.\n- Erforderlicher Zirkulationsvolumenstrom je Umlaufstrecke.\n- Pumpendruck und Volumenstrom.\n- Abgleich über Drosselventile.\n- Temperaturanforderung an allen Umlaufstrecken, typischerweise mit mindestens \\(55\\,{}^\\circ\\mathrm{C}\\) im Rücklauf nach Projektvorgabe und Regelwerk.\n- Abstimmung mit Trinkwasserhygiene, Speicher, Wärmeerzeuger und Regelung."
+            },
+            {
+                "id": "ergebnisdokumentation",
+                "title": "Ergebnisdokumentation",
+                "text": "Die Ausgabe des Workflows sollte tabellarisch und prüfbar dokumentiert werden.\n\n| Nachweis | Inhalt |\n|---|---|\n| Entnahmestellenliste | Armaturen, \\(\\dot{V}_{\\mathrm{R}}\\), Mindestfließdruck, Warm-/Kaltwasser-Zuordnung |\n| Teilstreckenliste | Start, Ende, Länge, Höhe, nachgeschaltete Verbraucher |\n| Durchflussnachweis | \\(\\sum \\dot{V}_{\\mathrm{R}}\\), Nutzungseinheit, \\(\\dot{V}_{\\mathrm{S}}\\), angesetzte Koeffizienten |\n| Rohrdimension | Werkstoff, Normmaß, \\(d_{\\mathrm{i}}\\), Geschwindigkeit \\(v\\), Rohrreibungsdruckgefälle \\(R\\) |\n| Druckbilanz | \\(p_{\\mathrm{min,Vers}}\\), \\(p_{\\mathrm{geo}}\\), \\(p_{\\mathrm{min,FL}}\\), \\(\\Delta p_{\\mathrm{App}}\\), \\(\\Delta p_{\\mathrm{R}}\\), \\(\\Delta p_{\\mathrm{E}}\\), Restdruck |\n| Einzelwiderstände | Bauteil, Anzahl, \\(\\zeta\\), Herstellerquelle, Druckverlust |\n| Apparate | Wasserzähler, Filter, Sicherungseinrichtung, Druckverlustdaten |\n| Iterationsstand | maßgebender Fließweg, bestandene und nicht bestandene Teilstrecken |\n| Zirkulation | separater Nachweis für Warmwasser-Zirkulation und Temperaturhaltung |\n\nJede Zahl muss mit Einheit, Quelle und Norm-/Herstellerbezug nachvollziehbar sein."
+            },
+            {
+                "id": "pruefhinweise",
+                "title": "Prüfhinweise und typische Fehler",
+                "text": "- Volumenstrom mit \\(\\dot{V}\\) schreiben; die Ersatzschreibweise V Punkt wird nicht verwendet.\n- Einheiten in Formeln immer aufrecht setzen: \\(\\frac{\\mathrm{m}}{\\mathrm{s}}\\), \\(\\frac{\\mathrm{l}}{\\mathrm{s}}\\), \\(\\mathrm{hPa}\\), \\(\\frac{\\mathrm{kg}}{\\mathrm{m}^{3}}\\).\n- Empirische Koeffizienten immer mit ihrem Einheitenbezug aus der Norm- oder Projekttabelle verwenden.\n- Mehrbuchstabige Indizes immer gruppieren: \\(\\Delta p_{\\mathrm{gesamt}}\\). Ungruppierte Textindizes nach einem Unterstrich werden nicht verwendet.\n- Dezimalkomma in KaTeX als \\(0{,}9\\) setzen.\n- Multiplikation mit \\(\\cdot\\) schreiben, nicht mit dem Buchstaben x.\n- Tabellenzellen mit mathematischen Werten als Inline-Math setzen und Zahlenwerte mit Einheit schreiben.\n- Rohrreibung nicht mit Einzelwiderständen vermischen.\n- Berechnung mit tatsächlichem Innendurchmesser des gewählten Rohres fortführen.\n- Druckverlust in \\(\\mathrm{Pa}\\), \\(\\mathrm{hPa}\\) und \\(\\mathrm{bar}\\) sauber umrechnen: \\(100\\,\\mathrm{Pa} = 1\\,\\mathrm{hPa}\\), \\(1000\\,\\mathrm{hPa} = 1\\,\\mathrm{bar}\\).\n- Dimensionslose Größen wie \\(Re\\), \\(\\lambda\\) und \\(\\zeta\\) ausdrücklich als dimensionslos verstehen.\n- Normative Tabellen- und Herstellerwerte nicht durch frei angenommene Beispielwerte ersetzen."
+            }
+        ]
+    },
+    "tables": [
+        {
+            "id": "symbole",
+            "title": "Wichtige Symbole",
+            "columns": [
+                "Symbol",
+                "Bedeutung",
+                "Einheit"
+            ],
+            "rows": [
+                [
+                    "\\(\\dot{V}_{\\mathrm{R}}\\)",
+                    "Berechnungsdurchfluss einer Entnahmestelle",
+                    "\\(\\frac{\\mathrm{l}}{\\mathrm{s}}\\)"
+                ],
+                [
+                    "\\(\\dot{V}_{\\mathrm{S}}\\)",
+                    "Spitzendurchfluss einer Teilstrecke",
+                    "\\(\\frac{\\mathrm{l}}{\\mathrm{s}}\\)"
+                ],
+                [
+                    "\\(d_{\\mathrm{i}}\\)",
+                    "Rohrinnendurchmesser",
+                    "\\(\\mathrm{mm}\\)"
+                ],
+                [
+                    "\\(R\\)",
+                    "Rohrreibungsdruckgefälle",
+                    "\\(\\frac{\\mathrm{hPa}}{\\mathrm{m}}\\)"
+                ],
+                [
+                    "\\(R_{\\mathrm{V}}\\)",
+                    "verfügbares Rohrreibungsdruckgefälle",
+                    "\\(\\frac{\\mathrm{hPa}}{\\mathrm{m}}\\)"
+                ],
+                [
+                    "\\(\\zeta\\)",
+                    "Einzelwiderstandsbeiwert",
+                    "dimensionslos"
+                ]
+            ]
+        },
+        {
+            "id": "beispiel_ergebnisse",
+            "title": "Beispielergebnisse",
+            "columns": [
+                "Größe",
+                "Ergebnis"
+            ],
+            "rows": [
+                [
+                    "Spitzendurchfluss",
+                    "\\(\\dot{V}_{\\mathrm{S}} = 0{,}57\\,\\frac{\\mathrm{l}}{\\mathrm{s}}\\)"
+                ],
+                [
+                    "erforderlicher Innendurchmesser",
+                    "\\(d_{\\mathrm{i,erf}} = 22{,}0\\,\\mathrm{mm}\\)"
+                ],
+                [
+                    "Geschwindigkeit Standardrohr",
+                    "\\(v = 1{,}07\\,\\frac{\\mathrm{m}}{\\mathrm{s}}\\)"
+                ],
+                [
+                    "Rohrreibungsverlust über 12 m",
+                    "\\(\\Delta p_{\\mathrm{R}} = 66{,}5\\,\\mathrm{hPa}\\)"
+                ],
+                [
+                    "Einzelwiderstände Beispielstrecke",
+                    "\\(\\Delta p_{\\mathrm{E}} = 18{,}4\\,\\mathrm{hPa}\\)"
+                ],
+                [
+                    "Gesamt Beispielstrecke",
+                    "\\(\\Delta p_{\\mathrm{gesamt}} = 84{,}9\\,\\mathrm{hPa}\\)"
+                ]
+            ]
+        }
+    ],
+    "formulas": [
+        {
+            "id": "summendurchfluss",
+            "title": "Summendurchfluss",
+            "name": "Summendurchfluss",
+            "expression": "\\sum \\dot{V}_{\\mathrm{R}} = \\dot{V}_{\\mathrm{R,1}} + \\dot{V}_{\\mathrm{R,2}} + \\ldots + \\dot{V}_{\\mathrm{R,n}}",
+            "latex": "\\sum \\dot{V}_{\\mathrm{R}} = \\dot{V}_{\\mathrm{R,1}} + \\dot{V}_{\\mathrm{R,2}} + \\ldots + \\dot{V}_{\\mathrm{R,n}}",
+            "description": "Summe der Berechnungsdurchflüsse aller nachgeschalteten Entnahmestellen einer Teilstrecke."
+        },
+        {
+            "id": "spitzendurchfluss",
+            "title": "Spitzendurchfluss",
+            "name": "Spitzendurchfluss",
+            "expression": "\\dot{V}_{\\mathrm{S}} = \\left[a \\cdot \\left(\\frac{\\sum \\dot{V}_{\\mathrm{R}}}{1\\,\\frac{\\mathrm{l}}{\\mathrm{s}}}\\right)^{b} - c\\right] \\cdot 1\\,\\frac{\\mathrm{l}}{\\mathrm{s}}",
+            "latex": "\\dot{V}_{\\mathrm{S}} = \\left[a \\cdot \\left(\\frac{\\sum \\dot{V}_{\\mathrm{R}}}{1\\,\\frac{\\mathrm{l}}{\\mathrm{s}}}\\right)^{b} - c\\right] \\cdot 1\\,\\frac{\\mathrm{l}}{\\mathrm{s}}",
+            "description": "Nutzungsabhängige Gleichzeitigkeitsbeziehung mit projektbezogen zu prüfenden Koeffizienten und ausgewiesenem Einheitenbezug."
+        },
+        {
+            "id": "druckbilanz",
+            "title": "Verfügbare Druckdifferenz",
+            "name": "Verfügbare Druckdifferenz",
+            "expression": "\\Delta p_{\\mathrm{verf}} = p_{\\mathrm{min,Vers}} - p_{\\mathrm{geo}} - p_{\\mathrm{min,FL}} - \\sum \\Delta p_{\\mathrm{App}} - \\Delta p_{\\mathrm{Sicher}}",
+            "latex": "\\Delta p_{\\mathrm{verf}} = p_{\\mathrm{min,Vers}} - p_{\\mathrm{geo}} - p_{\\mathrm{min,FL}} - \\sum \\Delta p_{\\mathrm{App}} - \\Delta p_{\\mathrm{Sicher}}",
+            "description": "Restdruck für Rohrreibung und Einzelwiderstände nach Abzug von Höhenanteil, Mindestfließdruck, Apparaten und Sicherheitsanteil."
+        },
+        {
+            "id": "durchmesser",
+            "title": "Erforderlicher Innendurchmesser",
+            "name": "Erforderlicher Innendurchmesser",
+            "expression": "d_{\\mathrm{i,erf}} = \\sqrt{\\frac{4 \\cdot \\dot{V}}{\\pi \\cdot v_{\\mathrm{zul}}}}",
+            "latex": "d_{\\mathrm{i,erf}} = \\sqrt{\\frac{4 \\cdot \\dot{V}}{\\pi \\cdot v_{\\mathrm{zul}}}}",
+            "description": "Vordimensionierung über Volumenstrom und zulässige Strömungsgeschwindigkeit."
+        },
+        {
+            "id": "darcy_weisbach",
+            "title": "Rohrreibung nach Darcy-Weisbach",
+            "name": "Rohrreibung nach Darcy-Weisbach",
+            "expression": "\\Delta p_{\\mathrm{R}} = \\lambda \\cdot \\frac{l}{d_{\\mathrm{i}}} \\cdot \\frac{\\rho \\cdot v^{2}}{2}",
+            "latex": "\\Delta p_{\\mathrm{R}} = \\lambda \\cdot \\frac{l}{d_{\\mathrm{i}}} \\cdot \\frac{\\rho \\cdot v^{2}}{2}",
+            "description": "Hydraulische Plausibilitätsformel für den Rohrreibungsverlust einer Teilstrecke."
+        },
+        {
+            "id": "einzelwiderstand",
+            "title": "Einzelwiderstand",
+            "name": "Einzelwiderstand",
+            "expression": "\\Delta p_{\\mathrm{E}} = \\zeta \\cdot \\frac{\\rho \\cdot v^{2}}{2}",
+            "latex": "\\Delta p_{\\mathrm{E}} = \\zeta \\cdot \\frac{\\rho \\cdot v^{2}}{2}",
+            "description": "Druckverlust von Formstücken und Armaturen über Widerstandsbeiwert und dynamischen Druck."
+        }
+    ],
+    "examples": [
+        {
+            "id": "neubau_wohneinheit_standardrohr",
+            "title": "Norm-Neubau-Wohneinheit mit Standardrohr",
+            "summary": "Didaktische Beispielrechnung für eine Neubau-Wohneinheit mit \\(\\sum \\dot{V}_{\\mathrm{R}} = 1{,}0\\,\\frac{\\mathrm{l}}{\\mathrm{s}}\\), \\(\\dot{V}_{\\mathrm{S}} = 0{,}57\\,\\frac{\\mathrm{l}}{\\mathrm{s}}\\), erforderlichem Innendurchmesser \\(22{,}0\\,\\mathrm{mm}\\), gewähltem Standardrohr \\(32\\,\\mathrm{mm} \\times 3{,}0\\,\\mathrm{mm}\\) mit \\(d_{\\mathrm{i}} = 26{,}0\\,\\mathrm{mm}\\) und Druckverlust \\(84{,}9\\,\\mathrm{hPa}\\) für die Beispielstrecke."
+        }
+    ],
+    "assumptions": [
+        "Die Beispielkoeffizienten \\(a = 0{,}70\\), \\(b = 0{,}48\\), \\(c = 0{,}13\\) sind nur Beispielwerte und müssen im Projekt durch die normativen Werte inklusive Einheitenbezug für die Nutzung ersetzt werden.",
+        "Der Beispiel-Innendurchmesser \\(d_{\\mathrm{i}} = 26{,}0\\,\\mathrm{mm}\\), der dimensionslose Reibungsfaktor \\(\\lambda = 0{,}025\\) und die dimensionslose Summe der Einzelwiderstandsbeiwerte \\(\\sum \\zeta = 3{,}20\\) sind angenommene Plausibilitätswerte.",
+        "Zulässige Geschwindigkeiten, Rohrreibungsdruckgefälle, Einzelwiderstände und Apparatedruckverluste werden im realen Projekt aus Norm, Herstellerdaten und freigegebenen Projektvorgaben übernommen."
+    ],
+    "warnings": [
+        "Dieser Workflow ist ein strukturiertes Arbeits- und Prüfdokument. Er ersetzt keine lizenzierte DIN 1988-300 und keine fachplanerische Verantwortung.",
+        "Die Norm enthält geschützte Tabellenwerte. Diese Datei enthält deshalb keine vollständige normative Wertetabelle.",
+        "Hygiene, Temperaturhaltung, Stagnation, Schallschutz, Brandschutz, Druckerhöhung und Zirkulation müssen projektbezogen zusätzlich geprüft werden."
+    ],
+    "sourceRefs": [
+        {
+            "title": "DIN Media: DIN 1988-300:2012-05",
+            "url": "https://www.dinmedia.de/de/norm/din-1988-300/151964210"
+        },
+        {
+            "title": "DVGW-Regelwerk: Wasserfachliche Norm DIN 1988-300",
+            "url": "https://www.dvgw-regelwerk.de/technische-regel/wasserfachliche-norm-din-1988-300/4c3ec5"
+        }
+    ],
+    "tags": [
+        "TGA",
+        "Trinkwasser",
+        "DIN 1988-300",
+        "Rohrdimensionierung",
+        "Druckverlust",
+        "KaTeX"
+    ],
+    "triggerExamples": [
+        "Bemessung der Trinkwasserinstallation nach DIN 1988-300",
+        "Trinkwasser Rohrdurchmesser nach DIN 1988-300 berechnen",
+        "Spitzendurchfluss und Druckverlust Trinkwasserinstallation prüfen"
+    ],
+    "verificationStatus": "Strukturiert und plausibilisiert; normative Tabellenwerte projektbezogen einsetzen"
+}
+

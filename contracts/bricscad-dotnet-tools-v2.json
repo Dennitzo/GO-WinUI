@@ -1,0 +1,887 @@
+{
+  "schema": "barebone.bricscad.tool-contract.dotnet.v2",
+  "contractVersion": "bricscad-dotnet-tools-v2",
+  "provider": "bricscad-dotnet",
+  "bridgeBuild": "bridge-json-v4",
+  "protocol": 4,
+  "target": {
+    "product": "BricsCAD",
+    "majorVersion": 26,
+    "runtime": ".NET 8",
+    "platform": "Windows"
+  },
+  "semantics": {
+    "coordinates": "WCS",
+    "inputUnits": "mm",
+    "drawingUnitPolicy": "All metric tool values are millimetres and are converted to drawing units from Database.Insunits. Unitless drawings are treated as millimetres and report that assumption.",
+    "capabilityAuthority": "live-plugin-only"
+  },
+  "definitions": {
+    "point": {
+      "type": "object",
+      "required": ["x", "y", "z"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "bounds": {
+      "type": "object",
+      "required": ["min", "max"],
+      "properties": {
+        "min": { "$ref": "#/definitions/point" },
+        "max": { "$ref": "#/definitions/point" }
+      },
+      "additionalProperties": false
+    },
+    "selector": {
+      "type": "object",
+      "required": ["scope"],
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": ["currentSpace", "allSpaces", "allLayouts", "selection", "handles", "names", "lastResult", "lastExtruded"]
+        },
+        "handles": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "names": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "layer": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["entity", "point", "line", "polyline", "rectangle", "circle", "arc", "profile", "solid", "block", "bim"] },
+        "shape": { "type": "string", "enum": ["rectangle", "circle"] },
+        "allMatches": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "querySelector": {
+      "type": "object",
+      "required": ["scope"],
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": ["currentSpace", "allSpaces", "allLayouts", "selection", "handles", "names", "lastResult", "lastExtruded"]
+        },
+        "handles": { "type": "array", "items": { "type": "string" } },
+        "names": { "type": "array", "items": { "type": "string" } },
+        "layer": { "type": "string" },
+        "kind": { "type": "string", "enum": ["entity", "point", "line", "polyline", "rectangle", "circle", "arc", "profile", "solid", "block", "bim"] },
+        "shape": { "type": "string", "enum": ["rectangle", "circle"] },
+        "allMatches": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "methods": [
+    {
+      "name": "capabilities.list",
+      "kind": "system",
+      "risk": "readOnly",
+      "category": "bridge",
+      "agentVisible": false,
+      "description": "Returns the authoritative live BricsCAD .NET capability contract and runtime metadata.",
+      "resultSchema": "barebone.bricscad.capabilities.dotnet.v2",
+      "paramsSchema": { "type": "object", "additionalProperties": false }
+    },
+    {
+      "name": "actions.list",
+      "kind": "system",
+      "risk": "readOnly",
+      "category": "bridge",
+      "agentVisible": false,
+      "description": "Returns all executable mutation methods exposed by this plugin build.",
+      "resultSchema": "barebone.bricscad.actions.dotnet.v2",
+      "paramsSchema": { "type": "object", "additionalProperties": false }
+    },
+    {
+      "name": "actions.validate",
+      "kind": "system",
+      "risk": "readOnly",
+      "category": "bridge",
+      "agentVisible": false,
+      "description": "Validates one or more proposed actions against this exact live contract without changing the drawing.",
+      "resultSchema": "barebone.bricscad.actions.validate.result.dotnet.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["actions"],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "required": ["tool", "params"],
+              "properties": {
+                "tool": { "type": "string" },
+                "params": { "type": "object" }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.list",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "layer",
+      "description": "Lists layers, colours, lock state and the current layer of the active drawing.",
+      "resultSchema": "barebone.bricscad.layers.list.result.v2",
+      "paramsSchema": { "type": "object", "additionalProperties": false }
+    },
+    {
+      "name": "layers.create",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "layer",
+      "description": "Creates one drawing layer if it does not already exist.",
+      "resultSchema": "barebone.bricscad.layers.create.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "color": { "type": "integer", "minimum": 1, "maximum": 255 },
+          "saveBefore": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.rename",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "layer",
+      "description": "Renames an existing drawing layer.",
+      "resultSchema": "barebone.bricscad.layers.rename.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["oldName", "name"],
+        "properties": {
+          "oldName": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "saveBefore": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.setColor",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "layer",
+      "description": "Sets the ACI colour of an existing drawing layer.",
+      "resultSchema": "barebone.bricscad.layers.set-color.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["name", "color"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "color": { "type": "integer", "minimum": 1, "maximum": 255 },
+          "saveBefore": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "layers.batch",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "layer",
+      "description": "Creates a validated batch of layers in one drawing transaction.",
+      "resultSchema": "barebone.bricscad.layers.batch.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["layers"],
+        "properties": {
+          "layers": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": { "type": "string", "minLength": 1 },
+                "color": { "type": "integer", "minimum": 1, "maximum": 255 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "saveBefore": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "geometry.query",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "geometry",
+      "description": "Queries entities and returns handles, types, layers, geometry, WCS bounds and dimensions. Full-drawing queries support immutable, paginated snapshots via snapshotPolicy, snapshotId and revision.",
+      "resultSchema": "barebone.bricscad.geometry.query.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/querySelector" },
+          "filters": {
+            "type": "object",
+            "properties": {
+              "typeContains": { "type": "string" },
+              "layer": { "type": "string" },
+              "isClosed": { "type": "boolean" },
+              "classification": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "include": { "type": "array", "items": { "type": "string", "enum": ["core", "geometry", "properties"] } },
+          "offset": { "type": "integer", "minimum": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "snapshotPolicy": { "type": "string", "enum": ["fresh", "continue"] },
+          "snapshotId": { "type": "string", "minLength": 1 },
+          "revision": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "selection.describe",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "selection",
+      "description": "Describes the current BricsCAD pickfirst selection.",
+      "resultSchema": "barebone.bricscad.selection.describe.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "include": { "type": "array", "items": { "type": "string", "enum": ["core", "geometry", "properties"] } },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "selection.set",
+      "kind": "action",
+      "risk": "modifiesEditorState",
+      "category": "selection",
+      "description": "Replaces the current pickfirst selection with entities resolved by an explicit selector.",
+      "resultSchema": "barebone.bricscad.selection.set.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "entity.describe",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "geometry",
+      "description": "Describes exact entities by handle or exact BIM/entity name.",
+      "resultSchema": "barebone.bricscad.entity.describe.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "handle": { "type": "string" },
+          "handles": { "type": "array", "items": { "type": "string" } },
+          "name": { "type": "string" },
+          "names": { "type": "array", "items": { "type": "string" } },
+          "include": { "type": "array", "items": { "type": "string", "enum": ["core", "geometry", "properties"] } },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+        },
+        "oneOfRequired": [["handle"], ["handles"], ["name"], ["names"]],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "entity.setLayer",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Assigns writable entities to an existing layer.",
+      "resultSchema": "barebone.bricscad.entity.set-layer.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector", "layer"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "layer": { "type": "string", "minLength": 1 },
+          "createIfMissing": { "type": "boolean" },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "entity.setName",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Sets the BricsCAD BIM name where supported and Barebone entity name metadata otherwise.",
+      "resultSchema": "barebone.bricscad.entity.set-name.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector", "name"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "name": { "type": "string", "minLength": 1 },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "geometry.create",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Creates a point, line, polyline, rectangle, circle, arc or box using millimetres in WCS.",
+      "resultSchema": "barebone.bricscad.geometry.create.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["geometry"],
+        "properties": {
+          "geometry": { "type": "string", "enum": ["point", "line", "polyline", "rectangle", "circle", "arc", "box"] },
+          "layer": { "type": "string" },
+          "position": { "$ref": "#/definitions/point" },
+          "point": { "$ref": "#/definitions/point" },
+          "origin": { "$ref": "#/definitions/point" },
+          "center": { "$ref": "#/definitions/point" },
+          "start": { "$ref": "#/definitions/point" },
+          "end": { "$ref": "#/definitions/point" },
+          "points": { "type": "array", "minItems": 2, "items": { "$ref": "#/definitions/point" } },
+          "closed": { "type": "boolean" },
+          "placementMode": { "type": "string", "enum": ["origin", "center"] },
+          "radiusMm": { "type": "number", "exclusiveMinimum": 0 },
+          "startAngleDeg": { "type": "number" },
+          "endAngleDeg": { "type": "number" },
+          "width": { "type": "number", "exclusiveMinimum": 0 },
+          "depth": { "type": "number", "exclusiveMinimum": 0 },
+          "height": { "type": "number", "exclusiveMinimum": 0 },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "geometry.move",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Moves complete writable entities by a WCS vector in millimetres.",
+      "resultSchema": "barebone.bricscad.geometry.move.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "vector": { "$ref": "#/definitions/point" },
+          "fromPoint": { "$ref": "#/definitions/point" },
+          "toPoint": { "$ref": "#/definitions/point" },
+          "units": { "type": "string", "enum": ["mm"] },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "oneOfRequired": [["vector"], ["fromPoint", "toPoint"]],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "geometry.copy",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Copies writable entities one or more times using an explicit WCS spacing vector.",
+      "resultSchema": "barebone.bricscad.geometry.copy.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector", "vector"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "vector": { "$ref": "#/definitions/point" },
+          "count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+          "units": { "type": "string", "enum": ["mm"] },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "geometry.rotate",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Rotates writable, non-hosted entities around an explicit WCS axis and base point, each entity's own bounds centre, or the combined selection bounds centre. Anchored BIMWindow and BIMDoor instances are intentionally rejected because their orientation belongs to the managed host-face placement contract.",
+      "resultSchema": "barebone.bricscad.geometry.rotate.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "basePoint": { "$ref": "#/definitions/point" },
+          "basePointMode": { "type": "string", "enum": ["eachEntityCenter", "selectionCenter"] },
+          "axis": { "$ref": "#/definitions/point" },
+          "angleDeg": { "type": "number" },
+          "angleRad": { "type": "number" },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "oneOfRequired": [["angleDeg"], ["angleRad"]],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "geometry.scale",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Uniformly scales writable entities around a concrete WCS base point.",
+      "resultSchema": "barebone.bricscad.geometry.scale.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector", "factor"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "basePoint": { "$ref": "#/definitions/point" },
+          "factor": { "type": "number", "exclusiveMinimum": 0 },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "geometry.delete",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Erases explicitly selected writable entities after confirm=true.",
+      "resultSchema": "barebone.bricscad.geometry.delete.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector", "confirm"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "confirm": { "type": "boolean", "const": true },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "measurement.bbox",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "analysis",
+      "description": "Returns individual and aggregate WCS bounding boxes for selected entities.",
+      "resultSchema": "barebone.bricscad.measurement.bbox.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": { "selector": { "$ref": "#/definitions/selector" } },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "measurement.length",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "analysis",
+      "description": "Measures curve lengths and returns millimetre values.",
+      "resultSchema": "barebone.bricscad.measurement.length.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": { "selector": { "$ref": "#/definitions/selector" } },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "measurement.area",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "analysis",
+      "description": "Measures areas of closed curves and solids and returns square-millimetre values.",
+      "resultSchema": "barebone.bricscad.measurement.area.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": { "selector": { "$ref": "#/definitions/selector" } },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "profile.extrude",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Extrudes closed planar curve profiles to 3D solids.",
+      "resultSchema": "barebone.bricscad.profile.extrude.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["heightMm"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "layer": { "type": "string" },
+          "heightMm": { "type": "number", "exclusiveMinimum": 0 },
+          "direction": { "$ref": "#/definitions/point" },
+          "taperAngleDeg": { "type": "number" },
+          "saveBefore": { "type": "boolean" }
+        },
+        "oneOfRequired": [["selector"], ["layer"]],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "circle.extrude",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Extrudes circle profiles to cylindrical 3D solids.",
+      "resultSchema": "barebone.bricscad.circle.extrude.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["heightMm"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "layer": { "type": "string" },
+          "heightMm": { "type": "number", "exclusiveMinimum": 0 },
+          "direction": { "$ref": "#/definitions/point" },
+          "saveBefore": { "type": "boolean" }
+        },
+        "oneOfRequired": [["selector"], ["layer"]],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "rectangles.extrude",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "geometry",
+      "description": "Extrudes closed rectangular polylines to 3D solids.",
+      "resultSchema": "barebone.bricscad.rectangles.extrude.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["heightMm"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "layer": { "type": "string" },
+          "heightMm": { "type": "number", "exclusiveMinimum": 0 },
+          "saveBefore": { "type": "boolean" }
+        },
+        "oneOfRequired": [["selector"], ["layer"]],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "pipes.validateNetwork",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "mep",
+      "description": "Validates connectivity, requested end and tee nodes, technique-room start, floor-plan containment and axis-aligned obstacle clearance of an open-polyline pipe network without changing the drawing.",
+      "resultSchema": "barebone.bricscad.pipes.validate-network.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["system", "selector", "startNode", "floorPlanBounds", "techniqueRoomBounds"],
+        "properties": {
+          "system": { "type": "string", "minLength": 1 },
+          "selector": { "$ref": "#/definitions/selector" },
+          "startNode": { "$ref": "#/definitions/point" },
+          "endNodes": { "type": "array", "items": { "$ref": "#/definitions/point" } },
+          "teeNodes": { "type": "array", "items": { "$ref": "#/definitions/point" } },
+          "floorPlanBounds": { "$ref": "#/definitions/bounds" },
+          "techniqueRoomBounds": { "$ref": "#/definitions/bounds" },
+          "minimumClearanceMm": { "type": "number", "minimum": 0 },
+          "avoidLayers": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "pipes.createNetworkSolids",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "mep",
+      "description": "Creates cylindrical pipe solids with spherical junction fittings along a connected open-polyline network after repeating its mandatory spatial checks.",
+      "resultSchema": "barebone.bricscad.pipes.create-network-solids.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["system", "selector", "diameterMm", "targetLayer", "startNode", "floorPlanBounds", "techniqueRoomBounds"],
+        "properties": {
+          "system": { "type": "string", "minLength": 1 },
+          "selector": { "$ref": "#/definitions/selector" },
+          "diameterMm": { "type": "number", "exclusiveMinimum": 0 },
+          "targetLayer": { "type": "string", "minLength": 1 },
+          "startNode": { "$ref": "#/definitions/point" },
+          "floorPlanBounds": { "$ref": "#/definitions/bounds" },
+          "techniqueRoomBounds": { "$ref": "#/definitions/bounds" },
+          "saveBefore": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "annotations.createRoomDimensions",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "annotation",
+      "description": "Creates width and length dimensions plus a room label for rectangular room contours and identifies contours whose centre lies in the supplied technique-room bounds.",
+      "resultSchema": "barebone.bricscad.annotations.room-dimensions.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector", "roomHeightMm", "dimensionLayer", "labelLayer", "techniqueRoomBounds"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "roomNames": { "type": "array", "items": { "type": "string" } },
+          "roomHeightMm": { "type": "number", "exclusiveMinimum": 0 },
+          "dimensionLayer": { "type": "string", "minLength": 1 },
+          "labelLayer": { "type": "string", "minLength": 1 },
+          "techniqueRoomBounds": { "$ref": "#/definitions/bounds" },
+          "decimalPlaces": { "type": "integer", "minimum": 0, "maximum": 2 },
+          "textHeightMm": { "type": "number", "exclusiveMinimum": 0 },
+          "offsetMm": { "type": "number", "minimum": 0 },
+          "saveBefore": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "document.save",
+      "kind": "action",
+      "risk": "modifiesDocumentState",
+      "category": "document",
+      "description": "Saves the active drawing to its existing path.",
+      "resultSchema": "barebone.bricscad.document.save.result.v2",
+      "paramsSchema": { "type": "object", "additionalProperties": false }
+    },
+    {
+      "name": "undo.last",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "undo",
+      "description": "Undoes a concrete number of actions in the active drawing.",
+      "resultSchema": "barebone.bricscad.undo.last.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "properties": { "steps": { "type": "integer", "minimum": 1, "maximum": 50 } },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "undo.redo",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "undo",
+      "description": "Redoes a concrete number of actions in the active drawing.",
+      "resultSchema": "barebone.bricscad.undo.redo.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "properties": { "steps": { "type": "integer", "minimum": 1, "maximum": 50 } },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "bim.objects.query",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "bim",
+      "description": "Queries real BricsCAD BIM classifications, names, properties and geometry.",
+      "resultSchema": "barebone.bricscad.bim.objects.query.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/querySelector" },
+          "classification": { "type": "string" },
+          "classifications": { "type": "array", "items": { "type": "string" } },
+          "include": { "type": "array", "items": { "type": "string", "enum": ["core", "geometry", "properties"] } },
+          "offset": { "type": "integer", "minimum": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "bim.components.query",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "bim",
+      "description": "Queries stable IDs from the local BricsCAD V26 BIM component library; arbitrary file paths are never accepted.",
+      "resultSchema": "barebone.bricscad.bim.components.query.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "classification": { "type": "string", "enum": ["Window", "Door"] },
+          "componentId": { "type": "string" },
+          "includeUnavailable": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "bim.selection.set",
+      "kind": "action",
+      "risk": "modifiesEditorState",
+      "category": "bim",
+      "description": "Sets the BricsCAD pickfirst selection from exact BIM handles or exact BIM names.",
+      "resultSchema": "barebone.bricscad.bim.selection.set.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "bim.host.point.resolve",
+      "kind": "query",
+      "risk": "readOnly",
+      "category": "bim",
+      "description": "Resolves and validates a requested insertion point and managed anchor face on a BIMWall-classified Solid3d host.",
+      "resultSchema": "barebone.bricscad.bim.host.point.resolve.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["host"],
+        "properties": {
+          "host": {
+            "type": "object",
+            "required": ["handle"],
+            "properties": { "handle": { "type": "string", "minLength": 1 } },
+            "additionalProperties": false
+          },
+          "requestedPoint": { "$ref": "#/definitions/point" },
+          "classification": { "type": "string", "enum": ["Window", "Door"] },
+          "coordinateSystem": { "type": "string", "const": "WCS" },
+          "facePolicy": { "type": "string", "enum": ["nearestValid"] },
+          "placement": {
+            "type": "object",
+            "required": ["mode", "coordinateSystem"],
+            "properties": {
+              "mode": { "type": "string", "enum": ["center"] },
+              "coordinateSystem": { "type": "string", "const": "WCS" },
+              "width": { "type": "number", "exclusiveMinimum": 0 },
+              "height": { "type": "number", "exclusiveMinimum": 0 },
+              "widthUnit": { "type": "string", "const": "mm" },
+              "heightUnit": { "type": "string", "const": "mm" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "bim.classify",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "bim",
+      "description": "Classifies entities through Bricscad.Bim.BIMClassification and verifies the native classification readback.",
+      "resultSchema": "barebone.bricscad.bim.classify.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["classification"],
+        "properties": {
+          "target": { "type": "string", "enum": ["lastExtruded", "lastResult", "selection"] },
+          "selector": { "$ref": "#/definitions/selector" },
+          "classification": { "type": "string", "enum": ["BIMWall", "BIMWindow", "BIMDoor", "BIMColumn", "BIMSlab", "BIMBeam", "BIMRoom", "BIMGenericBuildingElt"] },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "oneOfRequired": [["target"], ["selector"]],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "bim.move",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "bim",
+      "description": "Moves native BIM entities with the same explicit WCS and unit semantics as geometry.move, then verifies BIM identity.",
+      "resultSchema": "barebone.bricscad.bim.move.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["selector", "vector"],
+        "properties": {
+          "selector": { "$ref": "#/definitions/selector" },
+          "vector": { "$ref": "#/definitions/point" },
+          "units": { "type": "string", "enum": ["mm"] },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "bim.create",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "bim",
+      "description": "Inserts a whitelisted local BricsCAD BIM Window or Door component, aligns its complete local XY plane to the managed planar host-face frame, and verifies classification, transform, anchor relation and the resulting host opening. rotationDeg is only an optional additional in-face angle explicitly requested by the user.",
+      "resultSchema": "barebone.bricscad.bim.create.result.v6",
+      "paramsSchema": {
+        "type": "object",
+        "required": ["classification", "source", "position"],
+        "properties": {
+          "classification": { "type": "string", "enum": ["Window", "Door"] },
+          "source": {
+            "type": "object",
+            "required": ["provider", "componentId"],
+            "properties": {
+              "provider": { "type": "string", "const": "bricscad-dotnet-library" },
+              "componentId": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          },
+          "position": { "$ref": "#/definitions/point" },
+          "host": {
+            "type": "object",
+            "required": ["handle"],
+            "properties": { "handle": { "type": "string", "minLength": 1 } },
+            "additionalProperties": false
+          },
+          "rotationDeg": {
+            "type": "number",
+            "description": "Optional additional rotation in degrees within the resolved host-face plane. Omit it by default; host orientation is automatic and must not be derived from a global wall angle or bounding box."
+          },
+          "scale": { "type": "number", "exclusiveMinimum": 0 },
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "bricscad.assoc.evaluate",
+      "kind": "action",
+      "risk": "modifiesDrawing",
+      "category": "bim",
+      "description": "Evaluates the active database top-level associative network through the managed BricsCAD V26 API.",
+      "resultSchema": "barebone.bricscad.assoc.evaluate.result.v2",
+      "paramsSchema": {
+        "type": "object",
+        "properties": {
+          "saveBefore": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  ]
+}
+
+

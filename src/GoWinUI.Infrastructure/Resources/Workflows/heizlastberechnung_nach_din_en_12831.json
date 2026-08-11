@@ -1,0 +1,274 @@
+{
+    "schema": "barebone.general.workflow.v1",
+    "kind": "general",
+    "id": "heizlastberechnung_nach_din_en_12831",
+    "title": "Heizlastberechnung nach DIN EN 12831",
+    "description": "Strukturierter Workflow zur Heizlastberechnung nach DIN EN 12831-1:2017-09 und DIN/TS 12831-1:2020-04. Der Workflow führt von den Eingangsdaten über Transmissions- und Lüftungswärmeverluste, raumweise Norm-Heizlast, Gebäudesumme, Heizflächen-/Volumenstromprüfung und getrennte Trinkwarmwasserbewertung bis zur Ergebnisdokumentation. Die Beispielrechnungen sind didaktische Kontrollrechnungen; normative Randwerte, Tabellenwerte, nationale Anhänge und Projektvorgaben müssen projektbezogen eingesetzt werden.",
+    "domain": "TGA / Heizlast",
+    "contextSummary": "Konsolidierter Heizlast-Workflow aus Formelsammlung und Beispielrechnung: Normstand DIN EN 12831-1:2017-09, DIN/TS 12831-1:2020-04 und DIN EN 12831-3:2017-09; Eingangsdaten, Transmissionswärmeverlust, Lüftungswärmeverlust, Raumheizlast, Gebäudeheizlast, Heizwasser-Volumenstrom, getrennte Trinkwarmwasserbewertung, kompakte Kontrollrechnung, Neubau-Beispiel mit Wohnzimmer und Bad, Dokumentationscheckliste und typische Fehler.",
+    "display": {
+        "blocks": [
+            {
+                "id": "normstand_und_abgrenzung",
+                "title": "Normstand und Abgrenzung",
+                "text": "Dieser Workflow behandelt die raumweise Heizlastberechnung nach DIN EN 12831-1:2017-09 und die nationale Anwendung nach DIN/TS 12831-1:2020-04. Trinkwarmwasser wird nach DIN EN 12831-3:2017-09 getrennt betrachtet und nicht blind zur Raumheizlast addiert.\n\nDie Norm-Heizlast eines Raumes dient zur Auslegung von Heizflächen. Die Gebäudesumme dient zur Plausibilisierung und zur Wärmeerzeugerbetrachtung. Die Wärmeerzeugerleistung hängt zusätzlich von Anlagenkonzept, Trinkwarmwasser, Vorrangbetrieb, Sperrzeiten, Speicher und Regelung ab.\n\nDieser Workflow ersetzt keine lizenzierte Norm. Norm-Innentemperaturen, Auslegungsaußentemperaturen, Wärmebrückenansätze, Lüftungsansätze, Wiederaufheizzuschläge, nationale Anhänge und Herstellerdaten müssen aus den gültigen Projektunterlagen übernommen werden."
+            },
+            {
+                "id": "eingangsdaten",
+                "title": "Eingangsdaten",
+                "text": "Für jeden Raum und jede Zone werden mindestens diese Daten benötigt:\n\n| Gruppe | Eingabe |\n|---|---|\n| Standort | Norm-Außentemperatur, Klimadaten, Höhenlage, nationale Vorgaben |\n| Nutzung | Raumtyp, Norm-Innentemperatur, Betriebsweise, Aufheizbetrieb |\n| Geometrie | Raumfläche, lichte Höhe, Raumvolumen, Hüllflächen, angrenzende Zonen |\n| Bauteile | U-Werte, Flächen, Wärmebrücken, Bauteile gegen außen, Erdreich, unbeheizt oder beheizt |\n| Lüftung | Infiltration, Mindestaußenluft, Lüftungsanlage, Wärmerückgewinnung, Zulufttemperatur |\n| Heizung | Heizflächenart, Systemtemperaturen, Spreizung, Regelung, hydraulische Randbedingungen |\n| Trinkwarmwasser | Bedarf, Speicher, Vorrangbetrieb, Ladezeit, Zirkulation, Komfortanforderungen |\n\nAlle Einheiten werden in Formeln aufrecht gesetzt, zum Beispiel \\(\\mathrm{W}\\), \\(\\mathrm{m}^{2}\\), \\(\\mathrm{m}^{3}/\\mathrm{h}\\) und \\(\\mathrm{K}\\). Mehrbuchstabige Indizes werden gruppiert, zum Beispiel \\(\\Phi_{\\mathrm{HL,Gebaeude}}\\)."
+            },
+            {
+                "id": "berechnungsgang",
+                "title": "Berechnungsgang",
+                "text": "Der Workflow folgt dieser Reihenfolge:\n\n1. Räume, Nutzungen und Norm-Innentemperaturen erfassen.\n2. Raumvolumen und wärmeübertragende Flächen bestimmen.\n3. Transmissionswärmeverluste je Bauteil und Wärmebrücke berechnen.\n4. Lüftungswärmeverluste aus normativem Außenluftvolumenstrom, Infiltration und Lüftungsanlage bestimmen.\n5. Zusatz-Aufheizleistung nur ansetzen, wenn Betriebsweise und Normvorgaben dies erfordern.\n6. Raumheizlast je Raum berechnen.\n7. Gebäudesumme und Wärmeerzeugerbetrachtung getrennt dokumentieren.\n8. Heizflächen und Heizwasser-Volumenströme mit der raumweisen Heizlast prüfen.\n9. Trinkwarmwasser nach DIN EN 12831-3 beziehungsweise Anlagenkonzept separat bewerten.\n10. Ergebnisse mit Annahmen, Quellen, Normstand und offenen Risiken dokumentieren.\n\nWichtig: Vereinfachte Formeln in diesem Workflow sind Kontroll- und Plausibilitätsformeln. Die vollständige Normberechnung muss die projektspezifischen Tabellen, Korrekturfaktoren und nationalen Vorgaben verwenden."
+            },
+            {
+                "id": "transmission",
+                "title": "Transmissionswärmeverluste",
+                "text": "Für ein einzelnes Bauteil gegen eine andere Temperaturzone gilt als Kontrollformel:\n\n\\[\\Phi_{\\mathrm{T,k}} = U_{\\mathrm{k}} \\cdot A_{\\mathrm{k}} \\cdot \\Delta\\theta_{\\mathrm{k}}\\]\n\nMit Wärmebrücken kann eine raumweise Kontrollsumme so geschrieben werden:\n\n\\[\\Phi_{\\mathrm{T,i}} = \\sum_{\\mathrm{k}} U_{\\mathrm{k}} \\cdot A_{\\mathrm{k,i}} \\cdot \\Delta\\theta_{\\mathrm{k,i}} + \\sum_{\\mathrm{l}} \\Psi_{\\mathrm{l}} \\cdot l_{\\mathrm{l,i}} \\cdot \\Delta\\theta_{\\mathrm{l,i}} + \\sum_{\\mathrm{m}} \\chi_{\\mathrm{m}} \\cdot \\Delta\\theta_{\\mathrm{m,i}}\\]\n\nAngrenzende beheizte Räume werden nicht wie Außenluft behandelt. Innenübertragungen können für die raumweise Heizflächenauslegung relevant sein, dürfen in der Gebäudesumme aber nicht als zusätzlicher Außenverlust doppelt gezählt werden."
+            },
+            {
+                "id": "lueftung",
+                "title": "Lüftungswärmeverluste",
+                "text": "Die Lüftungswärmeverluste werden in der Norm über die maßgebenden Luftvolumenströme und Temperaturdifferenzen bestimmt. Bei Lüftungsanlagen, Wärmerückgewinnung, Infiltration und Zonenlüftung ist die vollständige normative Methode anzuwenden.\n\nFür Kontrollrechnungen kann die SI-Grundform verwendet werden:\n\n\\[\\Phi_{\\mathrm{V,i}} = \\rho_{\\mathrm{L}} \\cdot c_{\\mathrm{p,L}} \\cdot \\dot{V}_{\\mathrm{L,i}} \\cdot \\Delta\\theta\\]\n\nWenn \\(\\dot{V}_{\\mathrm{L,i}}\\) in \\(\\mathrm{m}^{3}/\\mathrm{h}\\) eingesetzt wird, ist eine gebräuchliche Praxisform:\n\n\\[\\Phi_{\\mathrm{V,i}} \\approx 0{,}34\\,\\frac{\\mathrm{Wh}}{\\mathrm{m}^{3}\\cdot\\mathrm{K}} \\cdot \\dot{V}_{\\mathrm{L,i}} \\cdot \\Delta\\theta\\]\n\nDer Faktor \\(0{,}34\\,\\frac{\\mathrm{Wh}}{\\mathrm{m}^{3}\\cdot\\mathrm{K}}\\) ist eine Näherung für Luft. Mit \\(\\dot{V}_{\\mathrm{L,i}}\\) in \\(\\mathrm{m}^{3}/\\mathrm{h}\\) ergibt sich \\(\\mathrm{Wh}/\\mathrm{h}\\), also \\(\\mathrm{W}\\). Er ersetzt keine normativen Mindestluftmengen oder projektbezogenen Lüftungsdaten."
+            },
+            {
+                "id": "raum_und_gebaeudeheizlast",
+                "title": "Raumheizlast und Gebäudeheizlast",
+                "text": "Die raumweise Norm-Heizlast wird als Summe aus Transmission, Lüftung und gegebenenfalls Zusatz-Aufheizleistung dokumentiert:\n\n\\[\\Phi_{\\mathrm{HL,i}} = \\Phi_{\\mathrm{T,i}} + \\Phi_{\\mathrm{V,i}} + \\Phi_{\\mathrm{RH,i}}\\]\n\nDie Gebäudesumme ist die Summe der raumweisen Heizlasten beziehungsweise der normativ ermittelten Gebäudeauswertung:\n\n\\[\\Phi_{\\mathrm{HL,Gebaeude}} = \\sum_{\\mathrm{i}=1}^{n} \\Phi_{\\mathrm{HL,i}}\\]\n\nDiese Größe ist nicht automatisch die endgültige Wärmeerzeugerleistung. Bei Wärmepumpen, Speichern, Trinkwarmwasser-Vorrang, Sperrzeiten und gleitenden Systemtemperaturen muss die Erzeugerleistung gesondert bewertet werden."
+            },
+            {
+                "id": "heizflaechen_und_hydraulik",
+                "title": "Heizflächen und Heizwasser-Volumenstrom",
+                "text": "Aus der raumweisen Heizlast folgt die Auslegung der Heizflächen. Für Heizkörper, Fußbodenheizung oder andere Heizflächen werden Systemtemperaturen, Oberflächentemperaturen, Bodenbelag, Regelbarkeit und hydraulischer Abgleich projektbezogen geprüft.\n\nFür den Heizwasser-Volumenstrom gilt als Praxisformel:\n\n\\[\\dot{V}_{\\mathrm{w,i}} = \\frac{\\Phi_{\\mathrm{HL,i}}}{1{,}163\\,\\frac{\\mathrm{Wh}}{\\mathrm{l}\\cdot\\mathrm{K}} \\cdot \\Delta T}\\]\n\nDabei steht \\(\\dot{V}_{\\mathrm{w,i}}\\) in \\(\\mathrm{l/h}\\), wenn \\(\\Phi_{\\mathrm{HL,i}}\\) in \\(\\mathrm{W}\\) beziehungsweise \\(\\mathrm{Wh}/\\mathrm{h}\\) und \\(\\Delta T\\) in \\(\\mathrm{K}\\) eingesetzt werden. Der Faktor \\(1{,}163\\,\\frac{\\mathrm{Wh}}{\\mathrm{l}\\cdot\\mathrm{K}}\\) ist die volumetrische Wärmekapazität von Wasser."
+            },
+            {
+                "id": "trinkwarmwasser",
+                "title": "Trinkwarmwasser getrennt bewerten",
+                "text": "Trinkwarmwasser ist kein Bestandteil der Raumheizlast. Für die Wärmeerzeuger- und Speicherbetrachtung wird der Bedarf separat nach DIN EN 12831-3, Nutzungsprofil, Komfortanforderung, Speichervolumen, Ladezeit, Wärmeerzeugerleistung und Regelstrategie bewertet.\n\nAls Energie-Kontrollrechnung für einen Speicher gilt zunächst:\n\n\\[Q_{\\mathrm{TWW,Wh}} = 1{,}163\\,\\frac{\\mathrm{Wh}}{\\mathrm{l}\\cdot\\mathrm{K}} \\cdot V_{\\mathrm{TWW}} \\cdot (\\theta_{\\mathrm{WW}} - \\theta_{\\mathrm{KW}})\\]\n\nFür die Ausgabe in \\(\\mathrm{kWh}\\):\n\n\\[Q_{\\mathrm{TWW,kWh}} = \\frac{Q_{\\mathrm{TWW,Wh}}}{1000\\,\\frac{\\mathrm{Wh}}{\\mathrm{kWh}}}\\]\n\nDas Ergebnis steht in \\(\\mathrm{kWh}\\), wenn \\(V_{\\mathrm{TWW}}\\) in \\(\\mathrm{l}\\) und die Temperaturdifferenz in \\(\\mathrm{K}\\) eingesetzt werden. Ob diese Leistung gleichzeitig zur Raumheizlast angesetzt wird, hängt vom Anlagenkonzept ab."
+            },
+            {
+                "id": "kompaktes_kontrollbeispiel",
+                "title": "Beispielrechnung: kompakter Raum",
+                "text": "Dieses Beispiel ist eine didaktische Kontrollrechnung und keine vollständige Normtabelle. Gegeben ist ein Raum mit \\(5\\,\\mathrm{m} \\times 6\\,\\mathrm{m} \\times 3\\,\\mathrm{m}\\), also \\(V = 90\\,\\mathrm{m}^{3}\\). Die Temperaturdifferenz beträgt \\(\\Delta\\theta = 30\\,\\mathrm{K}\\). Es werden nur eine Außenwand, ein Fenster und ein einfacher Luftwechsel betrachtet.\n\n| Teilrechnung | Formel | Ergebnis |\n|---|---|---:|\n| Wand | \\(0{,}35\\,\\frac{\\mathrm{W}}{\\mathrm{m}^{2}\\cdot\\mathrm{K}} \\cdot 30\\,\\mathrm{m}^{2} \\cdot 30\\,\\mathrm{K}\\) | \\(315\\,\\mathrm{W}\\) |\n| Fenster | \\(1{,}20\\,\\frac{\\mathrm{W}}{\\mathrm{m}^{2}\\cdot\\mathrm{K}} \\cdot 5\\,\\mathrm{m}^{2} \\cdot 30\\,\\mathrm{K}\\) | \\(180\\,\\mathrm{W}\\) |\n| Transmission gesamt | \\(315\\,\\mathrm{W} + 180\\,\\mathrm{W}\\) | \\(495\\,\\mathrm{W}\\) |\n| Luftvolumenstrom | \\(\\frac{0{,}5\\,\\mathrm{h}^{-1} \\cdot 90\\,\\mathrm{m}^{3}}{3600\\,\\frac{\\mathrm{s}}{\\mathrm{h}}}\\) | \\(0{,}0125\\,\\mathrm{m}^{3}/\\mathrm{s}\\) |\n| Lüftungsverlust | \\(1{,}2\\,\\frac{\\mathrm{kg}}{\\mathrm{m}^{3}} \\cdot 1005\\,\\frac{\\mathrm{J}}{\\mathrm{kg}\\cdot\\mathrm{K}} \\cdot 0{,}0125\\,\\frac{\\mathrm{m}^{3}}{\\mathrm{s}} \\cdot 30\\,\\mathrm{K}\\) | \\(452\\,\\mathrm{W}\\) |\n| Raumheizlast ohne Aufheizzuschlag | \\(495\\,\\mathrm{W} + 452\\,\\mathrm{W}\\) | \\(947\\,\\mathrm{W}\\) |\n| optionaler Beispielzuschlag 10 Prozent | \\(947\\,\\mathrm{W} \\cdot 1{,}10\\) | \\(1042\\,\\mathrm{W}\\) |\n\nDer Zuschlagsfaktor \\(1{,}10\\) ist dimensionslos und hier nur ein Rechenbeispiel. In einer Normberechnung wird Zusatz-Aufheizleistung nur angesetzt, wenn Betriebsweise, Raumtyp und nationale Vorgaben dies rechtfertigen."
+            },
+            {
+                "id": "neubau_beispiel",
+                "title": "Beispielrechnung: Neubau mit Wohnzimmer und Bad",
+                "text": "Dieses Beispiel zeigt, wie angrenzende beheizte Räume raumweise betrachtet werden, ohne Innenübertragungen in der Gebäudesumme doppelt zu zählen. Es ist eine Plausibilitätsrechnung für einen sehr gut gedämmten Neubau.\n\n| Größe | Wohnzimmer | Badezimmer |\n|---|---:|---:|\n| Raumfläche | \\(28\\,\\mathrm{m}^{2}\\) | \\(8\\,\\mathrm{m}^{2}\\) |\n| Raumhöhe | \\(2{,}60\\,\\mathrm{m}\\) | \\(2{,}60\\,\\mathrm{m}\\) |\n| Innentemperatur | \\(21\\,{}^\\circ\\mathrm{C}\\) | \\(24\\,{}^\\circ\\mathrm{C}\\) |\n| Außentemperatur Beispiel | \\(-10\\,{}^\\circ\\mathrm{C}\\) | \\(-10\\,{}^\\circ\\mathrm{C}\\) |\n| Außen-Transmission | \\(610{,}1\\,\\mathrm{W}\\) | \\(211{,}8\\,\\mathrm{W}\\) |\n| Innenwand Bad zu Wohnzimmer | Wärmegewinn \\(-43{,}2\\,\\mathrm{W}\\) | Wärmeverlust \\(43{,}2\\,\\mathrm{W}\\) |\n| Lüftung mit Beispiel-WRG | \\(94{,}9\\,\\mathrm{W}\\) | \\(92{,}5\\,\\mathrm{W}\\) |\n\nRaumheizlast Badezimmer:\n\n\\[\\Phi_{\\mathrm{HL,Bad}} = 211{,}8\\,\\mathrm{W} + 43{,}2\\,\\mathrm{W} + 92{,}5\\,\\mathrm{W} = 347{,}5\\,\\mathrm{W}\\]\n\nWohnzimmer konservativ ohne Anrechnung des Innenwärmegewinns:\n\n\\[\\Phi_{\\mathrm{HL,WZ,konservativ}} = 610{,}1\\,\\mathrm{W} + 94{,}9\\,\\mathrm{W} = 705{,}0\\,\\mathrm{W}\\]\n\nGebäudesumme mit saldierter Innenübertragung:\n\n\\[\\Phi_{\\mathrm{HL,Gebaeude}} = 661{,}8\\,\\mathrm{W} + 347{,}5\\,\\mathrm{W} = 1009{,}3\\,\\mathrm{W}\\]\n\nEine konservative Heizflächenauslegung ohne Anrechnung des Wohnzimmer-Innengewinns ergibt \\(1052{,}5\\,\\mathrm{W}\\)."
+            },
+            {
+                "id": "ergebnisdokumentation",
+                "title": "Ergebnisdokumentation",
+                "text": "Am Ende sollte die TGA-Planung mindestens nachvollziehbar dokumentieren:\n\n| Dokument | Inhalt |\n|---|---|\n| Raumheizlasttabelle | \\(\\Phi_{\\mathrm{T}}\\), \\(\\Phi_{\\mathrm{V}}\\), \\(\\Phi_{\\mathrm{RH}}\\), \\(\\Phi_{\\mathrm{HL}}\\) je Raum |\n| Gebäudesummenblatt | Gebäudeheizlast, Innenübertragungen, Zonen, Randbedingungen |\n| Bauteilliste | Flächen, U-Werte, angrenzende Temperaturzonen, Wärmebrücken |\n| Lüftungsliste | Luftmengen, Infiltration, WRG, Zulufttemperaturen, Normbezug |\n| Heizflächenauslegung | Heizkörper, Fußbodenheizung, Systemtemperaturen, Leistungsreserve |\n| Hydraulikdaten | Heizwasser-Volumenströme, Spreizung, Ventilvoreinstellung, Druckverluste |\n| Trinkwarmwasser | Speicher, Ladeleistung, Komfortprofil, Vorrangbetrieb, Zirkulation |\n| Annahmenprotokoll | Normstand, Quellen, nationale Anhänge, Abweichungen, offene Risiken |"
+            },
+            {
+                "id": "pruefhinweise",
+                "title": "Prüfhinweise und typische Fehler",
+                "text": "- Raumheizlast, Gebäudeheizlast und Wärmeerzeugerleistung nicht gleichsetzen.\n- Trinkwarmwasser nicht blind zur Raumheizlast addieren.\n- Innenübertragungen zwischen beheizten Räumen in der Gebäudesumme nicht doppelt zählen.\n- Luftvolumenströme in \\(\\mathrm{m}^{3}/\\mathrm{h}\\) und \\(\\mathrm{m}^{3}/\\mathrm{s}\\) nicht vermischen.\n- Der Faktor \\(0{,}34\\,\\frac{\\mathrm{Wh}}{\\mathrm{m}^{3}\\cdot\\mathrm{K}}\\) gilt nur bei Luftvolumenstrom in \\(\\mathrm{m}^{3}/\\mathrm{h}\\).\n- Der Faktor \\(1{,}163\\,\\frac{\\mathrm{Wh}}{\\mathrm{l}\\cdot\\mathrm{K}}\\) wird nicht dimensionslos geschrieben.\n- Aufheizzuschläge nur mit normativer oder betrieblicher Begründung verwenden.\n- Norm-Innentemperaturen, Außentemperaturen und Lüftungswerte nicht frei erfinden.\n- Einheiten in KaTeX aufrecht schreiben und mehrbuchstabige Indizes gruppieren."
+            }
+        ]
+    },
+    "tables": [
+        {
+            "id": "symbole",
+            "title": "Wichtige Symbole",
+            "columns": [
+                "Symbol",
+                "Bedeutung",
+                "Einheit"
+            ],
+            "rows": [
+                [
+                    "\\(\\Phi_{\\mathrm{HL,i}}\\)",
+                    "Norm-Heizlast des Raumes \\(i\\)",
+                    "\\(\\mathrm{W}\\)"
+                ],
+                [
+                    "\\(\\Phi_{\\mathrm{T,i}}\\)",
+                    "Transmissionswärmeverlust des Raumes",
+                    "\\(\\mathrm{W}\\)"
+                ],
+                [
+                    "\\(\\Phi_{\\mathrm{V,i}}\\)",
+                    "Lüftungswärmeverlust des Raumes",
+                    "\\(\\mathrm{W}\\)"
+                ],
+                [
+                    "\\(\\Phi_{\\mathrm{RH,i}}\\)",
+                    "Zusatz-Aufheizleistung",
+                    "\\(\\mathrm{W}\\)"
+                ],
+                [
+                    "\\(\\dot{V}_{\\mathrm{L,i}}\\)",
+                    "Luftvolumenstrom",
+                    "\\(\\mathrm{m}^{3}/\\mathrm{h}\\) oder \\(\\mathrm{m}^{3}/\\mathrm{s}\\)"
+                ],
+                [
+                    "\\(\\dot{V}_{\\mathrm{w,i}}\\)",
+                    "Heizwasser-Volumenstrom",
+                    "\\(\\mathrm{l/h}\\)"
+                ]
+            ]
+        },
+        {
+            "id": "beispiel_ergebnisse",
+            "title": "Beispielergebnisse",
+            "columns": [
+                "Beispiel",
+                "Ergebnis"
+            ],
+            "rows": [
+                [
+                    "Kompakter Beispielraum",
+                    "\\(\\Phi_{\\mathrm{HL}} = 947\\,\\mathrm{W}\\) ohne Aufheizzuschlag"
+                ],
+                [
+                    "Kompakter Beispielraum mit 10 Prozent Beispielzuschlag",
+                    "\\(\\Phi_{\\mathrm{HL}} = 1042\\,\\mathrm{W}\\)"
+                ],
+                [
+                    "Neubau Wohnzimmer konservativ",
+                    "\\(\\Phi_{\\mathrm{HL,WZ}} = 705{,}0\\,\\mathrm{W}\\)"
+                ],
+                [
+                    "Neubau Badezimmer",
+                    "\\(\\Phi_{\\mathrm{HL,Bad}} = 347{,}5\\,\\mathrm{W}\\)"
+                ],
+                [
+                    "Neubau Gebäudesumme saldiert",
+                    "\\(\\Phi_{\\mathrm{HL,Gebaeude}} = 1009{,}3\\,\\mathrm{W}\\)"
+                ]
+            ]
+        }
+    ],
+    "formulas": [
+        {
+            "id": "raumvolumen",
+            "title": "Raumvolumen",
+            "name": "Raumvolumen",
+            "expression": "V_{\\mathrm{i}} = A_{\\mathrm{i}} \\cdot h_{\\mathrm{i}}",
+            "latex": "V_{\\mathrm{i}} = A_{\\mathrm{i}} \\cdot h_{\\mathrm{i}}",
+            "description": "Raumvolumen aus Raumfläche und lichter Höhe."
+        },
+        {
+            "id": "transmission_bauteil",
+            "title": "Transmissionswärmeverlust eines Bauteils",
+            "name": "Transmissionswärmeverlust eines Bauteils",
+            "expression": "\\Phi_{\\mathrm{T,k}} = U_{\\mathrm{k}} \\cdot A_{\\mathrm{k}} \\cdot \\Delta\\theta_{\\mathrm{k}}",
+            "latex": "\\Phi_{\\mathrm{T,k}} = U_{\\mathrm{k}} \\cdot A_{\\mathrm{k}} \\cdot \\Delta\\theta_{\\mathrm{k}}",
+            "description": "Kontrollformel für ein Bauteil gegen eine andere Temperaturzone."
+        },
+        {
+            "id": "transmission_raum",
+            "title": "Raumweiser Transmissionswärmeverlust",
+            "name": "Raumweiser Transmissionswärmeverlust",
+            "expression": "\\Phi_{\\mathrm{T,i}} = \\sum_{\\mathrm{k}} U_{\\mathrm{k}} \\cdot A_{\\mathrm{k,i}} \\cdot \\Delta\\theta_{\\mathrm{k,i}} + \\sum_{\\mathrm{l}} \\Psi_{\\mathrm{l}} \\cdot l_{\\mathrm{l,i}} \\cdot \\Delta\\theta_{\\mathrm{l,i}} + \\sum_{\\mathrm{m}} \\chi_{\\mathrm{m}} \\cdot \\Delta\\theta_{\\mathrm{m,i}}",
+            "latex": "\\Phi_{\\mathrm{T,i}} = \\sum_{\\mathrm{k}} U_{\\mathrm{k}} \\cdot A_{\\mathrm{k,i}} \\cdot \\Delta\\theta_{\\mathrm{k,i}} + \\sum_{\\mathrm{l}} \\Psi_{\\mathrm{l}} \\cdot l_{\\mathrm{l,i}} \\cdot \\Delta\\theta_{\\mathrm{l,i}} + \\sum_{\\mathrm{m}} \\chi_{\\mathrm{m}} \\cdot \\Delta\\theta_{\\mathrm{m,i}}",
+            "description": "Kontrollsumme aus Bauteilen und Wärmebrücken."
+        },
+        {
+            "id": "lueftung_si",
+            "title": "Lüftungswärmeverlust in SI-Form",
+            "name": "Lüftungswärmeverlust in SI-Form",
+            "expression": "\\Phi_{\\mathrm{V,i}} = \\rho_{\\mathrm{L}} \\cdot c_{\\mathrm{p,L}} \\cdot \\dot{V}_{\\mathrm{L,i}} \\cdot \\Delta\\theta",
+            "latex": "\\Phi_{\\mathrm{V,i}} = \\rho_{\\mathrm{L}} \\cdot c_{\\mathrm{p,L}} \\cdot \\dot{V}_{\\mathrm{L,i}} \\cdot \\Delta\\theta",
+            "description": "Lüftungswärmeverlust bei Luftvolumenstrom in \\(\\mathrm{m}^{3}/\\mathrm{s}\\)."
+        },
+        {
+            "id": "lueftung_praxis",
+            "title": "Lüftungswärmeverlust mit Praxisfaktor",
+            "name": "Lüftungswärmeverlust mit Praxisfaktor",
+            "expression": "\\Phi_{\\mathrm{V,i}} \\approx 0{,}34\\,\\frac{\\mathrm{Wh}}{\\mathrm{m}^{3}\\cdot\\mathrm{K}} \\cdot \\dot{V}_{\\mathrm{L,i}} \\cdot \\Delta\\theta",
+            "latex": "\\Phi_{\\mathrm{V,i}} \\approx 0{,}34\\,\\frac{\\mathrm{Wh}}{\\mathrm{m}^{3}\\cdot\\mathrm{K}} \\cdot \\dot{V}_{\\mathrm{L,i}} \\cdot \\Delta\\theta",
+            "description": "Näherung bei Luftvolumenstrom in \\(\\mathrm{m}^{3}/\\mathrm{h}\\); das Ergebnis steht in \\(\\mathrm{W}\\)."
+        },
+        {
+            "id": "raumheizlast",
+            "title": "Raumheizlast",
+            "name": "Raumheizlast",
+            "expression": "\\Phi_{\\mathrm{HL,i}} = \\Phi_{\\mathrm{T,i}} + \\Phi_{\\mathrm{V,i}} + \\Phi_{\\mathrm{RH,i}}",
+            "latex": "\\Phi_{\\mathrm{HL,i}} = \\Phi_{\\mathrm{T,i}} + \\Phi_{\\mathrm{V,i}} + \\Phi_{\\mathrm{RH,i}}",
+            "description": "Raumweise Norm-Heizlast als Grundlage für die Heizflächenauslegung."
+        },
+        {
+            "id": "gebaeudeheizlast",
+            "title": "Gebäudeheizlast",
+            "name": "Gebäudeheizlast",
+            "expression": "\\Phi_{\\mathrm{HL,Gebaeude}} = \\sum_{\\mathrm{i}=1}^{n} \\Phi_{\\mathrm{HL,i}}",
+            "latex": "\\Phi_{\\mathrm{HL,Gebaeude}} = \\sum_{\\mathrm{i}=1}^{n} \\Phi_{\\mathrm{HL,i}}",
+            "description": "Summe der raumweisen Heizlasten beziehungsweise normativ ermittelte Gebäudeauswertung."
+        },
+        {
+            "id": "heizwasser_volumenstrom",
+            "title": "Heizwasser-Volumenstrom",
+            "name": "Heizwasser-Volumenstrom",
+            "expression": "\\dot{V}_{\\mathrm{w,i}} = \\frac{\\Phi_{\\mathrm{HL,i}}}{1{,}163\\,\\frac{\\mathrm{Wh}}{\\mathrm{l}\\cdot\\mathrm{K}} \\cdot \\Delta T}",
+            "latex": "\\dot{V}_{\\mathrm{w,i}} = \\frac{\\Phi_{\\mathrm{HL,i}}}{1{,}163\\,\\frac{\\mathrm{Wh}}{\\mathrm{l}\\cdot\\mathrm{K}} \\cdot \\Delta T}",
+            "description": "Praxisformel für \\(\\dot{V}_{\\mathrm{w,i}}\\) in \\(\\mathrm{l/h}\\), wenn Leistung in \\(\\mathrm{W}\\) beziehungsweise \\(\\mathrm{Wh}/\\mathrm{h}\\) und Spreizung in \\(\\mathrm{K}\\) eingesetzt werden."
+        },
+        {
+            "id": "trinkwarmwasser_energie",
+            "title": "Trinkwarmwasser-Speicherenergie",
+            "name": "Trinkwarmwasser-Speicherenergie",
+            "expression": "Q_{\\mathrm{TWW,kWh}} = \\frac{1{,}163\\,\\frac{\\mathrm{Wh}}{\\mathrm{l}\\cdot\\mathrm{K}} \\cdot V_{\\mathrm{TWW}} \\cdot (\\theta_{\\mathrm{WW}} - \\theta_{\\mathrm{KW}})}{1000\\,\\frac{\\mathrm{Wh}}{\\mathrm{kWh}}}",
+            "latex": "Q_{\\mathrm{TWW,kWh}} = \\frac{1{,}163\\,\\frac{\\mathrm{Wh}}{\\mathrm{l}\\cdot\\mathrm{K}} \\cdot V_{\\mathrm{TWW}} \\cdot (\\theta_{\\mathrm{WW}} - \\theta_{\\mathrm{KW}})}{1000\\,\\frac{\\mathrm{Wh}}{\\mathrm{kWh}}}",
+            "description": "Energie-Kontrollrechnung für Trinkwarmwasser in \\(\\mathrm{kWh}\\) mit ausgewiesenem Einheitenbezug."
+        }
+    ],
+    "examples": [
+        {
+            "id": "kompakter_raum",
+            "title": "Kompakter Beispielraum",
+            "summary": "Raum mit \\(90\\,\\mathrm{m}^{3}\\), Transmission \\(495\\,\\mathrm{W}\\), Lüftung \\(452\\,\\mathrm{W}\\), Raumheizlast ohne Aufheizzuschlag \\(947\\,\\mathrm{W}\\)."
+        },
+        {
+            "id": "neubau_wohnzimmer_bad",
+            "title": "Neubau mit Wohnzimmer und Bad",
+            "summary": "Plausibilitätsrechnung mit saldierter Innenübertragung: Wohnzimmer konservativ \\(705{,}0\\,\\mathrm{W}\\), Bad \\(347{,}5\\,\\mathrm{W}\\), Gebäudesumme saldiert \\(1009{,}3\\,\\mathrm{W}\\)."
+        }
+    ],
+    "assumptions": [
+        "Die Beispielwerte sind didaktische Annahmen und ersetzen keine projektbezogene Normberechnung.",
+        "Normative Randwerte, U-Werte, Wärmebrücken, Luftvolumenströme, Auslegungsaußentemperaturen und Aufheizzuschläge sind projektspezifisch aus DIN EN 12831-1, DIN/TS 12831-1 und nationalen Anhängen zu prüfen.",
+        "Die Lüftungs- und WRG-Beispiele sind Kontrollrechnungen; die vollständige normative Behandlung von Lüftungsanlagen und Zonen ist projektbezogen auszuführen.",
+        "Trinkwarmwasser wird getrennt von der Raumheizlast bewertet. Ob und wie es die Wärmeerzeugerleistung beeinflusst, hängt vom Anlagenkonzept ab."
+    ],
+    "warnings": [
+        "Dieser Workflow ist ein strukturiertes Arbeits- und Prüfdokument. Er ersetzt keine lizenzierte DIN EN 12831 und keine fachplanerische Verantwortung.",
+        "Die Norm enthält geschützte Tabellenwerte. Diese Datei enthält deshalb keine vollständigen normativen Wertetabellen.",
+        "Vereinfachte Kontrollformeln dürfen nicht als vollständiger Normnachweis für reale Projekte verwendet werden.",
+        "Aufheizzuschläge, Lüftungsansätze und Trinkwarmwasser-Zuschläge nur verwenden, wenn sie normativ und konzeptionell begründet sind."
+    ],
+    "sourceRefs": [
+        {
+            "title": "DIN Media: DIN EN 12831-1:2017-09",
+            "url": "https://www.dinmedia.de/en/standard/din-en-12831-1/261292587"
+        },
+        {
+            "title": "DIN Media: DIN/TS 12831-1:2020-04",
+            "url": "https://www.dinmedia.de/en/pre-standard/din-ts-12831-1/316645651"
+        },
+        {
+            "title": "DIN Media: DIN EN 12831-3:2017-09",
+            "url": "https://www.dinmedia.de/en/standard/din-en-12831-3/261437587"
+        }
+    ],
+    "tags": [
+        "TGA",
+        "Heizlast",
+        "DIN EN 12831",
+        "DIN/TS 12831-1",
+        "Heizflächen",
+        "Trinkwarmwasser",
+        "KaTeX"
+    ],
+    "triggerExamples": [
+        "Heizlast nach DIN EN 12831 berechnen",
+        "Raumheizlast und Gebäudeheizlast prüfen",
+        "Heizlast Beispielrechnung mit U-Werten und Lüftung erstellen"
+    ],
+    "verificationStatus": "Konsolidiert und plausibilisiert; normative Tabellenwerte projektbezogen einsetzen"
+}
+

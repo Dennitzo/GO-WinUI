@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+  x:Class="GoWinUI.App.Pages.SettingsPage"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+  xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+  Background="Transparent"
+  Loaded="OnLoaded"
+  mc:Ignorable="d">
+
+  <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+    <Grid MaxWidth="1040" Padding="24" RowSpacing="16">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+      </Grid.RowDefinitions>
+
+      <Grid ColumnSpacing="10">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <StackPanel>
+          <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Einstellungen" />
+          <TextBlock
+            Margin="0,4,0,0"
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            Text="Lokales Modell, Darstellung und Datensicherung konfigurieren." />
+        </StackPanel>
+        <Button Grid.Column="1" Click="OnSave" Content="Speichern" Style="{StaticResource AccentButtonStyle}" />
+      </Grid>
+
+      <InfoBar
+        x:Name="StatusBar"
+        Grid.Row="1"
+        IsClosable="True"
+        IsOpen="False"
+        Severity="Informational" />
+
+      <Border Grid.Row="2" Style="{StaticResource GoCardStyle}">
+        <Grid RowSpacing="14">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+          </Grid.RowDefinitions>
+          <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+              <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="LM Studio" />
+              <TextBlock Margin="0,3,0,0" Foreground="{ThemeResource GoMutedTextBrush}" Text="OpenAI-kompatibles Modell vollständig lokal verwenden." />
+            </StackPanel>
+            <Border Grid.Column="1" Style="{StaticResource GoStatusPillStyle}">
+              <StackPanel Orientation="Horizontal" Spacing="7">
+                <ProgressRing Width="15" Height="15" IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                <TextBlock Text="{x:Bind ViewModel.ConnectionStatus, Mode=OneWay}" />
+              </StackPanel>
+            </Border>
+          </Grid>
+          <Grid Grid.Row="1" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="2*" />
+              <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <TextBox
+              Header="Basisadresse"
+              PlaceholderText="http://127.0.0.1:1234/v1"
+              Text="{x:Bind ViewModel.LmStudioBaseUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <Button Grid.Column="1" VerticalAlignment="Bottom" Click="OnRefreshModels" Content="Verbindung testen und Modelle laden" />
+          </Grid>
+          <Grid Grid.Row="2" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="2*" />
+              <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <ComboBox
+              x:Name="ModelBox"
+              DisplayMemberPath="Id"
+              Header="Geladenes Modell"
+              ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
+              PlaceholderText="Verbindung testen"
+              SelectionChanged="OnModelChanged" />
+            <ComboBox x:Name="ReasoningBox" Grid.Column="1" Header="Reasoning-Aufwand" SelectionChanged="OnReasoningChanged">
+              <ComboBoxItem Content="Niedrig" Tag="low" />
+              <ComboBoxItem Content="Mittel" Tag="medium" />
+              <ComboBoxItem Content="Hoch" Tag="high" />
+            </ComboBox>
+          </Grid>
+          <TextBlock
+            Grid.Row="3"
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            Text="Standard: http://127.0.0.1:1234/v1. GO sendet keine Anfrage an einen Cloud-Anbieter."
+            TextWrapping="Wrap" />
+        </Grid>
+      </Border>
+
+      <Border Grid.Row="3" Style="{StaticResource GoCardStyle}">
+        <Grid RowSpacing="14">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+          </Grid.RowDefinitions>
+          <StackPanel>
+            <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Darstellung" />
+            <TextBlock Margin="0,3,0,0" Foreground="{ThemeResource GoMutedTextBrush}" Text="Akzentfarben werden immer aus Windows übernommen." />
+          </StackPanel>
+          <Grid Grid.Row="1" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <ComboBox x:Name="ThemeBox" Header="App-Theme" SelectionChanged="OnThemeChanged">
+              <ComboBoxItem Content="Windows-Systemeinstellung" Tag="System" />
+              <ComboBoxItem Content="Hell" Tag="Light" />
+              <ComboBoxItem Content="Dunkel" Tag="Dark" />
+            </ComboBox>
+            <ComboBox x:Name="LanguageBox" Grid.Column="1" Header="Sprache" SelectionChanged="OnLanguageChanged">
+              <ComboBoxItem Content="Deutsch" Tag="de-DE" />
+              <ComboBoxItem Content="English" Tag="en-US" />
+            </ComboBox>
+          </Grid>
+        </Grid>
+      </Border>
+
+      <Grid Grid.Row="4" ColumnSpacing="14">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <Border Style="{StaticResource GoCardStyle}">
+          <StackPanel Spacing="12">
+            <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Sicherung" />
+            <TextBlock
+              Foreground="{ThemeResource GoMutedTextBrush}"
+              Text="Chats, Workflows, Projekte, Dateien und Einstellungen in einer .gobackup-Datei sichern. Backups sind nicht verschlüsselt."
+              TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Click="OnCreateBackup" Content="Backup erstellen" Style="{StaticResource AccentButtonStyle}" />
+              <Button Click="OnRestoreBackup" Content="Backup wiederherstellen" />
+            </StackPanel>
+          </StackPanel>
+        </Border>
+        <Border Grid.Column="1" Style="{StaticResource GoCardStyle}">
+          <StackPanel Spacing="10">
+            <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Über GO" />
+            <TextBlock Text="GO · WinUI 3" />
+            <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Lokaler AI-Arbeitsbereich für Windows x64" />
+            <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="WebView2 Evergreen Runtime erforderlich" />
+          </StackPanel>
+        </Border>
+      </Grid>
+    </Grid>
+  </ScrollViewer>
+</Page>

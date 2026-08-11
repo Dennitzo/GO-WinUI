@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="src/GoWinUI.App/GoWinUI.App.csproj" />
+  <Project Path="src/GoWinUI.BricsCad.Plugin/GoWinUI.BricsCad.Plugin.csproj" />
+  <Project Path="src/GoWinUI.BricsCad.Protocol/GoWinUI.BricsCad.Protocol.csproj" />
+  <Project Path="src/GoWinUI.Core/GoWinUI.Core.csproj" />
+  <Project Path="src/GoWinUI.Infrastructure/GoWinUI.Infrastructure.csproj" />
+  <Project Path="tests/GoWinUI.Tests/GoWinUI.Tests.csproj" />
+</Solution>

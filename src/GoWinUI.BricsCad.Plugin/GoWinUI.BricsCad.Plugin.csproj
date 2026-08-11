@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <IsPackable>false</IsPackable>
+    <BuildBricsCadPlugin Condition="'$(BuildBricsCadPlugin)' == ''">false</BuildBricsCadPlugin>
+    <AssemblyName Condition="'$(BuildBricsCadPlugin)' == 'true'">GOBricsCad</AssemblyName>
+    <AssemblyName Condition="'$(BuildBricsCadPlugin)' != 'true'">GoWinUI.BricsCad.Plugin.BuildPlaceholder</AssemblyName>
+    <RootNamespace>GoWinUI.BricsCad.Plugin</RootNamespace>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
+    <Version>2.0.0</Version>
+    <BricsCadInstallDir Condition="'$(BricsCadInstallDir)' == ''">C:\Program Files\Bricsys\BricsCAD V26 en_US</BricsCadInstallDir>
+    <GoBuildId Condition="'$(GoBuildId)' == ''">unconfigured-build</GoBuildId>
+    <GoBuiltAt Condition="'$(GoBuiltAt)' == ''">unknown</GoBuiltAt>
+    <GoBimCreateRevision Condition="'$(GoBimCreateRevision)' == ''">7</GoBimCreateRevision>
+    <!-- The CAD adapter is a direct compatibility port; SDK analyzers are kept on for the shared protocol. -->
+    <EnableNETAnalyzers Condition="'$(BuildBricsCadPlugin)' == 'true'">false</EnableNETAnalyzers>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(BuildBricsCadPlugin)' != 'true'">
+    <Compile Include="PluginUnavailable.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(BuildBricsCadPlugin)' == 'true'">
+    <Compile Include="BimComponentCatalog.cs" />
+    <Compile Include="CadService.cs" />
+    <Compile Include="CapabilityRegistry.cs" />
+    <Compile Include="JsonContractValidator.cs" />
+    <Compile Include="Plugin.cs" />
+    <ProjectReference Include="..\GoWinUI.BricsCad.Protocol\GoWinUI.BricsCad.Protocol.csproj" />
+
+    <Reference Include="BrxMgd">
+      <HintPath>$(BricsCadInstallDir)\BrxMgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TD_Mgd">
+      <HintPath>$(BricsCadInstallDir)\TD_Mgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TD_MgdBrep">
+      <HintPath>$(BricsCadInstallDir)\TD_MgdBrep.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="TD_MgdDbConstraints">
+      <HintPath>$(BricsCadInstallDir)\TD_MgdDbConstraints.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <AssemblyMetadata Include="GoBuildId" Value="$(GoBuildId)" />
+    <AssemblyMetadata Include="GoBuiltAt" Value="$(GoBuiltAt)" />
+    <AssemblyMetadata Include="GoBimCreateRevision" Value="$(GoBimCreateRevision)" />
+    <AssemblyMetadata Include="GoContractVersion" Value="bricscad-dotnet-tools-v2" />
+  </ItemGroup>
+
+  <Target Name="ExplainOptionalBuild" BeforeTargets="CoreCompile" Condition="'$(BuildBricsCadPlugin)' != 'true'">
+    <Message Importance="high" Text="BricsCAD plugin is optional and was not compiled. Use windows\build-bricscad-plugin.ps1 for the V26 artifact." />
+  </Target>
+
+  <Target Name="ValidateBricsCadReferences" BeforeTargets="ResolveReferences" Condition="'$(BuildBricsCadPlugin)' == 'true'">
+    <Error Condition="!Exists('$(BricsCadInstallDir)\bricscad.exe')" Text="BricsCAD V26 executable not found below $(BricsCadInstallDir)." />
+    <Error Condition="!Exists('$(BricsCadInstallDir)\BrxMgd.dll')" Text="BricsCAD V26 managed assembly BrxMgd.dll not found below $(BricsCadInstallDir)." />
+    <Error Condition="!Exists('$(BricsCadInstallDir)\TD_Mgd.dll')" Text="BricsCAD V26 managed assembly TD_Mgd.dll not found below $(BricsCadInstallDir)." />
+    <Error Condition="!Exists('$(BricsCadInstallDir)\TD_MgdBrep.dll')" Text="BricsCAD V26 managed assembly TD_MgdBrep.dll not found below $(BricsCadInstallDir)." />
+    <Error Condition="!Exists('$(BricsCadInstallDir)\TD_MgdDbConstraints.dll')" Text="BricsCAD V26 managed assembly TD_MgdDbConstraints.dll not found below $(BricsCadInstallDir)." />
+  </Target>
+</Project>

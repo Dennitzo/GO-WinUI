@@ -1,0 +1,388 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+  x:Class="GoWinUI.App.Pages.ProjectsPage"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+  xmlns:models="using:GoWinUI.Core.Models"
+  xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+  Background="Transparent"
+  Loaded="OnLoaded"
+  Unloaded="OnUnloaded"
+  mc:Ignorable="d">
+
+  <Grid Padding="24" RowSpacing="16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <Grid ColumnSpacing="12">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <StackPanel>
+        <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Projekte" />
+        <TextBlock
+          Margin="0,4,0,0"
+          Foreground="{ThemeResource GoMutedTextBrush}"
+          Text="Projektinformationen, Checklisten und Dateien vollständig lokal verwalten." />
+      </StackPanel>
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+        <ProgressRing Width="20" Height="20" IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+        <Button Click="OnCreateProject" Style="{StaticResource AccentButtonStyle}">
+          <StackPanel Orientation="Horizontal" Spacing="7">
+            <FontIcon FontSize="14" Glyph="&#xE710;" />
+            <TextBlock Text="Neues Projekt" />
+          </StackPanel>
+        </Button>
+      </StackPanel>
+    </Grid>
+
+    <InfoBar
+      x:Name="ErrorBar"
+      Grid.Row="1"
+      IsClosable="True"
+      IsOpen="False"
+      Severity="Error"
+      Title="Aktion fehlgeschlagen" />
+
+    <Grid x:Name="ProjectsLayoutGrid" Grid.Row="2" ColumnSpacing="14">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition x:Name="ProjectListColumn" Width="300" />
+        <ColumnDefinition x:Name="ProjectDetailsColumn" Width="*" />
+      </Grid.ColumnDefinitions>
+      <Grid.RowDefinitions>
+        <RowDefinition x:Name="ProjectListRow" Height="*" />
+        <RowDefinition x:Name="ProjectDetailsRow" Height="0" />
+      </Grid.RowDefinitions>
+
+      <VisualStateManager.VisualStateGroups>
+        <VisualStateGroup x:Name="ProjectLayoutStates">
+          <VisualState x:Name="NarrowProjectLayout">
+            <VisualState.StateTriggers>
+              <AdaptiveTrigger MinWindowWidth="0" />
+            </VisualState.StateTriggers>
+            <VisualState.Setters>
+              <Setter Target="ProjectsLayoutGrid.ColumnSpacing" Value="0" />
+              <Setter Target="ProjectsLayoutGrid.RowSpacing" Value="14" />
+              <Setter Target="ProjectListColumn.Width" Value="*" />
+              <Setter Target="ProjectDetailsColumn.Width" Value="0" />
+              <Setter Target="ProjectListRow.Height" Value="260" />
+              <Setter Target="ProjectDetailsRow.Height" Value="*" />
+              <Setter Target="ProjectMasterPane.(Grid.Column)" Value="0" />
+              <Setter Target="ProjectMasterPane.(Grid.Row)" Value="0" />
+              <Setter Target="ProjectDetailsPane.(Grid.Column)" Value="0" />
+              <Setter Target="ProjectDetailsPane.(Grid.Row)" Value="1" />
+            </VisualState.Setters>
+          </VisualState>
+          <VisualState x:Name="WideProjectLayout">
+            <VisualState.StateTriggers>
+              <AdaptiveTrigger MinWindowWidth="980" />
+            </VisualState.StateTriggers>
+            <VisualState.Setters>
+              <Setter Target="ProjectsLayoutGrid.ColumnSpacing" Value="14" />
+              <Setter Target="ProjectsLayoutGrid.RowSpacing" Value="0" />
+              <Setter Target="ProjectListColumn.Width" Value="300" />
+              <Setter Target="ProjectDetailsColumn.Width" Value="*" />
+              <Setter Target="ProjectListRow.Height" Value="*" />
+              <Setter Target="ProjectDetailsRow.Height" Value="0" />
+              <Setter Target="ProjectMasterPane.(Grid.Column)" Value="0" />
+              <Setter Target="ProjectMasterPane.(Grid.Row)" Value="0" />
+              <Setter Target="ProjectDetailsPane.(Grid.Column)" Value="1" />
+              <Setter Target="ProjectDetailsPane.(Grid.Row)" Value="0" />
+            </VisualState.Setters>
+          </VisualState>
+        </VisualStateGroup>
+      </VisualStateManager.VisualStateGroups>
+
+      <Border x:Name="ProjectMasterPane" Padding="12" Style="{StaticResource GoCardStyle}">
+        <Grid RowSpacing="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+          </Grid.RowDefinitions>
+          <Grid ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock VerticalAlignment="Center" Style="{StaticResource GoSectionTitleStyle}" Text="Projektliste" />
+            <ToggleSwitch
+              x:Name="ArchivedToggle"
+              Grid.Column="1"
+              Header="Archiv"
+              IsOn="{x:Bind ViewModel.ShowArchived, Mode=TwoWay}"
+              Toggled="OnArchiveFilterChanged" />
+          </Grid>
+          <ListView
+            x:Name="ProjectList"
+            Grid.Row="1"
+            IsItemClickEnabled="True"
+            ItemsSource="{x:Bind ViewModel.Projects, Mode=OneWay}"
+            SelectionChanged="OnProjectSelectionChanged"
+            SelectionMode="Single">
+            <ListView.ItemTemplate>
+              <DataTemplate x:DataType="models:Project">
+                <Grid MinHeight="62" Padding="5" RowSpacing="3">
+                  <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                  </Grid.RowDefinitions>
+                  <TextBlock FontWeight="SemiBold" Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
+                  <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="6">
+                    <FontIcon FontSize="11" Glyph="&#xE80F;" />
+                    <TextBlock
+                      Foreground="{ThemeResource GoMutedTextBrush}"
+                      Text="{x:Bind ConstructionProject, FallbackValue='Ohne Bauvorhaben'}"
+                      TextTrimming="CharacterEllipsis" />
+                  </StackPanel>
+                </Grid>
+              </DataTemplate>
+            </ListView.ItemTemplate>
+          </ListView>
+        </Grid>
+      </Border>
+
+      <ScrollViewer x:Name="ProjectDetailsPane" Grid.Column="1" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Spacing="14">
+          <Border Style="{StaticResource GoCardStyle}">
+            <StackPanel Spacing="12">
+              <Grid ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Projektdetails" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                  <Button Click="OnDeleteProject" Content="Löschen" Foreground="{ThemeResource GoDangerBrush}" />
+                  <Button Click="OnToggleArchive" Content="{x:Bind ViewModel.ArchiveActionLabel, Mode=OneWay}" />
+                  <Button Click="OnSaveProject" Content="Speichern" Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+              </Grid>
+              <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBox Header="Projektname" Text="{x:Bind ViewModel.Name, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBox Grid.Column="1" Header="Bauvorhaben" Text="{x:Bind ViewModel.ConstructionProject, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+              </Grid>
+              <TextBox
+                AcceptsReturn="True"
+                Header="Beschreibung"
+                MinHeight="80"
+                Text="{x:Bind ViewModel.Description, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                TextWrapping="Wrap" />
+              <TextBox
+                AcceptsReturn="True"
+                Header="Notizen"
+                MinHeight="90"
+                Text="{x:Bind ViewModel.Notes, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource GoCardStyle}">
+            <Grid RowSpacing="10">
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+              </Grid.RowDefinitions>
+              <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Checkliste" />
+              <Grid Grid.Row="1" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox
+                  PlaceholderText="Neuer Checklistenpunkt"
+                  Text="{x:Bind ViewModel.NewChecklistText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <Button Grid.Column="1" Click="OnAddChecklistItem" Content="Hinzufügen" />
+              </Grid>
+              <ListView Grid.Row="2" ItemsSource="{x:Bind ViewModel.Checklist, Mode=OneWay}" SelectionMode="None">
+                <ListView.ItemTemplate>
+                  <DataTemplate x:DataType="models:ChecklistItem">
+                    <Grid ColumnSpacing="8">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <CheckBox IsChecked="{x:Bind IsCompleted}" Click="OnChecklistClicked" />
+                      <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{x:Bind Text}" TextWrapping="Wrap" />
+                      <Button Grid.Column="2" Click="OnMoveChecklistItemUp" ToolTipService.ToolTip="Nach oben">
+                        <FontIcon FontSize="13" Glyph="&#xE70E;" />
+                      </Button>
+                      <Button Grid.Column="3" Click="OnMoveChecklistItemDown" ToolTipService.ToolTip="Nach unten">
+                        <FontIcon FontSize="13" Glyph="&#xE70D;" />
+                      </Button>
+                      <Button Grid.Column="4" Click="OnDeleteChecklistItem" ToolTipService.ToolTip="Löschen">
+                        <FontIcon FontSize="13" Glyph="&#xE74D;" />
+                      </Button>
+                    </Grid>
+                  </DataTemplate>
+                </ListView.ItemTemplate>
+              </ListView>
+            </Grid>
+          </Border>
+
+          <Border Style="{StaticResource GoCardStyle}">
+            <Grid RowSpacing="10">
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="260" />
+              </Grid.RowDefinitions>
+              <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock VerticalAlignment="Center" Style="{StaticResource GoSectionTitleStyle}" Text="Dateien" />
+                <ComboBox x:Name="AssetCategoryBox" Grid.Column="1" MinWidth="130" SelectedIndex="4">
+                  <ComboBoxItem Content="PDF" Tag="Pdf" />
+                  <ComboBoxItem Content="Zeichnung" Tag="Drawing" />
+                  <ComboBoxItem Content="Bild" Tag="Image" />
+                  <ComboBoxItem Content="Besprechung" Tag="Meeting" />
+                  <ComboBoxItem Content="Sonstige" Tag="Other" />
+                </ComboBox>
+                <Button Grid.Column="2" Click="OnImportAsset" Content="Importieren" Style="{StaticResource AccentButtonStyle}" />
+              </Grid>
+
+              <ListView
+                x:Name="AssetList"
+                Grid.Row="1"
+                MaxHeight="270"
+                ItemsSource="{x:Bind ViewModel.Assets, Mode=OneWay}"
+                SelectionChanged="OnAssetSelectionChanged"
+                SelectionMode="Single">
+                <ListView.ItemTemplate>
+                  <DataTemplate x:DataType="models:ProjectAsset">
+                    <Grid MinHeight="52" ColumnSpacing="10">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <Grid Width="42" Height="42" VerticalAlignment="Center">
+                        <Border Background="{ThemeResource GoLayerStrongBrush}" CornerRadius="6" />
+                        <FontIcon FontSize="17" Glyph="&#xE7C3;" />
+                        <Image
+                          Margin="2"
+                          Loaded="OnAssetThumbnailLoaded"
+                          Stretch="UniformToFill" />
+                      </Grid>
+                      <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock FontWeight="SemiBold" Text="{x:Bind FileName}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="{x:Bind Category}" />
+                      </StackPanel>
+                      <TextBlock Grid.Column="2" VerticalAlignment="Center" Foreground="{ThemeResource GoMutedTextBrush}" Text="{x:Bind Length}" />
+                    </Grid>
+                  </DataTemplate>
+                </ListView.ItemTemplate>
+              </ListView>
+
+              <Grid Grid.Row="2" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="190" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox
+                  Header="Dateiname"
+                  IsEnabled="{x:Bind ViewModel.HasAssetSelection, Mode=OneWay}"
+                  Text="{x:Bind ViewModel.AssetFileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <ComboBox
+                  Grid.Column="1"
+                  Header="Kategorie"
+                  IsEnabled="{x:Bind ViewModel.HasAssetSelection, Mode=OneWay}"
+                  ItemsSource="{x:Bind ViewModel.AssetCategories, Mode=OneWay}"
+                  SelectedItem="{x:Bind ViewModel.SelectedAssetCategory, Mode=TwoWay}" />
+                <Button
+                  Grid.Column="2"
+                  VerticalAlignment="Bottom"
+                  Click="OnSaveAssetMetadata"
+                  Content="Metadaten speichern"
+                  IsEnabled="{x:Bind ViewModel.HasAssetSelection, Mode=OneWay}" />
+              </Grid>
+
+              <InfoBar
+                Grid.Row="3"
+                IsClosable="False"
+                IsOpen="{x:Bind ViewModel.HasModifiedWorkingCopy, Mode=OneWay}"
+                Severity="Warning"
+                Title="Extern geänderte Arbeitskopie">
+                <InfoBar.Content>
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="{x:Bind ViewModel.WorkingCopyStatusText, Mode=OneWay}" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                      <Button Click="OnReimportWorkingCopy" Content="Änderungen übernehmen" Style="{StaticResource AccentButtonStyle}" />
+                      <Button Click="OnDiscardWorkingCopy" Content="Änderungen verwerfen" />
+                    </StackPanel>
+                  </StackPanel>
+                </InfoBar.Content>
+              </InfoBar>
+
+              <Grid Grid.Row="4" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock
+                  x:Name="PreviewSummary"
+                  VerticalAlignment="Center"
+                  Foreground="{ThemeResource GoMutedTextBrush}"
+                  Text="Datei auswählen, um Aktionen anzuzeigen."
+                  TextTrimming="CharacterEllipsis" />
+                <Button Grid.Column="1" Click="OnMoveAssetUp" Content="Hoch" />
+                <Button Grid.Column="2" Click="OnMoveAssetDown" Content="Runter" />
+                <Button Grid.Column="3" Click="OnOpenAsset" Content="Öffnen" />
+                <Button Grid.Column="4" Click="OnExportAsset" Content="Exportieren" />
+                <Button Grid.Column="5" Click="OnDeleteAsset" Content="Löschen" Foreground="{ThemeResource GoDangerBrush}" />
+              </Grid>
+
+              <Border
+                Grid.Row="5"
+                Margin="0,4,0,0"
+                Background="{ThemeResource GoLayerStrongBrush}"
+                BorderBrush="{ThemeResource GoStrokeBrush}"
+                BorderThickness="1"
+                CornerRadius="10">
+                <Grid>
+                  <TextBlock
+                    x:Name="PreviewPlaceholder"
+                    MaxWidth="420"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Foreground="{ThemeResource GoMutedTextBrush}"
+                    Text="Vorschau für Bilder, Text und PDF"
+                    TextAlignment="Center"
+                    TextWrapping="Wrap" />
+                  <Image x:Name="ImagePreview" Margin="12" Stretch="Uniform" Visibility="Collapsed" />
+                  <ScrollViewer x:Name="TextPreview" Padding="14" Visibility="Collapsed">
+                    <TextBlock x:Name="TextPreviewContent" FontFamily="Cascadia Mono" FontSize="12" IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                  </ScrollViewer>
+                  <WebView2 x:Name="PdfPreview" Visibility="Collapsed" />
+                </Grid>
+              </Border>
+            </Grid>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+    </Grid>
+  </Grid>
+</Page>

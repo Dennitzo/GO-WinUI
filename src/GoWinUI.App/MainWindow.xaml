@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+  x:Class="GoWinUI.App.MainWindow"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+  xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+  xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives"
+  Title="GO"
+  mc:Ignorable="d">
+
+  <Window.SystemBackdrop>
+    <MicaBackdrop Kind="BaseAlt" />
+  </Window.SystemBackdrop>
+
+  <Grid Background="{ThemeResource GoWindowBrush}">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="56" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <Grid
+      x:Name="AppTitleBar"
+      Grid.Row="0"
+      Padding="16,0,152,0"
+      Background="Transparent"
+      ColumnSpacing="12">
+      <VisualStateManager.VisualStateGroups>
+        <VisualStateGroup>
+          <VisualState x:Name="ExpandedTitleBar">
+            <VisualState.StateTriggers>
+              <AdaptiveTrigger MinWindowWidth="900" />
+            </VisualState.StateTriggers>
+            <VisualState.Setters>
+              <Setter Target="WorkspaceSubtitle.Visibility" Value="Visible" />
+              <Setter Target="TitleStatus.Visibility" Value="Visible" />
+            </VisualState.Setters>
+          </VisualState>
+          <VisualState x:Name="CompactTitleBar">
+            <VisualState.StateTriggers>
+              <AdaptiveTrigger MinWindowWidth="0" />
+            </VisualState.StateTriggers>
+            <VisualState.Setters>
+              <Setter Target="WorkspaceSubtitle.Visibility" Value="Collapsed" />
+              <Setter Target="TitleStatus.Visibility" Value="Collapsed" />
+            </VisualState.Setters>
+          </VisualState>
+        </VisualStateGroup>
+      </VisualStateManager.VisualStateGroups>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+
+      <StackPanel
+        Grid.Column="0"
+        VerticalAlignment="Center"
+        Spacing="1">
+        <StackPanel Orientation="Horizontal" Spacing="10">
+          <TextBlock
+            FontFamily="Segoe UI Variable Display"
+            FontSize="16"
+            FontWeight="SemiBold"
+            Text="GO" />
+          <TextBlock
+            x:Name="WorkspaceSubtitle"
+            VerticalAlignment="Center"
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            Text="Lokaler AI-Arbeitsbereich" />
+        </StackPanel>
+        <TextBlock
+          Foreground="{ThemeResource GoMutedTextBrush}"
+          Text="{x:Bind ViewModel.ActivePageTitle, Mode=OneWay}" />
+      </StackPanel>
+
+      <Border
+        x:Name="TitleStatus"
+        Grid.Column="1"
+        VerticalAlignment="Center"
+        Style="{StaticResource GoStatusPillStyle}">
+        <StackPanel Orientation="Horizontal" Spacing="8">
+          <Ellipse
+            Width="8"
+            Height="8"
+            Fill="{ThemeResource GoSuccessBrush}" />
+          <TextBlock Text="{x:Bind ViewModel.DatabaseStatus, Mode=OneWay}" />
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <NavigationView
+      x:Name="RootNavigation"
+      Grid.Row="1"
+      AlwaysShowHeader="False"
+      Background="Transparent"
+      CompactModeThresholdWidth="840"
+      ExpandedModeThresholdWidth="1000"
+      IsBackButtonVisible="Collapsed"
+      IsPaneToggleButtonVisible="True"
+      IsSettingsVisible="True"
+      Loaded="OnNavigationLoaded"
+      OpenPaneLength="320"
+      PaneDisplayMode="Auto"
+      PaneTitle="Arbeitsbereich"
+      SelectionChanged="OnSelectionChanged">
+
+      <NavigationView.MenuItems>
+        <NavigationViewItem x:Name="AssistantItem" Content="AI Assistent" Tag="assistant">
+          <NavigationViewItem.Icon>
+            <FontIcon Glyph="&#xE99A;" />
+          </NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="Projekte" Tag="projects">
+          <NavigationViewItem.Icon>
+            <FontIcon Glyph="&#xE838;" />
+          </NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="Logs" Tag="logs">
+          <NavigationViewItem.Icon>
+            <FontIcon Glyph="&#xE9D9;" />
+          </NavigationViewItem.Icon>
+        </NavigationViewItem>
+      </NavigationView.MenuItems>
+
+      <NavigationView.PaneCustomContent>
+        <Grid x:Name="PaneHeaderLayout" Height="34" Margin="0,6,0,0">
+          <primitives:Thumb
+            x:Name="PaneResizeThumb"
+            Width="8"
+            HorizontalAlignment="Right"
+            AutomationProperties.Name="Navigationsbereich vergrößern oder verkleinern"
+            DragCompleted="OnPaneResizeCompleted"
+            DragDelta="OnPaneResizeDelta">
+            <primitives:Thumb.Template>
+              <ControlTemplate TargetType="primitives:Thumb">
+                <Border Background="Transparent">
+                  <Rectangle
+                    Width="2"
+                    Height="28"
+                    HorizontalAlignment="Center"
+                    Fill="{ThemeResource GoStrokeBrush}"
+                    RadiusX="1"
+                    RadiusY="1" />
+                </Border>
+              </ControlTemplate>
+            </primitives:Thumb.Template>
+          </primitives:Thumb>
+        </Grid>
+      </NavigationView.PaneCustomContent>
+
+      <Frame x:Name="ContentFrame" Navigated="OnNavigated" NavigationFailed="OnNavigationFailed" />
+    </NavigationView>
+
+    <Grid
+      Grid.Row="2"
+      MinHeight="36"
+      Padding="16,6"
+      Background="{ThemeResource GoLayerBrush}"
+      BorderBrush="{ThemeResource GoStrokeBrush}"
+      BorderThickness="0,1,0,0"
+      ColumnSpacing="18">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <FontIcon
+          FontSize="14"
+          Foreground="{ThemeResource GoMutedTextBrush}"
+          Glyph="&#xE9D9;" />
+        <TextBlock
+          VerticalAlignment="Center"
+          Foreground="{ThemeResource GoMutedTextBrush}"
+          Text="Lokal · Inhalte verlassen dieses Gerät nicht" />
+      </StackPanel>
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+        <ProgressRing
+          Width="16"
+          Height="16"
+          IsActive="{x:Bind ViewModel.IsAiRunning, Mode=OneWay}" />
+        <TextBlock
+          VerticalAlignment="Center"
+          Foreground="{ThemeResource GoMutedTextBrush}"
+          Text="{x:Bind ViewModel.LmStudioStatus, Mode=OneWay}" />
+      </StackPanel>
+    </Grid>
+  </Grid>
+</Window>
