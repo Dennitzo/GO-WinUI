@@ -1,5 +1,6 @@
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
+using System.Text.Json;
 
 namespace GoWinUI.Tests;
 
@@ -37,10 +38,45 @@ public sealed class ChatAndContextTests
 
         var result = assembler.Build(new("Du bist hilfreich.", "Bitte Seite 2 auswerten", history, null, pages, 2_048));
         Assert.True(result.WasTruncated);
-        Assert.Contains("ZWEI", result.Messages[0].Content, StringComparison.Ordinal);
-        Assert.DoesNotContain("EINS", result.Messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains("ZWEI", result.Messages[^1].Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("EINS", result.Messages[^1].Content, StringComparison.Ordinal);
         Assert.Equal(ChatRole.User, result.Messages[^1].Role);
+        Assert.Contains("Markdown-Pipe-Tabellen", result.Messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains("Dokument-Policy", result.Messages[0].Content, StringComparison.Ordinal);
+        Assert.Equal(1_024, result.MaxOutputTokens);
+
+        using var envelope = JsonDocument.Parse(Assert.IsType<string>(result.RequestEnvelopeJson));
+        var root = envelope.RootElement;
+        Assert.Equal("barebone.general.markdown.request.v1", root.GetProperty("schema").GetString());
+        Assert.Equal("document_qa", root.GetProperty("route").GetProperty("route").GetString());
+        Assert.False(root.GetProperty("modePolicy").GetProperty("cadToolsAllowed").GetBoolean());
+        Assert.Contains(root.GetProperty("policyRefs").EnumerateArray(), static value => value.GetString() == "documents");
+        Assert.Contains("ZWEI", root.GetProperty("documentContext").GetProperty("selectedText").GetString(), StringComparison.Ordinal);
 
         static IContextAssembler environmentAssembler() => new GoWinUI.Core.Chat.ContextAssembler();
+    }
+
+    [Fact]
+    public void GeneralChatEnvelopeUsesVisibleMarkdownAndFormattingPolicies()
+    {
+        var result = new GoWinUI.Core.Chat.ContextAssembler().Build(new(
+            "GO Anwendungshinweis.",
+            "Erstelle eine Vergleichstabelle.",
+            Array.Empty<ChatMessage>(),
+            null,
+            Array.Empty<DocumentPage>(),
+            131_072));
+
+        using var envelope = JsonDocument.Parse(Assert.IsType<string>(result.RequestEnvelopeJson));
+        var root = envelope.RootElement;
+        Assert.Equal("general_chat", root.GetProperty("route").GetProperty("route").GetString());
+        Assert.Equal("visible-markdown", root.GetProperty("expectedResponse").GetString());
+        Assert.Collection(
+            root.GetProperty("policyRefs").EnumerateArray(),
+            static value => Assert.Equal("general", value.GetString()));
+        Assert.Equal(8_192, result.MaxOutputTokens);
+        Assert.Contains("|---|---|", result.Messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains("\\[...\\]", result.Messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains("## Nutzeranfrage", result.Messages[^1].Content, StringComparison.Ordinal);
     }
 }

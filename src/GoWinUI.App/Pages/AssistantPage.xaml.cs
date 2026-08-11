@@ -1,4 +1,5 @@
 using GoWinUI.App.Services;
+using GoWinUI.App.ViewModels;
 using GoWinUI.Core.Contracts;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
@@ -17,6 +18,7 @@ public sealed partial class AssistantPage : Page, IDisposable
 {
     private readonly AssistantCoordinator _coordinator;
     private readonly SettingsCoordinator _settings;
+    private readonly ShellViewModel _shell;
     private readonly ILogger<AssistantPage> _logger;
     private readonly SemaphoreSlim _exportGate = new(1, 1);
     private readonly UISettings _uiSettings = new();
@@ -35,6 +37,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         InitializeComponent();
         _coordinator = App.Current.GetService<AssistantCoordinator>();
         _settings = App.Current.GetService<SettingsCoordinator>();
+        _shell = App.Current.GetService<ShellViewModel>();
         _logger = App.Current.GetService<ILogger<AssistantPage>>();
     }
 
@@ -47,6 +50,7 @@ public sealed partial class AssistantPage : Page, IDisposable
 
         _initialized = true;
         _lifetime = new CancellationTokenSource();
+        var initializationStage = "Plattformprüfung";
         try
         {
             if (System.Runtime.InteropServices.RuntimeInformation.OSArchitecture
@@ -56,13 +60,13 @@ public sealed partial class AssistantPage : Page, IDisposable
                     "GO v1 unterstützt WebView2 ausschließlich auf Windows x64.");
             }
 
-            _uiSettings.ColorValuesChanged += OnSystemColorsChanged;
-            _colorEventsSubscribed = true;
-            _accessibilitySettings.HighContrastChanged += OnHighContrastChanged;
-            _contrastEventsSubscribed = true;
+            initializationStage = "Systemereignisse";
+            SubscribeOptionalSystemThemeEvents();
             App.Current.ThemeChanged += OnAppThemeChanged;
             _themeEventsSubscribed = true;
+            initializationStage = "WebView2-Runtimeprüfung";
             _ = CoreWebView2Environment.GetAvailableBrowserVersionString();
+            initializationStage = "WebView2-Steuerelement";
             var webView = new WebView2
             {
                 HorizontalAlignment = HorizontalAlignment.Stretch,
@@ -74,15 +78,20 @@ public sealed partial class AssistantPage : Page, IDisposable
                 webView,
                 App.Current.GetService<ILogger<AssistantWebBridge>>());
             _bridge.MessageReceived += OnBridgeMessageReceived;
+            initializationStage = "Webassets";
             var webRoot = ApplicationAssets.ResolvePath("Assets", "Web");
             var userDataFolder = Path.Combine(App.Current.DataDirectory, "WebView2");
+            initializationStage = "WebView2-Umgebung";
             await _bridge.InitializeAsync(webRoot, userDataFolder);
+            initializationStage = "Navigation";
             webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
+            _bridge.NavigateToApp();
         }
         catch (Exception exception)
         {
             LoadingOverlay.Visibility = Visibility.Collapsed;
-            ErrorBar.Message = "Prüfe, ob die Microsoft Edge WebView2 Evergreen Runtime installiert ist.";
+            ErrorBar.Message = $"{initializationStage}: {exception.GetType().Name} "
+                + $"(0x{exception.HResult:X8}) – {exception.Message}";
             ErrorBar.IsOpen = true;
             AppLog.WebViewInitializationFailed(_logger, exception);
         }
@@ -161,6 +170,15 @@ public sealed partial class AssistantPage : Page, IDisposable
 
         if (_assistantWebView is { } webView)
         {
+            try
+            {
+                webView.Close();
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                AppLog.WebViewCloseFailed(_logger, exception);
+            }
+
             WebViewHost.Children.Remove(webView);
             _assistantWebView = null;
         }
@@ -190,15 +208,24 @@ public sealed partial class AssistantPage : Page, IDisposable
             return;
         }
 
+        var updatesAiState = args.Envelope.Type == "chat.send";
         try
         {
+            if (updatesAiState)
+            {
+                await SetShellAiStateAsync(true);
+            }
+
             switch (args.Envelope.Type)
             {
                 case "document.pick":
                     await PickDocumentAsync(args.Envelope, bridge);
                     break;
                 case "chat.exportPdf":
-                    await ExportPdfAsync(args.Envelope.RequestId, bridge);
+                    await ExportPdfAsync(args.Envelope, bridge, selectedMessageOnly: false);
+                    break;
+                case "message.exportPdf":
+                    await ExportPdfAsync(args.Envelope, bridge, selectedMessageOnly: true);
                     break;
                 case "message.copy":
                     CopyToClipboard(args.Envelope.Payload);
@@ -227,6 +254,55 @@ public sealed partial class AssistantPage : Page, IDisposable
             AppLog.AssistantRequestFailed(_logger, exception, args.Envelope.Type);
             await bridge.PostErrorAsync(exception.Message, args.Envelope.RequestId);
         }
+        finally
+        {
+            if (updatesAiState)
+            {
+                await SetShellAiStateAsync(false);
+            }
+        }
+    }
+
+    private Task SetShellAiStateAsync(bool isRunning)
+    {
+        if (_disposed)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (DispatcherQueue.HasThreadAccess)
+        {
+            SetShellAiState(isRunning);
+            return Task.CompletedTask;
+        }
+
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!DispatcherQueue.TryEnqueue(() =>
+            {
+                try
+                {
+                    if (!_disposed)
+                    {
+                        SetShellAiState(isRunning);
+                    }
+
+                    completion.SetResult();
+                }
+                catch (Exception exception)
+                {
+                    completion.SetException(exception);
+                }
+            }))
+        {
+            completion.SetResult();
+        }
+
+        return completion.Task;
+    }
+
+    private void SetShellAiState(bool isRunning)
+    {
+        _shell.IsAiRunning = isRunning;
     }
 
     private async Task PickDocumentAsync(WebBridgeEnvelope envelope, AssistantWebBridge bridge)
@@ -266,19 +342,26 @@ public sealed partial class AssistantPage : Page, IDisposable
             envelope.RequestId);
     }
 
-    private async Task ExportPdfAsync(string requestId, AssistantWebBridge bridge)
+    private async Task ExportPdfAsync(
+        WebBridgeEnvelope envelope,
+        AssistantWebBridge bridge,
+        bool selectedMessageOnly)
     {
         if (!await _exportGate.WaitAsync(0))
         {
             throw new InvalidOperationException("Ein PDF-Export läuft bereits.");
         }
 
+        CoreWebView2? core = null;
+        var messagePrepared = false;
         try
         {
             var picker = new FileSavePicker
             {
                 SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-                SuggestedFileName = $"GO-Chat-{DateTime.Now:yyyy-MM-dd-HHmm}",
+                SuggestedFileName = selectedMessageOnly
+                    ? $"GO-Nachricht-{DateTime.Now:yyyy-MM-dd-HHmm}"
+                    : $"GO-Chat-{DateTime.Now:yyyy-MM-dd-HHmm}",
                 DefaultFileExtension = ".pdf",
             };
             picker.FileTypeChoices.Add("PDF-Dokument", new List<string> { ".pdf" });
@@ -289,8 +372,23 @@ public sealed partial class AssistantPage : Page, IDisposable
                 return;
             }
 
-            var core = _assistantWebView?.CoreWebView2
+            core = _assistantWebView?.CoreWebView2
                 ?? throw new InvalidOperationException("Die Chat-Oberfläche ist nicht bereit.");
+            if (selectedMessageOnly)
+            {
+                var messageId = ReadRequiredText(envelope.Payload, "messageId", 128);
+                var scriptArgument = JsonSerializer.Serialize(messageId);
+                var result = await core.ExecuteScriptAsync(
+                    $"globalThis.goPrepareMessagePdf?.({scriptArgument}) ?? false");
+                if (!string.Equals(result, "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("Die ausgewählte Nachricht wurde nicht gefunden.");
+                }
+
+                messagePrepared = true;
+                await Task.Delay(50);
+            }
+
             var printSettings = core.Environment.CreatePrintSettings();
             printSettings.ShouldPrintBackgrounds = true;
             printSettings.ShouldPrintHeaderAndFooter = false;
@@ -300,10 +398,22 @@ public sealed partial class AssistantPage : Page, IDisposable
                 throw new InvalidOperationException("WebView2 konnte das PDF nicht erstellen.");
             }
 
-            await bridge.PostAsync("status.changed", new { exportCompleted = true }, requestId);
+            await bridge.PostAsync("status.changed", new { exportCompleted = true }, envelope.RequestId);
         }
         finally
         {
+            if (messagePrepared && core is not null)
+            {
+                try
+                {
+                    await core.ExecuteScriptAsync("globalThis.goFinishMessagePdf?.()");
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                {
+                    AppLog.MessagePdfViewResetFailed(_logger, exception);
+                }
+            }
+
             _exportGate.Release();
         }
     }
@@ -349,14 +459,50 @@ public sealed partial class AssistantPage : Page, IDisposable
             return;
         }
 
-        var accent = _uiSettings.GetColorValue(UIColorType.Accent);
-        var accentHex = $"#{accent.R:X2}{accent.G:X2}{accent.B:X2}";
+        var isLight = ActualTheme == ElementTheme.Light;
+        var resolvedTheme = isLight ? "light" : "dark";
+        var accentHex = App.Current.AccentColor;
+        var backgroundHex = App.Current.BackgroundColor;
+        var highContrast = false;
+        try
+        {
+            highContrast = _accessibilitySettings.HighContrast;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.SystemThemeEventUnavailable(_logger, exception, "AccessibilitySettings.HighContrast");
+        }
+
         await bridge.PostAsync("theme.changed", new
         {
-            theme = _settings.Current.Theme.ToString().ToLowerInvariant(),
+            theme = resolvedTheme,
             accent = accentHex,
-            highContrast = _accessibilitySettings.HighContrast,
+            backgroundAccent = backgroundHex,
+            highContrast,
         });
+    }
+
+    private void SubscribeOptionalSystemThemeEvents()
+    {
+        try
+        {
+            _uiSettings.ColorValuesChanged += OnSystemColorsChanged;
+            _colorEventsSubscribed = true;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.SystemThemeEventUnavailable(_logger, exception, "UISettings.ColorValuesChanged");
+        }
+
+        try
+        {
+            _accessibilitySettings.HighContrastChanged += OnHighContrastChanged;
+            _contrastEventsSubscribed = true;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.SystemThemeEventUnavailable(_logger, exception, "AccessibilitySettings.HighContrastChanged");
+        }
     }
 
     private void OnSystemColorsChanged(UISettings sender, object args) => QueueThemeRefresh();
@@ -398,5 +544,19 @@ public sealed partial class AssistantPage : Page, IDisposable
         return payload.TryGetProperty(name, out var property)
             && property.ValueKind == JsonValueKind.String
             && Guid.TryParse(property.GetString(), out value);
+    }
+
+    private static string ReadRequiredText(JsonElement payload, string name, int maximumLength)
+    {
+        if (!payload.TryGetProperty(name, out var property)
+            || property.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException($"'{name}' fehlt oder ist ungültig.");
+        }
+
+        var value = property.GetString() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(value) && value.Length <= maximumLength
+            ? value
+            : throw new InvalidOperationException($"'{name}' fehlt oder ist ungültig.");
     }
 }

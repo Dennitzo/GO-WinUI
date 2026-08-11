@@ -13,7 +13,8 @@ public sealed class ProjectAssetThumbnailService(
     IProjectAssetWorkingCopyService workingCopies,
     ILogger<ProjectAssetThumbnailService> logger)
 {
-    private const uint MaximumDimension = 256;
+    private const uint MaximumWidth = 640;
+    private const uint MaximumHeight = 480;
 
     public async Task<bool> GenerateAsync(ProjectAsset asset, CancellationToken cancellationToken = default)
     {
@@ -31,7 +32,9 @@ public sealed class ProjectAssetThumbnailService(
             var decoder = await BitmapDecoder.CreateAsync(source);
             var scale = Math.Min(
                 1d,
-                MaximumDimension / (double)Math.Max(decoder.PixelWidth, decoder.PixelHeight));
+                Math.Min(
+                    MaximumWidth / (double)Math.Max(1u, decoder.PixelWidth),
+                    MaximumHeight / (double)Math.Max(1u, decoder.PixelHeight)));
             var width = Math.Max(1u, (uint)Math.Round(decoder.PixelWidth * scale));
             var height = Math.Max(1u, (uint)Math.Round(decoder.PixelHeight * scale));
             var transform = new BitmapTransform
@@ -93,6 +96,21 @@ public sealed class ProjectAssetThumbnailService(
         return thumbnail is null
             ? null
             : await binaryObjects.OpenReadAsync(thumbnail.BlobId, cancellationToken);
+    }
+
+    public async Task<Stream?> OpenOrGenerateAsync(
+        ProjectAsset asset,
+        CancellationToken cancellationToken = default)
+    {
+        var stream = await OpenAsync(asset.Id, cancellationToken);
+        if (stream is not null)
+        {
+            return stream;
+        }
+
+        return await GenerateAsync(asset, cancellationToken)
+            ? await OpenAsync(asset.Id, cancellationToken)
+            : null;
     }
 
     private static bool IsSupportedImage(ProjectAsset asset) =>

@@ -1,4 +1,3 @@
-using GoWinUI.App.ViewModels;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using System.Globalization;
@@ -15,10 +14,9 @@ public sealed class AssistantCoordinator(
     ILmStudioClient lmStudio,
     IContextAssembler contextAssembler,
     IChatOrchestrator orchestrator,
-    SettingsCoordinator settings,
-    ShellViewModel shell) : IDisposable
+    SettingsCoordinator settings) : IDisposable
 {
-    private const string DefaultSystemPrompt = "Du bist GO, ein hilfreicher lokaler AI-Assistent. Antworte klar, korrekt und in der Sprache des Benutzers. Weise auf Unsicherheit hin und erfinde keine Dokumentquellen.";
+    private const string DefaultSystemPrompt = "Du bist GO, der lokale AI-Assistent dieser Anwendung. Weise auf Unsicherheit hin und erfinde keine Quellen.";
     private readonly SemaphoreSlim _chatGate = new(1, 1);
     private CancellationTokenSource? _activeChatCancellation;
 
@@ -42,14 +40,11 @@ public sealed class AssistantCoordinator(
         }
 
         var contextLimit = await ResolveContextLimitAsync(cancellationToken).ConfigureAwait(false);
-        var selectedWorkflow = session.SelectedWorkflowId is { } workflowId
-            ? workflowItems.FirstOrDefault(workflow => workflow.Id == workflowId)
-            : null;
         var context = contextAssembler.Build(new(
             DefaultSystemPrompt,
             string.IsNullOrWhiteSpace(session.Draft) ? "Nächste Benutzereingabe" : session.Draft,
             messages,
-            selectedWorkflow,
+            null,
             pages,
             contextLimit));
         return new
@@ -59,7 +54,6 @@ public sealed class AssistantCoordinator(
             workflows = workflowItems.Select(ToWorkflowDto),
             documents = documentItems.Select(ToDocumentDto),
             activeSessionId = session.Id,
-            selectedWorkflowId = session.SelectedWorkflowId,
             draft = session.Draft,
             isRunning = orchestrator.IsRunning,
             model = settings.Current.SelectedModel,
@@ -68,6 +62,7 @@ public sealed class AssistantCoordinator(
             contextLimit,
             contextWasTruncated = context.WasTruncated,
             contextNotice = context.TruncationNotice,
+            isSessionPaneOpen = settings.Current.IsAssistantSessionPaneOpen,
         };
     }
 
@@ -97,6 +92,9 @@ public sealed class AssistantCoordinator(
             case "session.delete":
                 await DeleteSessionAsync(GetRequiredGuid(envelope.Payload, "sessionId"), emit, envelope.RequestId, cancellationToken);
                 break;
+            case "session.clear":
+                await ClearSessionsAsync(emit, envelope.RequestId, cancellationToken);
+                break;
             case "session.draft":
                 await chats.SaveDraftAsync(
                     GetRequiredGuid(envelope.Payload, "sessionId"),
@@ -118,8 +116,8 @@ public sealed class AssistantCoordinator(
             case "workflow.list":
                 await ListWorkflowsAsync(envelope, emit, cancellationToken);
                 break;
-            case "workflow.select":
-                await SelectWorkflowAsync(GetOptionalGuid(envelope.Payload, "workflowId"), emit, envelope.RequestId, cancellationToken);
+            case "workflow.insert":
+                await InsertWorkflowAsync(envelope, emit, cancellationToken);
                 break;
             case "workflow.create":
                 await CreateWorkflowAsync(envelope, emit, cancellationToken);
@@ -134,15 +132,14 @@ public sealed class AssistantCoordinator(
                     cancellationToken);
                 await emit("workflow.changed", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
                 break;
-            case "workflow.clone":
-                await workflows.CloneAsync(
-                    GetRequiredGuid(envelope.Payload, "workflowId"),
-                    GetRequiredString(envelope.Payload, "title", 160),
-                    cancellationToken);
-                await emit("workflow.changed", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
-                break;
             case "workflow.createFromMessage":
                 await CreateWorkflowFromMessageAsync(envelope, emit, cancellationToken);
+                break;
+            case "ui.sessionPane":
+                await settings.UpdateAsync(current => current with
+                {
+                    IsAssistantSessionPaneOpen = GetRequiredBoolean(envelope.Payload, "isOpen"),
+                }, CancellationToken.None).ConfigureAwait(false);
                 break;
         }
     }
@@ -226,6 +223,27 @@ public sealed class AssistantCoordinator(
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
     }
 
+    private async Task ClearSessionsAsync(
+        Func<string, object, string?, Task> emit,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        if (orchestrator.IsRunning)
+        {
+            throw new InvalidOperationException("Die Sitzungen können während einer laufenden Antwort nicht gelöscht werden.");
+        }
+
+        var sessions = await chats.ListSessionsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        foreach (var session in sessions)
+        {
+            await chats.DeleteSessionAsync(session.Id, cancellationToken).ConfigureAwait(false);
+        }
+
+        await settings.UpdateAsync(current => current with { ActiveSessionId = null }, cancellationToken).ConfigureAwait(false);
+        _ = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
+        await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
+    }
+
     private async Task SendChatAsync(
         WebBridgeEnvelope envelope,
         Func<string, object, string?, Task> emit,
@@ -263,8 +281,6 @@ public sealed class AssistantCoordinator(
             }
 
             _activeChatCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            shell.IsAiRunning = true;
-            shell.LmStudioStatus = $"{model} antwortet";
             var updates = Channel.CreateUnbounded<ChatStreamUpdate>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -351,8 +367,6 @@ public sealed class AssistantCoordinator(
         {
             _activeChatCancellation?.Dispose();
             _activeChatCancellation = null;
-            shell.IsAiRunning = false;
-            shell.LmStudioStatus = settings.Current.SelectedModel ?? "Nicht verbunden";
             _chatGate.Release();
         }
     }
@@ -454,15 +468,28 @@ public sealed class AssistantCoordinator(
         await emit("workflow.snapshot", new { workflows = items.Select(ToWorkflowDto) }, envelope.RequestId);
     }
 
-    private async Task SelectWorkflowAsync(
-        Guid? workflowId,
+    private async Task InsertWorkflowAsync(
+        WebBridgeEnvelope envelope,
         Func<string, object, string?, Task> emit,
-        string requestId,
         CancellationToken cancellationToken)
     {
+        if (orchestrator.IsRunning)
+        {
+            throw new InvalidOperationException("Ein Workflow kann nicht während einer laufenden Antwort eingefügt werden.");
+        }
+
+        var workflowId = GetRequiredGuid(envelope.Payload, "workflowId");
+        var workflow = await workflows.GetAsync(workflowId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Der Workflow wurde nicht gefunden.");
         var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
-        await chats.SelectWorkflowAsync(session.Id, workflowId, cancellationToken).ConfigureAwait(false);
-        await emit("workflow.changed", await BuildSnapshotAsync(cancellationToken), requestId);
+        await chats.SelectWorkflowAsync(session.Id, null, cancellationToken).ConfigureAwait(false);
+        await chats.AddMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            WorkflowChatFormatter.Format(workflow),
+            MessageStatus.Completed,
+            cancellationToken).ConfigureAwait(false);
+        await emit("session.changed", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
     }
 
     private async Task CreateWorkflowAsync(
@@ -557,6 +584,7 @@ public sealed class AssistantCoordinator(
     {
         id = session.Id,
         session.Title,
+        session.CreatedAt,
         session.UpdatedAt,
     };
 
@@ -684,6 +712,14 @@ public sealed class AssistantCoordinator(
         return payload.TryGetProperty(name, out var property) && property.TryGetInt64(out var value)
             ? value
             : throw new InvalidOperationException($"'{name}' fehlt oder ist ungültig.");
+    }
+
+    private static bool GetRequiredBoolean(JsonElement payload, string name)
+    {
+        return payload.TryGetProperty(name, out var property)
+            && property.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? property.GetBoolean()
+                : throw new InvalidOperationException($"'{name}' fehlt oder ist ungültig.");
     }
 
     private static string GetRequiredJsonString(JsonElement payload, string name)

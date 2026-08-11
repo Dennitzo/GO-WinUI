@@ -38,7 +38,7 @@ public sealed class V1AcceptanceGapTests
         Assert.False(string.IsNullOrWhiteSpace(result.TruncationNotice));
         Assert.Equal(ChatRole.User, userMessage.Role);
         Assert.NotEqual(prompt, userMessage.Content);
-        Assert.StartsWith("ANFANG-", userMessage.Content, StringComparison.Ordinal);
+        Assert.Contains("\nANFANG-", userMessage.Content, StringComparison.Ordinal);
         Assert.EndsWith("-ENDE", userMessage.Content, StringComparison.Ordinal);
         Assert.Equal(actualTokens, result.EstimatedTokens);
         Assert.InRange(actualTokens, 1, contextLength - outputReserve);
@@ -233,7 +233,6 @@ public sealed class V1AcceptanceGapTests
 
     private static ChatOrchestrator CreateOrchestrator(TestEnvironment environment, ILmStudioClient lmStudio) => new(
         environment.Get<IChatRepository>(),
-        environment.Get<IWorkflowRepository>(),
         environment.Get<IDocumentIngestor>(),
         lmStudio,
         environment.Get<IContextAssembler>(),

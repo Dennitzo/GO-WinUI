@@ -14,7 +14,7 @@ public sealed class ChatOrchestratorTests
         await using var environment = await TestEnvironment.CreateAsync();
         var session = await environment.Get<IChatRepository>().CreateSessionAsync("Stream");
         using var orchestrator = new ChatOrchestrator(
-            environment.Get<IChatRepository>(), environment.Get<IWorkflowRepository>(), environment.Get<IDocumentIngestor>(),
+            environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(),
             new FakeLmStudio(), environment.Get<IContextAssembler>(), environment.Get<SqliteDatabase>());
         var updates = new List<ChatStreamUpdate>();
         orchestrator.StreamUpdated += (_, update) => updates.Add(update);

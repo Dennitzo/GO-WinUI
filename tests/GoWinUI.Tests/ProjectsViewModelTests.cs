@@ -9,7 +9,43 @@ namespace GoWinUI.Tests;
 public sealed class ProjectsViewModelTests
 {
     [Fact]
-    public async Task MetadataEditingAndMoveActionsRefreshTheObservableState()
+    public async Task ExplicitArchiveFilterCanSwitchRepeatedlyWithoutLosingProjects()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var repository = environment.Get<IProjectRepository>();
+        var blobs = environment.Get<IBinaryObjectStore>();
+        var workingCopies = environment.Get<IProjectAssetWorkingCopyService>();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var active = await CreateProjectAsync(repository);
+        var archived = await CreateProjectAsync(repository);
+        await repository.ArchiveAsync(archived.Id, archived.Revision);
+        await settings.UpdateAsync(current => current with { ActiveProjectId = active.Id });
+        var thumbnails = new ProjectAssetThumbnailService(
+            repository,
+            blobs,
+            workingCopies,
+            NullLogger<ProjectAssetThumbnailService>.Instance);
+        var viewModel = new ProjectsViewModel(repository, blobs, workingCopies, thumbnails, settings);
+
+        await viewModel.InitializeAsync();
+        Assert.False(viewModel.ShowArchived);
+        Assert.Equal([active.Id], viewModel.Projects.Select(static project => project.Id));
+
+        for (var iteration = 0; iteration < 4; iteration++)
+        {
+            await viewModel.ReloadProjectsAsync(showArchived: true);
+            Assert.True(viewModel.ShowArchived);
+            Assert.Equal([archived.Id], viewModel.Projects.Select(static project => project.Id));
+
+            await viewModel.ReloadProjectsAsync(showArchived: false);
+            Assert.False(viewModel.ShowArchived);
+            Assert.Equal([active.Id], viewModel.Projects.Select(static project => project.Id));
+        }
+    }
+
+    [Fact]
+    public async Task ChecklistMoveAndAssetDeletionRefreshTheObservableState()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var repository = environment.Get<IProjectRepository>();
@@ -34,58 +70,16 @@ public sealed class ProjectsViewModelTests
         var viewModel = new ProjectsViewModel(repository, blobs, workingCopies, thumbnails, settings);
         await viewModel.InitializeAsync();
 
+        Assert.Equal([firstAsset.Id, secondAsset.Id], viewModel.OtherFiles.Select(static asset => asset.Id));
+        Assert.Empty(viewModel.ConstructionDrawings);
+
         await viewModel.MoveChecklistItemAsync(viewModel.Checklist.Single(item => item.Id == secondItem.Id), -1);
         Assert.Equal([secondItem.Id, firstItem.Id], viewModel.Checklist.Select(static item => item.Id));
 
-        viewModel.SelectedAsset = viewModel.Assets.Single(asset => asset.Id == secondAsset.Id);
-        viewModel.AssetFileName = "  umbenannt.bin  ";
-        viewModel.SelectedAssetCategory = AssetCategory.Drawing;
-        await viewModel.UpdateAssetMetadataAsync();
-
-        Assert.Equal("umbenannt.bin", viewModel.SelectedAsset!.FileName);
-        Assert.Equal(AssetCategory.Drawing, viewModel.SelectedAsset.Category);
-        Assert.Equal("umbenannt.bin", viewModel.AssetFileName);
-        await viewModel.MoveAssetAsync(viewModel.SelectedAsset, -1);
-        Assert.Equal([secondAsset.Id, firstAsset.Id], viewModel.Assets.Select(static asset => asset.Id));
-        Assert.Equal(secondAsset.Id, viewModel.SelectedAsset!.Id);
-    }
-
-    [Fact]
-    public async Task WorkingCopyActionsExposeModificationReimportAndDiscardState()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var repository = environment.Get<IProjectRepository>();
-        var blobs = environment.Get<IBinaryObjectStore>();
-        var workingCopies = environment.Get<IProjectAssetWorkingCopyService>();
-        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
-        await settings.InitializeAsync();
-        var project = await CreateProjectAsync(repository);
-        await settings.UpdateAsync(current => current with { ActiveProjectId = project.Id });
-        var asset = await AddAssetAsync(repository, blobs, project.Id, "arbeitskopie.bin", 0, 1);
-        var thumbnails = new ProjectAssetThumbnailService(
-            repository,
-            blobs,
-            workingCopies,
-            NullLogger<ProjectAssetThumbnailService>.Instance);
-        var viewModel = new ProjectsViewModel(repository, blobs, workingCopies, thumbnails, settings);
-        await viewModel.InitializeAsync();
-        viewModel.SelectedAsset = viewModel.Assets.Single(item => item.Id == asset.Id);
-
-        var copy = await viewModel.MaterializeAssetAsync(viewModel.SelectedAsset!);
-        await File.WriteAllBytesAsync(copy.Path, [4, 5, 6]);
-        await viewModel.InspectWorkingCopyAsync(viewModel.SelectedAsset!);
-        Assert.True(viewModel.HasModifiedWorkingCopy);
-
-        await viewModel.ReimportWorkingCopyAsync(viewModel.SelectedAsset!);
-        Assert.False(viewModel.HasModifiedWorkingCopy);
-        Assert.Equal(new byte[] { 4, 5, 6 }, await ReadAssetAsync(viewModel, viewModel.SelectedAsset!));
-
-        await File.WriteAllBytesAsync(copy.Path, [9]);
-        await viewModel.InspectWorkingCopyAsync(viewModel.SelectedAsset!);
-        Assert.True(viewModel.HasModifiedWorkingCopy);
-        await viewModel.DiscardWorkingCopyChangesAsync(viewModel.SelectedAsset!);
-        Assert.False(viewModel.HasModifiedWorkingCopy);
-        Assert.Equal(new byte[] { 4, 5, 6 }, await File.ReadAllBytesAsync(copy.Path));
+        await viewModel.DeleteAssetAsync(secondAsset);
+        Assert.Equal([firstAsset.Id], viewModel.Assets.Select(static asset => asset.Id));
+        Assert.Equal([firstAsset.Id], viewModel.OtherFiles.Select(static asset => asset.Id));
+        Assert.Empty(viewModel.ConstructionDrawings);
     }
 
     private static Task<Project> CreateProjectAsync(IProjectRepository repository)
@@ -129,11 +123,4 @@ public sealed class ProjectsViewModelTests
             now));
     }
 
-    private static async Task<byte[]> ReadAssetAsync(ProjectsViewModel viewModel, ProjectAsset asset)
-    {
-        await using var stream = await viewModel.OpenAssetAsync(asset);
-        using var destination = new MemoryStream();
-        await stream.CopyToAsync(destination);
-        return destination.ToArray();
-    }
 }

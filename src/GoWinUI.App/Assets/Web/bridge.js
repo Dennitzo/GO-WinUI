@@ -4,15 +4,16 @@
   const version = 1;
   const allowedOutbound = new Set([
     "app.ready", "chat.send", "chat.cancel", "session.create", "session.open",
-    "session.rename", "session.delete", "session.draft", "document.pick",
-    "document.remove", "workflow.list", "workflow.select", "workflow.create",
-    "workflow.update", "workflow.delete", "workflow.clone",
-    "workflow.createFromMessage", "chat.exportPdf", "message.copy", "external.open"
+    "session.rename", "session.delete", "session.clear", "session.draft", "document.pick",
+    "document.remove", "workflow.list", "workflow.insert", "workflow.create",
+    "workflow.update", "workflow.delete",
+    "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
+    "ui.sessionPane", "external.open"
   ]);
   const allowedInbound = new Set([
     "state.snapshot", "chat.started", "chat.delta", "chat.completed",
     "chat.cancelled", "chat.failed", "session.changed", "workflow.snapshot",
-    "workflow.changed", "document.changed", "status.changed", "theme.changed",
+    "workflow.changed", "workflow.draft", "document.changed", "status.changed", "theme.changed",
     "draft.saved", "host.error"
   ]);
 

@@ -4,8 +4,8 @@ namespace GoWinUI.App.Services;
 
 internal static partial class AppLog
 {
-    [LoggerMessage(EventId = 1000, Level = LogLevel.Warning, Message = "LM Studio status check failed")]
-    public static partial void LmStudioStatusFailed(ILogger logger, Exception exception);
+    [LoggerMessage(EventId = 1000, Level = LogLevel.Warning, Message = "Local AI API availability check failed")]
+    public static partial void LocalAiAvailabilityCheckFailed(ILogger logger, Exception exception);
 
     [LoggerMessage(EventId = 1001, Level = LogLevel.Warning, Message = "Final window state could not be saved")]
     public static partial void WindowStateSaveFailed(ILogger logger, Exception exception);
@@ -19,8 +19,23 @@ internal static partial class AppLog
     [LoggerMessage(EventId = 1004, Level = LogLevel.Error, Message = "Navigation to page {PageType} failed")]
     public static partial void NavigationFailed(ILogger logger, Exception exception, string pageType);
 
+    [LoggerMessage(EventId = 1005, Level = LogLevel.Warning, Message = "Saved window placement could not be restored; using the current display")]
+    public static partial void WindowRestoreFailed(ILogger logger, Exception exception);
+
     [LoggerMessage(EventId = 1100, Level = LogLevel.Error, Message = "WebView2 initialization failed")]
     public static partial void WebViewInitializationFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1104, Level = LogLevel.Warning, Message = "WebView2 profile could not be opened; using a temporary profile")]
+    public static partial void WebViewProfileFallback(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1105, Level = LogLevel.Debug, Message = "Optional system theme event {EventName} is unavailable")]
+    public static partial void SystemThemeEventUnavailable(ILogger logger, Exception exception, string eventName);
+
+    [LoggerMessage(EventId = 1106, Level = LogLevel.Warning, Message = "WebView2 close failed during page cleanup")]
+    public static partial void WebViewCloseFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1107, Level = LogLevel.Warning, Message = "Message view could not be reset after PDF export")]
+    public static partial void MessagePdfViewResetFailed(ILogger logger, Exception exception);
 
     [LoggerMessage(EventId = 1101, Level = LogLevel.Error, Message = "Assistant UI request {RequestType} failed")]
     public static partial void AssistantRequestFailed(ILogger logger, Exception exception, string requestType);

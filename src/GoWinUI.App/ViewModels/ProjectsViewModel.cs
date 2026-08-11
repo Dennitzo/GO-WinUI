@@ -16,28 +16,17 @@ public sealed partial class ProjectsViewModel(
     public ObservableCollection<Project> Projects { get; } = [];
     public ObservableCollection<ChecklistItem> Checklist { get; } = [];
     public ObservableCollection<ProjectAsset> Assets { get; } = [];
-    public IReadOnlyList<AssetCategory> AssetCategories { get; } = Enum.GetValues<AssetCategory>();
+    public ObservableCollection<ProjectAsset> ConstructionPlans { get; } = [];
+    public ObservableCollection<ProjectAsset> ConstructionDrawings { get; } = [];
+    public ObservableCollection<ProjectAsset> MeetingFiles { get; } = [];
+    public ObservableCollection<ProjectAsset> OtherFiles { get; } = [];
+    public ObservableCollection<ProjectAsset> Images { get; } = [];
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasSelection))]
     [NotifyPropertyChangedFor(nameof(IsArchived))]
     [NotifyPropertyChangedFor(nameof(ArchiveActionLabel))]
     public partial Project? SelectedProject { get; set; }
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(HasAssetSelection))]
-    public partial ProjectAsset? SelectedAsset { get; set; }
-
-    [ObservableProperty]
-    public partial string AssetFileName { get; set; } = string.Empty;
-
-    [ObservableProperty]
-    public partial AssetCategory SelectedAssetCategory { get; set; } = AssetCategory.Other;
-
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(HasModifiedWorkingCopy))]
-    [NotifyPropertyChangedFor(nameof(WorkingCopyStatusText))]
-    public partial AssetWorkingCopy? WorkingCopy { get; set; }
 
     [ObservableProperty]
     public partial string Name { get; set; } = string.Empty;
@@ -65,27 +54,9 @@ public sealed partial class ProjectsViewModel(
 
     public bool HasSelection => SelectedProject is not null;
 
-    public bool HasAssetSelection => SelectedAsset is not null;
-
     public bool IsArchived => SelectedProject?.Status == ProjectStatus.Archived;
 
     public string ArchiveActionLabel => IsArchived ? "Wiederherstellen" : "Archivieren";
-
-    public bool HasModifiedWorkingCopy => WorkingCopy?.State == AssetWorkingCopyState.Modified;
-
-    public string WorkingCopyStatusText => WorkingCopy?.State switch
-    {
-        AssetWorkingCopyState.Modified => "Die Arbeitskopie wurde außerhalb von GO geändert. Übernehmen oder verwerfen Sie die Änderungen.",
-        AssetWorkingCopyState.Unchanged => "Die lokale Arbeitskopie stimmt mit dem gespeicherten Stand überein.",
-        _ => "Für dieses Asset wurde noch keine Arbeitskopie angelegt.",
-    };
-
-    partial void OnSelectedAssetChanged(ProjectAsset? value)
-    {
-        AssetFileName = value?.FileName ?? string.Empty;
-        SelectedAssetCategory = value?.Category ?? AssetCategory.Other;
-        WorkingCopy = null;
-    }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -96,11 +67,15 @@ public sealed partial class ProjectsViewModel(
         await SelectAsync(selected, cancellationToken);
     }
 
-    public async Task ReloadProjectsAsync(CancellationToken cancellationToken = default)
+    public Task ReloadProjectsAsync(CancellationToken cancellationToken = default) =>
+        ReloadProjectsAsync(ShowArchived, cancellationToken);
+
+    public async Task ReloadProjectsAsync(bool showArchived, CancellationToken cancellationToken = default)
     {
         await RunBusyAsync(async () =>
         {
-            var status = ShowArchived ? ProjectStatus.Archived : ProjectStatus.Active;
+            ShowArchived = showArchived;
+            var status = showArchived ? ProjectStatus.Archived : ProjectStatus.Active;
             var items = await projects.ListAsync(status, cancellationToken);
             Replace(Projects, items);
             if (SelectedProject is not null && Projects.All(project => project.Id != SelectedProject.Id))
@@ -113,19 +88,18 @@ public sealed partial class ProjectsViewModel(
     public async Task SelectAsync(Project? project, CancellationToken cancellationToken = default)
     {
         SelectedProject = project;
-        SelectedAsset = null;
         Name = project?.Name ?? string.Empty;
         ConstructionProject = project?.ConstructionProject ?? string.Empty;
         Description = project?.Description ?? string.Empty;
         Notes = project?.Notes ?? string.Empty;
         Checklist.Clear();
-        Assets.Clear();
+        ReplaceAssets([]);
         if (project is not null)
         {
             var checklist = await projects.ListChecklistAsync(project.Id, cancellationToken);
             var assets = await projects.ListAssetsAsync(project.Id, cancellationToken);
             Replace(Checklist, checklist);
-            Replace(Assets, assets);
+            ReplaceAssets(assets);
         }
 
         await settings.UpdateAsync(current => current with { ActiveProjectId = project?.Id }, cancellationToken);
@@ -291,86 +265,49 @@ public sealed partial class ProjectsViewModel(
         }
 
         await thumbnails.GenerateAsync(created, cancellationToken);
-        await RefreshAssetsAsync(created.Id, cancellationToken);
+        await RefreshAssetsAsync(cancellationToken);
     }
 
-    public Task<Stream> OpenAssetAsync(ProjectAsset asset, CancellationToken cancellationToken = default) =>
-        binaryObjects.OpenReadAsync(asset.BlobId, cancellationToken);
+    public Task<AssetWorkingCopy> MaterializeAssetForOpenAsync(
+        ProjectAsset asset,
+        CancellationToken cancellationToken = default) =>
+        workingCopies.MaterializeAndWatchAsync(asset, cancellationToken);
 
-    public Task ExportAssetAsync(ProjectAsset asset, Stream destination, CancellationToken cancellationToken = default) =>
-        binaryObjects.ExportAsync(asset.BlobId, destination, cancellationToken);
-
-    public async Task<AssetWorkingCopy> InspectWorkingCopyAsync(
+    public async Task<Stream?> OpenThumbnailAsync(
         ProjectAsset asset,
         CancellationToken cancellationToken = default)
     {
-        var state = await workingCopies.InspectAsync(asset, cancellationToken);
-        if (SelectedAsset?.Id == asset.Id)
+        var thumbnail = await thumbnails.OpenOrGenerateAsync(asset, cancellationToken);
+        if (thumbnail is not null || asset.Category != AssetCategory.Image)
         {
-            WorkingCopy = state;
+            return thumbnail;
         }
 
-        return state;
+        // Match Barebone-Qt's fallback: a usable original image is preferable to
+        // a generic icon when thumbnail generation is unavailable for a format.
+        return await binaryObjects.OpenReadAsync(asset.BlobId, cancellationToken);
     }
 
-    public async Task<AssetWorkingCopy> MaterializeAssetAsync(
+    public async Task ApplySynchronizedAssetAsync(
         ProjectAsset asset,
         CancellationToken cancellationToken = default)
     {
-        var state = await workingCopies.MaterializeAsync(asset, cancellationToken);
-        if (SelectedAsset?.Id == asset.Id)
+        await thumbnails.GenerateAsync(asset, cancellationToken);
+        if (SelectedProject?.Id == asset.ProjectId)
         {
-            WorkingCopy = state;
+            await RefreshAssetsAsync(cancellationToken);
+        }
+    }
+
+    public async Task RefreshAssetsAsync(CancellationToken cancellationToken = default)
+    {
+        if (SelectedProject is not { } project)
+        {
+            return;
         }
 
-        return state;
+        ReplaceAssets(await projects.ListAssetsAsync(project.Id, cancellationToken));
     }
-
-    public async Task UpdateAssetMetadataAsync(CancellationToken cancellationToken = default)
-    {
-        var asset = SelectedAsset ?? throw new InvalidOperationException("Keine Projektdatei ausgewählt.");
-        var fileName = ProjectAssetFileName.Normalize(AssetFileName);
-        var previousCopy = await workingCopies.InspectAsync(asset, cancellationToken);
-        var updated = await projects.UpdateAssetAsync(asset with
-        {
-            FileName = fileName,
-            Category = SelectedAssetCategory,
-        }, asset.Revision, cancellationToken);
-        await RefreshAssetsAsync(updated.Id, cancellationToken);
-        WorkingCopy = previousCopy.State == AssetWorkingCopyState.Missing
-            ? await workingCopies.InspectAsync(updated, cancellationToken)
-            : await workingCopies.MaterializeAsync(updated, cancellationToken);
-    }
-
-    public async Task MoveAssetAsync(ProjectAsset asset, int direction, CancellationToken cancellationToken = default)
-    {
-        var project = SelectedProject ?? throw new InvalidOperationException("Kein Projekt ausgewählt.");
-        if (asset.ProjectId != project.Id)
-        {
-            throw new InvalidOperationException("Das Asset gehört nicht zum ausgewählten Projekt.");
-        }
-
-        var workingCopy = WorkingCopy;
-        await projects.MoveAssetAsync(project.Id, asset.Id, direction, asset.Revision, cancellationToken);
-        await RefreshAssetsAsync(asset.Id, cancellationToken);
-        WorkingCopy = workingCopy;
-    }
-
-    public async Task ReimportWorkingCopyAsync(ProjectAsset asset, CancellationToken cancellationToken = default)
-    {
-        var updated = await workingCopies.ReimportAsync(asset, asset.Revision, cancellationToken);
-        await thumbnails.GenerateAsync(updated, cancellationToken);
-        await RefreshAssetsAsync(updated.Id, cancellationToken);
-        WorkingCopy = await workingCopies.InspectAsync(updated, cancellationToken);
-    }
-
-    public async Task DiscardWorkingCopyChangesAsync(ProjectAsset asset, CancellationToken cancellationToken = default)
-    {
-        WorkingCopy = await workingCopies.DiscardChangesAsync(asset, cancellationToken);
-    }
-
-    public Task<Stream?> OpenThumbnailAsync(ProjectAsset asset, CancellationToken cancellationToken = default) =>
-        thumbnails.OpenAsync(asset.Id, cancellationToken);
 
     public async Task DeleteAssetAsync(ProjectAsset asset, CancellationToken cancellationToken = default)
     {
@@ -378,21 +315,20 @@ public sealed partial class ProjectsViewModel(
         await projects.DeleteAssetAsync(asset.Id, asset.Revision, cancellationToken);
         if (SelectedProject is { } project)
         {
-            Replace(Assets, await projects.ListAssetsAsync(project.Id, cancellationToken));
+            ReplaceAssets(await projects.ListAssetsAsync(project.Id, cancellationToken));
         }
 
-        SelectedAsset = null;
     }
 
-    private async Task RefreshAssetsAsync(Guid selectedAssetId, CancellationToken cancellationToken)
+    private void ReplaceAssets(IEnumerable<ProjectAsset> items)
     {
-        if (SelectedProject is not { } project)
-        {
-            return;
-        }
-
-        Replace(Assets, await projects.ListAssetsAsync(project.Id, cancellationToken));
-        SelectedAsset = Assets.FirstOrDefault(asset => asset.Id == selectedAssetId);
+        var snapshot = items.ToArray();
+        Replace(Assets, snapshot);
+        Replace(ConstructionPlans, snapshot.Where(static asset => asset.Category == AssetCategory.Pdf));
+        Replace(ConstructionDrawings, snapshot.Where(static asset => asset.Category == AssetCategory.Drawing));
+        Replace(MeetingFiles, snapshot.Where(static asset => asset.Category == AssetCategory.Meeting));
+        Replace(OtherFiles, snapshot.Where(static asset => asset.Category == AssetCategory.Other));
+        Replace(Images, snapshot.Where(static asset => asset.Category == AssetCategory.Image));
     }
 
     private async Task RunBusyAsync(Func<Task> operation)

@@ -150,7 +150,10 @@ public sealed record ContextBuildResult(
     IReadOnlyList<LmChatMessage> Messages,
     int EstimatedTokens,
     bool WasTruncated,
-    string? TruncationNotice);
+    string? TruncationNotice,
+    string? RequestEnvelopeJson = null,
+    IReadOnlyList<string>? PolicyReferences = null,
+    int MaxOutputTokens = 1_024);
 
 public sealed record WindowPlacement(
     double X = 120,
@@ -163,15 +166,22 @@ public sealed record WindowPlacement(
 
 public sealed record AppSettings
 {
-    public int Version { get; init; } = 1;
+    public const string DefaultSelectedModel = "openai/gpt-oss-20b";
+    public const string DefaultAccentColor = "#A970FF";
+    public const string DefaultBackgroundColor = "#6B6872";
+
+    public int Version { get; init; } = 2;
     public string LmStudioBaseUrl { get; init; } = "http://127.0.0.1:1234/v1";
-    public string? SelectedModel { get; init; }
+    public string? SelectedModel { get; init; } = DefaultSelectedModel;
     public string ReasoningEffort { get; init; } = "medium";
     public AppTheme Theme { get; init; } = AppTheme.System;
+    public string AccentColor { get; init; } = DefaultAccentColor;
+    public string BackgroundColor { get; init; } = DefaultBackgroundColor;
     public string Language { get; init; } = "de-DE";
     public WindowPlacement Window { get; init; } = new();
     public double NavigationPaneWidth { get; init; } = 320;
     public bool IsNavigationPaneOpen { get; init; } = true;
+    public bool IsAssistantSessionPaneOpen { get; init; } = true;
     public string LastRoute { get; init; } = "assistant";
     public Guid? ActiveSessionId { get; init; }
     public Guid? ActiveProjectId { get; init; }

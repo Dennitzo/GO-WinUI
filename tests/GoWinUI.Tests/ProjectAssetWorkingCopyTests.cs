@@ -64,6 +64,37 @@ public sealed class ProjectAssetWorkingCopyTests
         Assert.Equal(new byte[] { 7, 7, 7 }, await File.ReadAllBytesAsync(secondMaterialization.Path));
     }
 
+    [Fact]
+    public async Task WatchedWorkingCopyAutomaticallySynchronizesChangesBackToTheDatabase()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var repository = environment.Get<IProjectRepository>();
+        var blobs = environment.Get<IBinaryObjectStore>();
+        var workingCopies = environment.Get<IProjectAssetWorkingCopyService>();
+        var asset = await CreateAssetAsync(repository, blobs, [1, 2, 3]);
+        var synchronized = new TaskCompletionSource<ProjectAsset>(TaskCreationOptions.RunContinuationsAsynchronously);
+        workingCopies.AssetSynchronized += (_, args) =>
+        {
+            if (args.Asset.Id == asset.Id)
+            {
+                synchronized.TrySetResult(args.Asset);
+            }
+        };
+
+        var workingCopy = await workingCopies.MaterializeAndWatchAsync(asset);
+        await File.WriteAllBytesAsync(workingCopy.Path, [8, 7, 6, 5]);
+
+        var updated = await synchronized.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(asset.Revision + 1, updated.Revision);
+        Assert.Equal(4, updated.Length);
+        Assert.True(updated.UpdatedAt > asset.UpdatedAt);
+        Assert.NotEqual(asset.BlobId, updated.BlobId);
+        await using var stored = await blobs.OpenReadAsync(updated.BlobId);
+        using var buffer = new MemoryStream();
+        await stored.CopyToAsync(buffer);
+        Assert.Equal(new byte[] { 8, 7, 6, 5 }, buffer.ToArray());
+    }
+
     [Theory]
     [InlineData("  plan final.pdf  ", "plan final.pdf")]
     [InlineData("Foto_01.png", "Foto_01.png")]

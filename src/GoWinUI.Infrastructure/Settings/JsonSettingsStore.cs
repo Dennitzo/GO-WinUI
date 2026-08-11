@@ -80,14 +80,33 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             Height = Math.Clamp(settings.Window.Height, 480, 10_000),
             SavedDpi = Math.Clamp(settings.Window.SavedDpi, 48, 768),
         };
+        var accentColor = NormalizePaletteColor(settings.AccentColor, AppSettings.DefaultAccentColor);
+        var backgroundColor = settings.Version < 2
+            ? accentColor
+            : NormalizePaletteColor(settings.BackgroundColor, AppSettings.DefaultBackgroundColor);
         return settings with
         {
-            Version = 1,
+            Version = 2,
             LmStudioBaseUrl = baseUrl.TrimEnd('/'),
+            SelectedModel = string.IsNullOrWhiteSpace(settings.SelectedModel)
+                ? AppSettings.DefaultSelectedModel
+                : settings.SelectedModel.Trim(),
+            AccentColor = accentColor,
+            BackgroundColor = backgroundColor,
             NavigationPaneWidth = Math.Clamp(settings.NavigationPaneWidth, 280, 520),
             Language = string.IsNullOrWhiteSpace(settings.Language) ? "de-DE" : settings.Language,
             LastRoute = string.IsNullOrWhiteSpace(settings.LastRoute) ? "assistant" : settings.LastRoute,
             Window = window,
         };
+    }
+
+    private static string NormalizePaletteColor(string? value, string fallback)
+    {
+        var candidate = value?.Trim();
+        return candidate is { Length: 7 }
+               && candidate[0] == '#'
+               && candidate.Skip(1).All(Uri.IsHexDigit)
+            ? candidate.ToUpperInvariant()
+            : fallback;
     }
 }

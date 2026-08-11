@@ -13,18 +13,59 @@ namespace GoWinUI.App.Pages;
 public sealed partial class SettingsPage : Page
 {
     private readonly ILogger<SettingsPage> _logger;
+    private readonly ShellViewModel _shell;
     private bool _synchronizing;
 
     public SettingsPage()
     {
         InitializeComponent();
         ViewModel = App.Current.GetService<SettingsViewModel>();
+        _shell = App.Current.GetService<ShellViewModel>();
         _logger = App.Current.GetService<ILogger<SettingsPage>>();
     }
 
     public SettingsViewModel ViewModel { get; }
 
-    private void OnLoaded(object sender, RoutedEventArgs e)
+    public IReadOnlyList<SettingsAccentColorOption> AccentColors { get; } =
+    [
+        new("Lila", "#A970FF", Windows.UI.Color.FromArgb(255, 169, 112, 255)),
+        new("Violett", "#7C5CFC", Windows.UI.Color.FromArgb(255, 124, 92, 252)),
+        new("Blau", "#4C8DFF", Windows.UI.Color.FromArgb(255, 76, 141, 255)),
+        new("Türkis", "#25B7A6", Windows.UI.Color.FromArgb(255, 37, 183, 166)),
+        new("Grün", "#8FBD45", Windows.UI.Color.FromArgb(255, 143, 189, 69)),
+        new("Orange", "#F4B860", Windows.UI.Color.FromArgb(255, 244, 184, 96)),
+        new("Pink", "#D95BA8", Windows.UI.Color.FromArgb(255, 217, 91, 168)),
+    ];
+
+    public IReadOnlyList<SettingsAccentColorOption> BackgroundColors { get; } =
+    [
+        new("Standard", "#6B6872", Windows.UI.Color.FromArgb(255, 107, 104, 114)),
+        new("Grau", "#858A94", Windows.UI.Color.FromArgb(255, 133, 138, 148)),
+        new("Dunkel", "#34313B", Windows.UI.Color.FromArgb(255, 52, 49, 59)),
+        new("Schwarz", "#000000", Windows.UI.Color.FromArgb(255, 0, 0, 0)),
+        new("Lila", "#A970FF", Windows.UI.Color.FromArgb(255, 169, 112, 255)),
+        new("Violett", "#7C5CFC", Windows.UI.Color.FromArgb(255, 124, 92, 252)),
+        new("Blau", "#4C8DFF", Windows.UI.Color.FromArgb(255, 76, 141, 255)),
+        new("Türkis", "#25B7A6", Windows.UI.Color.FromArgb(255, 37, 183, 166)),
+        new("Grün", "#8FBD45", Windows.UI.Color.FromArgb(255, 143, 189, 69)),
+        new("Orange", "#F4B860", Windows.UI.Color.FromArgb(255, 244, 184, 96)),
+        new("Pink", "#D95BA8", Windows.UI.Color.FromArgb(255, 217, 91, 168)),
+    ];
+
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        SynchronizeControls();
+        if (_shell.IsAiAvailable)
+        {
+            await RunActionAsync(async () =>
+            {
+                await ViewModel.RefreshModelsAsync();
+                SynchronizeModelSelection();
+            });
+        }
+    }
+
+    private void SynchronizeControls()
     {
         _synchronizing = true;
         try
@@ -33,7 +74,11 @@ public sealed partial class SettingsPage : Page
             SelectByTag(ReasoningBox, ViewModel.ReasoningEffort);
             SelectByTag(ThemeBox, ViewModel.Theme.ToString());
             SelectByTag(LanguageBox, ViewModel.Language);
-            ModelBox.SelectedItem = ViewModel.Models.FirstOrDefault(model => model.Id == ViewModel.SelectedModel);
+            AccentColorList.SelectedItem = AccentColors.FirstOrDefault(color =>
+                string.Equals(color.Value, ViewModel.AccentColor, StringComparison.OrdinalIgnoreCase));
+            BackgroundColorList.SelectedItem = BackgroundColors.FirstOrDefault(color =>
+                string.Equals(color.Value, ViewModel.BackgroundColor, StringComparison.OrdinalIgnoreCase));
+            SynchronizeModelSelection();
         }
         finally
         {
@@ -55,15 +100,7 @@ public sealed partial class SettingsPage : Page
         await RunActionAsync(async () =>
         {
             await ViewModel.RefreshModelsAsync();
-            _synchronizing = true;
-            try
-            {
-                ModelBox.SelectedItem = ViewModel.Models.FirstOrDefault(model => model.Id == ViewModel.SelectedModel);
-            }
-            finally
-            {
-                _synchronizing = false;
-            }
+            SynchronizeModelSelection();
 
             ShowStatus(ViewModel.ConnectionStatus, InfoBarSeverity.Success);
         });
@@ -101,6 +138,24 @@ public sealed partial class SettingsPage : Page
         if (!_synchronizing && (LanguageBox.SelectedItem as ComboBoxItem)?.Tag is string value)
         {
             ViewModel.Language = value;
+        }
+    }
+
+    private void OnAccentColorChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_synchronizing && AccentColorList.SelectedItem is SettingsAccentColorOption option)
+        {
+            ViewModel.AccentColor = option.Value;
+            App.Current.ApplyAccentColor(option.Value);
+        }
+    }
+
+    private void OnBackgroundColorChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_synchronizing && BackgroundColorList.SelectedItem is SettingsAccentColorOption option)
+        {
+            ViewModel.BackgroundColor = option.Value;
+            App.Current.ApplyBackgroundColor(option.Value);
         }
     }
 
@@ -183,6 +238,19 @@ public sealed partial class SettingsPage : Page
         StatusBar.Message = message;
         StatusBar.Severity = severity;
         StatusBar.IsOpen = true;
+    }
+
+    private void SynchronizeModelSelection()
+    {
+        _synchronizing = true;
+        try
+        {
+            ModelBox.SelectedItem = ViewModel.Models.FirstOrDefault(model => model.Id == ViewModel.SelectedModel);
+        }
+        finally
+        {
+            _synchronizing = false;
+        }
     }
 
     private static void SelectByTag(ComboBox comboBox, string value)

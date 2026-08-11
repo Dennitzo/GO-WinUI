@@ -1,16 +1,29 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
+using Microsoft.Extensions.Logging;
 
 namespace GoWinUI.Infrastructure.Projects;
 
 public sealed class ProjectAssetWorkingCopyService(
     IBinaryObjectStore binaryObjects,
     IProjectRepository projects,
-    GoInfrastructureOptions options) : IProjectAssetWorkingCopyService, IDisposable
+    GoInfrastructureOptions options,
+    ILogger<ProjectAssetWorkingCopyService> logger) : IProjectAssetWorkingCopyService, IDisposable
 {
     private const int BufferSize = 1024 * 1024;
+    private static readonly TimeSpan ChangeDebounce = TimeSpan.FromMilliseconds(900);
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(500);
+    private static readonly Action<ILogger, Guid, Exception?> SynchronizationFailed = LoggerMessage.Define<Guid>(
+        LogLevel.Warning,
+        new EventId(2300, nameof(SynchronizationFailed)),
+        "Automatic synchronization of project asset {AssetId} failed");
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly ConcurrentDictionary<Guid, WatchRegistration> _watchedAssets = new();
+    private int _disposed;
+
+    public event EventHandler<ProjectAssetSynchronizedEventArgs>? AssetSynchronized;
 
     public async Task<AssetWorkingCopy> InspectAsync(
         ProjectAsset asset,
@@ -54,6 +67,29 @@ public sealed class ProjectAssetWorkingCopyService(
         }
     }
 
+    public async Task<AssetWorkingCopy> MaterializeAndWatchAsync(
+        ProjectAsset asset,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        var workingCopy = await MaterializeAsync(asset, cancellationToken).ConfigureAwait(false);
+        var registration = new WatchRegistration(asset, workingCopy.Path, QueueSynchronization);
+        StopMonitoring(asset.Id);
+        if (!_watchedAssets.TryAdd(asset.Id, registration))
+        {
+            registration.Dispose();
+            throw new InvalidOperationException("Die Arbeitskopie konnte nicht überwacht werden.");
+        }
+
+        registration.Start();
+        if (workingCopy.State == AssetWorkingCopyState.Modified)
+        {
+            QueueSynchronization(asset.Id);
+        }
+
+        return workingCopy;
+    }
+
     public async Task<ProjectAsset> ReimportAsync(
         ProjectAsset asset,
         long expectedRevision,
@@ -90,6 +126,7 @@ public sealed class ProjectAssetWorkingCopyService(
                     Length = blob.Length,
                 }, expectedRevision, cancellationToken).ConfigureAwait(false);
                 await binaryObjects.DeleteIfUnreferencedAsync(asset.BlobId, CancellationToken.None).ConfigureAwait(false);
+                UpdateWatchedAsset(updated);
                 return updated;
             }
             catch
@@ -131,6 +168,7 @@ public sealed class ProjectAssetWorkingCopyService(
 
     public async Task RemoveAsync(Guid assetId, CancellationToken cancellationToken = default)
     {
+        StopMonitoring(assetId);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -251,6 +289,141 @@ public sealed class ProjectAssetWorkingCopyService(
         return directory;
     }
 
+    private void QueueSynchronization(Guid assetId)
+    {
+        if (Volatile.Read(ref _disposed) != 0
+            || !_watchedAssets.TryGetValue(assetId, out var registration))
+        {
+            return;
+        }
+
+        var cancellation = new CancellationTokenSource();
+        CancellationTokenSource? previous;
+        lock (registration.SyncRoot)
+        {
+            previous = registration.DebounceCancellation;
+            registration.DebounceCancellation = cancellation;
+        }
+
+        previous?.Cancel();
+        previous?.Dispose();
+        _ = SynchronizeAfterDelayAsync(assetId, registration, cancellation);
+    }
+
+    private async Task SynchronizeAfterDelayAsync(
+        Guid assetId,
+        WatchRegistration registration,
+        CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(ChangeDebounce, cancellation.Token).ConfigureAwait(false);
+            await SynchronizeAsync(assetId, cancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            // A newer file-system event replaces this debounce operation.
+        }
+        catch (Exception exception)
+        {
+            SynchronizationFailed(logger, assetId, exception);
+        }
+        finally
+        {
+            lock (registration.SyncRoot)
+            {
+                if (ReferenceEquals(registration.DebounceCancellation, cancellation))
+                {
+                    registration.DebounceCancellation = null;
+                }
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private async Task SynchronizeAsync(Guid assetId, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_watchedAssets.TryGetValue(assetId, out var registration))
+            {
+                return;
+            }
+
+            ProjectAsset watchedAsset;
+            lock (registration.SyncRoot)
+            {
+                watchedAsset = registration.Asset;
+            }
+
+            var project = await projects.GetAsync(watchedAsset.ProjectId, cancellationToken).ConfigureAwait(false);
+            if (project?.Status != ProjectStatus.Active)
+            {
+                return;
+            }
+
+            var current = (await projects.ListAssetsAsync(watchedAsset.ProjectId, cancellationToken).ConfigureAwait(false))
+                .FirstOrDefault(asset => asset.Id == assetId);
+            if (current is null)
+            {
+                StopMonitoring(assetId);
+                return;
+            }
+
+            try
+            {
+                var state = await InspectAsync(current, cancellationToken).ConfigureAwait(false);
+                if (state.State == AssetWorkingCopyState.Unchanged)
+                {
+                    UpdateWatchedAsset(current);
+                    return;
+                }
+
+                if (state.State == AssetWorkingCopyState.Missing)
+                {
+                    if (attempt < 7)
+                    {
+                        await Task.Delay(RetryDelay, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    continue;
+                }
+
+                var updated = await ReimportAsync(current, current.Revision, cancellationToken).ConfigureAwait(false);
+                UpdateWatchedAsset(updated);
+                AssetSynchronized?.Invoke(this, new ProjectAssetSynchronizedEventArgs(updated, state.Path));
+                return;
+            }
+            catch (Exception exception) when (
+                attempt < 7
+                && exception is IOException or UnauthorizedAccessException or RevisionConflictException)
+            {
+                await Task.Delay(RetryDelay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private void UpdateWatchedAsset(ProjectAsset asset)
+    {
+        if (_watchedAssets.TryGetValue(asset.Id, out var registration))
+        {
+            lock (registration.SyncRoot)
+            {
+                registration.Asset = asset;
+            }
+        }
+    }
+
+    private void StopMonitoring(Guid assetId)
+    {
+        if (_watchedAssets.TryRemove(assetId, out var registration))
+        {
+            registration.Dispose();
+        }
+    }
+
     private static string GetSafeExtension(string fileName)
     {
         var extension = Path.GetExtension(Path.GetFileName(fileName));
@@ -275,5 +448,80 @@ public sealed class ProjectAssetWorkingCopyService(
         return (Convert.ToHexStringLower(hash), stream.Length);
     }
 
-    public void Dispose() => _gate.Dispose();
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        foreach (var assetId in _watchedAssets.Keys)
+        {
+            StopMonitoring(assetId);
+        }
+
+        _gate.Dispose();
+    }
+
+    private sealed class WatchRegistration : IDisposable
+    {
+        private readonly FileSystemWatcher _watcher;
+        private int _started;
+        private int _disposed;
+
+        public WatchRegistration(ProjectAsset asset, string path, Action<Guid> changed)
+        {
+            Asset = asset;
+            Path = path;
+            var directory = System.IO.Path.GetDirectoryName(path)
+                ?? throw new InvalidOperationException("Der Arbeitskopieordner ist ungültig.");
+            _watcher = new FileSystemWatcher(directory)
+            {
+                Filter = "*",
+                IncludeSubdirectories = false,
+                NotifyFilter = NotifyFilters.FileName
+                    | NotifyFilters.LastWrite
+                    | NotifyFilters.Size
+                    | NotifyFilters.CreationTime,
+            };
+            _watcher.Changed += (_, _) => changed(asset.Id);
+            _watcher.Created += (_, _) => changed(asset.Id);
+            _watcher.Deleted += (_, _) => changed(asset.Id);
+            _watcher.Renamed += (_, _) => changed(asset.Id);
+            _watcher.Error += (_, _) => changed(asset.Id);
+        }
+
+        public object SyncRoot { get; } = new();
+
+        public ProjectAsset Asset { get; set; }
+
+        public string Path { get; }
+
+        public CancellationTokenSource? DebounceCancellation { get; set; }
+
+        public void Start()
+        {
+            if (Interlocked.Exchange(ref _started, 1) == 0)
+            {
+                _watcher.EnableRaisingEvents = true;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            lock (SyncRoot)
+            {
+                DebounceCancellation?.Cancel();
+                DebounceCancellation?.Dispose();
+                DebounceCancellation = null;
+            }
+
+            _watcher.Dispose();
+        }
+    }
 }

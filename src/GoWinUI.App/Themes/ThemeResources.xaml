@@ -5,36 +5,101 @@
 
   <ResourceDictionary.ThemeDictionaries>
     <ResourceDictionary x:Key="Default">
-      <SolidColorBrush x:Key="GoWindowBrush" Color="#CC202020" />
-      <SolidColorBrush x:Key="GoLayerBrush" Color="#B82A2A2A" />
-      <SolidColorBrush x:Key="GoLayerStrongBrush" Color="#F0353535" />
-      <SolidColorBrush x:Key="GoStrokeBrush" Color="#30FFFFFF" />
-      <SolidColorBrush x:Key="GoMutedTextBrush" Color="#B8FFFFFF" />
-      <SolidColorBrush x:Key="GoSuccessBrush" Color="#6CCB91" />
-      <SolidColorBrush x:Key="GoWarningBrush" Color="#F0B45A" />
-      <SolidColorBrush x:Key="GoDangerBrush" Color="#F76E7D" />
+      <Color x:Key="GoWindowColor">#17131F</Color>
+      <Color x:Key="GoLayerColor">#CC241E30</Color>
+      <Color x:Key="GoLayerStrongColor">#F02D263B</Color>
+      <Color x:Key="GoStrokeColor">#38FFFFFF</Color>
+      <Color x:Key="GoMutedTextColor">#B7AFC3</Color>
+      <Color x:Key="GoAccentColor">#A970FF</Color>
+      <Color x:Key="GoAccentTextColor">#FFFFFF</Color>
+      <Color x:Key="GoSuccessColor">#42D392</Color>
+      <Color x:Key="GoWarningColor">#F4B860</Color>
+      <Color x:Key="GoDangerColor">#FF667A</Color>
     </ResourceDictionary>
     <ResourceDictionary x:Key="Light">
-      <SolidColorBrush x:Key="GoWindowBrush" Color="#CCF6F6F6" />
-      <SolidColorBrush x:Key="GoLayerBrush" Color="#DFFFFFFF" />
-      <SolidColorBrush x:Key="GoLayerStrongBrush" Color="#FFFFFFFF" />
-      <SolidColorBrush x:Key="GoStrokeBrush" Color="#24242424" />
-      <SolidColorBrush x:Key="GoMutedTextBrush" Color="#A6242424" />
-      <SolidColorBrush x:Key="GoSuccessBrush" Color="#167D49" />
-      <SolidColorBrush x:Key="GoWarningBrush" Color="#9A5A00" />
-      <SolidColorBrush x:Key="GoDangerBrush" Color="#B42335" />
+      <Color x:Key="GoWindowColor">#ECE7F2</Color>
+      <Color x:Key="GoLayerColor">#FFFFFFFF</Color>
+      <Color x:Key="GoLayerStrongColor">#FFF8F5FC</Color>
+      <Color x:Key="GoStrokeColor">#45241D2F</Color>
+      <Color x:Key="GoMutedTextColor">#51465D</Color>
+      <Color x:Key="GoAccentColor">#6425C4</Color>
+      <Color x:Key="GoAccentTextColor">#FFFFFF</Color>
+      <Color x:Key="GoSuccessColor">#066540</Color>
+      <Color x:Key="GoWarningColor">#874800</Color>
+      <Color x:Key="GoDangerColor">#B31E3A</Color>
     </ResourceDictionary>
     <ResourceDictionary x:Key="HighContrast">
-      <SolidColorBrush x:Key="GoWindowBrush" Color="{ThemeResource SystemColorWindowColor}" />
-      <SolidColorBrush x:Key="GoLayerBrush" Color="{ThemeResource SystemColorWindowColor}" />
-      <SolidColorBrush x:Key="GoLayerStrongBrush" Color="{ThemeResource SystemColorWindowColor}" />
-      <SolidColorBrush x:Key="GoStrokeBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
-      <SolidColorBrush x:Key="GoMutedTextBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
-      <SolidColorBrush x:Key="GoSuccessBrush" Color="{ThemeResource SystemColorHighlightColor}" />
-      <SolidColorBrush x:Key="GoWarningBrush" Color="{ThemeResource SystemColorHighlightColor}" />
-      <SolidColorBrush x:Key="GoDangerBrush" Color="{ThemeResource SystemColorHotlightColor}" />
+      <Color x:Key="GoWindowColor">#000000</Color>
+      <Color x:Key="GoLayerColor">#000000</Color>
+      <Color x:Key="GoLayerStrongColor">#000000</Color>
+      <Color x:Key="GoStrokeColor">#FFFFFF</Color>
+      <Color x:Key="GoMutedTextColor">#FFFFFF</Color>
+      <Color x:Key="GoAccentColor">#FFFF00</Color>
+      <Color x:Key="GoAccentTextColor">#000000</Color>
+      <Color x:Key="GoSuccessColor">#00FF00</Color>
+      <Color x:Key="GoWarningColor">#FFFF00</Color>
+      <Color x:Key="GoDangerColor">#FF8080</Color>
     </ResourceDictionary>
   </ResourceDictionary.ThemeDictionaries>
+
+  <SolidColorBrush x:Key="GoWindowBrush" Color="{ThemeResource GoWindowColor}" />
+  <SolidColorBrush x:Key="GoLayerBrush" Color="{ThemeResource GoLayerColor}" />
+  <SolidColorBrush x:Key="GoLayerStrongBrush" Color="{ThemeResource GoLayerStrongColor}" />
+  <SolidColorBrush x:Key="GoInputBrush" Color="{ThemeResource GoLayerStrongColor}" />
+  <SolidColorBrush x:Key="GoHoverBrush" Color="{ThemeResource GoLayerStrongColor}" />
+  <SolidColorBrush x:Key="GoPressedBrush" Color="{ThemeResource GoLayerStrongColor}" />
+  <SolidColorBrush x:Key="GoStrokeBrush" Color="{ThemeResource GoStrokeColor}" />
+  <SolidColorBrush x:Key="GoMutedTextBrush" Color="{ThemeResource GoMutedTextColor}" />
+  <SolidColorBrush x:Key="GoAccentBrush" Color="{ThemeResource GoAccentColor}" />
+  <SolidColorBrush x:Key="GoAccentSubtleBrush" Color="{ThemeResource GoAccentColor}" Opacity="0.14" />
+  <SolidColorBrush x:Key="GoAccentTextBrush" Color="{ThemeResource GoAccentTextColor}" />
+  <SolidColorBrush x:Key="GoSuccessBrush" Color="{ThemeResource GoSuccessColor}" />
+  <SolidColorBrush x:Key="GoWarningBrush" Color="{ThemeResource GoWarningColor}" />
+  <SolidColorBrush x:Key="GoDangerBrush" Color="{ThemeResource GoDangerColor}" />
+  <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="{ThemeResource GoAccentColor}" />
+  <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="{ThemeResource GoAccentColor}" Opacity="0.90" />
+  <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="{ThemeResource GoAccentColor}" Opacity="0.80" />
+  <SolidColorBrush x:Key="AccentFillColorDisabledBrush" Color="{ThemeResource GoAccentColor}" Opacity="0.40" />
+  <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="{ThemeResource GoAccentColor}" />
+  <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="{ThemeResource GoAccentTextColor}" />
+  <SolidColorBrush x:Key="TextOnAccentFillColorSecondaryBrush" Color="{ThemeResource GoAccentTextColor}" Opacity="0.85" />
+  <SolidColorBrush x:Key="TextOnAccentFillColorDisabledBrush" Color="{ThemeResource GoAccentTextColor}" Opacity="0.55" />
+  <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="{ThemeResource GoAccentColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="{ThemeResource GoAccentColor}" Opacity="0.90" />
+  <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="{ThemeResource GoAccentColor}" Opacity="0.80" />
+  <SolidColorBrush x:Key="ToggleSwitchFillOnDisabled" Color="{ThemeResource GoAccentColor}" Opacity="0.40" />
+  <SolidColorBrush x:Key="ToggleSwitchStrokeOn" Color="{ThemeResource GoAccentColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchStrokeOnPointerOver" Color="{ThemeResource GoAccentColor}" Opacity="0.90" />
+  <SolidColorBrush x:Key="ToggleSwitchStrokeOnPressed" Color="{ThemeResource GoAccentColor}" Opacity="0.80" />
+  <SolidColorBrush x:Key="ToggleSwitchStrokeOnDisabled" Color="{ThemeResource GoAccentColor}" Opacity="0.40" />
+  <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="{ThemeResource GoAccentTextColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="{ThemeResource GoAccentTextColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="{ThemeResource GoAccentTextColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchKnobFillOnDisabled" Color="{ThemeResource GoAccentTextColor}" Opacity="0.55" />
+  <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="{ThemeResource GoAccentColor}" />
+
+  <!-- Keep WinUI control surfaces in the same accent-derived visual system. -->
+  <StaticResource x:Key="NavigationViewDefaultPaneBackground" ResourceKey="GoLayerBrush" />
+  <StaticResource x:Key="NavigationViewExpandedPaneBackground" ResourceKey="GoLayerBrush" />
+  <StaticResource x:Key="NavigationViewContentBackground" ResourceKey="GoWindowBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundPointerOver" ResourceKey="GoHoverBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundPressed" ResourceKey="GoPressedBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundCheckedPointerOver" ResourceKey="GoHoverBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundCheckedPressed" ResourceKey="GoPressedBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundSelected" ResourceKey="GoAccentSubtleBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundSelectedPointerOver" ResourceKey="GoHoverBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundSelectedPressed" ResourceKey="GoPressedBrush" />
+  <StaticResource x:Key="TextControlBackground" ResourceKey="GoInputBrush" />
+  <StaticResource x:Key="TextControlBackgroundPointerOver" ResourceKey="GoHoverBrush" />
+  <StaticResource x:Key="TextControlBackgroundFocused" ResourceKey="GoInputBrush" />
+  <StaticResource x:Key="ComboBoxBackground" ResourceKey="GoInputBrush" />
+  <StaticResource x:Key="ComboBoxBackgroundPointerOver" ResourceKey="GoHoverBrush" />
+  <StaticResource x:Key="ComboBoxBackgroundPressed" ResourceKey="GoPressedBrush" />
+  <StaticResource x:Key="ComboBoxDropDownBackground" ResourceKey="GoLayerStrongBrush" />
+  <StaticResource x:Key="ListViewItemBackgroundPointerOver" ResourceKey="GoHoverBrush" />
+  <StaticResource x:Key="ListViewItemBackgroundSelected" ResourceKey="GoAccentSubtleBrush" />
+  <StaticResource x:Key="ListViewItemBackgroundSelectedPointerOver" ResourceKey="GoHoverBrush" />
+  <StaticResource x:Key="ListViewItemBackgroundSelectedPressed" ResourceKey="GoPressedBrush" />
 
   <Style x:Key="GoPageTitleStyle" TargetType="TextBlock">
     <Setter Property="FontFamily" Value="Segoe UI Variable Display" />
@@ -65,4 +130,35 @@
     <Setter Property="MinHeight" Value="32" />
     <Setter Property="Padding" Value="12,6" />
   </Style>
+
+  <Style x:Key="GoPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
+    <Setter Property="Background" Value="{ThemeResource GoAccentBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource GoAccentBrush}" />
+    <Setter Property="Foreground" Value="{ThemeResource GoAccentTextBrush}" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Padding" Value="14,8" />
+  </Style>
+
+  <Style x:Key="GoSubtleButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+    <Setter Property="Background" Value="{ThemeResource GoLayerStrongBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource GoStrokeBrush}" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Padding" Value="14,8" />
+  </Style>
+
+  <Style x:Key="GoDangerButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+    <Setter Property="Background" Value="{ThemeResource GoLayerStrongBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource GoDangerBrush}" />
+    <Setter Property="Foreground" Value="{ThemeResource GoDangerBrush}" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Padding" Value="14,8" />
+  </Style>
+
+  <Style x:Key="GoTableHeaderStyle" TargetType="Border">
+    <Setter Property="Background" Value="{ThemeResource GoAccentBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource GoAccentBrush}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+  </Style>
+
+  <Style TargetType="Button" BasedOn="{StaticResource GoSubtleButtonStyle}" />
 </ResourceDictionary>

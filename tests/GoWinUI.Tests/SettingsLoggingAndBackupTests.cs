@@ -16,16 +16,41 @@ public sealed class SettingsLoggingAndBackupTests
         await settings.SaveAsync(new AppSettings
         {
             LmStudioBaseUrl = "http://localhost:1234/v1/",
+            SelectedModel = null,
+            AccentColor = "#f4b860",
+            BackgroundColor = "#34313b",
             NavigationPaneWidth = 999,
+            IsAssistantSessionPaneOpen = false,
             Window = new(0, 0, 100, 100, SavedDpi: 1),
         });
 
         var restored = await settings.LoadAsync();
         Assert.Equal("http://localhost:1234/v1", restored.LmStudioBaseUrl);
+        Assert.Equal(AppSettings.DefaultSelectedModel, restored.SelectedModel);
+        Assert.Equal("#F4B860", restored.AccentColor);
+        Assert.Equal("#34313B", restored.BackgroundColor);
         Assert.Equal(520, restored.NavigationPaneWidth);
+        Assert.False(restored.IsAssistantSessionPaneOpen);
         Assert.Equal(640, restored.Window.Width);
         Assert.Equal(480, restored.Window.Height);
         Assert.DoesNotContain(System.IO.Directory.GetFiles(environment.Directory), static path => path.EndsWith(".tmp", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task VersionOneSettingsUseTheirAccentAsInitialBackgroundColor()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+        await settings.SaveAsync(new AppSettings
+        {
+            Version = 1,
+            AccentColor = "#8fbd45",
+        });
+
+        var restored = await settings.LoadAsync();
+        Assert.Equal(2, restored.Version);
+        Assert.Equal("#8FBD45", restored.AccentColor);
+        Assert.Equal("#8FBD45", restored.BackgroundColor);
     }
 
     [Fact]

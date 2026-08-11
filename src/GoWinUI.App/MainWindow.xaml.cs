@@ -19,9 +19,9 @@ namespace GoWinUI.App;
 
 public sealed partial class MainWindow : Window
 {
-    private const double MinimumPaneWidth = 280;
-    private const double MaximumPaneWidth = 520;
-    private const double MinimumContentWidth = 440;
+    private const double MinimumPaneWidth = 220;
+    private const double MaximumPaneWidth = 420;
+    private const double MinimumContentWidth = 620;
     private readonly Dictionary<string, Type> _routes = new(StringComparer.Ordinal)
     {
         ["assistant"] = typeof(AssistantPage),
@@ -116,6 +116,38 @@ public sealed partial class MainWindow : Window
         titleBar.ExtendsContentIntoTitleBar = true;
         titleBar.ButtonBackgroundColor = Colors.Transparent;
         titleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
+        AppTitleBar.ActualThemeChanged += OnTitleBarActualThemeChanged;
+        UpdateTitleBarColors();
+    }
+
+    private void OnTitleBarActualThemeChanged(FrameworkElement sender, object args) =>
+        UpdateTitleBarColors();
+
+    private void UpdateTitleBarColors()
+    {
+        var titleBar = _appWindow.TitleBar;
+        var isLight = AppTitleBar.ActualTheme == ElementTheme.Light;
+        var foreground = isLight
+            ? Windows.UI.Color.FromArgb(255, 36, 29, 47)
+            : Windows.UI.Color.FromArgb(255, 248, 244, 255);
+        var inactiveForeground = isLight
+            ? Windows.UI.Color.FromArgb(180, 36, 29, 47)
+            : Windows.UI.Color.FromArgb(180, 248, 244, 255);
+        var hoverBackground = isLight
+            ? Windows.UI.Color.FromArgb(24, 36, 29, 47)
+            : Windows.UI.Color.FromArgb(28, 255, 255, 255);
+        var pressedBackground = isLight
+            ? Windows.UI.Color.FromArgb(42, 36, 29, 47)
+            : Windows.UI.Color.FromArgb(48, 255, 255, 255);
+
+        titleBar.ForegroundColor = foreground;
+        titleBar.InactiveForegroundColor = inactiveForeground;
+        titleBar.ButtonForegroundColor = foreground;
+        titleBar.ButtonInactiveForegroundColor = inactiveForeground;
+        titleBar.ButtonHoverForegroundColor = foreground;
+        titleBar.ButtonPressedForegroundColor = foreground;
+        titleBar.ButtonHoverBackgroundColor = hoverBackground;
+        titleBar.ButtonPressedBackgroundColor = pressedBackground;
     }
 
     private async void OnNavigationLoaded(object sender, RoutedEventArgs e)
@@ -132,7 +164,15 @@ public sealed partial class MainWindow : Window
             MinimumPaneWidth,
             MaximumPaneWidth);
         RootNavigation.IsPaneOpen = settings.IsNavigationPaneOpen;
-        RestoreWindow(settings.Window);
+        try
+        {
+            RestoreWindow(settings.Window);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.WindowRestoreFailed(_logger, exception);
+        }
+
         NavigateTo(settings.LastRoute);
         await Task.Yield();
         ScheduleSave();
@@ -196,9 +236,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var route = args.IsSettingsSelected
-            ? "settings"
-            : args.SelectedItemContainer?.Tag as string;
+        var route = args.SelectedItemContainer?.Tag as string;
         if (route is null || !_routes.TryGetValue(route, out var pageType))
         {
             return;
@@ -228,7 +266,7 @@ public sealed partial class MainWindow : Window
         {
             if (route == "settings")
             {
-                RootNavigation.SelectedItem = RootNavigation.SettingsItem;
+                RootNavigation.SelectedItem = SettingsItem;
             }
             else
             {
@@ -301,7 +339,26 @@ public sealed partial class MainWindow : Window
 
     private void OnPaneResizeCompleted(object sender, DragCompletedEventArgs e) => ScheduleSave();
 
-    private void OnPaneChanged(NavigationView sender, object args) => ScheduleSave();
+    private async void OnPaneChanged(NavigationView sender, object args)
+    {
+        if (!_restored || _isClosing)
+        {
+            return;
+        }
+
+        try
+        {
+            await _settings.UpdateAsync(current => current with
+            {
+                NavigationPaneWidth = RootNavigation.OpenPaneLength,
+                IsNavigationPaneOpen = RootNavigation.IsPaneOpen,
+            });
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.WindowStateSaveFailed(_logger, exception);
+        }
+    }
 
     private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
     {
@@ -415,6 +472,7 @@ public sealed partial class MainWindow : Window
         _isClosing = true;
         _saveTimer.Stop();
         _saveTimer.Tick -= OnSaveTimerTick;
+        AppTitleBar.ActualThemeChanged -= OnTitleBarActualThemeChanged;
         _appWindow.Changed -= OnAppWindowChanged;
         _appWindow.Closing -= OnAppWindowClosing;
         RootNavigation.PaneOpened -= OnPaneChanged;
@@ -453,7 +511,7 @@ public sealed partial class MainWindow : Window
 
     private string GetSelectedRoute()
     {
-        if (RootNavigation.SelectedItem == RootNavigation.SettingsItem)
+        if (ReferenceEquals(RootNavigation.SelectedItem, SettingsItem))
         {
             return "settings";
         }
@@ -481,8 +539,17 @@ public sealed partial class MainWindow : Window
             return null;
         }
 
-        return DisplayArea.FindAll().FirstOrDefault(
-            area => string.Equals(GetMonitorId(area), monitorId, StringComparison.OrdinalIgnoreCase));
+        var displays = DisplayArea.FindAll();
+        for (var index = 0; index < displays.Count; index++)
+        {
+            var area = displays[index];
+            if (string.Equals(GetMonitorId(area), monitorId, StringComparison.OrdinalIgnoreCase))
+            {
+                return area;
+            }
+        }
+
+        return null;
     }
 
     private static string GetMonitorId(DisplayArea area) => area.DisplayId.Value.ToString("X16", CultureInfo.InvariantCulture);

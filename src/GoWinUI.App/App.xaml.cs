@@ -8,15 +8,45 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.Windows.AppLifecycle;
+using System.Globalization;
+using Windows.UI.ViewManagement;
 
 namespace GoWinUI.App;
 
+[System.Diagnostics.CodeAnalysis.SuppressMessage(
+    "Design",
+    "CA1001:Types that own disposable fields should be disposable",
+    Justification = "WinUI owns the Application lifetime; PrepareShutdownAsync cancels and disposes the monitor token.")]
 public partial class App : Application
 {
+    private static readonly string[] AccentBrushKeys =
+    [
+        "GoAccentBrush",
+        "GoAccentSubtleBrush",
+        "AccentFillColorDefaultBrush",
+        "AccentFillColorSecondaryBrush",
+        "AccentFillColorTertiaryBrush",
+        "AccentFillColorDisabledBrush",
+        "AccentTextFillColorPrimaryBrush",
+        "ToggleSwitchFillOn",
+        "ToggleSwitchFillOnPointerOver",
+        "ToggleSwitchFillOnPressed",
+        "ToggleSwitchFillOnDisabled",
+        "ToggleSwitchStrokeOn",
+        "ToggleSwitchStrokeOnPointerOver",
+        "ToggleSwitchStrokeOnPressed",
+        "ToggleSwitchStrokeOnDisabled",
+        "NavigationViewSelectionIndicatorForeground",
+    ];
     private readonly IHost _host;
     private AppInstance? _appInstance;
     private MainWindow? _window;
+    private FrameworkElement? _themeRoot;
+    private AppTheme _appliedTheme = AppTheme.System;
+    private CancellationTokenSource? _aiAvailabilityCancellation;
+    private Task? _aiAvailabilityMonitor;
     private int _shutdownStarted;
 
     public App()
@@ -58,13 +88,18 @@ public partial class App : Application
 
     public string DataDirectory { get; }
 
+    public string AccentColor { get; private set; } = AppSettings.DefaultAccentColor;
+
+    public string BackgroundColor { get; private set; } = AppSettings.DefaultBackgroundColor;
+
     public event EventHandler? ThemeChanged;
 
     public T GetService<T>() where T : notnull => _host.Services.GetRequiredService<T>();
 
     public void ApplyTheme(AppTheme theme)
     {
-        if (_window?.Content is FrameworkElement root)
+        _appliedTheme = theme;
+        if ((_themeRoot ?? _window?.Content as FrameworkElement) is { } root)
         {
             root.RequestedTheme = theme switch
             {
@@ -72,6 +107,40 @@ public partial class App : Application
                 AppTheme.Dark => ElementTheme.Dark,
                 _ => ElementTheme.Default,
             };
+        }
+
+        ApplyPaletteColors();
+    }
+
+    public void ApplyAccentColor(string accentColor)
+    {
+        if (!TryParsePaletteColor(accentColor, out var color))
+        {
+            accentColor = AppSettings.DefaultAccentColor;
+            _ = TryParsePaletteColor(accentColor, out color);
+        }
+
+        AccentColor = accentColor.ToUpperInvariant();
+        if (!IsHighContrastEnabled())
+        {
+            SetBrushColors(AccentBrushKeys, color);
+        }
+
+        ThemeChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void ApplyBackgroundColor(string backgroundColor)
+    {
+        if (!TryParsePaletteColor(backgroundColor, out var color))
+        {
+            backgroundColor = AppSettings.DefaultBackgroundColor;
+            _ = TryParsePaletteColor(backgroundColor, out color);
+        }
+
+        BackgroundColor = backgroundColor.ToUpperInvariant();
+        if (!IsHighContrastEnabled())
+        {
+            ApplyBackgroundSurfaceColors(color);
         }
 
         ThemeChanged?.Invoke(this, EventArgs.Empty);
@@ -99,13 +168,22 @@ public partial class App : Application
             await settings.UpdateAsync(static current => current);
 
             var shell = GetService<ShellViewModel>();
-            shell.DatabaseStatus = "SQLite bereit";
+            shell.DatabaseStatus = "Datenbank bereit";
             _window = GetService<MainWindow>();
+            if (_window.Content is FrameworkElement themeRoot)
+            {
+                _themeRoot = themeRoot;
+                _themeRoot.ActualThemeChanged += OnActualThemeChanged;
+            }
+
             ApplyTheme(settings.Current.Theme);
+            ApplyAccentColor(settings.Current.AccentColor);
+            ApplyBackgroundColor(settings.Current.BackgroundColor);
             _window.Closed += OnWindowClosed;
             _window.BeforeCloseAsync = PrepareShutdownAsync;
             _window.Activate();
-            _ = RefreshLmStudioStatusAsync();
+            _aiAvailabilityCancellation = new CancellationTokenSource();
+            _aiAvailabilityMonitor = MonitorLocalAiAvailabilityAsync(_aiAvailabilityCancellation.Token);
         }
         catch (Exception exception)
         {
@@ -119,29 +197,81 @@ public partial class App : Application
         _window?.DispatcherQueue.TryEnqueue(() => _window.BringToForeground());
     }
 
-    private async Task RefreshLmStudioStatusAsync()
+    private async Task MonitorLocalAiAvailabilityAsync(CancellationToken cancellationToken)
     {
-        var shell = GetService<ShellViewModel>();
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            await RefreshLocalAiAvailabilityAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+    }
+
+    private async Task RefreshLocalAiAvailabilityAsync(CancellationToken cancellationToken)
+    {
+        var connected = false;
         try
         {
-            var connected = await GetService<ILmStudioClient>().TestConnectionAsync();
-            shell.LmStudioStatus = connected
-                ? GetService<SettingsCoordinator>().Current.SelectedModel ?? "LM Studio bereit"
-                : "LM Studio nicht verbunden";
+            connected = await GetService<ILmStudioClient>()
+                .TestConnectionAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
         }
         catch (Exception exception)
         {
-            shell.LmStudioStatus = "LM Studio nicht verbunden";
-            AppLog.LmStudioStatusFailed(GetService<ILogger<App>>(), exception);
+            AppLog.LocalAiAvailabilityCheckFailed(GetService<ILogger<App>>(), exception);
         }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        SetLocalAiAvailability(connected);
+    }
+
+    private void SetLocalAiAvailability(bool connected)
+    {
+        var shell = GetService<ShellViewModel>();
+        var dispatcher = _window?.DispatcherQueue;
+        if (dispatcher is null || dispatcher.HasThreadAccess)
+        {
+            shell.IsAiAvailable = connected;
+            return;
+        }
+
+        _ = dispatcher.TryEnqueue(() => shell.IsAiAvailable = connected);
     }
 
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
+        if (_themeRoot is not null)
+        {
+            _themeRoot.ActualThemeChanged -= OnActualThemeChanged;
+            _themeRoot = null;
+        }
+
         if (_window is not null)
         {
             _window.Closed -= OnWindowClosed;
             _window.BeforeCloseAsync = null;
+        }
+    }
+
+    private void OnActualThemeChanged(FrameworkElement sender, object args)
+    {
+        if (_appliedTheme == AppTheme.System)
+        {
+            ApplyPaletteColors();
         }
     }
 
@@ -154,6 +284,22 @@ public partial class App : Application
 
         try
         {
+            var availabilityCancellation = Interlocked.Exchange(ref _aiAvailabilityCancellation, null);
+            var availabilityMonitor = Interlocked.Exchange(ref _aiAvailabilityMonitor, null);
+            availabilityCancellation?.Cancel();
+            if (availabilityMonitor is not null)
+            {
+                try
+                {
+                    await availabilityMonitor;
+                }
+                catch (OperationCanceledException)
+                {
+                    // The availability monitor is expected to stop during shutdown.
+                }
+            }
+
+            availabilityCancellation?.Dispose();
             await _host.StopAsync(TimeSpan.FromSeconds(4));
         }
         finally
@@ -190,6 +336,12 @@ public partial class App : Application
     {
         try
         {
+            if (exception is not null)
+            {
+                details = $"{details} | {exception.GetType().FullName} "
+                    + $"(0x{exception.HResult:X8}) | {exception.StackTrace}";
+            }
+
             var logger = GetService<ILogger<App>>();
             if (logger.IsEnabled(LogLevel.Critical))
             {
@@ -218,5 +370,125 @@ public partial class App : Application
         return string.IsNullOrWhiteSpace(smokeKey)
             ? "GO.Main"
             : $"GO.Smoke.{smokeKey}";
+    }
+
+    private static IEnumerable<ResourceDictionary> EnumerateResourceDictionaries(ResourceDictionary root)
+    {
+        yield return root;
+        foreach (var merged in root.MergedDictionaries)
+        {
+            foreach (var nested in EnumerateResourceDictionaries(merged))
+            {
+                yield return nested;
+            }
+        }
+    }
+
+    private void ApplyPaletteColors()
+    {
+        if (!IsHighContrastEnabled())
+        {
+            _ = TryParsePaletteColor(AccentColor, out var accent);
+            _ = TryParsePaletteColor(BackgroundColor, out var background);
+            SetBrushColors(AccentBrushKeys, accent);
+            ApplyBackgroundSurfaceColors(background);
+        }
+
+        ThemeChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void ApplyBackgroundSurfaceColors(Windows.UI.Color background)
+    {
+        var isLight = _appliedTheme == AppTheme.Light
+            || (_appliedTheme == AppTheme.System && _themeRoot?.ActualTheme == ElementTheme.Light);
+        if (isLight)
+        {
+            SetBrushColor("GoWindowBrush", MixBackground(0xF3F0F5, background, 0.07, 0xFF));
+            SetBrushColor("GoLayerBrush", MixBackground(0xFFFFFF, background, 0.04, 0xF8));
+            SetBrushColor("GoLayerStrongBrush", MixBackground(0xFAF8FC, background, 0.08, 0xFF));
+            SetBrushColor("GoInputBrush", MixBackground(0xFFFFFF, background, 0.09, 0xFF));
+            SetBrushColor("GoHoverBrush", MixBackground(0xF5F1F7, background, 0.13, 0xFF));
+            SetBrushColor("GoPressedBrush", MixBackground(0xEEE9F1, background, 0.18, 0xFF));
+            SetBrushColor("GoStrokeBrush", MixBackground(0x302A38, background, 0.22, 0x52));
+            return;
+        }
+
+        SetBrushColor("GoWindowBrush", MixBackground(0x121016, background, 0.08, 0xFF));
+        SetBrushColor("GoLayerBrush", MixBackground(0x1B1820, background, 0.12, 0xE6));
+        SetBrushColor("GoLayerStrongBrush", MixBackground(0x211D27, background, 0.18, 0xF2));
+        SetBrushColor("GoInputBrush", MixBackground(0x28232F, background, 0.20, 0xFF));
+        SetBrushColor("GoHoverBrush", MixBackground(0x2E2836, background, 0.23, 0xFF));
+        SetBrushColor("GoPressedBrush", MixBackground(0x332C3C, background, 0.28, 0xFF));
+        SetBrushColor("GoStrokeBrush", MixBackground(0xFFFFFF, background, 0.28, 0x42));
+    }
+
+    private void SetBrushColors(IEnumerable<string> keys, Windows.UI.Color color)
+    {
+        foreach (var key in keys)
+        {
+            SetBrushColor(key, color);
+        }
+    }
+
+    private void SetBrushColor(string key, Windows.UI.Color color)
+    {
+        foreach (var dictionary in EnumerateResourceDictionaries(Resources))
+        {
+            if (dictionary.ContainsKey(key)
+                && dictionary[key] is SolidColorBrush brush)
+            {
+                brush.Color = color;
+            }
+        }
+    }
+
+    private static Windows.UI.Color MixBackground(
+        uint baseRgb,
+        Windows.UI.Color background,
+        double backgroundWeight,
+        byte alpha)
+    {
+        var baseColor = Windows.UI.Color.FromArgb(
+            alpha,
+            (byte)(baseRgb >> 16),
+            (byte)(baseRgb >> 8),
+            (byte)baseRgb);
+        var baseWeight = 1d - backgroundWeight;
+        return Windows.UI.Color.FromArgb(
+            alpha,
+            (byte)Math.Round((baseColor.R * baseWeight) + (background.R * backgroundWeight)),
+            (byte)Math.Round((baseColor.G * baseWeight) + (background.G * backgroundWeight)),
+            (byte)Math.Round((baseColor.B * baseWeight) + (background.B * backgroundWeight)));
+    }
+
+    private static bool IsHighContrastEnabled()
+    {
+        try
+        {
+            return new AccessibilitySettings().HighContrast;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParsePaletteColor(string? value, out Windows.UI.Color color)
+    {
+        color = default;
+        return value is { Length: 7 }
+            && value[0] == '#'
+            && uint.TryParse(value.AsSpan(1), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var rgb)
+            && SetColor(rgb, out color);
+    }
+
+    private static bool SetColor(uint rgb, out Windows.UI.Color color)
+    {
+        color = Windows.UI.Color.FromArgb(
+            255,
+            (byte)(rgb >> 16),
+            (byte)(rgb >> 8),
+            (byte)rgb);
+        return true;
     }
 }

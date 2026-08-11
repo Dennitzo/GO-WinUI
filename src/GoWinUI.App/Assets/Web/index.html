@@ -9,128 +9,195 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="app-shell">
+  <div id="app-shell" class="app-shell">
     <aside class="session-pane" aria-label="Sitzungen">
-      <div class="session-pane__header">
-        <button id="new-session" class="primary compact" type="button" title="Neue Sitzung">
-          <span aria-hidden="true">＋</span><span>Neuer Chat</span>
+      <div class="session-pane__toolbar">
+        <button id="toggle-sessions" class="sidebar-icon-button" type="button" title="Sitzungsleiste ein- oder ausklappen" aria-label="Sitzungsleiste ein- oder ausklappen" aria-expanded="true">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
-        <button id="collapse-sessions" class="icon-button mobile-only" type="button" aria-label="Sitzungen schließen">×</button>
+        <span class="sidebar-toolbar-spacer"></span>
+        <button id="clear-sessions" class="sidebar-icon-button" type="button" title="Alle Sitzungen löschen" aria-label="Alle Sitzungen löschen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg>
+        </button>
+        <button id="collapse-sessions" class="sidebar-icon-button mobile-only" type="button" aria-label="Sitzungen schließen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
       </div>
-      <label class="search-field">
-        <span aria-hidden="true">⌕</span>
-        <input id="session-search" type="search" autocomplete="off" placeholder="Chats durchsuchen">
+
+      <button id="new-session" class="new-session-button" type="button" title="Neue Sitzung">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.7-10.7a2.1 2.1 0 0 0-3-3L5.2 16 4 20Zm10.4-13.2 3 3"/></svg>
+        <span>Neuer Chat</span>
+      </button>
+
+      <label class="search-field" title="Sitzung suchen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.2 16.2 4 4"/></svg>
+        <input id="session-search" type="search" autocomplete="off" placeholder="Sitzung suchen">
       </label>
+      <div class="sidebar-title">Sitzungen</div>
       <div id="session-list" class="session-list" role="list"></div>
-      <div class="session-pane__footer">
-        <span class="privacy-dot" aria-hidden="true"></span>
-        <span>Nur lokal gespeichert</span>
-      </div>
     </aside>
 
     <main class="chat-pane">
       <header class="chat-header">
         <div class="chat-title-row">
-          <button id="open-sessions" class="icon-button mobile-only" type="button" aria-label="Sitzungen öffnen">☰</button>
-          <div>
-            <h1 id="chat-title">AI Assistent</h1>
-            <p id="chat-subtitle">Allgemeiner Chat mit deinem lokalen Modell</p>
-          </div>
+          <button id="open-sessions" class="icon-button mobile-only" type="button" aria-label="Sitzungen öffnen">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <h1>AI Assistent</h1>
         </div>
         <div class="header-actions">
-          <span id="connection-pill" class="status-pill offline"><span class="status-dot"></span><span>LM Studio nicht verbunden</span></span>
-          <button id="export-pdf" class="icon-button" type="button" title="Chat als PDF exportieren" aria-label="Chat als PDF exportieren">⇩</button>
+          <button id="export-pdf" class="icon-button" type="button" title="Chat als PDF exportieren" aria-label="Chat als PDF exportieren">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 19h14"/></svg>
+          </button>
         </div>
       </header>
 
       <section id="message-scroll" class="message-scroll" aria-live="polite">
-        <div id="welcome" class="welcome">
-          <div class="go-orb" aria-hidden="true">GO</div>
-          <h2>Wobei kann ich helfen?</h2>
-          <p>Nutze dein lokales LM-Studio-Modell, füge Dokumente als Kontext hinzu oder arbeite mit einem Workflow.</p>
-          <div class="suggestions">
-            <button type="button" data-prompt="Erkläre mir das Thema Schritt für Schritt."><strong>Etwas verstehen</strong><span>Komplexe Inhalte verständlich aufbereiten</span></button>
-            <button type="button" data-prompt="Hilf mir, einen klaren und umsetzbaren Plan zu erstellen."><strong>Einen Plan erstellen</strong><span>Ziele in konkrete Schritte zerlegen</span></button>
-            <button type="button" data-prompt="Analysiere das beigefügte Dokument und fasse die Kernaussagen zusammen."><strong>Dokument analysieren</strong><span>PDF, DOCX oder Text als Kontext nutzen</span></button>
-          </div>
-        </div>
         <div id="message-list" class="message-list"></div>
       </section>
 
       <section class="composer-region" aria-label="Nachricht verfassen">
         <div id="context-strip" class="context-strip" hidden>
-          <div id="workflow-chip" class="context-chip" hidden>
-            <span aria-hidden="true">⌘</span><span id="workflow-chip-name"></span>
-            <button id="remove-workflow" type="button" aria-label="Workflow entfernen">×</button>
-          </div>
           <div id="document-chips" class="document-chips"></div>
         </div>
+
         <div class="composer">
-          <textarea id="prompt" rows="1" maxlength="100000" placeholder="Nachricht an GO" aria-label="Nachricht"></textarea>
+          <textarea id="prompt" rows="1" maxlength="100000" placeholder="Nachricht eingeben …" aria-label="Nachricht"></textarea>
           <div class="composer-toolbar">
-            <div class="toolbar-group">
-              <button id="pick-document" class="tool-button" type="button" title="Dokument hinzufügen"><span aria-hidden="true">＋</span><span>Datei</span></button>
-              <button id="open-workflows" class="tool-button" type="button" title="Workflow wählen"><span aria-hidden="true">⌘</span><span>Workflow</span></button>
-              <label class="reasoning-control" title="Reasoning-Aufwand">
-                <span>Reasoning</span>
-                <select id="reasoning">
-                  <option value="low">Niedrig</option>
-                  <option value="medium" selected>Mittel</option>
-                  <option value="high">Hoch</option>
-                </select>
-              </label>
+            <div class="toolbar-group composer-tools">
+              <button id="pick-document" class="tool-button icon-only" type="button" title="Datei hinzufügen" aria-label="Datei hinzufügen">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+
+              <div class="tools-menu-anchor">
+                <button id="tools-button" class="tool-button" type="button" aria-haspopup="menu" aria-expanded="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
+                  <span>Tools</span>
+                </button>
+                <div id="tools-menu" class="tools-menu" role="menu" hidden>
+                  <div class="tools-menu__title">Schlussfolgern</div>
+                  <button class="reasoning-option" type="button" role="menuitemradio" data-reasoning="low"><span>Niedrig</span><span class="option-check">✓</span></button>
+                  <button class="reasoning-option" type="button" role="menuitemradio" data-reasoning="medium"><span>Mittel</span><span class="option-check">✓</span></button>
+                  <button class="reasoning-option" type="button" role="menuitemradio" data-reasoning="high"><span>Hoch</span><span class="option-check">✓</span></button>
+                </div>
+              </div>
+
+              <button id="open-workflows" class="tool-button" type="button" title="Workflow wählen">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
+                <span>Workflows</span>
+              </button>
+
+              <div id="context-meter" class="context-meter" title="Kontext: 0 von 0 Tokens" role="img" aria-label="Kontext zu 0 Prozent belegt">
+                <span class="context-ring" aria-hidden="true"></span>
+                <span id="context-label">0%</span>
+              </div>
+              <select id="reasoning" hidden aria-label="Reasoning-Aufwand">
+                <option value="low">Niedrig</option>
+                <option value="medium" selected>Mittel</option>
+                <option value="high">Hoch</option>
+              </select>
             </div>
-            <div class="toolbar-group context-meter-wrap">
-              <span id="context-meter" class="context-meter">0 / 8k</span>
-              <button id="send" class="send-button" type="button" aria-label="Senden">↑</button>
-              <button id="stop" class="stop-button" type="button" aria-label="Antwort stoppen" hidden>■</button>
+
+            <div class="toolbar-group composer-submit">
+              <button id="send" class="send-button" type="button" aria-label="Senden">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
+              </button>
+              <button id="stop" class="stop-button" type="button" aria-label="Antwort stoppen" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+              </button>
             </div>
           </div>
         </div>
-        <p class="composer-note">GO kann Fehler machen. Prüfe wichtige Angaben und Dokumentquellen.</p>
+        <p class="composer-note">AI kann Fehler machen. Prüfe wichtige Angaben und Dokumentquellen.</p>
       </section>
     </main>
   </div>
 
   <div id="workflow-overlay" class="modal-backdrop" hidden>
-    <section class="workflow-modal" role="dialog" aria-modal="true" aria-labelledby="workflow-title">
-      <header class="modal-header">
-        <div><h2 id="workflow-title">Workflows</h2><p>Wiederverwendbaren Fachkontext verwalten</p></div>
-        <button id="close-workflows" class="icon-button" type="button" aria-label="Schließen">×</button>
+    <section class="workflow-panel" role="dialog" aria-modal="true" aria-labelledby="workflow-dialog-title">
+      <header class="workflow-window-titlebar">
+        <div>
+          <h2 id="workflow-dialog-title">Workflows</h2>
+          <p>Gespeicherte Abläufe auswählen und verwalten</p>
+        </div>
+        <button id="close-workflows" class="icon-button" type="button" aria-label="Workflows schließen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
       </header>
+
       <div class="workflow-layout">
-        <aside class="workflow-browser">
-          <div class="workflow-tools">
-            <input id="workflow-search" type="search" placeholder="Workflows durchsuchen">
-            <button id="new-workflow" class="primary compact" type="button">Neu</button>
+        <aside class="workflow-list-pane">
+          <div class="workflow-list-controls">
+            <label class="workflow-search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.2 16.2 4 4"/></svg>
+              <input id="workflow-search" type="search" autocomplete="off" placeholder="Workflows durchsuchen …">
+            </label>
+            <button id="new-workflow" class="secondary wide" type="button">＋ Neuer Workflow</button>
           </div>
-          <div id="workflow-list" class="workflow-list"></div>
+          <div id="workflow-list" class="workflow-list" role="list"></div>
         </aside>
-        <form id="workflow-editor" class="workflow-editor">
-          <input id="workflow-id" type="hidden">
-          <input id="workflow-revision" type="hidden">
-          <label>Titel<input id="workflow-name" required maxlength="160"></label>
-          <div class="form-grid">
-            <label>Fachgebiet<input id="workflow-domain" maxlength="120"></label>
-            <label>Tags<input id="workflow-tags" placeholder="Planung, DIN, Prüfung"></label>
+
+        <section class="workflow-detail-pane">
+          <div id="workflow-empty" class="workflow-empty">
+            <strong>Workflow auswählen</strong>
+            <span>Details und Inhalt werden hier zusammenhängend angezeigt.</span>
           </div>
-          <label>Beschreibung<textarea id="workflow-description" rows="2"></textarea></label>
-          <label>Kontextzusammenfassung<textarea id="workflow-summary" rows="3"></textarea></label>
-          <label>Inhalt (JSON)<textarea id="workflow-content" class="code-editor" rows="10" spellcheck="false">{}</textarea></label>
-          <p id="workflow-lock-note" class="inline-note" hidden>Dieser integrierte Workflow ist schreibgeschützt. Du kannst ihn klonen.</p>
-          <div class="editor-actions">
+
+          <article id="workflow-preview" class="workflow-preview" hidden>
+            <header class="workflow-preview__header">
+              <div>
+                <h3 id="workflow-preview-title"></h3>
+                <p id="workflow-preview-id"></p>
+              </div>
+              <span id="workflow-preview-badge" class="built-in-badge" hidden>Integriert</span>
+            </header>
+            <div id="workflow-preview-tags" class="workflow-tag-list"></div>
+            <section class="workflow-preview__section">
+              <h4>Beschreibung</h4>
+              <p id="workflow-preview-description"></p>
+            </section>
+            <section class="workflow-preview__section">
+              <h4>Kontextzusammenfassung</h4>
+              <p id="workflow-preview-summary"></p>
+            </section>
+            <section class="workflow-preview__section workflow-content-section">
+              <h4>Workflow-Inhalt</h4>
+              <pre id="workflow-preview-content"></pre>
+            </section>
+          </article>
+
+          <form id="workflow-editor" class="workflow-editor" hidden>
+            <input id="workflow-id" type="hidden">
+            <input id="workflow-revision" type="hidden" value="0">
+            <div class="workflow-editor__heading">
+              <h3 id="workflow-editor-title">Workflow bearbeiten</h3>
+              <p>Alle Daten bleiben als ein zusammenhängender Workflow gespeichert.</p>
+            </div>
+            <label>Name<input id="workflow-name" required maxlength="160"></label>
+            <div class="form-grid">
+              <label>Bereich<input id="workflow-domain" maxlength="120"></label>
+              <label>Tags<input id="workflow-tags" maxlength="500" placeholder="Tag 1, Tag 2"></label>
+            </div>
+            <label>Beschreibung<textarea id="workflow-description" rows="3" maxlength="4000"></textarea></label>
+            <label>Kontextzusammenfassung<textarea id="workflow-summary" rows="5" maxlength="20000"></textarea></label>
+            <label>Workflow-Inhalt (JSON)<textarea id="workflow-content" class="code-editor" rows="12" required></textarea></label>
+            <p id="workflow-lock-note" class="inline-note" hidden>Integrierte Workflows sind schreibgeschützt.</p>
+          </form>
+
+          <footer class="workflow-footer">
             <button id="delete-workflow" class="danger" type="button">Löschen</button>
+            <button id="edit-workflow" class="secondary" type="button">Bearbeiten</button>
             <span class="spacer"></span>
-            <button id="clone-workflow" type="button">Klonen</button>
-            <button id="select-workflow" type="button">Als Kontext wählen</button>
-            <button id="save-workflow" class="primary" type="submit">Speichern</button>
-          </div>
-        </form>
+            <button id="cancel-workflow-edit" class="secondary" type="button" hidden>Abbrechen</button>
+            <button id="select-workflow" class="secondary" type="button">Auswählen</button>
+            <button id="save-workflow" class="primary" type="submit" form="workflow-editor" hidden>Speichern</button>
+          </footer>
+        </section>
       </div>
     </section>
   </div>
 
-  <div id="toast-region" class="toast-region" aria-live="assertive"></div>
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
   <script src="vendor/katex/0.16.10/katex.min.js"></script>
   <script src="bridge.js"></script>
   <script src="markdown.js"></script>

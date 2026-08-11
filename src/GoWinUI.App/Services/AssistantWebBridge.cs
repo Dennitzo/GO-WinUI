@@ -4,6 +4,7 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Runtime.InteropServices;
 
 namespace GoWinUI.App.Services;
 
@@ -16,10 +17,11 @@ public sealed class AssistantWebBridge : IDisposable
     private static readonly HashSet<string> AllowedIncomingTypes = new(StringComparer.Ordinal)
     {
         "app.ready", "chat.send", "chat.cancel", "session.create", "session.open",
-        "session.rename", "session.delete", "session.draft", "document.pick",
-        "document.remove", "workflow.list", "workflow.select", "workflow.create",
-        "workflow.update", "workflow.delete", "workflow.clone",
-        "workflow.createFromMessage", "chat.exportPdf", "message.copy", "external.open",
+        "session.rename", "session.delete", "session.clear", "session.draft", "document.pick",
+        "document.remove", "workflow.list", "workflow.insert", "workflow.create",
+        "workflow.update", "workflow.delete",
+        "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
+        "ui.sessionPane", "external.open",
     };
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
@@ -61,10 +63,23 @@ public sealed class AssistantWebBridge : IDisposable
         }
 
         Directory.CreateDirectory(userDataFolder);
-        var environment = await CoreWebView2Environment.CreateWithOptionsAsync(
-            browserExecutableFolder: null,
-            userDataFolder,
-            options: null);
+        CoreWebView2Environment environment;
+        try
+        {
+            environment = await CoreWebView2Environment.CreateWithOptionsAsync(
+                browserExecutableFolder: null,
+                userDataFolder,
+                options: null);
+        }
+        catch (Exception exception) when (exception is COMException or UnauthorizedAccessException or IOException)
+        {
+            // A stale/locked profile must not prevent the rest of the desktop app from opening.
+            // Keep the configured directory as the first choice so the profile remains persistent.
+            var fallbackFolder = Path.Combine(Path.GetTempPath(), "GO", "WebView2", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(fallbackFolder);
+            AppLog.WebViewProfileFallback(_logger, exception);
+            environment = await CoreWebView2Environment.CreateWithOptionsAsync(null, fallbackFolder, null);
+        }
         await _webView.EnsureCoreWebView2Async(environment);
         var core = _webView.CoreWebView2;
         core.SetVirtualHostNameToFolderMapping(
@@ -83,6 +98,16 @@ public sealed class AssistantWebBridge : IDisposable
         core.NewWindowRequested += OnNewWindowRequested;
         core.ProcessFailed += OnProcessFailed;
         _initialized = true;
+    }
+
+    public void NavigateToApp()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!_initialized || _webView.CoreWebView2 is not { } core)
+        {
+            throw new InvalidOperationException("Die WebView2-Umgebung ist noch nicht initialisiert.");
+        }
+
         core.Navigate($"https://{VirtualHost}/index.html");
     }
 

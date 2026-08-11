@@ -1,5 +1,6 @@
 using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
+using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
@@ -16,13 +17,18 @@ namespace GoWinUI.App.Pages;
 public sealed partial class ProjectsPage : Page
 {
     private readonly ILogger<ProjectsPage> _logger;
+    private readonly IProjectAssetWorkingCopyService _workingCopies;
+    private Task _archiveFilterUpdate = Task.CompletedTask;
     private bool _initialized;
-    private bool _isWindowActivationSubscribed;
+    private bool _isWorkingCopySubscribed;
+    private bool _ignoreArchiveToggle;
+    private int _archiveFilterVersion;
 
     public ProjectsPage()
     {
         InitializeComponent();
         ViewModel = App.Current.GetService<ProjectsViewModel>();
+        _workingCopies = App.Current.GetService<IProjectAssetWorkingCopyService>();
         _logger = App.Current.GetService<ILogger<ProjectsPage>>();
     }
 
@@ -30,14 +36,10 @@ public sealed partial class ProjectsPage : Page
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        SubscribeToWindowActivation();
+        SubscribeToWorkingCopyChanges();
         if (_initialized)
         {
-            if (ViewModel.SelectedAsset is { } selected)
-            {
-                await RunUiActionAsync(() => ViewModel.InspectWorkingCopyAsync(selected));
-            }
-
+            await RunUiActionAsync(() => ViewModel.RefreshAssetsAsync());
             return;
         }
 
@@ -45,38 +47,39 @@ public sealed partial class ProjectsPage : Page
         await RunUiActionAsync(async () =>
         {
             await ViewModel.InitializeAsync();
-            ProjectList.SelectedItem = ViewModel.SelectedProject;
+            SetArchiveToggle(ViewModel.ShowArchived);
+            UpdateProjectOverviewState();
+            ShowProjectOverview();
         });
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        if (_isWindowActivationSubscribed && App.Current.MainWindow is { } window)
+        if (_isWorkingCopySubscribed)
         {
-            window.Activated -= OnWindowActivated;
-            _isWindowActivationSubscribed = false;
+            _workingCopies.AssetSynchronized -= OnAssetSynchronized;
+            _isWorkingCopySubscribed = false;
         }
     }
 
-    private void SubscribeToWindowActivation()
+    private void SubscribeToWorkingCopyChanges()
     {
-        if (!_isWindowActivationSubscribed && App.Current.MainWindow is { } window)
+        if (!_isWorkingCopySubscribed)
         {
-            window.Activated += OnWindowActivated;
-            _isWindowActivationSubscribed = true;
+            _workingCopies.AssetSynchronized += OnAssetSynchronized;
+            _isWorkingCopySubscribed = true;
         }
     }
 
-    private async void OnWindowActivated(object sender, WindowActivatedEventArgs args)
+    private void OnAssetSynchronized(object? sender, ProjectAssetSynchronizedEventArgs args)
     {
-        if (args.WindowActivationState == WindowActivationState.Deactivated
-            || !_initialized
-            || ViewModel.SelectedAsset is not { } asset)
+        if (!_initialized)
         {
             return;
         }
 
-        await RunUiActionAsync(() => ViewModel.InspectWorkingCopyAsync(asset));
+        _ = DispatcherQueue.TryEnqueue(async () =>
+            await RunUiActionAsync(() => ViewModel.ApplySynchronizedAssetAsync(args.Asset)));
     }
 
     private async void OnCreateProject(object sender, RoutedEventArgs e)
@@ -84,49 +87,85 @@ public sealed partial class ProjectsPage : Page
         await RunUiActionAsync(async () =>
         {
             await ViewModel.CreateAsync();
-            ProjectList.SelectedItem = ViewModel.SelectedProject;
+            SetArchiveToggle(false);
+            UpdateProjectOverviewState();
+            ShowProjectDetails();
         });
     }
 
     private async void OnArchiveFilterChanged(object sender, RoutedEventArgs e)
     {
-        if (!_initialized)
+        if (!_initialized || _ignoreArchiveToggle)
         {
             return;
         }
 
-        await RunUiActionAsync(async () =>
-        {
-            await ViewModel.ReloadProjectsAsync();
-            ProjectList.SelectedItem = ViewModel.SelectedProject;
-        });
+        var showArchived = ArchivedToggle.IsOn;
+        var version = Interlocked.Increment(ref _archiveFilterVersion);
+        var precedingUpdate = _archiveFilterUpdate;
+        _archiveFilterUpdate = ApplyArchiveFilterAsync(precedingUpdate, showArchived, version);
+        await _archiveFilterUpdate;
     }
 
-    private async void OnProjectSelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async Task ApplyArchiveFilterAsync(Task precedingUpdate, bool showArchived, int version)
     {
-        if (!_initialized || Equals(ProjectList.SelectedItem, ViewModel.SelectedProject))
+        try
+        {
+            await precedingUpdate;
+        }
+        catch
+        {
+            // RunUiActionAsync reports UI failures. A failed predecessor must not block later toggles.
+        }
+
+        if (version != Volatile.Read(ref _archiveFilterVersion))
         {
             return;
         }
 
         await RunUiActionAsync(async () =>
         {
-            await ViewModel.SelectAsync(ProjectList.SelectedItem as Project);
-            AssetList.SelectedItem = null;
-            UpdateAssetSummary(null);
-            ResetPreview("Vorschau für Bilder, Text und PDF");
+            await ViewModel.ReloadProjectsAsync(showArchived);
+            if (version != Volatile.Read(ref _archiveFilterVersion))
+            {
+                return;
+            }
+
+            UpdateProjectOverviewState();
+            ShowProjectOverview();
         });
     }
 
-    private async void OnSaveProject(object sender, RoutedEventArgs e) =>
-        await RunUiActionAsync(() => ViewModel.SaveAsync());
+    private async void OnProjectItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (!_initialized || e.ClickedItem is not Project project)
+        {
+            return;
+        }
+
+        await RunUiActionAsync(async () =>
+        {
+            await ViewModel.SelectAsync(project);
+            ShowProjectDetails();
+        });
+    }
+
+    private async void OnSaveProject(object sender, RoutedEventArgs e)
+    {
+        await RunUiActionAsync(async () =>
+        {
+            await ViewModel.SaveAsync();
+            ShowProjectDetails();
+        });
+    }
 
     private async void OnToggleArchive(object sender, RoutedEventArgs e)
     {
         await RunUiActionAsync(async () =>
         {
             await ViewModel.ToggleArchiveAsync();
-            ProjectList.SelectedItem = ViewModel.SelectedProject;
+            UpdateProjectOverviewState();
+            ShowProjectOverview();
         });
     }
 
@@ -151,10 +190,13 @@ public sealed partial class ProjectsPage : Page
             await RunUiActionAsync(async () =>
             {
                 await ViewModel.DeleteProjectAsync();
-                ProjectList.SelectedItem = ViewModel.SelectedProject;
+                UpdateProjectOverviewState();
+                ShowProjectOverview();
             });
         }
     }
+
+    private void OnBackToProjects(object sender, RoutedEventArgs e) => ShowProjectOverview();
 
     private async void OnAddChecklistItem(object sender, RoutedEventArgs e) =>
         await RunUiActionAsync(() => ViewModel.AddChecklistItemAsync());
@@ -200,233 +242,80 @@ public sealed partial class ProjectsPage : Page
 
         await RunUiActionAsync(async () =>
         {
+            var category = Enum.TryParse<AssetCategory>(
+                (sender as FrameworkElement)?.Tag as string,
+                out var requestedCategory)
+                ? requestedCategory
+                : AssetCategory.Other;
             var picker = new FileOpenPicker
             {
                 SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-                ViewMode = PickerViewMode.List,
+                ViewMode = category == AssetCategory.Image ? PickerViewMode.Thumbnail : PickerViewMode.List,
             };
-            picker.FileTypeFilter.Add("*");
+            foreach (var extension in FileTypeFilters(category))
+            {
+                picker.FileTypeFilter.Add(extension);
+            }
             InitializePicker(picker);
-            var file = await picker.PickSingleFileAsync();
-            if (file is null)
+            var files = await picker.PickMultipleFilesAsync();
+            if (files.Count == 0)
             {
                 return;
             }
 
-            var category = Enum.TryParse<AssetCategory>(
-                (AssetCategoryBox.SelectedItem as ComboBoxItem)?.Tag as string,
-                out var parsed)
-                ? parsed
-                : InferCategory(file.FileType);
-            await using var content = await file.OpenStreamForReadAsync();
-            await ViewModel.ImportAssetAsync(
-                file.Name,
-                string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType,
-                file.Path,
-                category,
-                content);
-            AssetList.SelectedItem = ViewModel.SelectedAsset;
-        });
-    }
-
-    private async void OnAssetSelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        var selected = AssetList.SelectedItem as ProjectAsset;
-        if (ViewModel.SelectedAsset?.Id != selected?.Id)
-        {
-            ViewModel.SelectedAsset = selected;
-        }
-
-        UpdateAssetSummary(selected);
-        if (selected is null)
-        {
-            ResetPreview("Vorschau für Bilder, Text und PDF");
-            return;
-        }
-
-        await RunUiActionAsync(async () =>
-        {
-            await ViewModel.InspectWorkingCopyAsync(selected);
-            await PreviewAssetAsync(selected);
-        });
-    }
-
-    private async void OnSaveAssetMetadata(object sender, RoutedEventArgs e)
-    {
-        await RunUiActionAsync(async () =>
-        {
-            await ViewModel.UpdateAssetMetadataAsync();
-            await RefreshSelectedAssetAsync();
-        });
-    }
-
-    private async void OnMoveAssetUp(object sender, RoutedEventArgs e) =>
-        await MoveSelectedAssetAsync(-1);
-
-    private async void OnMoveAssetDown(object sender, RoutedEventArgs e) =>
-        await MoveSelectedAssetAsync(1);
-
-    private async Task MoveSelectedAssetAsync(int direction)
-    {
-        if (ViewModel.SelectedAsset is not { } asset)
-        {
-            return;
-        }
-
-        await RunUiActionAsync(async () =>
-        {
-            await ViewModel.MoveAssetAsync(asset, direction);
-            AssetList.SelectedItem = ViewModel.SelectedAsset;
-        });
-    }
-
-    private async void OnOpenAsset(object sender, RoutedEventArgs e)
-    {
-        if (ViewModel.SelectedAsset is not { } selected)
-        {
-            return;
-        }
-
-        await RunUiActionAsync(async () =>
-        {
-            var asset = await ResolveModifiedWorkingCopyBeforeOpenAsync(selected);
-            if (asset is null)
+            foreach (var file in files)
             {
-                return;
+                await using var content = await file.OpenStreamForReadAsync();
+                await ViewModel.ImportAssetAsync(
+                    file.Name,
+                    string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType,
+                    file.Path,
+                    category,
+                    content);
             }
+        });
+    }
 
-            var workingCopy = await ViewModel.MaterializeAssetAsync(asset);
+    private async void OnAssetItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is not ProjectAsset asset)
+        {
+            return;
+        }
+
+        await RunUiActionAsync(() => OpenProjectAssetAsync(asset));
+    }
+
+    private async Task OpenProjectAssetAsync(ProjectAsset asset)
+    {
+        FileOpeningMessage.Text = $"„{asset.FileName}“ wird im Standardprogramm geöffnet …";
+        FileOpeningOverlay.Visibility = Visibility.Visible;
+        var minimumDisplay = Task.Delay(TimeSpan.FromSeconds(2));
+        try
+        {
+            var workingCopy = await ViewModel.MaterializeAssetForOpenAsync(asset);
             var file = await StorageFile.GetFileFromPathAsync(workingCopy.Path);
             if (!await Launcher.LaunchFileAsync(file))
             {
-                throw new InvalidOperationException("Für diesen Dateityp ist kein Programm registriert.");
-            }
-        });
-    }
-
-    private async Task<ProjectAsset?> ResolveModifiedWorkingCopyBeforeOpenAsync(ProjectAsset asset)
-    {
-        var state = await ViewModel.InspectWorkingCopyAsync(asset);
-        if (state.State != AssetWorkingCopyState.Modified)
-        {
-            return asset;
-        }
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "Geänderte Arbeitskopie gefunden",
-            Content = "Vor dem erneuten Öffnen muss entschieden werden, ob die externe Änderung in GO übernommen oder verworfen wird.",
-            PrimaryButtonText = "Übernehmen",
-            SecondaryButtonText = "Verwerfen",
-            CloseButtonText = "Abbrechen",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        var result = await dialog.ShowAsync();
-        if (result == ContentDialogResult.Primary)
-        {
-            await ViewModel.ReimportWorkingCopyAsync(asset);
-        }
-        else if (result == ContentDialogResult.Secondary)
-        {
-            await ViewModel.DiscardWorkingCopyChangesAsync(asset);
-        }
-        else
-        {
-            return null;
-        }
-
-        await RefreshSelectedAssetAsync();
-        return ViewModel.SelectedAsset;
-    }
-
-    private async void OnReimportWorkingCopy(object sender, RoutedEventArgs e)
-    {
-        if (ViewModel.SelectedAsset is not { } asset)
-        {
-            return;
-        }
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "Externe Änderungen übernehmen?",
-            Content = "Die gespeicherte Projektdatei wird durch den aktuellen Inhalt der Arbeitskopie ersetzt.",
-            PrimaryButtonText = "Übernehmen",
-            CloseButtonText = "Abbrechen",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
-        {
-            await RunUiActionAsync(async () =>
-            {
-                await ViewModel.ReimportWorkingCopyAsync(asset);
-                await RefreshSelectedAssetAsync();
-            });
-        }
-    }
-
-    private async void OnDiscardWorkingCopy(object sender, RoutedEventArgs e)
-    {
-        if (ViewModel.SelectedAsset is not { } asset)
-        {
-            return;
-        }
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "Externe Änderungen verwerfen?",
-            Content = "Die Arbeitskopie wird wieder aus dem in GO gespeicherten Stand hergestellt. Die externe Änderung geht verloren.",
-            PrimaryButtonText = "Verwerfen",
-            CloseButtonText = "Abbrechen",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
-        {
-            await RunUiActionAsync(async () =>
-            {
-                await ViewModel.DiscardWorkingCopyChangesAsync(asset);
-                await RefreshSelectedAssetAsync();
-            });
-        }
-    }
-
-    private async void OnExportAsset(object sender, RoutedEventArgs e)
-    {
-        if (ViewModel.SelectedAsset is not { } asset)
-        {
-            return;
-        }
-
-        await RunUiActionAsync(async () =>
-        {
-            var extension = Path.GetExtension(asset.FileName);
-            var picker = new FileSavePicker
-            {
-                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-                SuggestedFileName = Path.GetFileNameWithoutExtension(asset.FileName),
-                DefaultFileExtension = string.IsNullOrWhiteSpace(extension) ? ".bin" : extension,
-            };
-            picker.FileTypeChoices.Add(
-                "Projektdatei",
-                new List<string> { string.IsNullOrWhiteSpace(extension) ? ".bin" : extension });
-            InitializePicker(picker);
-            var file = await picker.PickSaveFileAsync();
-            if (file is null)
-            {
-                return;
+                throw new InvalidOperationException("Für diesen Dateityp ist kein Standardprogramm registriert.");
             }
 
-            await using var destination = await file.OpenStreamForWriteAsync();
-            destination.SetLength(0);
-            await ViewModel.ExportAssetAsync(asset, destination);
-        });
+            await minimumDisplay;
+        }
+        catch
+        {
+            await minimumDisplay;
+            throw;
+        }
+        finally
+        {
+            FileOpeningOverlay.Visibility = Visibility.Collapsed;
+        }
     }
 
     private async void OnDeleteAsset(object sender, RoutedEventArgs e)
     {
-        if (ViewModel.SelectedAsset is not { } asset)
+        if (sender is not Button { DataContext: ProjectAsset asset })
         {
             return;
         }
@@ -442,12 +331,7 @@ public sealed partial class ProjectsPage : Page
         };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary)
         {
-            await RunUiActionAsync(async () =>
-            {
-                await ViewModel.DeleteAssetAsync(asset);
-                UpdateAssetSummary(null);
-                ResetPreview("Vorschau für Bilder, Text und PDF");
-            });
+            await RunUiActionAsync(() => ViewModel.DeleteAssetAsync(asset));
         }
     }
 
@@ -467,11 +351,7 @@ public sealed partial class ProjectsPage : Page
                 return;
             }
 
-            using var randomAccess = new InMemoryRandomAccessStream();
-            await stream.CopyToAsync(randomAccess.AsStreamForWrite());
-            randomAccess.Seek(0);
-            var bitmap = new BitmapImage();
-            await bitmap.SetSourceAsync(randomAccess);
+            var bitmap = await LoadBitmapAsync(stream);
             if (image.DataContext is ProjectAsset current && current.Id == asset.Id)
             {
                 image.Source = bitmap;
@@ -484,85 +364,103 @@ public sealed partial class ProjectsPage : Page
         }
     }
 
-    private async Task RefreshSelectedAssetAsync()
+    private static async Task<BitmapImage> LoadBitmapAsync(Stream source)
     {
-        AssetList.SelectedItem = ViewModel.SelectedAsset;
-        UpdateAssetSummary(ViewModel.SelectedAsset);
-        if (ViewModel.SelectedAsset is { } selected)
+        using var randomAccess = new InMemoryRandomAccessStream();
+        using var output = randomAccess.AsStreamForWrite();
+        await source.CopyToAsync(output);
+        await output.FlushAsync();
+        randomAccess.Seek(0);
+        var bitmap = new BitmapImage();
+        await bitmap.SetSourceAsync(randomAccess);
+        return bitmap;
+    }
+
+    private void OnAssetFormatIconLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is FontIcon { DataContext: ProjectAsset asset } icon)
         {
-            await PreviewAssetAsync(selected);
+            icon.Glyph = AssetIconGlyph(asset);
+            ToolTipService.SetToolTip(icon, GetAssetFormatLabel(asset));
         }
     }
 
-    private async Task PreviewAssetAsync(ProjectAsset asset)
+    private void OnAssetFormatBadgeLoaded(object sender, RoutedEventArgs e)
     {
-        ResetPreview("Vorschau wird geladen …");
-        var extension = Path.GetExtension(asset.FileName).ToLowerInvariant();
-        if (asset.Category == AssetCategory.Image
-            || extension is ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".webp")
+        if (sender is TextBlock { DataContext: ProjectAsset asset } badge)
         {
-            await using var source = await ViewModel.OpenAssetAsync(asset);
-            using var randomAccess = new InMemoryRandomAccessStream();
-            await source.CopyToAsync(randomAccess.AsStreamForWrite());
-            randomAccess.Seek(0);
-            var bitmap = new BitmapImage();
-            await bitmap.SetSourceAsync(randomAccess);
-            ImagePreview.Source = bitmap;
-            ImagePreview.Visibility = Visibility.Visible;
-            PreviewPlaceholder.Visibility = Visibility.Collapsed;
-            return;
+            badge.Text = GetAssetFormatLabel(asset);
         }
-
-        if (asset.Category == AssetCategory.Pdf || extension == ".pdf")
-        {
-            var workingCopy = await ViewModel.MaterializeAssetAsync(asset);
-            await PdfPreview.EnsureCoreWebView2Async();
-            PdfPreview.CoreWebView2.Settings.AreDevToolsEnabled = false;
-            PdfPreview.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-            PdfPreview.CoreWebView2.Settings.IsWebMessageEnabled = false;
-            PdfPreview.Source = new Uri(workingCopy.Path);
-            PdfPreview.Visibility = Visibility.Visible;
-            PreviewPlaceholder.Visibility = Visibility.Collapsed;
-            return;
-        }
-
-        if (IsTextPreview(extension, asset.ContentType))
-        {
-            await using var stream = await ViewModel.OpenAssetAsync(asset);
-            using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true, leaveOpen: false);
-            var buffer = new char[1_000_000];
-            var length = await reader.ReadBlockAsync(buffer);
-            TextPreviewContent.Text = new string(buffer, 0, length)
-                + (length == buffer.Length ? Environment.NewLine + "[Vorschau nach 1.000.000 Zeichen gekürzt]" : string.Empty);
-            TextPreview.Visibility = Visibility.Visible;
-            PreviewPlaceholder.Visibility = Visibility.Collapsed;
-            return;
-        }
-
-        ResetPreview("Für diesen Dateityp gibt es keine interne Vorschau. Nutze „Öffnen“ mit dem registrierten Windows-Programm.");
     }
 
-    private void UpdateAssetSummary(ProjectAsset? asset)
+    private void OnAssetTypeTextLoaded(object sender, RoutedEventArgs e)
     {
-        PreviewSummary.Text = asset is null
-            ? "Datei auswählen, um Aktionen anzuzeigen."
-            : $"{asset.FileName} · {FormatBytes(asset.Length)} · SHA-256 {asset.Sha256[..Math.Min(12, asset.Sha256.Length)]}…";
+        if (sender is TextBlock { DataContext: ProjectAsset asset } text)
+        {
+            text.Text = FriendlyAssetType(asset);
+        }
     }
 
-    private void ResetPreview(string message)
+    private void OnAssetSizeTextLoaded(object sender, RoutedEventArgs e)
     {
-        ImagePreview.Source = null;
-        ImagePreview.Visibility = Visibility.Collapsed;
-        TextPreview.Visibility = Visibility.Collapsed;
-        TextPreviewContent.Text = string.Empty;
-        PdfPreview.Visibility = Visibility.Collapsed;
-        if (PdfPreview.CoreWebView2 is not null)
+        if (sender is TextBlock { DataContext: ProjectAsset asset } text)
         {
-            PdfPreview.Source = null;
+            text.Text = FormatBytes(asset.Length);
+        }
+    }
+
+    private void OnAssetModifiedTextLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is TextBlock { DataContext: ProjectAsset asset } text)
+        {
+            text.Text = $"Geändert {asset.UpdatedAt.ToLocalTime():dd.MM.yyyy, HH:mm}";
+        }
+    }
+
+    private void UpdateProjectOverviewState()
+    {
+        var hasProjects = ViewModel.Projects.Count > 0;
+        ProjectList.Visibility = hasProjects ? Visibility.Visible : Visibility.Collapsed;
+        ProjectEmptyState.Visibility = hasProjects ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void SetArchiveToggle(bool isOn)
+    {
+        _ignoreArchiveToggle = true;
+        try
+        {
+            ArchivedToggle.IsOn = isOn;
+        }
+        finally
+        {
+            _ignoreArchiveToggle = false;
+        }
+    }
+
+    private void ShowProjectOverview()
+    {
+        ProjectMasterPane.Visibility = Visibility.Visible;
+        ProjectDetailsPane.Visibility = Visibility.Collapsed;
+        PageTitleText.Text = ViewModel.ShowArchived ? "Archivierte Projekte" : "Projekte";
+        PageDescriptionText.Text = "Projektinformationen, Checklisten und Dateien übersichtlich verwalten.";
+        ProjectMasterPane.ChangeView(null, 0, null, disableAnimation: true);
+    }
+
+    private void ShowProjectDetails()
+    {
+        if (ViewModel.SelectedProject is not { } project)
+        {
+            ShowProjectOverview();
+            return;
         }
 
-        PreviewPlaceholder.Text = message;
-        PreviewPlaceholder.Visibility = Visibility.Visible;
+        ProjectMasterPane.Visibility = Visibility.Collapsed;
+        ProjectDetailsPane.Visibility = Visibility.Visible;
+        PageTitleText.Text = project.Name;
+        PageDescriptionText.Text = string.IsNullOrWhiteSpace(project.ConstructionProject)
+            ? "Projektinformationen, Checklisten und Dateien vollständig verwalten."
+            : $"{project.ConstructionProject} · Projektinformationen, Checklisten und Dateien vollständig verwalten.";
+        ProjectDetailsPane.ChangeView(null, 0, null, disableAnimation: true);
     }
 
     private async Task RunUiActionAsync(Func<Task> action)
@@ -589,11 +487,62 @@ public sealed partial class ProjectsPage : Page
         _ => AssetCategory.Other,
     };
 
-    private static bool IsTextPreview(string extension, string contentType) =>
-        contentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase)
-        || extension is ".txt" or ".md" or ".csv" or ".json" or ".xml" or ".html" or ".htm"
-            or ".rtf" or ".log" or ".ini" or ".yaml" or ".yml" or ".css" or ".js" or ".ts"
-            or ".py" or ".cpp" or ".c" or ".h" or ".hpp" or ".cs" or ".java" or ".sql";
+    private static IReadOnlyList<string> FileTypeFilters(AssetCategory category) => category switch
+    {
+        AssetCategory.Pdf => [".pdf"],
+        AssetCategory.Drawing => [".dwg", ".dxf", ".dwt", ".rvt", ".rfa", ".ifc"],
+        AssetCategory.Image => [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"],
+        AssetCategory.Meeting => [".doc", ".docx", ".odt", ".pdf", ".txt", ".md", ".rtf", ".xlsx", ".csv"],
+        _ => ["*"],
+    };
+
+    private static string GetAssetFormatLabel(ProjectAsset asset)
+    {
+        var extension = Path.GetExtension(asset.FileName).TrimStart('.').ToUpperInvariant();
+        if (!string.IsNullOrWhiteSpace(extension))
+        {
+            return extension.Length <= 5 ? extension : extension[..5];
+        }
+
+        return asset.Category switch
+        {
+            AssetCategory.Pdf => "PDF",
+            AssetCategory.Drawing => "CAD",
+            AssetCategory.Image => "IMG",
+            AssetCategory.Meeting => "DOC",
+            _ => "FILE",
+        };
+    }
+
+    private static string AssetIconGlyph(ProjectAsset asset)
+    {
+        var extension = Path.GetExtension(asset.FileName).ToLowerInvariant();
+        return extension switch
+        {
+            ".pdf" => "\uEA90",
+            ".dwg" or ".dxf" or ".dwt" or ".rvt" or ".rfa" or ".ifc" => "\uE7C3",
+            ".doc" or ".docx" or ".odt" or ".rtf" => "\uE8A5",
+            ".xls" or ".xlsx" or ".csv" => "\uE9F9",
+            ".ppt" or ".pptx" => "\uE8A5",
+            ".zip" or ".7z" or ".rar" => "\uF012",
+            _ when asset.Category == AssetCategory.Image => "\uEB9F",
+            _ when asset.Category == AssetCategory.Drawing => "\uE7C3",
+            _ => "\uE8A5",
+        };
+    }
+
+    private static string FriendlyAssetType(ProjectAsset asset)
+    {
+        var format = GetAssetFormatLabel(asset);
+        return asset.Category switch
+        {
+            AssetCategory.Pdf => $"{format}-Bauplan",
+            AssetCategory.Drawing => $"{format}-Bauzeichnung",
+            AssetCategory.Meeting => $"{format}-Besprechungsdatei",
+            AssetCategory.Image => $"{format}-Bild",
+            _ => $"{format}-Datei",
+        };
+    }
 
     private static string FormatBytes(long bytes)
     {

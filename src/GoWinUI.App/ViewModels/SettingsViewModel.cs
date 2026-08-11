@@ -27,6 +27,12 @@ public sealed partial class SettingsViewModel(
     public partial AppTheme Theme { get; set; } = AppTheme.System;
 
     [ObservableProperty]
+    public partial string AccentColor { get; set; } = AppSettings.DefaultAccentColor;
+
+    [ObservableProperty]
+    public partial string BackgroundColor { get; set; } = AppSettings.DefaultBackgroundColor;
+
+    [ObservableProperty]
     public partial string Language { get; set; } = "de-DE";
 
     [ObservableProperty]
@@ -42,6 +48,8 @@ public sealed partial class SettingsViewModel(
         SelectedModel = current.SelectedModel;
         ReasoningEffort = current.ReasoningEffort;
         Theme = current.Theme;
+        AccentColor = current.AccentColor;
+        BackgroundColor = current.BackgroundColor;
         Language = current.Language;
     }
 
@@ -59,10 +67,14 @@ public sealed partial class SettingsViewModel(
             SelectedModel = string.IsNullOrWhiteSpace(SelectedModel) ? null : SelectedModel,
             ReasoningEffort = ReasoningEffort,
             Theme = Theme,
+            AccentColor = AccentColor,
+            BackgroundColor = BackgroundColor,
             Language = Language,
         }, cancellationToken);
         App.Current.ApplyTheme(Theme);
-        shell.LmStudioStatus = SelectedModel ?? "Nicht verbunden";
+        App.Current.ApplyAccentColor(AccentColor);
+        App.Current.ApplyBackgroundColor(BackgroundColor);
+        shell.IsAiAvailable = await lmStudio.TestConnectionAsync(cancellationToken);
     }
 
     public async Task RefreshModelsAsync(CancellationToken cancellationToken = default)
@@ -87,12 +99,12 @@ public sealed partial class SettingsViewModel(
             ConnectionStatus = items.Count == 0
                 ? "Verbunden, aber kein Modell geladen"
                 : $"Verbunden · {items.Count} Modell(e) geladen";
-            shell.LmStudioStatus = SelectedModel ?? "LM Studio bereit";
+            shell.IsAiAvailable = true;
         }
         catch
         {
             ConnectionStatus = "LM Studio nicht erreichbar";
-            shell.LmStudioStatus = "LM Studio nicht verbunden";
+            shell.IsAiAvailable = false;
             throw;
         }
         finally

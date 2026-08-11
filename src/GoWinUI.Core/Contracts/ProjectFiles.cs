@@ -4,11 +4,17 @@ namespace GoWinUI.Core.Contracts;
 
 public interface IProjectAssetWorkingCopyService
 {
+    event EventHandler<ProjectAssetSynchronizedEventArgs>? AssetSynchronized;
+
     Task<AssetWorkingCopy> InspectAsync(
         ProjectAsset asset,
         CancellationToken cancellationToken = default);
 
     Task<AssetWorkingCopy> MaterializeAsync(
+        ProjectAsset asset,
+        CancellationToken cancellationToken = default);
+
+    Task<AssetWorkingCopy> MaterializeAndWatchAsync(
         ProjectAsset asset,
         CancellationToken cancellationToken = default);
 

@@ -10,7 +10,6 @@ namespace GoWinUI.Infrastructure.AI;
 
 public sealed partial class ChatOrchestrator(
     IChatRepository chats,
-    IWorkflowRepository workflows,
     IDocumentIngestor documents,
     ILmStudioClient lmStudio,
     IContextAssembler contextAssembler,
@@ -42,19 +41,23 @@ public sealed partial class ChatOrchestrator(
             _ = await chats.AddMessageAsync(sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed, linked.Token).ConfigureAwait(false);
             assistant = await chats.AddMessageAsync(sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming, linked.Token).ConfigureAwait(false);
 
-            WorkflowDefinition? workflow = session.SelectedWorkflowId is { } workflowId
-                ? await workflows.GetAsync(workflowId, linked.Token).ConfigureAwait(false)
-                : null;
             var pages = new List<DocumentPage>();
             foreach (var document in await documents.ListAsync(sessionId, linked.Token).ConfigureAwait(false))
                 pages.AddRange(await documents.ReadPagesAsync(document.Id, linked.Token).ConfigureAwait(false));
 
             var models = await lmStudio.ListModelsAsync(linked.Token).ConfigureAwait(false);
             var contextLength = models.FirstOrDefault(candidate => candidate.Id == model)?.ContextLength ?? 8_192;
-            var context = contextAssembler.Build(new(systemPrompt, prompt.Trim(), history, workflow, pages, contextLength));
+            var context = contextAssembler.Build(new(systemPrompt, prompt.Trim(), history, null, pages, contextLength));
             runId = Guid.NewGuid();
             await SaveRunStartedAsync(database, runId.Value, sessionId, assistant.Id, model, reasoningEffort, context, linked.Token).ConfigureAwait(false);
             RunStarted(_logger, sessionId, model);
+            if (_logger.IsEnabled(LogLevel.Information))
+            {
+                GeneralEnvelopePrepared(
+                    _logger,
+                    context.PolicyReferences?.Count ?? 0,
+                    context.MaxOutputTokens);
+            }
             StreamUpdated?.Invoke(this, new(
                 sessionId,
                 assistant.Id,
@@ -65,7 +68,7 @@ public sealed partial class ChatOrchestrator(
                 contextLength,
                 context.WasTruncated,
                 context.TruncationNotice));
-            var request = new LmChatRequest(model, context.Messages, reasoningEffort);
+            var request = new LmChatRequest(model, context.Messages, reasoningEffort, context.MaxOutputTokens);
             var checkpoint = Stopwatch.StartNew();
             var unpersisted = 0;
             await foreach (var delta in lmStudio.StreamAsync(request, linked.Token).ConfigureAwait(false))
@@ -174,4 +177,7 @@ public sealed partial class ChatOrchestrator(
 
     [LoggerMessage(EventId = 2203, Level = LogLevel.Warning, Message = "LM Studio chat run failed for session {SessionId}")]
     private static partial void RunFailed(ILogger logger, Exception exception, Guid sessionId);
+
+    [LoggerMessage(EventId = 2204, Level = LogLevel.Information, Message = "General chat envelope prepared with {PolicyCount} policies and output limit {MaxOutputTokens}")]
+    private static partial void GeneralEnvelopePrepared(ILogger logger, int policyCount, int maxOutputTokens);
 }

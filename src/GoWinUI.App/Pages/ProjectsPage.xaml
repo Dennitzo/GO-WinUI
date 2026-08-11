@@ -11,7 +11,140 @@
   Unloaded="OnUnloaded"
   mc:Ignorable="d">
 
-  <Grid Padding="24" RowSpacing="16">
+  <Page.Resources>
+    <DataTemplate x:Key="ProjectFileItemTemplate" x:DataType="models:ProjectAsset">
+      <Grid
+        MinHeight="68"
+        ColumnSpacing="11">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <Border
+          Width="46"
+          Height="46"
+          Background="{ThemeResource GoLayerStrongBrush}"
+          BorderBrush="{ThemeResource GoStrokeBrush}"
+          BorderThickness="1"
+          CornerRadius="8">
+          <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="1">
+            <FontIcon FontSize="16" Loaded="OnAssetFormatIconLoaded" />
+            <TextBlock
+              HorizontalAlignment="Center"
+              FontSize="8"
+              FontWeight="Bold"
+              Loaded="OnAssetFormatBadgeLoaded" />
+          </StackPanel>
+        </Border>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+          <TextBlock FontWeight="SemiBold" Text="{x:Bind FileName}" TextTrimming="CharacterEllipsis" />
+          <TextBlock
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            FontSize="12"
+            Loaded="OnAssetTypeTextLoaded"
+            TextTrimming="CharacterEllipsis" />
+          <TextBlock
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            FontSize="11"
+            Loaded="OnAssetModifiedTextLoaded"
+            TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+        <StackPanel
+          Grid.Column="2"
+          HorizontalAlignment="Right"
+          VerticalAlignment="Center"
+          Orientation="Horizontal"
+          Spacing="9">
+          <TextBlock
+            x:Name="AssetSizeText"
+            VerticalAlignment="Center"
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            FontSize="12"
+            Loaded="OnAssetSizeTextLoaded" />
+          <Button
+            x:Name="AssetDeleteButton"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Center"
+            AutomationProperties.Name="Datei löschen"
+            Click="OnDeleteAsset"
+            ToolTipService.ToolTip="Löschen">
+            <FontIcon FontSize="13" Glyph="&#xE74D;" />
+          </Button>
+        </StackPanel>
+      </Grid>
+    </DataTemplate>
+
+    <DataTemplate x:Key="ProjectImageItemTemplate" x:DataType="models:ProjectAsset">
+      <Grid
+        Width="164"
+        Height="132"
+        Background="Transparent">
+        <Border
+          Background="{ThemeResource GoLayerStrongBrush}"
+          BorderBrush="{ThemeResource GoStrokeBrush}"
+          BorderThickness="1"
+          CornerRadius="9">
+          <Grid>
+            <FontIcon
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center"
+              FontSize="28"
+              Foreground="{ThemeResource GoMutedTextBrush}"
+              Glyph="&#xEB9F;" />
+            <Image Margin="2" Loaded="OnAssetThumbnailLoaded" Stretch="UniformToFill" />
+            <Border
+              VerticalAlignment="Bottom"
+              Padding="8,6"
+              Background="#B2181320"
+              CornerRadius="0,0,8,8">
+              <StackPanel Spacing="1">
+                <TextBlock
+                  Foreground="White"
+                  FontSize="11"
+                  FontWeight="SemiBold"
+                  Text="{x:Bind FileName}"
+                  TextTrimming="CharacterEllipsis" />
+                <TextBlock
+                  Foreground="#D9FFFFFF"
+                  FontSize="9"
+                  Loaded="OnAssetModifiedTextLoaded"
+                  TextTrimming="CharacterEllipsis" />
+              </StackPanel>
+            </Border>
+            <Border
+              Margin="7"
+              Padding="5,2"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Top"
+              Background="#D9181320"
+              CornerRadius="5">
+              <TextBlock
+                Foreground="White"
+                FontSize="8"
+                FontWeight="Bold"
+                Loaded="OnAssetFormatBadgeLoaded" />
+            </Border>
+            <Button
+              x:Name="AssetDeleteButton"
+              Margin="7"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Top"
+              AutomationProperties.Name="Bild löschen"
+              Click="OnDeleteAsset"
+              ToolTipService.ToolTip="Löschen">
+              <FontIcon FontSize="13" Glyph="&#xE74D;" />
+            </Button>
+          </Grid>
+        </Border>
+      </Grid>
+    </DataTemplate>
+  </Page.Resources>
+
+  <Grid
+    Margin="28,24,28,0"
+    VerticalAlignment="Stretch"
+    RowSpacing="18">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
@@ -23,16 +156,17 @@
         <ColumnDefinition Width="*" />
         <ColumnDefinition Width="Auto" />
       </Grid.ColumnDefinitions>
-      <StackPanel>
-        <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Projekte" />
+      <StackPanel Spacing="6">
+        <TextBlock x:Name="PageTitleText" Style="{StaticResource GoPageTitleStyle}" Text="Projekte" />
         <TextBlock
-          Margin="0,4,0,0"
+          x:Name="PageDescriptionText"
           Foreground="{ThemeResource GoMutedTextBrush}"
-          Text="Projektinformationen, Checklisten und Dateien vollständig lokal verwalten." />
+          Text="Projektinformationen, Checklisten und Dateien übersichtlich verwalten."
+          TextWrapping="Wrap" />
       </StackPanel>
       <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
         <ProgressRing Width="20" Height="20" IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
-        <Button Click="OnCreateProject" Style="{StaticResource AccentButtonStyle}">
+        <Button Click="OnCreateProject" Style="{StaticResource GoPrimaryButtonStyle}">
           <StackPanel Orientation="Horizontal" Spacing="7">
             <FontIcon FontSize="14" Glyph="&#xE710;" />
             <TextBlock Text="Neues Projekt" />
@@ -49,105 +183,146 @@
       Severity="Error"
       Title="Aktion fehlgeschlagen" />
 
-    <Grid x:Name="ProjectsLayoutGrid" Grid.Row="2" ColumnSpacing="14">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition x:Name="ProjectListColumn" Width="300" />
-        <ColumnDefinition x:Name="ProjectDetailsColumn" Width="*" />
-      </Grid.ColumnDefinitions>
-      <Grid.RowDefinitions>
-        <RowDefinition x:Name="ProjectListRow" Height="*" />
-        <RowDefinition x:Name="ProjectDetailsRow" Height="0" />
-      </Grid.RowDefinitions>
+    <Grid Grid.Row="2">
+      <ScrollViewer
+        x:Name="ProjectMasterPane"
+        HorizontalScrollBarVisibility="Disabled"
+        Padding="0,0,0,24"
+        VerticalAlignment="Stretch"
+        VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="18">
+          <Border Padding="12" Style="{StaticResource GoCardStyle}">
+            <Grid ColumnSpacing="12">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <StackPanel VerticalAlignment="Center" Spacing="3">
+                <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Projektübersicht" />
+                <TextBlock
+                  Foreground="{ThemeResource GoMutedTextBrush}"
+                  Text="Projekt auswählen, um die vollständige Projektseite zu öffnen."
+                  TextWrapping="Wrap" />
+              </StackPanel>
+              <ToggleSwitch
+                x:Name="ArchivedToggle"
+                Grid.Column="1"
+                Header="Archiv"
+                Toggled="OnArchiveFilterChanged" />
+            </Grid>
+          </Border>
 
-      <VisualStateManager.VisualStateGroups>
-        <VisualStateGroup x:Name="ProjectLayoutStates">
-          <VisualState x:Name="NarrowProjectLayout">
-            <VisualState.StateTriggers>
-              <AdaptiveTrigger MinWindowWidth="0" />
-            </VisualState.StateTriggers>
-            <VisualState.Setters>
-              <Setter Target="ProjectsLayoutGrid.ColumnSpacing" Value="0" />
-              <Setter Target="ProjectsLayoutGrid.RowSpacing" Value="14" />
-              <Setter Target="ProjectListColumn.Width" Value="*" />
-              <Setter Target="ProjectDetailsColumn.Width" Value="0" />
-              <Setter Target="ProjectListRow.Height" Value="260" />
-              <Setter Target="ProjectDetailsRow.Height" Value="*" />
-              <Setter Target="ProjectMasterPane.(Grid.Column)" Value="0" />
-              <Setter Target="ProjectMasterPane.(Grid.Row)" Value="0" />
-              <Setter Target="ProjectDetailsPane.(Grid.Column)" Value="0" />
-              <Setter Target="ProjectDetailsPane.(Grid.Row)" Value="1" />
-            </VisualState.Setters>
-          </VisualState>
-          <VisualState x:Name="WideProjectLayout">
-            <VisualState.StateTriggers>
-              <AdaptiveTrigger MinWindowWidth="980" />
-            </VisualState.StateTriggers>
-            <VisualState.Setters>
-              <Setter Target="ProjectsLayoutGrid.ColumnSpacing" Value="14" />
-              <Setter Target="ProjectsLayoutGrid.RowSpacing" Value="0" />
-              <Setter Target="ProjectListColumn.Width" Value="300" />
-              <Setter Target="ProjectDetailsColumn.Width" Value="*" />
-              <Setter Target="ProjectListRow.Height" Value="*" />
-              <Setter Target="ProjectDetailsRow.Height" Value="0" />
-              <Setter Target="ProjectMasterPane.(Grid.Column)" Value="0" />
-              <Setter Target="ProjectMasterPane.(Grid.Row)" Value="0" />
-              <Setter Target="ProjectDetailsPane.(Grid.Column)" Value="1" />
-              <Setter Target="ProjectDetailsPane.(Grid.Row)" Value="0" />
-            </VisualState.Setters>
-          </VisualState>
-        </VisualStateGroup>
-      </VisualStateManager.VisualStateGroups>
-
-      <Border x:Name="ProjectMasterPane" Padding="12" Style="{StaticResource GoCardStyle}">
-        <Grid RowSpacing="10">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-          </Grid.RowDefinitions>
-          <Grid ColumnSpacing="8">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*" />
-              <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <TextBlock VerticalAlignment="Center" Style="{StaticResource GoSectionTitleStyle}" Text="Projektliste" />
-            <ToggleSwitch
-              x:Name="ArchivedToggle"
-              Grid.Column="1"
-              Header="Archiv"
-              IsOn="{x:Bind ViewModel.ShowArchived, Mode=TwoWay}"
-              Toggled="OnArchiveFilterChanged" />
-          </Grid>
-          <ListView
+          <GridView
             x:Name="ProjectList"
-            Grid.Row="1"
+            HorizontalAlignment="Stretch"
             IsItemClickEnabled="True"
+            ItemClick="OnProjectItemClick"
             ItemsSource="{x:Bind ViewModel.Projects, Mode=OneWay}"
-            SelectionChanged="OnProjectSelectionChanged"
-            SelectionMode="Single">
-            <ListView.ItemTemplate>
+            SelectionMode="None">
+            <GridView.ItemContainerStyle>
+              <Style TargetType="GridViewItem">
+                <Setter Property="Width" Value="310" />
+                <Setter Property="Height" Value="184" />
+                <Setter Property="Margin" Value="0,0,12,12" />
+                <Setter Property="Padding" Value="0" />
+                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                <Setter Property="VerticalContentAlignment" Value="Stretch" />
+              </Style>
+            </GridView.ItemContainerStyle>
+            <GridView.ItemsPanel>
+              <ItemsPanelTemplate>
+                <ItemsWrapGrid Orientation="Horizontal" />
+              </ItemsPanelTemplate>
+            </GridView.ItemsPanel>
+            <GridView.ItemTemplate>
               <DataTemplate x:DataType="models:Project">
-                <Grid MinHeight="62" Padding="5" RowSpacing="3">
-                  <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                  </Grid.RowDefinitions>
-                  <TextBlock FontWeight="SemiBold" Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
-                  <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="6">
-                    <FontIcon FontSize="11" Glyph="&#xE80F;" />
+                <Border Padding="18" Style="{StaticResource GoCardStyle}">
+                  <Grid RowSpacing="10">
+                    <Grid.RowDefinitions>
+                      <RowDefinition Height="Auto" />
+                      <RowDefinition Height="Auto" />
+                      <RowDefinition Height="*" />
+                      <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid ColumnSpacing="10">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                      </Grid.ColumnDefinitions>
+                      <Border
+                        Width="34"
+                        Height="34"
+                        Background="{ThemeResource GoLayerStrongBrush}"
+                        CornerRadius="7">
+                        <FontIcon FontSize="16" Glyph="&#xE838;" />
+                      </Border>
+                      <TextBlock
+                        Grid.Column="1"
+                        VerticalAlignment="Center"
+                        FontSize="17"
+                        FontWeight="SemiBold"
+                        Text="{x:Bind Name}"
+                        TextTrimming="CharacterEllipsis" />
+                    </Grid>
                     <TextBlock
+                      Grid.Row="1"
                       Foreground="{ThemeResource GoMutedTextBrush}"
                       Text="{x:Bind ConstructionProject, FallbackValue='Ohne Bauvorhaben'}"
                       TextTrimming="CharacterEllipsis" />
-                  </StackPanel>
-                </Grid>
+                    <TextBlock
+                      Grid.Row="2"
+                      MaxLines="2"
+                      Foreground="{ThemeResource GoMutedTextBrush}"
+                      Text="{x:Bind Description, FallbackValue='Ohne Beschreibung'}"
+                      TextTrimming="CharacterEllipsis"
+                      TextWrapping="WrapWholeWords" />
+                    <TextBlock
+                      Grid.Row="3"
+                      HorizontalAlignment="Right"
+                      FontWeight="SemiBold"
+                      Foreground="{ThemeResource GoAccentBrush}"
+                      Text="Öffnen →" />
+                  </Grid>
+                </Border>
               </DataTemplate>
-            </ListView.ItemTemplate>
-          </ListView>
-        </Grid>
-      </Border>
+            </GridView.ItemTemplate>
+          </GridView>
 
-      <ScrollViewer x:Name="ProjectDetailsPane" Grid.Column="1" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel
+            x:Name="ProjectEmptyState"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Spacing="8"
+            Visibility="Collapsed">
+            <FontIcon
+              HorizontalAlignment="Center"
+              FontSize="30"
+              Foreground="{ThemeResource GoMutedTextBrush}"
+              Glyph="&#xE838;" />
+            <TextBlock
+              Foreground="{ThemeResource GoMutedTextBrush}"
+              Text="Keine Projekte in dieser Ansicht vorhanden." />
+          </StackPanel>
+        </StackPanel>
+      </ScrollViewer>
+
+      <ScrollViewer
+        x:Name="ProjectDetailsPane"
+        HorizontalScrollBarVisibility="Disabled"
+        Padding="0,0,0,24"
+        VerticalAlignment="Stretch"
+        VerticalScrollBarVisibility="Auto"
+        Visibility="Collapsed">
         <StackPanel Spacing="14">
+          <Button
+            HorizontalAlignment="Left"
+            Click="OnBackToProjects"
+            Style="{StaticResource GoSubtleButtonStyle}">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <FontIcon FontSize="13" Glyph="&#xE72B;" />
+              <TextBlock Text="Zurück zu Projekten" />
+            </StackPanel>
+          </Button>
           <Border Style="{StaticResource GoCardStyle}">
             <StackPanel Spacing="12">
               <Grid ColumnSpacing="10">
@@ -159,7 +334,7 @@
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
                   <Button Click="OnDeleteProject" Content="Löschen" Foreground="{ThemeResource GoDangerBrush}" />
                   <Button Click="OnToggleArchive" Content="{x:Bind ViewModel.ArchiveActionLabel, Mode=OneWay}" />
-                  <Button Click="OnSaveProject" Content="Speichern" Style="{StaticResource AccentButtonStyle}" />
+                  <Button Click="OnSaveProject" Content="Speichern" Style="{StaticResource GoPrimaryButtonStyle}" />
                 </StackPanel>
               </Grid>
               <Grid ColumnSpacing="12">
@@ -206,26 +381,34 @@
               <ListView Grid.Row="2" ItemsSource="{x:Bind ViewModel.Checklist, Mode=OneWay}" SelectionMode="None">
                 <ListView.ItemTemplate>
                   <DataTemplate x:DataType="models:ChecklistItem">
-                    <Grid ColumnSpacing="8">
-                      <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="Auto" />
-                      </Grid.ColumnDefinitions>
-                      <CheckBox IsChecked="{x:Bind IsCompleted}" Click="OnChecklistClicked" />
-                      <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{x:Bind Text}" TextWrapping="Wrap" />
-                      <Button Grid.Column="2" Click="OnMoveChecklistItemUp" ToolTipService.ToolTip="Nach oben">
-                        <FontIcon FontSize="13" Glyph="&#xE70E;" />
-                      </Button>
-                      <Button Grid.Column="3" Click="OnMoveChecklistItemDown" ToolTipService.ToolTip="Nach unten">
-                        <FontIcon FontSize="13" Glyph="&#xE70D;" />
-                      </Button>
-                      <Button Grid.Column="4" Click="OnDeleteChecklistItem" ToolTipService.ToolTip="Löschen">
-                        <FontIcon FontSize="13" Glyph="&#xE74D;" />
-                      </Button>
-                    </Grid>
+                    <Border
+                      Margin="0,3"
+                      Padding="10,7"
+                      Background="{ThemeResource GoLayerStrongBrush}"
+                      BorderBrush="{ThemeResource GoStrokeBrush}"
+                      BorderThickness="1"
+                      CornerRadius="9">
+                      <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="Auto" />
+                          <ColumnDefinition Width="*" />
+                          <ColumnDefinition Width="Auto" />
+                          <ColumnDefinition Width="Auto" />
+                          <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <CheckBox IsChecked="{x:Bind IsCompleted}" Click="OnChecklistClicked" />
+                        <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{x:Bind Text}" TextWrapping="Wrap" />
+                        <Button Grid.Column="2" Click="OnMoveChecklistItemUp" ToolTipService.ToolTip="Nach oben">
+                          <FontIcon FontSize="13" Glyph="&#xE70E;" />
+                        </Button>
+                        <Button Grid.Column="3" Click="OnMoveChecklistItemDown" ToolTipService.ToolTip="Nach unten">
+                          <FontIcon FontSize="13" Glyph="&#xE70D;" />
+                        </Button>
+                        <Button Grid.Column="4" Click="OnDeleteChecklistItem" ToolTipService.ToolTip="Löschen">
+                          <FontIcon FontSize="13" Glyph="&#xE74D;" />
+                        </Button>
+                      </Grid>
+                    </Border>
                   </DataTemplate>
                 </ListView.ItemTemplate>
               </ListView>
@@ -233,156 +416,171 @@
           </Border>
 
           <Border Style="{StaticResource GoCardStyle}">
-            <Grid RowSpacing="10">
-              <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="260" />
-              </Grid.RowDefinitions>
-              <Grid ColumnSpacing="8">
+            <StackPanel Spacing="12">
+              <Grid ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width="*" />
                   <ColumnDefinition Width="Auto" />
-                  <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock VerticalAlignment="Center" Style="{StaticResource GoSectionTitleStyle}" Text="Dateien" />
-                <ComboBox x:Name="AssetCategoryBox" Grid.Column="1" MinWidth="130" SelectedIndex="4">
-                  <ComboBoxItem Content="PDF" Tag="Pdf" />
-                  <ComboBoxItem Content="Zeichnung" Tag="Drawing" />
-                  <ComboBoxItem Content="Bild" Tag="Image" />
-                  <ComboBoxItem Content="Besprechung" Tag="Meeting" />
-                  <ComboBoxItem Content="Sonstige" Tag="Other" />
-                </ComboBox>
-                <Button Grid.Column="2" Click="OnImportAsset" Content="Importieren" Style="{StaticResource AccentButtonStyle}" />
+                <StackPanel Spacing="3">
+                  <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Baupläne" />
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Grundrisse, Schnitte und Planunterlagen im PDF-Format." TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" Click="OnImportAsset" Content="Baupläne hinzufügen" Style="{StaticResource GoPrimaryButtonStyle}" Tag="Pdf" />
               </Grid>
-
               <ListView
-                x:Name="AssetList"
-                Grid.Row="1"
-                MaxHeight="270"
-                ItemsSource="{x:Bind ViewModel.Assets, Mode=OneWay}"
-                SelectionChanged="OnAssetSelectionChanged"
-                SelectionMode="Single">
-                <ListView.ItemTemplate>
-                  <DataTemplate x:DataType="models:ProjectAsset">
-                    <Grid MinHeight="52" ColumnSpacing="10">
-                      <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                      </Grid.ColumnDefinitions>
-                      <Grid Width="42" Height="42" VerticalAlignment="Center">
-                        <Border Background="{ThemeResource GoLayerStrongBrush}" CornerRadius="6" />
-                        <FontIcon FontSize="17" Glyph="&#xE7C3;" />
-                        <Image
-                          Margin="2"
-                          Loaded="OnAssetThumbnailLoaded"
-                          Stretch="UniformToFill" />
-                      </Grid>
-                      <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <TextBlock FontWeight="SemiBold" Text="{x:Bind FileName}" TextTrimming="CharacterEllipsis" />
-                        <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="{x:Bind Category}" />
-                      </StackPanel>
-                      <TextBlock Grid.Column="2" VerticalAlignment="Center" Foreground="{ThemeResource GoMutedTextBrush}" Text="{x:Bind Length}" />
-                    </Grid>
-                  </DataTemplate>
-                </ListView.ItemTemplate>
-              </ListView>
-
-              <Grid Grid.Row="2" ColumnSpacing="8">
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="*" />
-                  <ColumnDefinition Width="190" />
-                  <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBox
-                  Header="Dateiname"
-                  IsEnabled="{x:Bind ViewModel.HasAssetSelection, Mode=OneWay}"
-                  Text="{x:Bind ViewModel.AssetFileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                <ComboBox
-                  Grid.Column="1"
-                  Header="Kategorie"
-                  IsEnabled="{x:Bind ViewModel.HasAssetSelection, Mode=OneWay}"
-                  ItemsSource="{x:Bind ViewModel.AssetCategories, Mode=OneWay}"
-                  SelectedItem="{x:Bind ViewModel.SelectedAssetCategory, Mode=TwoWay}" />
-                <Button
-                  Grid.Column="2"
-                  VerticalAlignment="Bottom"
-                  Click="OnSaveAssetMetadata"
-                  Content="Metadaten speichern"
-                  IsEnabled="{x:Bind ViewModel.HasAssetSelection, Mode=OneWay}" />
-              </Grid>
-
-              <InfoBar
-                Grid.Row="3"
-                IsClosable="False"
-                IsOpen="{x:Bind ViewModel.HasModifiedWorkingCopy, Mode=OneWay}"
-                Severity="Warning"
-                Title="Extern geänderte Arbeitskopie">
-                <InfoBar.Content>
-                  <StackPanel Spacing="8">
-                    <TextBlock Text="{x:Bind ViewModel.WorkingCopyStatusText, Mode=OneWay}" TextWrapping="Wrap" />
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                      <Button Click="OnReimportWorkingCopy" Content="Änderungen übernehmen" Style="{StaticResource AccentButtonStyle}" />
-                      <Button Click="OnDiscardWorkingCopy" Content="Änderungen verwerfen" />
-                    </StackPanel>
-                  </StackPanel>
-                </InfoBar.Content>
-              </InfoBar>
-
-              <Grid Grid.Row="4" ColumnSpacing="8">
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="*" />
-                  <ColumnDefinition Width="Auto" />
-                  <ColumnDefinition Width="Auto" />
-                  <ColumnDefinition Width="Auto" />
-                  <ColumnDefinition Width="Auto" />
-                  <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock
-                  x:Name="PreviewSummary"
-                  VerticalAlignment="Center"
-                  Foreground="{ThemeResource GoMutedTextBrush}"
-                  Text="Datei auswählen, um Aktionen anzuzeigen."
-                  TextTrimming="CharacterEllipsis" />
-                <Button Grid.Column="1" Click="OnMoveAssetUp" Content="Hoch" />
-                <Button Grid.Column="2" Click="OnMoveAssetDown" Content="Runter" />
-                <Button Grid.Column="3" Click="OnOpenAsset" Content="Öffnen" />
-                <Button Grid.Column="4" Click="OnExportAsset" Content="Exportieren" />
-                <Button Grid.Column="5" Click="OnDeleteAsset" Content="Löschen" Foreground="{ThemeResource GoDangerBrush}" />
-              </Grid>
-
-              <Border
-                Grid.Row="5"
-                Margin="0,4,0,0"
-                Background="{ThemeResource GoLayerStrongBrush}"
-                BorderBrush="{ThemeResource GoStrokeBrush}"
-                BorderThickness="1"
-                CornerRadius="10">
-                <Grid>
-                  <TextBlock
-                    x:Name="PreviewPlaceholder"
-                    MaxWidth="420"
-                    HorizontalAlignment="Center"
-                    VerticalAlignment="Center"
-                    Foreground="{ThemeResource GoMutedTextBrush}"
-                    Text="Vorschau für Bilder, Text und PDF"
-                    TextAlignment="Center"
-                    TextWrapping="Wrap" />
-                  <Image x:Name="ImagePreview" Margin="12" Stretch="Uniform" Visibility="Collapsed" />
-                  <ScrollViewer x:Name="TextPreview" Padding="14" Visibility="Collapsed">
-                    <TextBlock x:Name="TextPreviewContent" FontFamily="Cascadia Mono" FontSize="12" IsTextSelectionEnabled="True" TextWrapping="Wrap" />
-                  </ScrollViewer>
-                  <WebView2 x:Name="PdfPreview" Visibility="Collapsed" />
-                </Grid>
-              </Border>
-            </Grid>
+                x:Name="ConstructionPlanList"
+                MaxHeight="230"
+                IsItemClickEnabled="True"
+                ItemTemplate="{StaticResource ProjectFileItemTemplate}"
+                ItemClick="OnAssetItemClick"
+                ItemsSource="{x:Bind ViewModel.ConstructionPlans, Mode=OneWay}"
+                SelectionMode="None" />
+            </StackPanel>
           </Border>
+
+          <Border Style="{StaticResource GoCardStyle}">
+            <StackPanel Spacing="12">
+              <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="3">
+                  <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Bauzeichnungen" />
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="CAD- und BIM-Zeichnungen, zum Beispiel DWG oder RVT." TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" Click="OnImportAsset" Content="Zeichnungen hinzufügen" Style="{StaticResource GoPrimaryButtonStyle}" Tag="Drawing" />
+              </Grid>
+              <ListView
+                x:Name="ConstructionDrawingList"
+                MaxHeight="230"
+                IsItemClickEnabled="True"
+                ItemTemplate="{StaticResource ProjectFileItemTemplate}"
+                ItemClick="OnAssetItemClick"
+                ItemsSource="{x:Bind ViewModel.ConstructionDrawings, Mode=OneWay}"
+                SelectionMode="None" />
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource GoCardStyle}">
+            <StackPanel Spacing="12">
+              <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="3">
+                  <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Baubesprechungen" />
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Protokolle, Notizen und Unterlagen aus Projektbesprechungen." TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" Click="OnImportAsset" Content="Besprechungsdateien hinzufügen" Style="{StaticResource GoPrimaryButtonStyle}" Tag="Meeting" />
+              </Grid>
+              <ListView
+                x:Name="MeetingFileList"
+                MaxHeight="230"
+                IsItemClickEnabled="True"
+                ItemTemplate="{StaticResource ProjectFileItemTemplate}"
+                ItemClick="OnAssetItemClick"
+                ItemsSource="{x:Bind ViewModel.MeetingFiles, Mode=OneWay}"
+                SelectionMode="None" />
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource GoCardStyle}">
+            <StackPanel Spacing="12">
+              <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="3">
+                  <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Sonstige Dateien" />
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Weitere projektbezogene Dokumente und Dateiformate." TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" Click="OnImportAsset" Content="Dateien hinzufügen" Style="{StaticResource GoPrimaryButtonStyle}" Tag="Other" />
+              </Grid>
+              <ListView
+                x:Name="OtherFileList"
+                MaxHeight="230"
+                IsItemClickEnabled="True"
+                ItemTemplate="{StaticResource ProjectFileItemTemplate}"
+                ItemClick="OnAssetItemClick"
+                ItemsSource="{x:Bind ViewModel.OtherFiles, Mode=OneWay}"
+                SelectionMode="None" />
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource GoCardStyle}">
+            <StackPanel Spacing="12">
+              <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="3">
+                  <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Bilder" />
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Baustellenfotos und Projektdokumentation mit direkter Vorschau." TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" Click="OnImportAsset" Content="Bilder hinzufügen" Style="{StaticResource GoPrimaryButtonStyle}" Tag="Image" />
+              </Grid>
+              <GridView
+                x:Name="ImageAssetList"
+                HorizontalAlignment="Stretch"
+                IsItemClickEnabled="True"
+                ItemTemplate="{StaticResource ProjectImageItemTemplate}"
+                ItemClick="OnAssetItemClick"
+                ItemsSource="{x:Bind ViewModel.Images, Mode=OneWay}"
+                SelectionMode="None">
+                <GridView.ItemContainerStyle>
+                  <Style TargetType="GridViewItem">
+                    <Setter Property="Width" Value="176" />
+                    <Setter Property="Height" Value="144" />
+                    <Setter Property="Margin" Value="0,0,8,8" />
+                    <Setter Property="Padding" Value="0" />
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                    <Setter Property="VerticalContentAlignment" Value="Stretch" />
+                  </Style>
+                </GridView.ItemContainerStyle>
+              </GridView>
+            </StackPanel>
+          </Border>
+
         </StackPanel>
       </ScrollViewer>
+    </Grid>
+
+    <Grid
+      x:Name="FileOpeningOverlay"
+      Grid.RowSpan="3"
+      Canvas.ZIndex="100"
+      Background="#38000000"
+      IsHitTestVisible="True"
+      Visibility="Collapsed">
+      <Border
+        MinWidth="300"
+        MaxWidth="440"
+        Padding="24,20"
+        HorizontalAlignment="Center"
+        VerticalAlignment="Center"
+        Background="{ThemeResource GoLayerBrush}"
+        BorderBrush="{ThemeResource GoStrokeBrush}"
+        BorderThickness="1"
+        CornerRadius="12">
+        <StackPanel HorizontalAlignment="Center" Spacing="12">
+          <ProgressRing
+            Width="34"
+            Height="34"
+            HorizontalAlignment="Center"
+            IsActive="True" />
+          <TextBlock
+            x:Name="FileOpeningMessage"
+            FontWeight="SemiBold"
+            Text="Datei wird geöffnet …"
+            TextAlignment="Center"
+            TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
     </Grid>
   </Grid>
 </Page>
