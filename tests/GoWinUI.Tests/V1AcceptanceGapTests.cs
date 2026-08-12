@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using GoWinUI.Core.Chat;
 using GoWinUI.Core.Contracts;
@@ -38,8 +39,11 @@ public sealed class V1AcceptanceGapTests
         Assert.False(string.IsNullOrWhiteSpace(result.TruncationNotice));
         Assert.Equal(ChatRole.User, userMessage.Role);
         Assert.NotEqual(prompt, userMessage.Content);
-        Assert.Contains("\nANFANG-", userMessage.Content, StringComparison.Ordinal);
-        Assert.EndsWith("-ENDE", userMessage.Content, StringComparison.Ordinal);
+        using var envelope = JsonDocument.Parse(userMessage.Content);
+        var boundedPrompt = envelope.RootElement.GetProperty("originalUserPrompt").GetString();
+        Assert.NotNull(boundedPrompt);
+        Assert.StartsWith("ANFANG-", boundedPrompt, StringComparison.Ordinal);
+        Assert.EndsWith("-ENDE", boundedPrompt, StringComparison.Ordinal);
         Assert.Equal(actualTokens, result.EstimatedTokens);
         Assert.InRange(actualTokens, 1, contextLength - outputReserve);
     }

@@ -284,22 +284,92 @@ public sealed partial class LmStudioClient(
         Headers = { Accept = { new("text/event-stream") } },
     };
 
-    private static object CreateResponsesPayload(LmChatRequest request) => new
+    private static object CreateResponsesPayload(LmChatRequest request)
     {
-        model = request.Model,
-        input = request.Messages.Select(static message => new { role = message.Role.ToString().ToLowerInvariant(), content = message.Content }).ToArray(),
-        stream = true,
-        max_output_tokens = request.MaxOutputTokens,
-        reasoning = string.IsNullOrWhiteSpace(request.ReasoningEffort) ? null : new { effort = request.ReasoningEffort },
-    };
+        var input = request.Messages.Select(message => new
+        {
+            role = RequestRole(request.Model, message.Role),
+            content = message.Content,
+        }).ToArray();
+        if (request.RequireJsonObject)
+        {
+            return new
+            {
+                model = request.Model,
+                input,
+                stream = true,
+                max_output_tokens = request.MaxOutputTokens,
+                reasoning = string.IsNullOrWhiteSpace(request.ReasoningEffort) ? null : new { effort = request.ReasoningEffort },
+                text = new
+                {
+                    format = new
+                    {
+                        type = "json_schema",
+                        name = "go_tga_chat_response",
+                        strict = true,
+                        schema = StructuredChatResponseSchema(),
+                    },
+                },
+            };
+        }
 
-    private static object CreateChatPayload(LmChatRequest request) => new
+        return new
+        {
+            model = request.Model,
+            input,
+            stream = true,
+            max_output_tokens = request.MaxOutputTokens,
+            reasoning = string.IsNullOrWhiteSpace(request.ReasoningEffort) ? null : new { effort = request.ReasoningEffort },
+        };
+    }
+
+    private static object CreateChatPayload(LmChatRequest request)
     {
-        model = request.Model,
-        messages = request.Messages.Select(static message => new { role = message.Role.ToString().ToLowerInvariant(), content = message.Content }).ToArray(),
-        stream = true,
-        max_tokens = request.MaxOutputTokens,
-        reasoning_effort = request.ReasoningEffort,
+        var messages = request.Messages.Select(message => new
+        {
+            role = RequestRole(request.Model, message.Role),
+            content = message.Content,
+        }).ToArray();
+        if (request.RequireJsonObject)
+        {
+            return new
+            {
+                model = request.Model,
+                messages,
+                stream = true,
+                max_tokens = request.MaxOutputTokens,
+                reasoning_effort = request.ReasoningEffort,
+                response_format = new { type = "json_object" },
+            };
+        }
+
+        return new
+        {
+            model = request.Model,
+            messages,
+            stream = true,
+            max_tokens = request.MaxOutputTokens,
+            reasoning_effort = request.ReasoningEffort,
+        };
+    }
+
+    private static string RequestRole(string model, ChatRole role) =>
+        role == ChatRole.System && model.Contains("gpt-oss", StringComparison.OrdinalIgnoreCase)
+            ? "developer"
+            : role.ToString().ToLowerInvariant();
+
+    private static object StructuredChatResponseSchema() => new
+    {
+        type = "object",
+        additionalProperties = false,
+        required = new[] { "schema", "type", "message", "sessionTitle" },
+        properties = new Dictionary<string, object>
+        {
+            ["schema"] = new { type = "string", @const = "barebone.agent.response.v2" },
+            ["type"] = new { type = "string", @const = "message" },
+            ["message"] = new { type = "string", minLength = 1 },
+            ["sessionTitle"] = new { type = "string", minLength = 1, maxLength = 64 },
+        },
     };
 
     private static Uri BuildOpenAiUri(string baseUrl, string relative)

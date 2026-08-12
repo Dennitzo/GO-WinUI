@@ -136,7 +136,8 @@ public sealed record LmChatRequest(
     string Model,
     IReadOnlyList<LmChatMessage> Messages,
     string? ReasoningEffort = null,
-    int? MaxOutputTokens = null);
+    int? MaxOutputTokens = null,
+    bool RequireJsonObject = false);
 
 public sealed record ContextBuildRequest(
     string SystemPrompt,
@@ -169,6 +170,7 @@ public sealed record AppSettings
     public const string DefaultSelectedModel = "openai/gpt-oss-20b";
     public const string DefaultAccentColor = "#A970FF";
     public const string DefaultBackgroundColor = "#6B6872";
+    public const int MaximumRecentActivityTextLength = 180;
 
     public int Version { get; init; } = 2;
     public string LmStudioBaseUrl { get; init; } = "http://127.0.0.1:1234/v1";
@@ -185,6 +187,8 @@ public sealed record AppSettings
     public string LastRoute { get; init; } = "assistant";
     public Guid? ActiveSessionId { get; init; }
     public Guid? ActiveProjectId { get; init; }
+    public string? LastActivityText { get; init; }
+    public DateTimeOffset? LastActivityAt { get; init; }
 }
 
 public sealed record SessionLogEntry(

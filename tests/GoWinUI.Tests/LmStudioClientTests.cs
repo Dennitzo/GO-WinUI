@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure.AI;
@@ -67,6 +68,30 @@ public sealed class LmStudioClientTests
         Assert.Contains(result, static delta => delta.Text == "Fallback");
     }
 
+    [Fact]
+    public async Task GptOssUsesDeveloperInstructionAndRequestsAJsonObjectOnChatFallback()
+    {
+        var handler = new QueueHandler(
+            Response(HttpStatusCode.NotFound, "missing", "application/json"),
+            Response(HttpStatusCode.OK, "data: {\"choices\":[{\"delta\":{\"content\":\"{}\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"));
+        var client = new LmStudioClient(new HttpClient(handler), new StaticSettings());
+        var request = new LmChatRequest(
+            "openai/gpt-oss-20b",
+            [new(ChatRole.System, "TGA-Regeln"), new(ChatRole.User, "{}")],
+            RequireJsonObject: true);
+
+        await foreach (var _ in client.StreamAsync(request))
+        {
+        }
+
+        using var responsesPayload = JsonDocument.Parse(handler.RequestBodies[0]);
+        Assert.Equal("developer", responsesPayload.RootElement.GetProperty("input")[0].GetProperty("role").GetString());
+        Assert.Equal("json_schema", responsesPayload.RootElement.GetProperty("text").GetProperty("format").GetProperty("type").GetString());
+        using var chatPayload = JsonDocument.Parse(handler.RequestBodies[1]);
+        Assert.Equal("developer", chatPayload.RootElement.GetProperty("messages")[0].GetProperty("role").GetString());
+        Assert.Equal("json_object", chatPayload.RootElement.GetProperty("response_format").GetProperty("type").GetString());
+    }
+
     private static LmChatRequest Request() => new("local-model", [new(ChatRole.User, "Hallo")]);
 
     private static HttpResponseMessage Response(HttpStatusCode status, string body, string contentType = "text/event-stream") => new(status)
@@ -78,10 +103,15 @@ public sealed class LmStudioClientTests
     {
         private readonly Queue<HttpResponseMessage> _responses = new(responses);
         internal List<HttpRequestMessage> Requests { get; } = [];
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        internal List<string> RequestBodies { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Requests.Add(request);
-            return Task.FromResult(_responses.Dequeue());
+            RequestBodies.Add(request.Content is null
+                ? string.Empty
+                : await request.Content.ReadAsStringAsync(cancellationToken));
+            return _responses.Dequeue();
         }
     }
 

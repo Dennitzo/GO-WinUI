@@ -84,6 +84,8 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         var backgroundColor = settings.Version < 2
             ? accentColor
             : NormalizePaletteColor(settings.BackgroundColor, AppSettings.DefaultBackgroundColor);
+        var lastActivityText = NormalizeActivityText(settings.LastActivityText);
+        var lastActivityAt = lastActivityText is null ? null : settings.LastActivityAt;
         return settings with
         {
             Version = 2,
@@ -96,6 +98,8 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             NavigationPaneWidth = Math.Clamp(settings.NavigationPaneWidth, 280, 520),
             Language = string.IsNullOrWhiteSpace(settings.Language) ? "de-DE" : settings.Language,
             LastRoute = string.IsNullOrWhiteSpace(settings.LastRoute) ? "assistant" : settings.LastRoute,
+            LastActivityText = lastActivityAt is null ? null : lastActivityText,
+            LastActivityAt = lastActivityAt,
             Window = window,
         };
     }
@@ -108,5 +112,19 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
                && candidate.Skip(1).All(Uri.IsHexDigit)
             ? candidate.ToUpperInvariant()
             : fallback;
+    }
+
+    private static string? NormalizeActivityText(string? value)
+    {
+        var normalized = string.Join(' ', (value ?? string.Empty)
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (normalized.Length == 0)
+        {
+            return null;
+        }
+
+        return normalized.Length <= AppSettings.MaximumRecentActivityTextLength
+            ? normalized
+            : string.Concat(normalized.AsSpan(0, AppSettings.MaximumRecentActivityTextLength - 1), "…");
     }
 }

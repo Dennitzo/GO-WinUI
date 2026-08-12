@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using System.Text;
+using GoWinUI.Core.Chat;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure.Storage;
@@ -35,7 +35,7 @@ public sealed partial class ChatOrchestrator(
         var accumulated = new StringBuilder();
         try
         {
-            var session = await chats.GetSessionAsync(sessionId, linked.Token).ConfigureAwait(false)
+            _ = await chats.GetSessionAsync(sessionId, linked.Token).ConfigureAwait(false)
                 ?? throw new KeyNotFoundException($"Sitzung '{sessionId}' wurde nicht gefunden.");
             var history = await chats.ListMessagesAsync(sessionId, linked.Token).ConfigureAwait(false);
             _ = await chats.AddMessageAsync(sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed, linked.Token).ConfigureAwait(false);
@@ -68,28 +68,34 @@ public sealed partial class ChatOrchestrator(
                 contextLength,
                 context.WasTruncated,
                 context.TruncationNotice));
-            var request = new LmChatRequest(model, context.Messages, reasoningEffort, context.MaxOutputTokens);
-            var checkpoint = Stopwatch.StartNew();
-            var unpersisted = 0;
+            var request = new LmChatRequest(
+                model,
+                context.Messages,
+                reasoningEffort,
+                context.MaxOutputTokens,
+                RequireJsonObject: true);
             await foreach (var delta in lmStudio.StreamAsync(request, linked.Token).ConfigureAwait(false))
             {
                 if (delta.Text.Length > 0)
                 {
                     accumulated.Append(delta.Text);
-                    unpersisted += delta.Text.Length;
-                    StreamUpdated?.Invoke(this, new(sessionId, assistant.Id, delta.Text, accumulated.ToString(), MessageStatus.Streaming));
-                }
-
-                if (unpersisted >= 4_096 || checkpoint.ElapsedMilliseconds >= 500)
-                {
-                    await chats.UpdateMessageAsync(assistant.Id, accumulated.ToString(), MessageStatus.Streaming, cancellationToken: linked.Token).ConfigureAwait(false);
-                    checkpoint.Restart();
-                    unpersisted = 0;
                 }
             }
 
-            var finalContent = accumulated.ToString();
+            var parsedResponse = GeneralAgentResponseParser.Parse(accumulated.ToString(), prompt);
+            var finalContent = parsedResponse.Message;
+            if (string.IsNullOrWhiteSpace(finalContent))
+            {
+                throw new InvalidDataException("Die lokale AI hat keine sichtbare Antwort erzeugt.");
+            }
+
+            if (!parsedResponse.IsStructured)
+            {
+                ResponseContractFallback(_logger, sessionId);
+            }
+
             await chats.UpdateMessageAsync(assistant.Id, finalContent, MessageStatus.Completed, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            await chats.RenameSessionAsync(sessionId, parsedResponse.SessionTitle, CancellationToken.None).ConfigureAwait(false);
             await SaveRunFinishedAsync(database, runId, MessageStatus.Completed, null).ConfigureAwait(false);
             RunCompleted(_logger, sessionId);
             StreamUpdated?.Invoke(this, new(sessionId, assistant.Id, string.Empty, finalContent, MessageStatus.Completed));
@@ -97,7 +103,7 @@ public sealed partial class ChatOrchestrator(
         }
         catch (OperationCanceledException) when (assistant is not null)
         {
-            var partialContent = accumulated.ToString();
+            var partialContent = GeneralAgentResponseParser.VisiblePartial(accumulated.ToString());
             await chats.UpdateMessageAsync(assistant.Id, partialContent, MessageStatus.Cancelled, cancellationToken: CancellationToken.None).ConfigureAwait(false);
             await SaveRunFinishedAsync(database, runId, MessageStatus.Cancelled, null).ConfigureAwait(false);
             RunCancelled(_logger, sessionId);
@@ -106,7 +112,7 @@ public sealed partial class ChatOrchestrator(
         }
         catch (Exception exception) when (assistant is not null)
         {
-            var partialContent = accumulated.ToString();
+            var partialContent = GeneralAgentResponseParser.VisiblePartial(accumulated.ToString());
             await chats.UpdateMessageAsync(assistant.Id, partialContent, MessageStatus.Failed, exception.Message, CancellationToken.None).ConfigureAwait(false);
             await SaveRunFinishedAsync(database, runId, MessageStatus.Failed, exception.Message).ConfigureAwait(false);
             RunFailed(_logger, exception, sessionId);
@@ -180,4 +186,7 @@ public sealed partial class ChatOrchestrator(
 
     [LoggerMessage(EventId = 2204, Level = LogLevel.Information, Message = "General chat envelope prepared with {PolicyCount} policies and output limit {MaxOutputTokens}")]
     private static partial void GeneralEnvelopePrepared(ILogger logger, int policyCount, int maxOutputTokens);
+
+    [LoggerMessage(EventId = 2205, Level = LogLevel.Warning, Message = "LM Studio response for session {SessionId} did not follow the structured message/session-title contract; visible fallback was used")]
+    private static partial void ResponseContractFallback(ILogger logger, Guid sessionId);
 }

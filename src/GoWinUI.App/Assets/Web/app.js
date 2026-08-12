@@ -160,12 +160,12 @@
       const open = document.createElement("button");
       open.type = "button";
       open.className = "session-item__open";
-      open.title = `${session.title || "Neuer Chat"}\nRechtsklick zum Umbenennen`;
+      open.title = `${session.title || "Neue Sitzung"}\nRechtsklick zum Umbenennen`;
       const main = document.createElement("span");
       main.className = "session-item__main";
       const title = document.createElement("span");
       title.className = "session-item__title";
-      title.textContent = session.title || "Neuer Chat";
+      title.textContent = session.title || "Neue Sitzung";
       const date = document.createElement("span");
       date.className = "session-item__date";
       date.textContent = dateLabel(session.updatedAt);
@@ -181,7 +181,7 @@
       });
       open.addEventListener("contextmenu", event => {
         event.preventDefault();
-        const nextTitle = globalThis.prompt("Chat umbenennen", session.title || "Neuer Chat");
+        const nextTitle = globalThis.prompt("Sitzung umbenennen", session.title || "Neue Sitzung");
         if (nextTitle?.trim()) post("session.rename", { sessionId: session.id, title: nextTitle.trim() });
       });
 
@@ -193,7 +193,7 @@
       remove.title = "Sitzung löschen";
       remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>';
       remove.addEventListener("click", () => {
-        if (globalThis.confirm(`„${session.title || "Neuer Chat"}“ endgültig löschen?`)) {
+        if (globalThis.confirm(`„${session.title || "Neue Sitzung"}“ endgültig löschen?`)) {
           post("session.delete", { sessionId: session.id });
         }
       });
@@ -210,7 +210,7 @@
       id: `intro-${session.id}`,
       sessionId: session.id,
       role: "assistant",
-      content: "Worüber möchtest du sprechen?",
+      content: "Wobei kann ich dich in der TGA-Planung unterstützen?",
       status: "completed",
       createdAt: session.createdAt || session.updatedAt,
       isIntro: true
@@ -353,7 +353,7 @@
   function statusLabel(status) {
     return ({
       pending: "Wartet",
-      streaming: "Antwortet …",
+      streaming: "Denkt nach",
       cancelled: "Abgebrochen",
       failed: "Fehlgeschlagen",
       interrupted: "Unterbrochen"
@@ -661,6 +661,11 @@
       case "chat.cancelled":
       case "chat.failed":
         state.isRunning = false;
+        if (payload.session) {
+          const sessionIndex = state.sessions.findIndex(item => item.id === payload.session.id);
+          if (sessionIndex >= 0) state.sessions[sessionIndex] = payload.session;
+          else state.sessions.push(payload.session);
+        }
         if (payload.message && payload.message.sessionId === state.activeSessionId) {
           const index = state.messages.findIndex(item => item.id === payload.message.id);
           if (index >= 0) state.messages[index] = payload.message;

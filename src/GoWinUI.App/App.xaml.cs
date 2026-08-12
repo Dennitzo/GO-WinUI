@@ -73,6 +73,8 @@ public partial class App : Application
                 services.AddSingleton<SettingsCoordinator>();
                 services.AddSingleton<ProjectAssetThumbnailService>();
                 services.AddSingleton<ShellViewModel>();
+                services.AddSingleton<RecentActivityService>();
+                services.AddSingleton<ProjectAssetActivityService>();
                 services.AddSingleton<AssistantCoordinator>();
                 services.AddSingleton<ProjectsViewModel>();
                 services.AddSingleton<LogsViewModel>();
@@ -169,6 +171,8 @@ public partial class App : Application
 
             var shell = GetService<ShellViewModel>();
             shell.DatabaseStatus = "Datenbank bereit";
+            GetService<RecentActivityService>().Restore();
+            GetService<ProjectAssetActivityService>().Start();
             _window = GetService<MainWindow>();
             if (_window.Content is FrameworkElement themeRoot)
             {

@@ -14,9 +14,11 @@ public sealed class AssistantCoordinator(
     ILmStudioClient lmStudio,
     IContextAssembler contextAssembler,
     IChatOrchestrator orchestrator,
-    SettingsCoordinator settings) : IDisposable
+    SettingsCoordinator settings,
+    RecentActivityService recentActivity) : IDisposable
 {
-    private const string DefaultSystemPrompt = "Du bist GO, der lokale AI-Assistent dieser Anwendung. Weise auf Unsicherheit hin und erfinde keine Quellen.";
+    private const string DefaultSessionTitle = "Neue Sitzung";
+    private const string DefaultSystemPrompt = "GO ist ein lokales Arbeitstool für TGA-Fachplanung. Unterstütze Fachplaner bei technischer Gebäudeausrüstung, Anlagenkonzepten, Berechnungen, Koordination und Dokumentation. GO ist hier ein Produktname und nicht die Programmiersprache Go. Weise auf Unsicherheit, fehlende Projektdaten und erforderliche fachliche Prüfungen hin; erfinde keine Norminhalte, Quellen oder Projektangaben.";
     private readonly SemaphoreSlim _chatGate = new(1, 1);
     private CancellationTokenSource? _activeChatCancellation;
 
@@ -83,11 +85,12 @@ public sealed class AssistantCoordinator(
                 await OpenSessionAsync(GetRequiredGuid(envelope.Payload, "sessionId"), emit, envelope.RequestId, cancellationToken);
                 break;
             case "session.rename":
-                await chats.RenameSessionAsync(
+                await RenameSessionAsync(
                     GetRequiredGuid(envelope.Payload, "sessionId"),
                     GetRequiredString(envelope.Payload, "title", 160),
+                    emit,
+                    envelope.RequestId,
                     cancellationToken);
-                await emit("session.changed", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
                 break;
             case "session.delete":
                 await DeleteSessionAsync(GetRequiredGuid(envelope.Payload, "sessionId"), emit, envelope.RequestId, cancellationToken);
@@ -165,6 +168,12 @@ public sealed class AssistantCoordinator(
 
             throw new InvalidOperationException("Das Dokument enthält keinen extrahierbaren Text. OCR ist in dieser Version nicht enthalten.");
         }
+
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
+        await recentActivity.RecordAsync(
+            $"Datei „{fileName}“ zur AI-Sitzung „{session.Title}“ hinzugefügt",
+            CancellationToken.None).ConfigureAwait(false);
     }
 
     public IReadOnlySet<string> SupportedDocumentExtensions => documents.SupportedExtensions;
@@ -180,7 +189,7 @@ public sealed class AssistantCoordinator(
         var existing = await chats.ListSessionsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         var session = existing.Count > 0
             ? existing[0]
-            : await chats.CreateSessionAsync("Neuer Chat", cancellationToken).ConfigureAwait(false);
+            : await chats.CreateSessionAsync(DefaultSessionTitle, cancellationToken).ConfigureAwait(false);
         await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id }, cancellationToken).ConfigureAwait(false);
         return session;
     }
@@ -190,8 +199,11 @@ public sealed class AssistantCoordinator(
         string requestId,
         CancellationToken cancellationToken)
     {
-        var session = await chats.CreateSessionAsync("Neuer Chat", cancellationToken).ConfigureAwait(false);
+        var session = await chats.CreateSessionAsync(DefaultSessionTitle, cancellationToken).ConfigureAwait(false);
         await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id }, cancellationToken).ConfigureAwait(false);
+        await recentActivity.RecordAsync(
+            $"AI-Sitzung „{session.Title}“ erstellt",
+            CancellationToken.None).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
     }
 
@@ -201,9 +213,28 @@ public sealed class AssistantCoordinator(
         string requestId,
         CancellationToken cancellationToken)
     {
-        _ = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
         await settings.UpdateAsync(current => current with { ActiveSessionId = sessionId }, cancellationToken).ConfigureAwait(false);
+        await recentActivity.RecordAsync(
+            $"AI-Sitzung „{session.Title}“ geöffnet",
+            CancellationToken.None).ConfigureAwait(false);
+        await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
+    }
+
+    private async Task RenameSessionAsync(
+        Guid sessionId,
+        string title,
+        Func<string, object, string?, Task> emit,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        _ = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
+        await chats.RenameSessionAsync(sessionId, title, cancellationToken).ConfigureAwait(false);
+        await recentActivity.RecordAsync(
+            $"AI-Sitzung in „{title}“ umbenannt",
+            CancellationToken.None).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
     }
 
@@ -213,12 +244,17 @@ public sealed class AssistantCoordinator(
         string requestId,
         CancellationToken cancellationToken)
     {
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
         await chats.DeleteSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (settings.Current.ActiveSessionId == sessionId)
         {
             await settings.UpdateAsync(current => current with { ActiveSessionId = null }, cancellationToken).ConfigureAwait(false);
         }
 
+        await recentActivity.RecordAsync(
+            $"AI-Sitzung „{session.Title}“ gelöscht",
+            CancellationToken.None).ConfigureAwait(false);
         _ = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
     }
@@ -240,6 +276,13 @@ public sealed class AssistantCoordinator(
         }
 
         await settings.UpdateAsync(current => current with { ActiveSessionId = null }, cancellationToken).ConfigureAwait(false);
+        if (sessions.Count > 0)
+        {
+            await recentActivity.RecordAsync(
+                "Alle AI-Sitzungen gelöscht",
+                CancellationToken.None).ConfigureAwait(false);
+        }
+
         _ = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
     }
@@ -271,14 +314,8 @@ public sealed class AssistantCoordinator(
             }, cancellationToken).ConfigureAwait(false);
             await chats.SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
 
-            var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            _ = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
-            if (string.Equals(session.Title, "Neuer Chat", StringComparison.Ordinal)
-                && !string.IsNullOrWhiteSpace(prompt))
-            {
-                var title = prompt.Length <= 60 ? prompt : $"{prompt[..57]}…";
-                await chats.RenameSessionAsync(sessionId, title, cancellationToken).ConfigureAwait(false);
-            }
 
             _activeChatCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var updates = Channel.CreateUnbounded<ChatStreamUpdate>(new UnboundedChannelOptions
@@ -325,10 +362,16 @@ public sealed class AssistantCoordinator(
                 }
 
                 var completed = await sendTask.ConfigureAwait(false);
+                var updatedSession = await chats.GetSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("Die Sitzung wurde nach dem AI-Lauf nicht gefunden.");
+                await recentActivity.RecordAsync(
+                    $"AI-Sitzung „{updatedSession.Title}“ bearbeitet",
+                    CancellationToken.None).ConfigureAwait(false);
                 await emit(EventTypeFor(completed.Status), new
                 {
                     message = ToMessageDto(completed),
                     error = completed.Error,
+                    session = ToSessionDto(updatedSession),
                 }, envelope.RequestId);
             }
             finally
@@ -489,6 +532,9 @@ public sealed class AssistantCoordinator(
             WorkflowChatFormatter.Format(workflow),
             MessageStatus.Completed,
             cancellationToken).ConfigureAwait(false);
+        await recentActivity.RecordAsync(
+            $"Workflow „{workflow.Title}“ in AI-Sitzung „{session.Title}“ eingefügt",
+            CancellationToken.None).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
     }
 

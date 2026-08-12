@@ -1,3 +1,4 @@
+using GoWinUI.Core.Chat;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using System.Text.Json;
@@ -33,10 +34,10 @@ public sealed class ChatAndContextTests
         var session = Guid.NewGuid();
         var history = Enumerable.Range(1, 20).Select(index => new ChatMessage(
             Guid.NewGuid(), session, index % 2 == 0 ? ChatRole.Assistant : ChatRole.User,
-            new string('x', 800), MessageStatus.Completed, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)).ToArray();
+            new string('x', 1_600), MessageStatus.Completed, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)).ToArray();
         var pages = new[] { new DocumentPage(Guid.NewGuid(), 1, "EINS"), new DocumentPage(Guid.NewGuid(), 2, "ZWEI"), new DocumentPage(Guid.NewGuid(), 3, "DREI") };
 
-        var result = assembler.Build(new("Du bist hilfreich.", "Bitte Seite 2 auswerten", history, null, pages, 2_048));
+        var result = assembler.Build(new("Du bist hilfreich.", "Bitte Seite 2 auswerten", history, null, pages, 8_192));
         Assert.True(result.WasTruncated);
         Assert.Contains("ZWEI", result.Messages[^1].Content, StringComparison.Ordinal);
         Assert.DoesNotContain("EINS", result.Messages[^1].Content, StringComparison.Ordinal);
@@ -57,7 +58,7 @@ public sealed class ChatAndContextTests
     }
 
     [Fact]
-    public void GeneralChatEnvelopeUsesVisibleMarkdownAndFormattingPolicies()
+    public void GeneralChatEnvelopeUsesTgaPoliciesAndStructuredResponseContract()
     {
         var result = new GoWinUI.Core.Chat.ContextAssembler().Build(new(
             "GO Anwendungshinweis.",
@@ -70,13 +71,55 @@ public sealed class ChatAndContextTests
         using var envelope = JsonDocument.Parse(Assert.IsType<string>(result.RequestEnvelopeJson));
         var root = envelope.RootElement;
         Assert.Equal("general_chat", root.GetProperty("route").GetProperty("route").GetString());
-        Assert.Equal("visible-markdown", root.GetProperty("expectedResponse").GetString());
+        Assert.Equal("barebone-agent-json-message-with-session-title", root.GetProperty("expectedResponse").GetString());
+        Assert.Equal(
+            GeneralAgentResponseParser.ResponseSchema,
+            root.GetProperty("responseContract").GetProperty("schema").GetString());
+        Assert.True(root.GetProperty("responseContract").GetProperty("sessionTitle").GetProperty("refreshOnEveryRun").GetBoolean());
+        Assert.Equal(6, root.GetProperty("responseContract").GetProperty("sessionTitle").GetProperty("maximumWords").GetInt32());
+        Assert.Equal("TGA-Fachplanung", root.GetProperty("domainProfile").GetProperty("name").GetString());
+        Assert.True(root.GetProperty("domainProfile").GetProperty("applicationNameIsNotProgrammingLanguage").GetBoolean());
         Assert.Collection(
             root.GetProperty("policyRefs").EnumerateArray(),
             static value => Assert.Equal("general", value.GetString()));
         Assert.Equal(8_192, result.MaxOutputTokens);
         Assert.Contains("|---|---|", result.Messages[0].Content, StringComparison.Ordinal);
         Assert.Contains("\\[...\\]", result.Messages[0].Content, StringComparison.Ordinal);
-        Assert.Contains("## Nutzeranfrage", result.Messages[^1].Content, StringComparison.Ordinal);
+        Assert.Contains("Technischen Gebäudeausrüstung", result.Messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains("Programmiersprache Go", result.Messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains("Biete keine Go-Programmierung", result.Messages[0].Content, StringComparison.Ordinal);
+
+        using var transmittedEnvelope = JsonDocument.Parse(result.Messages[^1].Content);
+        Assert.Equal("Erstelle eine Vergleichstabelle.", transmittedEnvelope.RootElement.GetProperty("originalUserPrompt").GetString());
+        Assert.Equal(
+            "barebone-agent-json-message-with-session-title",
+            transmittedEnvelope.RootElement.GetProperty("expectedResponse").GetString());
+    }
+
+    [Fact]
+    public void StructuredAgentResponseSeparatesVisibleMarkdownAndSpecificSessionTitle()
+    {
+        const string raw = """
+            ```json
+            {"schema":"barebone.agent.response.v2","type":"message","message":"## Heizlast\n\nDie Berechnung ist vorbereitet.","sessionTitle":"Heizlast Bestand fachlich prüfen"}
+            ```
+            """;
+
+        var response = GeneralAgentResponseParser.Parse(raw, "Hallo");
+
+        Assert.True(response.IsStructured);
+        Assert.Equal("## Heizlast\n\nDie Berechnung ist vorbereitet.", response.Message);
+        Assert.Equal("Heizlast Bestand fachlich prüfen", response.SessionTitle);
+    }
+
+    [Fact]
+    public void GenericGreetingNeverBecomesTheSessionTitleFallback()
+    {
+        var response = GeneralAgentResponseParser.Parse(
+            "Hallo! Wobei kann ich dich in der TGA-Planung unterstützen?",
+            "Hallo");
+
+        Assert.False(response.IsStructured);
+        Assert.Equal("Einstieg in die TGA-Fachplanung", response.SessionTitle);
     }
 }

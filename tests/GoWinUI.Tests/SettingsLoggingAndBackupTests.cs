@@ -1,6 +1,9 @@
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
+using GoWinUI.App.Services;
+using GoWinUI.App.ViewModels;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace GoWinUI.Tests;
 
@@ -51,6 +54,40 @@ public sealed class SettingsLoggingAndBackupTests
         Assert.Equal(2, restored.Version);
         Assert.Equal("#8FBD45", restored.AccentColor);
         Assert.Equal("#8FBD45", restored.BackgroundColor);
+    }
+
+    [Fact]
+    public async Task RecentActivitySurvivesASettingsReload()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var store = environment.Get<ISettingsStore>();
+        var firstShell = new ShellViewModel();
+        using (var firstSettings = new SettingsCoordinator(store))
+        {
+            await firstSettings.InitializeAsync();
+            var activity = new RecentActivityService(
+                firstSettings,
+                firstShell,
+                NullLogger<RecentActivityService>.Instance);
+
+            await activity.RecordAsync("  Projekt   „Haus A“\r\n erstellt  ");
+            Assert.Equal("Projekt „Haus A“ erstellt", firstShell.RecentActivityText);
+            Assert.Contains("Uhr", firstShell.RecentActivityTimeText, StringComparison.Ordinal);
+        }
+
+        var secondShell = new ShellViewModel();
+        using var secondSettings = new SettingsCoordinator(store);
+        await secondSettings.InitializeAsync();
+        var restoredActivity = new RecentActivityService(
+            secondSettings,
+            secondShell,
+            NullLogger<RecentActivityService>.Instance);
+        restoredActivity.Restore();
+
+        Assert.Equal("Projekt „Haus A“ erstellt", secondSettings.Current.LastActivityText);
+        Assert.NotNull(secondSettings.Current.LastActivityAt);
+        Assert.Equal("Projekt „Haus A“ erstellt", secondShell.RecentActivityText);
+        Assert.Contains("Uhr", secondShell.RecentActivityTimeText, StringComparison.Ordinal);
     }
 
     [Fact]

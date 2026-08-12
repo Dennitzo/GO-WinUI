@@ -14,6 +14,20 @@
   </Window.SystemBackdrop>
 
   <Grid Background="{ThemeResource GoWindowBrush}">
+    <Grid.Resources>
+      <Style
+        x:Key="GoNavigationPaneToggleButtonStyle"
+        BasedOn="{StaticResource PaneToggleButtonStyle}"
+        TargetType="Button">
+      <Setter Property="Height" Value="38" />
+        <Setter Property="RenderTransform">
+          <Setter.Value>
+            <TranslateTransform Y="5.333" />
+          </Setter.Value>
+        </Setter>
+      </Style>
+    </Grid.Resources>
+
     <Grid.RowDefinitions>
       <RowDefinition Height="56" />
       <RowDefinition Height="*" />
@@ -123,41 +137,56 @@
       IsTitleBarAutoPaddingEnabled="False"
       Loaded="OnNavigationLoaded"
       OpenPaneLength="320"
+      PaneToggleButtonStyle="{StaticResource GoNavigationPaneToggleButtonStyle}"
       PaneDisplayMode="Auto"
       SelectionChanged="OnSelectionChanged">
 
       <NavigationView.PaneHeader>
         <Grid
           x:Name="PaneHeaderLayout"
-          MinHeight="126"
-          Margin="12,2,0,20">
-          <StackPanel
-            Margin="0,0,16,0"
-            Spacing="16">
+          MinHeight="132"
+          Margin="12,6,0,18">
+          <Grid Margin="0,0,16,0">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="38" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
             <TextBlock
+              VerticalAlignment="Center"
               FontSize="18"
               FontWeight="SemiBold"
               Text="Arbeitsbereich" />
-            <StackPanel Spacing="5">
+            <StackPanel
+              Grid.Row="1"
+              Margin="0,12,0,0"
+              Spacing="5">
               <TextBlock
-                FontSize="12"
+                FontSize="11"
                 Foreground="{ThemeResource GoMutedTextBrush}"
-                Text="LOKALER ARBEITSBEREICH" />
+                Text="ZULETZT GEMACHT" />
               <TextBlock
-                MaxLines="1"
-                FontSize="16"
-                FontWeight="SemiBold"
-                Text="GO"
-                TextTrimming="CharacterEllipsis" />
-              <TextBlock
+                AutomationProperties.LiveSetting="Polite"
                 MaxLines="2"
-                FontSize="12"
-                Foreground="{ThemeResource GoMutedTextBrush}"
-                Text="Projekte, AI-Assistent und Laufzeitdiagnose"
+                FontSize="14"
+                FontWeight="SemiBold"
+                Text="{x:Bind ViewModel.RecentActivityText, Mode=OneWay}"
                 TextTrimming="CharacterEllipsis"
                 TextWrapping="WrapWholeWords" />
+              <StackPanel Orientation="Horizontal" Spacing="5">
+                <FontIcon
+                  VerticalAlignment="Center"
+                  FontSize="10"
+                  Foreground="{ThemeResource GoMutedTextBrush}"
+                  Glyph="&#xE823;" />
+                <TextBlock
+                  VerticalAlignment="Center"
+                  FontSize="11"
+                  Foreground="{ThemeResource GoMutedTextBrush}"
+                  Text="{x:Bind ViewModel.RecentActivityTimeText, Mode=OneWay}"
+                  TextTrimming="CharacterEllipsis" />
+              </StackPanel>
             </StackPanel>
-          </StackPanel>
+          </Grid>
           <primitives:Thumb
             x:Name="PaneResizeThumb"
             Width="12"

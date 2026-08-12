@@ -18,6 +18,7 @@ public sealed partial class ProjectsPage : Page
 {
     private readonly ILogger<ProjectsPage> _logger;
     private readonly IProjectAssetWorkingCopyService _workingCopies;
+    private readonly RecentActivityService _recentActivity;
     private Task _archiveFilterUpdate = Task.CompletedTask;
     private bool _initialized;
     private bool _isWorkingCopySubscribed;
@@ -29,6 +30,7 @@ public sealed partial class ProjectsPage : Page
         InitializeComponent();
         ViewModel = App.Current.GetService<ProjectsViewModel>();
         _workingCopies = App.Current.GetService<IProjectAssetWorkingCopyService>();
+        _recentActivity = App.Current.GetService<RecentActivityService>();
         _logger = App.Current.GetService<ILogger<ProjectsPage>>();
     }
 
@@ -87,6 +89,11 @@ public sealed partial class ProjectsPage : Page
         await RunUiActionAsync(async () =>
         {
             await ViewModel.CreateAsync();
+            if (ViewModel.SelectedProject is { } project)
+            {
+                await RecordProjectActivityAsync(project, "erstellt");
+            }
+
             SetArchiveToggle(false);
             UpdateProjectOverviewState();
             ShowProjectDetails();
@@ -146,6 +153,7 @@ public sealed partial class ProjectsPage : Page
         await RunUiActionAsync(async () =>
         {
             await ViewModel.SelectAsync(project);
+            await RecordProjectActivityAsync(project, "geöffnet");
             ShowProjectDetails();
         });
     }
@@ -155,6 +163,11 @@ public sealed partial class ProjectsPage : Page
         await RunUiActionAsync(async () =>
         {
             await ViewModel.SaveAsync();
+            if (ViewModel.SelectedProject is { } project)
+            {
+                await RecordProjectActivityAsync(project, "bearbeitet");
+            }
+
             ShowProjectDetails();
         });
     }
@@ -163,7 +176,11 @@ public sealed partial class ProjectsPage : Page
     {
         await RunUiActionAsync(async () =>
         {
+            var project = ViewModel.SelectedProject
+                ?? throw new InvalidOperationException("Kein Projekt ausgewählt.");
+            var activity = project.Status == ProjectStatus.Active ? "archiviert" : "wiederhergestellt";
             await ViewModel.ToggleArchiveAsync();
+            await RecordProjectActivityAsync(project, activity);
             UpdateProjectOverviewState();
             ShowProjectOverview();
         });
@@ -190,6 +207,7 @@ public sealed partial class ProjectsPage : Page
             await RunUiActionAsync(async () =>
             {
                 await ViewModel.DeleteProjectAsync();
+                await RecordProjectActivityAsync(project, "gelöscht");
                 UpdateProjectOverviewState();
                 ShowProjectOverview();
             });
@@ -198,14 +216,39 @@ public sealed partial class ProjectsPage : Page
 
     private void OnBackToProjects(object sender, RoutedEventArgs e) => ShowProjectOverview();
 
-    private async void OnAddChecklistItem(object sender, RoutedEventArgs e) =>
-        await RunUiActionAsync(() => ViewModel.AddChecklistItemAsync());
+    private async void OnAddChecklistItem(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(ViewModel.NewChecklistText))
+        {
+            return;
+        }
+
+        await RunUiActionAsync(async () =>
+        {
+            var project = ViewModel.SelectedProject;
+            await ViewModel.AddChecklistItemAsync();
+            if (project is not null)
+            {
+                await _recentActivity.RecordAsync($"Checkliste in Projekt „{project.Name}“ ergänzt");
+            }
+        });
+    }
 
     private async void OnChecklistClicked(object sender, RoutedEventArgs e)
     {
         if (sender is CheckBox { DataContext: ChecklistItem item, IsChecked: { } completed })
         {
-            await RunUiActionAsync(() => ViewModel.ToggleChecklistItemAsync(item, completed));
+            await RunUiActionAsync(async () =>
+            {
+                var project = ViewModel.SelectedProject;
+                await ViewModel.ToggleChecklistItemAsync(item, completed);
+                if (project is not null)
+                {
+                    var activity = completed ? "als erledigt markiert" : "wieder geöffnet";
+                    await _recentActivity.RecordAsync(
+                        $"Checklistenpunkt in Projekt „{project.Name}“ {activity}");
+                }
+            });
         }
     }
 
@@ -213,7 +256,15 @@ public sealed partial class ProjectsPage : Page
     {
         if (sender is Button { DataContext: ChecklistItem item })
         {
-            await RunUiActionAsync(() => ViewModel.MoveChecklistItemAsync(item, -1));
+            await RunUiActionAsync(async () =>
+            {
+                var project = ViewModel.SelectedProject;
+                await ViewModel.MoveChecklistItemAsync(item, -1);
+                if (project is not null)
+                {
+                    await _recentActivity.RecordAsync($"Checkliste in Projekt „{project.Name}“ neu sortiert");
+                }
+            });
         }
     }
 
@@ -221,7 +272,15 @@ public sealed partial class ProjectsPage : Page
     {
         if (sender is Button { DataContext: ChecklistItem item })
         {
-            await RunUiActionAsync(() => ViewModel.MoveChecklistItemAsync(item, 1));
+            await RunUiActionAsync(async () =>
+            {
+                var project = ViewModel.SelectedProject;
+                await ViewModel.MoveChecklistItemAsync(item, 1);
+                if (project is not null)
+                {
+                    await _recentActivity.RecordAsync($"Checkliste in Projekt „{project.Name}“ neu sortiert");
+                }
+            });
         }
     }
 
@@ -229,7 +288,15 @@ public sealed partial class ProjectsPage : Page
     {
         if (sender is Button { DataContext: ChecklistItem item })
         {
-            await RunUiActionAsync(() => ViewModel.DeleteChecklistItemAsync(item));
+            await RunUiActionAsync(async () =>
+            {
+                var project = ViewModel.SelectedProject;
+                await ViewModel.DeleteChecklistItemAsync(item);
+                if (project is not null)
+                {
+                    await _recentActivity.RecordAsync($"Checklistenpunkt aus Projekt „{project.Name}“ gelöscht");
+                }
+            });
         }
     }
 
@@ -242,6 +309,8 @@ public sealed partial class ProjectsPage : Page
 
         await RunUiActionAsync(async () =>
         {
+            var project = ViewModel.SelectedProject
+                ?? throw new InvalidOperationException("Kein Projekt ausgewählt.");
             var category = Enum.TryParse<AssetCategory>(
                 (sender as FrameworkElement)?.Tag as string,
                 out var requestedCategory)
@@ -273,6 +342,11 @@ public sealed partial class ProjectsPage : Page
                     category,
                     content);
             }
+
+            var activity = files.Count == 1
+                ? $"Datei „{files[0].Name}“ zu Projekt „{project.Name}“ hinzugefügt"
+                : $"{files.Count} Dateien zu Projekt „{project.Name}“ hinzugefügt";
+            await _recentActivity.RecordAsync(activity);
         });
     }
 
@@ -300,6 +374,8 @@ public sealed partial class ProjectsPage : Page
                 throw new InvalidOperationException("Für diesen Dateityp ist kein Standardprogramm registriert.");
             }
 
+            var projectName = ViewModel.SelectedProject?.Name ?? "Projekt";
+            await _recentActivity.RecordAsync($"Datei „{asset.FileName}“ aus „{projectName}“ geöffnet");
             await minimumDisplay;
         }
         catch
@@ -331,7 +407,12 @@ public sealed partial class ProjectsPage : Page
         };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary)
         {
-            await RunUiActionAsync(() => ViewModel.DeleteAssetAsync(asset));
+            await RunUiActionAsync(async () =>
+            {
+                var projectName = ViewModel.SelectedProject?.Name ?? "Projekt";
+                await ViewModel.DeleteAssetAsync(asset);
+                await _recentActivity.RecordAsync($"Datei „{asset.FileName}“ aus „{projectName}“ gelöscht");
+            });
         }
     }
 
@@ -423,6 +504,9 @@ public sealed partial class ProjectsPage : Page
         ProjectList.Visibility = hasProjects ? Visibility.Visible : Visibility.Collapsed;
         ProjectEmptyState.Visibility = hasProjects ? Visibility.Collapsed : Visibility.Visible;
     }
+
+    private Task RecordProjectActivityAsync(Project project, string activity) =>
+        _recentActivity.RecordAsync($"Projekt „{project.Name}“ {activity}");
 
     private void SetArchiveToggle(bool isOn)
     {

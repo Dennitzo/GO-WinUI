@@ -40,45 +40,73 @@ public sealed class ContextAssembler : IContextAssembler
         var systemTokens = EstimateTokens(systemText);
         var wasTruncated = documentWasTruncated;
 
-        var maximumPromptTokens = Math.Max(128, inputBudget - systemTokens - 128);
+        var maximumUserTokens = Math.Max(1, inputBudget - systemTokens);
+        var maximumPromptTokens = Math.Max(32, maximumUserTokens - 256);
         var effectivePrompt = TruncatePreservingEnds(
             request.UserPrompt.Trim(),
             maximumPromptTokens * 4,
             ref wasTruncated);
-
-        var promptSection = $"## Nutzeranfrage\n{effectivePrompt}";
-        var maximumUserTokens = Math.Max(1, inputBudget - systemTokens);
-        if (EstimateTokens(promptSection) > maximumUserTokens)
+        var selectedPages = (pageSelection is null
+                ? request.DocumentPages
+                : request.DocumentPages.Where(page =>
+                    page.PageNumber >= pageSelection.Value.Start
+                    && page.PageNumber <= pageSelection.Value.End))
+            .ToArray();
+        var workflowContent = request.Workflow?.ContentJson ?? string.Empty;
+        var envelopeJson = BuildEnvelopeJson(
+            effectivePrompt,
+            request.Workflow,
+            workflowContent,
+            selectedPages,
+            documentText,
+            hasDocumentContext,
+            wasTruncated,
+            policyReferences);
+        for (var attempt = 0;
+             attempt < 32 && EstimateTokens(envelopeJson) > maximumUserTokens;
+             attempt++)
         {
-            var promptCharacters = Math.Max(1, maximumUserTokens * 4 - "## Nutzeranfrage\n".Length);
-            effectivePrompt = TruncatePreservingEnds(effectivePrompt, promptCharacters, ref wasTruncated);
-            promptSection = $"## Nutzeranfrage\n{effectivePrompt}";
-        }
-
-        var contextSections = BuildContextSections(documentText, request.Workflow);
-        var contextText = string.Join("\n\n", contextSections);
-        var remainingContextTokens = Math.Max(0, maximumUserTokens - EstimateTokens(promptSection) - 2);
-        if (EstimateTokens(contextText) > remainingContextTokens)
-        {
-            contextText = TruncateContext(contextText, remainingContextTokens * 4);
+            var excessCharacters = Math.Max(
+                64,
+                (EstimateTokens(envelopeJson) - maximumUserTokens) * 4 + 16);
             wasTruncated = true;
-        }
+            if (documentText.Length > 0)
+            {
+                documentText = TruncateContext(
+                    documentText,
+                    Math.Max(0, documentText.Length - excessCharacters));
+            }
+            else if (workflowContent.Length > 0)
+            {
+                workflowContent = TruncateContext(
+                    workflowContent,
+                    Math.Max(0, workflowContent.Length - excessCharacters));
+            }
+            else if (effectivePrompt.Length > 1)
+            {
+                effectivePrompt = TruncatePreservingEnds(
+                    effectivePrompt,
+                    Math.Max(1, effectivePrompt.Length - excessCharacters),
+                    ref wasTruncated);
+            }
+            else
+            {
+                break;
+            }
 
-        var userContent = contextText.Length == 0
-            ? promptSection
-            : $"{contextText}\n\n{promptSection}";
-        while (EstimateTokens(userContent) > maximumUserTokens && contextText.Length > 0)
-        {
-            var excessCharacters = (EstimateTokens(userContent) - maximumUserTokens) * 4 + 4;
-            contextText = TruncateContext(contextText, Math.Max(0, contextText.Length - excessCharacters));
-            userContent = contextText.Length == 0
-                ? promptSection
-                : $"{contextText}\n\n{promptSection}";
-            wasTruncated = true;
+            envelopeJson = BuildEnvelopeJson(
+                effectivePrompt,
+                request.Workflow,
+                workflowContent,
+                selectedPages,
+                documentText,
+                hasDocumentContext,
+                wasTruncated,
+                policyReferences);
         }
 
         var retained = new Stack<LmChatMessage>();
-        var baseTokens = systemTokens + EstimateTokens(userContent);
+        var baseTokens = systemTokens + EstimateTokens(envelopeJson);
         var historyBudget = Math.Min(MaximumHistoryTokens, Math.Max(0, inputBudget - baseTokens));
         var retainedHistoryTokens = 0;
         foreach (var history in request.History.Reverse())
@@ -112,20 +140,23 @@ public sealed class ContextAssembler : IContextAssembler
             retainedHistoryTokens += tokens;
         }
 
+        envelopeJson = BuildEnvelopeJson(
+            effectivePrompt,
+            request.Workflow,
+            workflowContent,
+            selectedPages,
+            documentText,
+            hasDocumentContext,
+            wasTruncated,
+            policyReferences);
+
         var messages = new List<LmChatMessage>(retained.Count + 2)
         {
             new(ChatRole.System, systemText),
         };
         messages.AddRange(retained);
-        messages.Add(new(ChatRole.User, userContent));
+        messages.Add(new(ChatRole.User, envelopeJson));
         var estimated = messages.Sum(static message => EstimateTokens(message.Content));
-        var envelopeJson = BuildEnvelopeJson(
-            effectivePrompt,
-            request.Workflow,
-            request.DocumentPages,
-            documentText,
-            wasTruncated,
-            policyReferences);
 
         return new(
             messages,
@@ -139,46 +170,26 @@ public sealed class ContextAssembler : IContextAssembler
             maximumOutputTokens);
     }
 
-    private static List<string> BuildContextSections(string documentText, WorkflowDefinition? workflow)
-    {
-        var sections = new List<string>();
-        if (documentText.Length > 0)
-        {
-            sections.Add($"## Dokumentkontext\n{documentText}");
-        }
-
-        if (workflow is not null)
-        {
-            var workflowText = new StringBuilder()
-                .Append("Titel: ").Append(workflow.Title).AppendLine()
-                .Append("Bereich: ").Append(workflow.Domain).AppendLine()
-                .Append("Beschreibung: ").Append(workflow.Description).AppendLine()
-                .Append("Kontext: ").Append(workflow.ContextSummary).AppendLine()
-                .Append("Inhalt: ").Append(workflow.ContentJson)
-                .ToString();
-            sections.Add($"## Ausgewählter Workflow\n{workflowText}");
-        }
-
-        return sections;
-    }
-
     private static string BuildEnvelopeJson(
         string prompt,
         WorkflowDefinition? workflow,
+        string workflowContent,
         IReadOnlyList<DocumentPage> pages,
         string documentText,
+        bool hasDocuments,
         bool wasTruncated,
         IReadOnlyList<string> policyReferences)
     {
-        var hasDocuments = documentText.Length > 0;
         var routeName = hasDocuments ? GeneralChatPolicies.DocumentRoute : GeneralChatPolicies.GeneralRoute;
-        var capabilityProfile = hasDocuments ? "document" : "general";
+        var capabilityProfile = hasDocuments ? "tga-document" : "tga-general";
         var route = new Dictionary<string, object?>
         {
             ["schema"] = GeneralChatPolicies.RouterSchema,
             ["route"] = routeName,
             ["capabilityProfile"] = capabilityProfile,
-            ["reason"] = "Allgemeiner Modus",
+            ["reason"] = hasDocuments
+                ? "TGA-Fachplanung mit Dokumentkontext"
+                : "Allgemeine TGA-Fachplanung",
             ["mode"] = "general",
         };
         var modePolicy = new Dictionary<string, object?>
@@ -217,7 +228,7 @@ public sealed class ContextAssembler : IContextAssembler
                     ["description"] = workflow.Description,
                     ["domain"] = workflow.Domain,
                     ["contextSummary"] = workflow.ContextSummary,
-                    ["contentJson"] = workflow.ContentJson,
+                    ["contentJson"] = workflowContent,
                     ["manuallySelected"] = true,
                 },
             ];
@@ -225,11 +236,43 @@ public sealed class ContextAssembler : IContextAssembler
         var envelope = new Dictionary<string, object?>
         {
             ["schema"] = GeneralChatPolicies.EnvelopeSchema,
-            ["userPrompt"] = prompt,
+            ["originalUserPrompt"] = prompt,
             ["route"] = route,
             ["modePolicy"] = modePolicy,
+            ["domainProfile"] = new Dictionary<string, object?>
+            {
+                ["name"] = "TGA-Fachplanung",
+                ["application"] = "GO",
+                ["applicationNameIsNotProgrammingLanguage"] = true,
+                ["focus"] = new[]
+                {
+                    "Heizung",
+                    "Kälte",
+                    "Lüftung",
+                    "Sanitär",
+                    "Elektro",
+                    "Gebäudeautomation/MSR",
+                    "Energie",
+                    "Brandschutzschnittstellen",
+                    "Planungskoordination",
+                },
+            },
             ["policyRefs"] = policyReferences,
             ["expectedResponse"] = GeneralChatPolicies.ExpectedResponse,
+            ["responseContract"] = new Dictionary<string, object?>
+            {
+                ["schema"] = GeneralAgentResponseParser.ResponseSchema,
+                ["type"] = "message",
+                ["required"] = new[] { "schema", "type", "message", "sessionTitle" },
+                ["messageFormat"] = "visible-markdown",
+                ["sessionTitle"] = new Dictionary<string, object?>
+                {
+                    ["language"] = "de",
+                    ["maximumWords"] = 6,
+                    ["mustBeSpecific"] = true,
+                    ["refreshOnEveryRun"] = true,
+                },
+            },
             ["includeConversationHistory"] = true,
             ["selectedWorkflow"] = selectedWorkflow,
             ["workflowCapsules"] = workflowCapsules,
