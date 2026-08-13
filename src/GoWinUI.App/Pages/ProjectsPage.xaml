@@ -19,6 +19,7 @@
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="280" />
           <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
         <Border
@@ -50,8 +51,20 @@
             Loaded="OnAssetModifiedTextLoaded"
             TextTrimming="CharacterEllipsis" />
         </StackPanel>
-        <StackPanel
+        <TextBox
           Grid.Column="2"
+          Width="260"
+          Height="36"
+          HorizontalAlignment="Center"
+          VerticalAlignment="Center"
+          AutomationProperties.Name="Dateiüberschrift"
+          KeyDown="OnAssetTitleKeyDown"
+          LostFocus="OnAssetTitleLostFocus"
+          MaxLength="200"
+          PlaceholderText="Überschrift eingeben"
+          Text="{x:Bind Title}" />
+        <StackPanel
+          Grid.Column="3"
           HorizontalAlignment="Right"
           VerticalAlignment="Center"
           Orientation="Horizontal"
@@ -309,6 +322,7 @@
       <ScrollViewer
         x:Name="ProjectDetailsPane"
         HorizontalScrollBarVisibility="Disabled"
+        IsTabStop="True"
         Padding="0,0,0,24"
         VerticalAlignment="Stretch"
         VerticalScrollBarVisibility="Auto"

@@ -47,6 +47,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await using var connection = await OpenConnectionCoreAsync(cancellationToken).ConfigureAwait(false);
             await ConfigureConnectionAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationOneAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwoAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -181,6 +182,25 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await SeedBuiltInWorkflowAsync(command, BuiltInWorkflows.Heating, cancellationToken).ConfigureAwait(false);
             command.Parameters.Clear();
             command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(1, $now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwoAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=2;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = "ALTER TABLE project_assets ADD COLUMN title TEXT NULL;";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(2, $now);";
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }

@@ -183,7 +183,7 @@ public sealed class ZipBackupService(SqliteDatabase database, ISettingsStore set
 
         command.CommandText = "SELECT COALESCE(MAX(version),0) FROM schema_migrations;";
         var schema = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
-        if (schema is < 1 or > 1) throw new InvalidDataException($"Nicht unterstützte Datenbankschemaversion {schema}.");
+        if (schema is < 1 or > 2) throw new InvalidDataException($"Nicht unterstützte Datenbankschemaversion {schema}.");
     }
 
     private static async Task EnsureHashAsync(string path, string expected, CancellationToken cancellationToken)

@@ -50,6 +50,8 @@ public sealed class BlobProjectAndDocumentTests
         Assert.Single(await projects.ListChecklistAsync(project.Id));
         Assert.Single(await projects.ListAssetsAsync(project.Id));
         Assert.Equal(thumbnailBlob.Id, (await projects.GetAssetThumbnailAsync(asset.Id))?.BlobId);
+        asset = await projects.UpdateAssetAsync(asset with { Title = "Freigegebener Ausführungsplan" }, asset.Revision);
+        Assert.Equal("Freigegebener Ausführungsplan", Assert.Single(await projects.ListAssetsAsync(project.Id)).Title);
         await Assert.ThrowsAsync<RevisionConflictException>(() => projects.DeleteChecklistItemAsync(item.Id, 99));
         await projects.DeleteAssetAsync(asset.Id, asset.Revision);
         Assert.Empty(await projects.ListAssetsAsync(project.Id));

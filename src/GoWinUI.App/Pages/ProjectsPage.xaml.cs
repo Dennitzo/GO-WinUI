@@ -5,6 +5,8 @@ using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Storage;
 using Windows.Storage.Pickers;
@@ -32,9 +34,44 @@ public sealed partial class ProjectsPage : Page
         _workingCopies = App.Current.GetService<IProjectAssetWorkingCopyService>();
         _recentActivity = App.Current.GetService<RecentActivityService>();
         _logger = App.Current.GetService<ILogger<ProjectsPage>>();
+        AddHandler(PointerPressedEvent, new PointerEventHandler(OnPagePointerPressed), true);
     }
 
     public ProjectsViewModel ViewModel { get; }
+
+    private void OnPagePointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (FocusManager.GetFocusedElement(XamlRoot) is not TextBox
+            || IsInsideTextBox(e.OriginalSource as DependencyObject))
+        {
+            return;
+        }
+
+        MoveFocusOutsideTextBoxes(FocusState.Pointer);
+    }
+
+    private static bool IsInsideTextBox(DependencyObject? element)
+    {
+        while (element is not null)
+        {
+            if (element is TextBox)
+            {
+                return true;
+            }
+
+            element = VisualTreeHelper.GetParent(element);
+        }
+
+        return false;
+    }
+
+    private void MoveFocusOutsideTextBoxes(FocusState focusState)
+    {
+        if (!ProjectDetailsPane.Focus(focusState))
+        {
+            System.Diagnostics.Debug.WriteLine("GO could not move focus from the project text input.");
+        }
+    }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -414,6 +451,45 @@ public sealed partial class ProjectsPage : Page
                 await _recentActivity.RecordAsync($"Datei „{asset.FileName}“ aus „{projectName}“ gelöscht");
             });
         }
+    }
+
+    private async void OnAssetTitleKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Enter || sender is not TextBox textBox)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        MoveFocusOutsideTextBoxes(FocusState.Programmatic);
+        await SaveAssetTitleAsync(textBox);
+    }
+
+    private async void OnAssetTitleLostFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is TextBox textBox)
+        {
+            await SaveAssetTitleAsync(textBox);
+        }
+    }
+
+    private async Task SaveAssetTitleAsync(TextBox textBox)
+    {
+        if (textBox.DataContext is not ProjectAsset asset)
+        {
+            return;
+        }
+
+        var title = string.IsNullOrWhiteSpace(textBox.Text) ? null : textBox.Text.Trim();
+        if (string.Equals(asset.Title, title, StringComparison.Ordinal)
+            || (textBox.Tag is string savedTitle && string.Equals(savedTitle, title, StringComparison.Ordinal))
+            || (textBox.Tag == DBNull.Value && title is null))
+        {
+            return;
+        }
+
+        textBox.Tag = (object?)title ?? DBNull.Value;
+        await RunUiActionAsync(() => ViewModel.SaveAssetTitleAsync(asset, title));
     }
 
     private async void OnAssetThumbnailLoaded(object sender, RoutedEventArgs e)

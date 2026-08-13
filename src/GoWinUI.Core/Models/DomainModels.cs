@@ -78,7 +78,8 @@ public sealed record ProjectAsset(
     int SortOrder,
     long Revision,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? Title = null);
 
 public sealed record AssetThumbnail(
     Guid AssetId,

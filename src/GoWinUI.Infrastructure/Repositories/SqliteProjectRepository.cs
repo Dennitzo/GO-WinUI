@@ -175,7 +175,7 @@ public sealed class SqliteProjectRepository(SqliteDatabase database) : IProjectR
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,project_id,blob_id,file_name,content_type,category,source_path,sha256,length,sort_order,revision,created_at,updated_at
+            SELECT id,project_id,blob_id,file_name,content_type,category,source_path,sha256,length,sort_order,revision,created_at,updated_at,title
             FROM project_assets WHERE project_id=$id ORDER BY sort_order,id;
             """;
         command.Parameters.AddWithValue("$id", projectId.ToString("D"));
@@ -199,8 +199,8 @@ public sealed class SqliteProjectRepository(SqliteDatabase database) : IProjectR
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = """
-                INSERT INTO project_assets(id,project_id,blob_id,file_name,content_type,category,source_path,sha256,length,sort_order,revision,created_at,updated_at)
-                VALUES($id,$project,$blob,$name,$type,$category,$source,$sha,$length,$order,1,$created,$updated);
+                INSERT INTO project_assets(id,project_id,blob_id,file_name,content_type,category,source_path,sha256,length,sort_order,revision,created_at,updated_at,title)
+                VALUES($id,$project,$blob,$name,$type,$category,$source,$sha,$length,$order,1,$created,$updated,$title);
                 """;
             BindAsset(command, created);
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
@@ -226,7 +226,7 @@ public sealed class SqliteProjectRepository(SqliteDatabase database) : IProjectR
             command.Parameters.Clear();
             command.CommandText = """
                 UPDATE project_assets SET blob_id=$blob,file_name=$name,content_type=$type,category=$category,source_path=$source,
-                    sha256=$sha,length=$length,sort_order=$order,revision=$revision,updated_at=$updated
+                    sha256=$sha,length=$length,sort_order=$order,revision=$revision,updated_at=$updated,title=$title
                 WHERE id=$id AND revision=$expected;
                 """;
             BindAsset(command, updated);
@@ -503,6 +503,7 @@ public sealed class SqliteProjectRepository(SqliteDatabase database) : IProjectR
         command.Parameters.AddWithValue("$order", asset.SortOrder);
         command.Parameters.AddWithValue("$created", asset.CreatedAt.ToDb());
         command.Parameters.AddWithValue("$updated", asset.UpdatedAt.ToDb());
+        command.Parameters.AddWithValue("$title", (object?)asset.Title ?? DBNull.Value);
     }
 
     private static Project ReadProject(SqliteDataReader reader) => new(
@@ -511,7 +512,8 @@ public sealed class SqliteProjectRepository(SqliteDatabase database) : IProjectR
 
     private static ProjectAsset ReadAsset(SqliteDataReader reader) => new(
         reader.ReadGuid(0), reader.ReadGuid(1), reader.ReadGuid(2), reader.GetString(3), reader.GetString(4), reader.ReadEnum<AssetCategory>(5),
-        reader.IsDBNull(6) ? null : reader.GetString(6), reader.GetString(7), reader.GetInt64(8), reader.GetInt32(9), reader.GetInt64(10), reader.ReadDate(11), reader.ReadDate(12));
+        reader.IsDBNull(6) ? null : reader.GetString(6), reader.GetString(7), reader.GetInt64(8), reader.GetInt32(9), reader.GetInt64(10), reader.ReadDate(11), reader.ReadDate(12),
+        reader.IsDBNull(13) ? null : reader.GetString(13));
 
     private static async Task DeleteBlobIfUnreferencedAsync(SqliteCommand command, string blobId, CancellationToken cancellationToken)
     {

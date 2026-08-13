@@ -320,6 +320,22 @@ public sealed partial class ProjectsViewModel(
 
     }
 
+    public async Task SaveAssetTitleAsync(
+        ProjectAsset asset,
+        string? title,
+        CancellationToken cancellationToken = default)
+    {
+        title = string.IsNullOrWhiteSpace(title) ? null : title.Trim();
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(title?.Length ?? 0, 200);
+        if (string.Equals(asset.Title, title, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _ = await projects.UpdateAssetAsync(asset with { Title = title }, asset.Revision, cancellationToken);
+        await RefreshAssetsAsync(cancellationToken);
+    }
+
     private void ReplaceAssets(IEnumerable<ProjectAsset> items)
     {
         var snapshot = items.ToArray();
