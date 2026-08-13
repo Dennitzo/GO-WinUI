@@ -10,6 +10,28 @@ namespace GoWinUI.Tests;
 public sealed class AssistantWorkflowTests
 {
     [Fact]
+    public async Task BuildingSessionSnapshotDoesNotContactLocalAi()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var localAi = new UnexpectedLmStudioClient();
+        using var coordinator = new AssistantCoordinator(
+            environment.Get<IChatRepository>(),
+            environment.Get<IWorkflowRepository>(),
+            environment.Get<IDocumentIngestor>(),
+            localAi,
+            environment.Get<IContextAssembler>(),
+            environment.Get<IChatOrchestrator>(),
+            settings,
+            CreateRecentActivity(settings));
+
+        _ = await coordinator.BuildSnapshotAsync();
+
+        Assert.Equal(0, localAi.ListModelsCallCount);
+    }
+
+    [Fact]
     public async Task SelectingWorkflowInsertsVisibleMessageWithoutSessionAttachment()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -117,5 +139,27 @@ public sealed class AssistantWorkflowTests
             Guid.NewGuid().ToString("D"),
             payloadDocument.RootElement.Clone());
         await coordinator.HandleAsync(envelope, static (_, _, _) => Task.CompletedTask);
+    }
+
+    private sealed class UnexpectedLmStudioClient : ILmStudioClient
+    {
+        public int ListModelsCallCount { get; private set; }
+
+        public Task<IReadOnlyList<LmModel>> ListModelsAsync(CancellationToken cancellationToken = default)
+        {
+            ListModelsCallCount++;
+            throw new InvalidOperationException("A local UI snapshot must not query LM Studio.");
+        }
+
+        public Task<bool> TestConnectionAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(false);
+
+        public async IAsyncEnumerable<LmDelta> StreamAsync(
+            LmChatRequest request,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
     }
 }

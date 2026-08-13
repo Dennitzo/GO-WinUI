@@ -21,6 +21,7 @@ public sealed class AssistantCoordinator(
     private const string DefaultSystemPrompt = "GO ist ein lokales Arbeitstool für TGA-Fachplanung. Unterstütze Fachplaner bei technischer Gebäudeausrüstung, Anlagenkonzepten, Berechnungen, Koordination und Dokumentation. GO ist hier ein Produktname und nicht die Programmiersprache Go. Weise auf Unsicherheit, fehlende Projektdaten und erforderliche fachliche Prüfungen hin; erfinde keine Norminhalte, Quellen oder Projektangaben.";
     private readonly SemaphoreSlim _chatGate = new(1, 1);
     private CancellationTokenSource? _activeChatCancellation;
+    private IReadOnlyList<LmModel> _knownModels = Array.Empty<LmModel>();
 
     public Task SaveDraftAsync(Guid sessionId, string draft, CancellationToken cancellationToken = default)
     {
@@ -41,7 +42,9 @@ public sealed class AssistantCoordinator(
             pages.AddRange(await documents.ReadPagesAsync(document.Id, cancellationToken).ConfigureAwait(false));
         }
 
-        var contextLimit = await ResolveContextLimitAsync(cancellationToken).ConfigureAwait(false);
+        // A snapshot is local UI state. Never make sidebar/session interaction wait for
+        // LM Studio, which may take several seconds to time out when it is offline.
+        var contextLimit = ResolveKnownContextLimit();
         var context = contextAssembler.Build(new(
             DefaultSystemPrompt,
             string.IsNullOrWhiteSpace(session.Draft) ? "Nächste Benutzereingabe" : session.Draft,
@@ -463,6 +466,7 @@ public sealed class AssistantCoordinator(
         }
 
         var models = await lmStudio.ListModelsAsync(cancellationToken).ConfigureAwait(false);
+        _knownModels = models;
         if (models.Count == 0)
         {
             throw new InvalidOperationException("LM Studio ist nicht erreichbar oder es ist kein Modell geladen.");
@@ -478,27 +482,16 @@ public sealed class AssistantCoordinator(
         return model;
     }
 
-    private async Task<int> ResolveContextLimitAsync(CancellationToken cancellationToken)
+    private int ResolveKnownContextLimit()
     {
-        try
-        {
-            var models = await lmStudio.ListModelsAsync(cancellationToken).ConfigureAwait(false);
-            var selected = settings.Current.SelectedModel;
-            var model = string.IsNullOrWhiteSpace(selected)
-                ? models.Count == 1 ? models[0] : null
-                : models.FirstOrDefault(candidate => string.Equals(candidate.Id, selected, StringComparison.Ordinal));
-            return model?.ContextLength is >= 2_048 and <= 10_000_000
-                ? model.ContextLength.Value
-                : 8_192;
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return 8_192;
-        }
-        catch (Exception exception) when (exception is HttpRequestException or JsonException)
-        {
-            return 8_192;
-        }
+        var models = _knownModels;
+        var selected = settings.Current.SelectedModel;
+        var model = string.IsNullOrWhiteSpace(selected)
+            ? models.Count == 1 ? models[0] : null
+            : models.FirstOrDefault(candidate => string.Equals(candidate.Id, selected, StringComparison.Ordinal));
+        return model?.ContextLength is >= 2_048 and <= 10_000_000
+            ? model.ContextLength.Value
+            : 8_192;
     }
 
     private async Task ListWorkflowsAsync(
