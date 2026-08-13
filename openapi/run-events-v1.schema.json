@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://go-ai.local/schemas/run-events-v1.schema.json",
+  "title": "GO AI Run Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "runId", "type", "createdAt", "data"],
+  "properties": {
+    "id": { "type": "integer", "minimum": 1 },
+    "runId": { "type": "string", "pattern": "^run-[a-f0-9]{32}$" },
+    "type": {
+      "enum": [
+        "run.started",
+        "queue.changed",
+        "model.selected",
+        "model.loading",
+        "model.fallback",
+        "provider.fallback",
+        "text.delta",
+        "server_tool.started",
+        "server_tool.completed",
+        "client_tool.proposed",
+        "run.waiting_for_client",
+        "artifact.created",
+        "run.completed",
+        "run.failed",
+        "run.cancelled"
+      ]
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "data": { "type": "object" }
+  }
+}

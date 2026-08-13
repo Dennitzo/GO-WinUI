@@ -1,0 +1,95 @@
+using GoAi.Contracts;
+using GoAi.Server.Core.Configuration;
+using GoAi.Server.Core.Policies;
+using System.Text.Json;
+
+namespace GoAi.Server.Tests;
+
+public sealed class ProtocolTests
+{
+    [Fact]
+    public void TgaPoliciesRemainValidUtf8GermanText()
+    {
+        Assert.Contains("für die TGA-Fachplanung", TgaAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
+        Assert.Contains("höchstens sechs Wörtern", TgaAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
+        Assert.DoesNotContain("Ã", TgaAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
+        Assert.DoesNotContain("Ã", TgaAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunRequestUsesStrictCamelCaseAndStringEnums()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Build prüfen")])]);
+
+        var json = JsonSerializer.Serialize(request, GoAiProtocol.CreateJsonOptions());
+
+        Assert.Contains("\"protocolVersion\":\"1.0\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"mode\":\"code\"", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProtocolVersion", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProtocolConstantsKeepEightMebibyteChunks()
+    {
+        Assert.Equal(8 * 1024 * 1024, GoAiProtocol.UploadChunkSize);
+        Assert.Equal("/v1", GoAiProtocol.ApiPrefix);
+    }
+
+    [Fact]
+    public void UnknownContractPropertiesAreRejected()
+    {
+        const string json = """
+            {"protocolVersion":"1.0","mode":"general","messages":[],"unexpected":true}
+            """;
+
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<RunRequest>(json, GoAiProtocol.CreateJsonOptions()));
+    }
+
+    [Fact]
+    public void LiveCaptionContractUsesVersionedLimitsAndStringMode()
+    {
+        var request = new LiveCaptionSessionRequest(Mode: LiveCaptionMode.TranslateToEnglish);
+
+        var json = JsonSerializer.Serialize(request, GoAiProtocol.CreateJsonOptions());
+
+        Assert.Contains("\"mode\":\"translateToEnglish\"", json, StringComparison.Ordinal);
+        Assert.Equal(512 * 1024, GoAiProtocol.MaximumLiveCaptionChunkBytes);
+        Assert.Equal(16_000, GoAiProtocol.LiveCaptionSampleRate);
+    }
+
+    [Fact]
+    public void ProviderSecretOverridesKeepClientSecretsInTheRunDataDirectory()
+    {
+        var options = new GoAiServerOptions
+        {
+            DataDirectory = @"C:\GO-AI-Test\RunData",
+            ProviderDataDirectory = @"C:\GO-AI-Test\ProviderData",
+            WorkerDataDirectory = @"C:\GO-AI-Test\WorkerData",
+        };
+
+        Assert.Equal(
+            Path.GetFullPath(@"C:\GO-AI-Test\ProviderData\Secrets\lmstudio-token.dpapi"),
+            options.LmStudioTokenPath);
+        Assert.Equal(
+            Path.GetFullPath(@"C:\GO-AI-Test\ProviderData\Secrets\speech-worker.key"),
+            options.GetWorkerKeyPath("speech"));
+        Assert.Equal(
+            Path.GetFullPath(@"C:\GO-AI-Test\RunData\Secrets\bootstrap-client-key.once"),
+            options.BootstrapKeyExportPath);
+        Assert.Equal(
+            Path.GetFullPath(@"C:\GO-AI-Test\WorkerData\Uploads"),
+            options.UploadDirectory);
+        Assert.Equal(
+            Path.GetFullPath(@"C:\GO-AI-Test\WorkerData"),
+            options.ResolvedWorkerDataDirectory);
+        Assert.Equal(
+            Path.GetFullPath(@"C:\GO-AI-Test\WorkerData\Artifacts\worker"),
+            options.WorkerArtifactDirectory);
+        Assert.Equal(
+            Path.GetFullPath(@"C:\GO-AI-Test\RunData\Artifacts"),
+            options.ArtifactDirectory);
+    }
+}

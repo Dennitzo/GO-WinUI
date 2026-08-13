@@ -1,0 +1,51 @@
+using System.Text.Json;
+
+namespace GoAi.Contracts;
+
+public enum ToolRiskClass
+{
+    ReadOnly,
+    LocalMutation,
+    Process,
+    CadMutation,
+}
+
+public sealed record ToolProposal(
+    string ProposalId,
+    string RunId,
+    string Name,
+    JsonElement Arguments,
+    ToolRiskClass RiskClass,
+    string Summary,
+    DateTimeOffset ExpiresAt);
+
+public sealed record ClientToolResult(
+    string ProposalId,
+    string Status,
+    JsonElement Result,
+    string? ErrorCode = null,
+    string? Message = null);
+
+public sealed record ToolDescriptor(
+    string Name,
+    string Description,
+    ToolRiskClass RiskClass,
+    JsonElement InputSchema,
+    int TimeoutSeconds,
+    int MaximumOutputBytes);
+
+public static class ClientToolNames
+{
+    public const string FileSystemList = "fs.list";
+    public const string FileSystemStat = "fs.stat";
+    public const string FileSystemReadText = "fs.readText";
+    public const string FileSystemSearch = "fs.search";
+    public const string FileSystemProposePatch = "fs.proposePatch";
+    public const string FileSystemProposeCreate = "fs.proposeCreate";
+    public const string FileSystemProposeDelete = "fs.proposeDelete";
+    public const string ProcessRunPreset = "process.runPreset";
+    public const string BricsCadGeometryQuery = "bricscad.geometryQuery";
+    public const string BricsCadMeasure = "bricscad.measure";
+    public const string BricsCadMove = "bricscad.move";
+    public const string BricsCadAction = "bricscad.action";
+}

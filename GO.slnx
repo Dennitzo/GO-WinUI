@@ -1,8 +1,15 @@
 <Solution>
+  <Project Path="src/GoAi.Client/GoAi.Client.csproj" />
+  <Project Path="src/GoAi.Contracts/GoAi.Contracts.csproj" />
+  <Project Path="src/GoAi.Server.App/GoAi.Server.App.csproj" />
+  <Project Path="src/GoAi.Server.Core/GoAi.Server.Core.csproj" />
+  <Project Path="src/GoAi.Gateway/GoAi.Gateway.csproj" />
+  <Project Path="src/GoAi.SmokeClient/GoAi.SmokeClient.csproj" />
   <Project Path="src/GoWinUI.App/GoWinUI.App.csproj" />
   <Project Path="src/GoWinUI.BricsCad.Plugin/GoWinUI.BricsCad.Plugin.csproj" />
   <Project Path="src/GoWinUI.BricsCad.Protocol/GoWinUI.BricsCad.Protocol.csproj" />
   <Project Path="src/GoWinUI.Core/GoWinUI.Core.csproj" />
   <Project Path="src/GoWinUI.Infrastructure/GoWinUI.Infrastructure.csproj" />
   <Project Path="tests/GoWinUI.Tests/GoWinUI.Tests.csproj" />
+  <Project Path="tests/GoAi.Server.Tests/GoAi.Server.Tests.csproj" />
 </Solution>

@@ -1,0 +1,21 @@
+{
+  admin off
+  auto_https disable_redirects
+  default_sni 192.168.0.67
+  skip_install_trust
+  servers {
+    protocols h1 h2
+  }
+}
+
+https://192.168.0.67:8443 {
+  tls internal
+  encode zstd gzip
+  reverse_proxy 127.0.0.1:7080 {
+    transport http {
+      versions 1.1
+      dial_timeout 5s
+      response_header_timeout 30m
+    }
+  }
+}

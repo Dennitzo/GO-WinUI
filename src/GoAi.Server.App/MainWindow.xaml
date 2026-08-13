@@ -1,0 +1,398 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+  x:Class="GoAi.Server.App.MainWindow"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+  xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+  Title="GO AI Server"
+  mc:Ignorable="d">
+
+  <Window.SystemBackdrop>
+    <MicaBackdrop Kind="BaseAlt" />
+  </Window.SystemBackdrop>
+
+  <Grid Background="{ThemeResource GoWindowBrush}">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="56" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="58" />
+    </Grid.RowDefinitions>
+
+    <Grid
+      x:Name="AppTitleBar"
+      Grid.Row="0"
+      Padding="18,0,152,0"
+      Background="{ThemeResource GoLayerBrush}">
+      <StackPanel VerticalAlignment="Center" Orientation="Horizontal" Spacing="8">
+        <TextBlock FontWeight="SemiBold" Text="GO AI Server" />
+        <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="GPU- und Agentendienst" />
+      </StackPanel>
+    </Grid>
+    <Border
+      Grid.Row="0"
+      Height="1"
+      VerticalAlignment="Bottom"
+      Background="{ThemeResource GoStrokeBrush}" />
+
+    <NavigationView
+      x:Name="RootNavigation"
+      Grid.Row="1"
+      AlwaysShowHeader="False"
+      Background="Transparent"
+      IsBackButtonVisible="Collapsed"
+      IsPaneToggleButtonVisible="True"
+      IsSettingsVisible="False"
+      IsTitleBarAutoPaddingEnabled="False"
+      OpenPaneLength="250"
+      PaneDisplayMode="Left"
+      SelectionChanged="OnNavigationSelectionChanged">
+      <NavigationView.PaneHeader>
+        <StackPanel Margin="12,16,12,22" Spacing="5">
+          <TextBlock FontSize="18" FontWeight="SemiBold" Text="Serververwaltung" />
+          <TextBlock
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            Text="127.0.0.1:7080 · HTTPS über Caddy"
+            TextWrapping="Wrap" />
+        </StackPanel>
+      </NavigationView.PaneHeader>
+      <NavigationView.MenuItems>
+        <NavigationViewItem x:Name="OverviewItem" Content="Übersicht" IsSelected="True" Tag="overview">
+          <NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="Modelle und GPU" Tag="models">
+          <NavigationViewItem.Icon><FontIcon Glyph="&#xE950;" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="Dienste" Tag="services">
+          <NavigationViewItem.Icon><FontIcon Glyph="&#xE968;" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="Sicherheit" Tag="security">
+          <NavigationViewItem.Icon><FontIcon Glyph="&#xE72E;" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="Ausführungslog" Tag="logs">
+          <NavigationViewItem.Icon><FontIcon Glyph="&#xE9D9;" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+      </NavigationView.MenuItems>
+
+      <Grid Padding="28,24,28,28">
+        <ScrollViewer x:Name="OverviewPanel" VerticalScrollBarVisibility="Auto">
+          <StackPanel MaxWidth="1450" HorizontalAlignment="Stretch" Spacing="18">
+            <Grid ColumnSpacing="12">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <StackPanel Spacing="4">
+                <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Serverübersicht" />
+                <TextBlock
+                  Foreground="{ThemeResource GoMutedTextBrush}"
+                  Text="Zustand des GO-Gateways, der lokalen AI und der GPU-Warteschlange." />
+              </StackPanel>
+              <Button
+                Grid.Column="1"
+                Click="OnRefreshClick"
+                Style="{StaticResource GoPrimaryButtonStyle}">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <FontIcon FontSize="14" Glyph="&#xE72C;" />
+                  <TextBlock Text="Aktualisieren" />
+                </StackPanel>
+              </Button>
+            </Grid>
+
+            <Grid ColumnSpacing="14">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <Border Style="{StaticResource GoCardStyle}">
+                <StackPanel Spacing="8">
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="GATEWAY" />
+                  <TextBlock FontSize="22" FontWeight="SemiBold" Text="{x:Bind ViewModel.GatewayStatus, Mode=OneWay}" />
+                  <TextBlock Text="{x:Bind ViewModel.GatewayDetail, Mode=OneWay}" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="1" Style="{StaticResource GoCardStyle}">
+                <StackPanel Spacing="8">
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="GPU-LANE" />
+                  <TextBlock FontSize="22" FontWeight="SemiBold" Text="{x:Bind ViewModel.GpuQueue, Mode=OneWay}" />
+                  <TextBlock Text="{x:Bind ViewModel.ActiveLease, Mode=OneWay}" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="2" Style="{StaticResource GoCardStyle}">
+                <StackPanel Spacing="8">
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="LAUFZEIT" />
+                  <TextBlock FontSize="22" FontWeight="SemiBold" Text="{x:Bind ViewModel.Uptime, Mode=OneWay}" />
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Tage · Stunden · Minuten · Sekunden" />
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="3" Style="{StaticResource GoCardStyle}">
+                <StackPanel Spacing="8">
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="AGENTENLÄUFE" />
+                  <TextBlock FontSize="22" FontWeight="SemiBold" Text="{x:Bind ViewModel.RunsSummary, Mode=OneWay}" />
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="{x:Bind ViewModel.RunsDetail, Mode=OneWay}" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+            </Grid>
+
+            <Border Style="{StaticResource GoCardStyle}">
+              <StackPanel Spacing="14">
+                <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Verbindungen" />
+                <Grid RowSpacing="12" ColumnSpacing="16">
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="170" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                  <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                  <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Öffentlicher Endpunkt" />
+                  <TextBlock Grid.Column="1" FontFamily="Cascadia Mono" Text="{x:Bind ViewModel.PublicEndpoint, Mode=OneWay}" />
+                  <TextBlock Grid.Row="1" Foreground="{ThemeResource GoMutedTextBrush}" Text="Gateway Loopback" />
+                  <TextBlock Grid.Row="1" Grid.Column="1" FontFamily="Cascadia Mono" Text="{x:Bind ViewModel.LoopbackEndpoint, Mode=OneWay}" />
+                </Grid>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource GoCardStyle}">
+              <StackPanel Spacing="14">
+                <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Temporäre Serverdaten" />
+                <Grid ColumnSpacing="18">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <StackPanel Spacing="5">
+                    <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="UPLOADS UND ARTEFAKTE" />
+                    <TextBlock FontSize="20" FontWeight="SemiBold" Text="{x:Bind ViewModel.StorageSummary, Mode=OneWay}" />
+                    <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="{x:Bind ViewModel.StorageDetail, Mode=OneWay}" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="1" Spacing="5">
+                    <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="DATENTRÄGER" />
+                    <TextBlock FontSize="20" FontWeight="SemiBold" Text="{x:Bind ViewModel.DiskFree, Mode=OneWay}" />
+                    <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="{x:Bind ViewModel.DataDirectory, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="2" Spacing="5">
+                    <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="CLIENT-ZUGRIFF" />
+                    <TextBlock FontSize="20" FontWeight="SemiBold" Text="{x:Bind ViewModel.ApiKeySummary, Mode=OneWay}" />
+                    <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Schlüsselmaterial wird nicht protokolliert." TextWrapping="Wrap" />
+                  </StackPanel>
+                </Grid>
+              </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource GoCardStyle}">
+              <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="GPU-Server" />
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Gpus}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Grid Padding="0,10" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="2*" /><ColumnDefinition Width="2*" />
+                          <ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock FontWeight="SemiBold" Text="{Binding Name}" />
+                        <TextBlock Grid.Column="1" Text="{Binding Memory}" />
+                        <TextBlock Grid.Column="2" Text="{Binding Utilization}" />
+                        <TextBlock Grid.Column="3" Text="{Binding Temperature}" />
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+
+        <ScrollViewer x:Name="ModelsPanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+          <StackPanel MaxWidth="1450" Spacing="18">
+            <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Modelle und GPU" />
+            <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Konfigurierte Rollen – ohne stille Modellumschaltung." />
+            <Border Padding="0" Style="{StaticResource GoCardStyle}">
+              <StackPanel>
+                <Grid Padding="16,12" Background="{ThemeResource GoAccentBrush}" ColumnSpacing="12">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="3*" /><ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Foreground="Black" FontWeight="SemiBold" Text="Modell" />
+                  <TextBlock Grid.Column="1" Foreground="Black" FontWeight="SemiBold" Text="Rolle" />
+                  <TextBlock Grid.Column="2" Foreground="Black" FontWeight="SemiBold" Text="Kontext" />
+                  <TextBlock Grid.Column="3" Foreground="Black" FontWeight="SemiBold" Text="Runtime" />
+                  <TextBlock Grid.Column="4" Foreground="Black" FontWeight="SemiBold" Text="Dateien" />
+                </Grid>
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Models}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Grid Padding="16,13" BorderBrush="{ThemeResource GoAccentBrush}" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="3*" /><ColumnDefinition Width="*" />
+                          <ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock FontWeight="SemiBold" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Grid.Column="1" Text="{Binding Role}" />
+                        <TextBlock Grid.Column="2" Text="{Binding Context}" />
+                        <TextBlock Grid.Column="3" Text="{Binding State}" />
+                        <TextBlock Grid.Column="4" Text="{Binding DownloadState}" />
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+
+        <ScrollViewer x:Name="ServicesPanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+          <StackPanel MaxWidth="1450" Spacing="18">
+            <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Dienste" />
+            <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Caddy ist der einzige LAN-Einstieg; Worker bleiben intern und loopbackgebunden." />
+            <ItemsControl ItemsSource="{x:Bind ViewModel.Services}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Border Margin="0,0,0,12" Style="{StaticResource GoCardStyle}">
+                    <Grid ColumnSpacing="16">
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="220" /><ColumnDefinition Width="*" /><ColumnDefinition Width="130" /></Grid.ColumnDefinitions>
+                      <StackPanel Spacing="4">
+                        <TextBlock FontWeight="SemiBold" Text="{Binding Name}" />
+                        <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="{Binding Detail}" />
+                      </StackPanel>
+                      <TextBlock Grid.Column="1" VerticalAlignment="Center" FontFamily="Cascadia Mono" Text="{Binding Endpoint}" />
+                      <Border Grid.Column="2" BorderBrush="{ThemeResource GoWarningBrush}" Style="{StaticResource GoStatusPillStyle}">
+                        <TextBlock HorizontalAlignment="Center" Foreground="{ThemeResource GoWarningBrush}" Text="{Binding State}" />
+                      </Border>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </ScrollViewer>
+
+        <ScrollViewer
+          x:Name="SecurityPanel"
+          HorizontalAlignment="Stretch"
+          HorizontalContentAlignment="Stretch"
+          Visibility="Collapsed"
+          VerticalScrollBarVisibility="Auto">
+          <StackPanel HorizontalAlignment="Stretch" Spacing="18">
+            <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Sicherheit und Schlüssel" />
+            <Border Style="{StaticResource GoCardStyle}">
+              <StackPanel Spacing="14">
+                <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="GO-Client API-Schlüssel" />
+                <TextBlock Text="{x:Bind ViewModel.SecurityMessage, Mode=OneWay}" TextWrapping="Wrap" />
+                <TextBox
+                  x:Name="ApiKeyBox"
+                  IsReadOnly="True"
+                  FontFamily="Cascadia Mono"
+                  PlaceholderText="Kein Klartextschlüssel sichtbar"
+                  Text="{x:Bind ViewModel.OneTimeApiKey, Mode=OneWay}" />
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                  <Button Click="OnCreateApiKeyClick" Style="{StaticResource GoPrimaryButtonStyle}" Content="Neuen Schlüssel erzeugen" />
+                  <Button Click="OnCopyApiKeyClick" Content="Kopieren" />
+                  <Button Click="OnHideApiKeyClick" Content="Ausblenden" />
+                </StackPanel>
+                <ItemsControl ItemsSource="{x:Bind ViewModel.ApiKeys}">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Border
+                        Margin="0,4,0,0"
+                        Padding="14,12"
+                        Background="{ThemeResource GoLayerStrongBrush}"
+                        BorderBrush="{ThemeResource GoStrokeBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8">
+                        <Grid ColumnSpacing="16">
+                          <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="2*" />
+                            <ColumnDefinition Width="2*" />
+                            <ColumnDefinition Width="Auto" />
+                          </Grid.ColumnDefinitions>
+                          <StackPanel Spacing="3">
+                            <TextBlock FontWeight="SemiBold" Text="{Binding Name}" />
+                            <TextBlock
+                              FontFamily="Cascadia Mono"
+                              Foreground="{ThemeResource GoMutedTextBrush}"
+                              Text="{Binding KeyId}" />
+                          </StackPanel>
+                          <StackPanel Grid.Column="1" Spacing="3">
+                            <TextBlock Text="{Binding Created}" TextWrapping="Wrap" />
+                            <TextBlock
+                              Foreground="{ThemeResource GoMutedTextBrush}"
+                              Text="{Binding LastUsed}"
+                              TextWrapping="Wrap" />
+                          </StackPanel>
+                          <Button
+                            Grid.Column="2"
+                            VerticalAlignment="Center"
+                            Click="OnRevokeApiKeyClick"
+                            Content="Widerrufen"
+                            IsEnabled="{Binding CanRevoke}"
+                            Style="{StaticResource GoDangerButtonStyle}"
+                            Tag="{Binding KeyId}" />
+                        </Grid>
+                      </Border>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource GoCardStyle}">
+              <StackPanel Spacing="14">
+                <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="LM-Studio Authentifizierung" />
+                <TextBlock
+                  Foreground="{ThemeResource GoMutedTextBrush}"
+                  Text="Token wird mit Windows DPAPI geschützt und niemals in der Oberfläche zurückgelesen."
+                  TextWrapping="Wrap" />
+                <PasswordBox x:Name="LmStudioTokenBox" PlaceholderText="LM Studio API Token" />
+                <Button
+                  HorizontalAlignment="Left"
+                  Click="OnSaveLmStudioTokenClick"
+                  Style="{StaticResource GoPrimaryButtonStyle}"
+                  Content="Token geschützt speichern" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+
+        <Grid x:Name="LogsPanel" Visibility="Collapsed">
+          <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+          <StackPanel Margin="0,0,0,16" Spacing="4">
+            <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Ausführungslog" />
+            <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Nur IDs, Zustände, Dauer, Größen und Fehlercodes – keine Prompts oder Medieninhalte." />
+          </StackPanel>
+          <TextBox
+            x:Name="LogTextBox"
+            Grid.Row="1"
+            AcceptsReturn="True"
+            FontFamily="Cascadia Mono"
+            FontSize="13"
+            IsReadOnly="True"
+            Text="{x:Bind ViewModel.LogText, Mode=OneWay}"
+            TextChanged="OnLogTextChanged"
+            ScrollViewer.HorizontalScrollBarVisibility="Auto"
+            ScrollViewer.VerticalScrollBarVisibility="Auto"
+            TextWrapping="NoWrap"
+            VerticalContentAlignment="Stretch" />
+        </Grid>
+      </Grid>
+    </NavigationView>
+
+    <Border
+      Grid.Row="2"
+      Padding="14,8"
+      Background="{ThemeResource GoLayerBrush}"
+      BorderBrush="{ThemeResource GoStrokeBrush}"
+      BorderThickness="0,1,0,0">
+      <Grid ColumnSpacing="12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+        <Border Style="{StaticResource GoStatusPillStyle}">
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <FontIcon Foreground="{ThemeResource GoAccentBrush}" Glyph="&#xE950;" />
+            <TextBlock FontWeight="SemiBold" Text="GPU Server" />
+            <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="{x:Bind ViewModel.GatewayStatus, Mode=OneWay}" />
+          </StackPanel>
+        </Border>
+        <TextBlock Grid.Column="2" VerticalAlignment="Center" FontFamily="Cascadia Mono" Foreground="{ThemeResource GoMutedTextBrush}" Text="Protocol v1.0" />
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

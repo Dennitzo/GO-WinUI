@@ -31,6 +31,85 @@ function Assert-GoCommand {
     return $command
 }
 
+function Resolve-GoDockerCommand {
+    $dockerBin = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'Docker\Docker\resources\bin'
+    if (Test-Path -LiteralPath $dockerBin -PathType Container) {
+        $pathEntries = @($env:PATH -split ';')
+        if (-not ($pathEntries | Where-Object { [string]::Equals($_.TrimEnd('\'), $dockerBin.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase) })) {
+            $env:PATH = $dockerBin + ';' + $env:PATH
+        }
+    }
+
+    $command = Get-Command docker -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    $candidate = Join-Path $dockerBin 'docker.exe'
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        return $candidate
+    }
+
+    throw 'Docker Desktop command was not found. Install or start Docker Desktop.'
+}
+
+function New-GoRandomSecret {
+    param(
+        [ValidateRange(16, 256)]
+        [int] $ByteCount = 32
+    )
+
+    $bytes = New-Object byte[] $ByteCount
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    }
+    finally {
+        $generator.Dispose()
+    }
+
+    return [Convert]::ToBase64String($bytes)
+}
+
+function Get-GoLmStudioToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $DataRoot
+    )
+
+    $tokenPath = Join-Path ([IO.Path]::GetFullPath($DataRoot)) 'Secrets\lmstudio-token.dpapi'
+    if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) {
+        return $null
+    }
+
+    Add-Type -AssemblyName System.Security
+    $protectedBytes = [IO.File]::ReadAllBytes($tokenPath)
+    $entropy = [Text.Encoding]::UTF8.GetBytes('GO-AI-Server.LM-Studio.v1')
+    $clearBytes = [Security.Cryptography.ProtectedData]::Unprotect(
+        $protectedBytes,
+        $entropy,
+        [Security.Cryptography.DataProtectionScope]::LocalMachine)
+    try {
+        return [Text.Encoding]::UTF8.GetString($clearBytes)
+    }
+    finally {
+        [Array]::Clear($clearBytes, 0, $clearBytes.Length)
+    }
+}
+
+function Get-GoLmStudioHeaders {
+    param(
+        [AllowNull()]
+        [string] $Token
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Token)) {
+        return @{}
+    }
+
+    return @{ Authorization = "Bearer $Token" }
+}
+
 function Invoke-GoDotNet {
     param(
         [Parameter(Mandatory = $true)]

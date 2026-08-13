@@ -1,0 +1,1304 @@
+openapi: 3.1.0
+info:
+  title: GO AI Server API
+  version: 1.0.0
+  description: Versionierte API des lokal betriebenen GO AI Servers.
+  license:
+    name: Proprietär
+servers:
+  - url: https://192.168.0.67:8443
+security:
+  - goAiKey: []
+paths:
+  /v1/health/live:
+    get:
+      summary: Prozess-Liveness abrufen
+      operationId: getLiveHealth
+      security: []
+      responses:
+        "200":
+          description: Prozess ist aktiv.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthSnapshot"
+  /v1/health/ready:
+    get:
+      summary: Betriebsbereitschaft abrufen
+      operationId: getReadyHealth
+      security: []
+      responses:
+        "200":
+          description: Server ist betriebsbereit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthSnapshot"
+        "503":
+          description: Server ist nicht bereit; Antwort nennt Grund und Reparaturschritt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthSnapshot"
+  /v1/capabilities:
+    get:
+      summary: Serverfähigkeiten abrufen
+      operationId: getCapabilities
+      responses:
+        "200":
+          description: Protokoll- und Fähigkeitsübersicht.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitySnapshot"
+  /v1/models/status:
+    get:
+      summary: LM-Studio-Modellstatus abrufen
+      operationId: getModelStatus
+      responses:
+        "200":
+          description: LM-Studio-Modellstatus.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelStatusSnapshot"
+  /v1/gpu/status:
+    get:
+      summary: GPU- und Warteschlangenstatus abrufen
+      operationId: getGpuStatus
+      responses:
+        "200":
+          description: GPU- und Lease-Status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GpuStatusSnapshot"
+  /v1/services/status:
+    get:
+      summary: Status der internen Dienste abrufen
+      operationId: getServiceStatus
+      responses:
+        "200":
+          description: Status der internen Dienste.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ServiceStatusSnapshot"
+  /v1/runs:
+    post:
+      summary: Agentenlauf erstellen
+      operationId: createRun
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunRequest"
+      responses:
+        "202":
+          description: Run wurde angenommen.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunAccepted"
+        "200":
+          description: Bereits vorhandener idempotenter Run wurde zurückgegeben.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunAccepted"
+        "400":
+          $ref: "#/components/responses/Problem"
+  /v1/runs/{runId}:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    get:
+      summary: Agentenlauf abrufen
+      operationId: getRun
+      responses:
+        "200":
+          description: Persistierter Runstatus.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunSnapshot"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /v1/runs/{runId}/events:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+      - name: Last-Event-ID
+        in: header
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+    get:
+      summary: Wiederaufnehmbaren Ereignisstream öffnen
+      operationId: streamRunEvents
+      responses:
+        "200":
+          description: Wiederaufnehmbarer Server-Sent-Event-Stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /v1/runs/{runId}/client-tool-results:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    post:
+      summary: Lokales Client-Werkzeugergebnis übermitteln
+      operationId: submitClientToolResult
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClientToolResult"
+      responses:
+        "204":
+          description: Ergebnis persistiert.
+  /v1/runs/{runId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    post:
+      summary: Agentenlauf abbrechen
+      operationId: cancelRun
+      responses:
+        "202":
+          description: Abbruch wurde angefordert.
+        "204":
+          description: Run war bereits beendet.
+  /v1/uploads:
+    post:
+      summary: Resumierbaren Upload anlegen
+      operationId: createUpload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadManifest"
+      responses:
+        "201":
+          description: Upload wurde angelegt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadCreated"
+  /v1/uploads/{uploadId}:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+    get:
+      summary: Uploadfortschritt abrufen
+      operationId: getUpload
+      responses:
+        "200":
+          description: Upload- und Resume-Status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadCreated"
+    delete:
+      summary: Temporären Upload löschen
+      operationId: deleteUpload
+      responses:
+        "204":
+          description: Temporärer Upload gelöscht.
+  /v1/uploads/{uploadId}/chunks/{index}:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+      - name: index
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 0
+      - name: X-Chunk-SHA256
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: "^[A-Fa-f0-9]{64}$"
+    put:
+      summary: Upload-Chunk übertragen
+      operationId: putUploadChunk
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              contentEncoding: binary
+              maxLength: 8388608
+      responses:
+        "200":
+          description: Chunk verifiziert und gespeichert.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadChunkReceipt"
+  /v1/uploads/{uploadId}/complete:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+    post:
+      summary: Upload abschließen und prüfen
+      operationId: completeUpload
+      responses:
+        "200":
+          description: Gesamt-SHA-256 wurde geprüft.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadCompleted"
+  /v1/artifacts/{artifactId}:
+    parameters:
+      - name: artifactId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^artifact-[a-f0-9]{32}$"
+    get:
+      summary: Artefakt vollständig oder als Range laden
+      operationId: downloadArtifact
+      parameters:
+        - name: Range
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Vollständiges Artefakt.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                contentEncoding: binary
+        "206":
+          description: Teilinhalt für Resume.
+  /v1/research/web:
+    post:
+      summary: Web über SearXNG durchsuchen
+      operationId: searchWeb
+      requestBody:
+        $ref: "#/components/requestBodies/WebSearch"
+      responses:
+        "200":
+          description: SearXNG-Suchergebnisse.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebSearchResponse"
+  /v1/research/youtube:
+    post:
+      summary: YouTube durchsuchen
+      operationId: searchYouTube
+      requestBody:
+        $ref: "#/components/requestBodies/WebSearch"
+      responses:
+        "200":
+          description: YouTube-Ergebnisse; ohne API-Key sichtbar als SearXNG-Fallback markiert.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebSearchResponse"
+  /v1/research/fetch:
+    post:
+      summary: Öffentliche Webquelle geschützt abrufen
+      operationId: fetchWeb
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+      responses:
+        "200":
+          description: Begrenzter, als nicht vertrauenswürdig markierter Webinhalt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebFetchResponse"
+  /v1/audio/transcriptions:
+    post:
+      summary: Audio mit Whisper transkribieren
+      operationId: transcribeAudio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [uploadId]
+              properties:
+                uploadId:
+                  type: string
+                language:
+                  type: string
+      responses:
+        "200":
+          description: Whisper-Transkript mit Zeitsegmenten.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranscriptionResponse"
+  /v1/audio/speech:
+    post:
+      summary: Sprache mit Qwen3-TTS erzeugen
+      operationId: synthesizeSpeech
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  maxLength: 10000
+                voice:
+                  type: string
+                format:
+                  const: wav
+                speed:
+                  type: number
+                  minimum: 0.5
+                  maximum: 2
+      responses:
+        "200":
+          description: Qwen3-TTS- oder sichtbar markiertes Windows-TTS-Artefakt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeechResponse"
+  /v1/audio/live-captions/sessions:
+    post:
+      summary: Explizite Live-Untertitel-Sitzung für Client-Systemaudio starten
+      operationId: createLiveCaptionSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LiveCaptionSessionRequest"
+      responses:
+        "201":
+          description: Exklusive Live-Untertitel-Sitzung wurde gestartet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveCaptionSessionSnapshot"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/audio/live-captions/sessions/{sessionId}:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^caption-[a-f0-9]{32}$"
+    get:
+      summary: Laufenden Live-Untertitel-Stand für Reconnect abrufen
+      operationId: getLiveCaptionSession
+      responses:
+        "200":
+          description: Aktueller Sitzungsstand und nächste Sequenz.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveCaptionSessionSnapshot"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /v1/audio/live-captions/sessions/{sessionId}/chunks/{sequence}:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^caption-[a-f0-9]{32}$"
+      - name: sequence
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+    put:
+      summary: Kurzes PCM16-WAV-Systemaudiofenster transkribieren
+      operationId: putLiveCaptionChunk
+      requestBody:
+        required: true
+        content:
+          audio/wav:
+            schema:
+              type: string
+              contentEncoding: binary
+              maxLength: 524288
+      responses:
+        "200":
+          description: Dedupliziertes bestätigtes Untertitelsegment.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveCaptionChunkResponse"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+  /v1/audio/live-captions/sessions/{sessionId}/stop:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^caption-[a-f0-9]{32}$"
+    post:
+      summary: Live-Untertitel-Sitzung beenden und Gesamttext zurückgeben
+      operationId: stopLiveCaptionSession
+      responses:
+        "200":
+          description: Abgeschlossener Sitzungsstand.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveCaptionSessionSnapshot"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /v1/images/generations:
+    post:
+      summary: Bildgenerierung starten
+      operationId: generateImage
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [prompt]
+              properties:
+                prompt:
+                  type: string
+                  maxLength: 10000
+                width:
+                  type: integer
+                  minimum: 256
+                  maximum: 1536
+                  multipleOf: 64
+                height:
+                  type: integer
+                  minimum: 256
+                  maximum: 1536
+                  multipleOf: 64
+                seed:
+                  type: integer
+                count:
+                  type: integer
+                  minimum: 1
+                  maximum: 4
+      responses:
+        "202":
+          description: Asynchroner Bild-Run angenommen.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunAccepted"
+        "200":
+          description: Bereits vorhandener idempotenter Bild-Run wurde zurückgegeben.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunAccepted"
+  /v1/media/analyze:
+    post:
+      summary: Medienanalyse starten
+      operationId: analyzeMedia
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [uploadId]
+              properties:
+                uploadId:
+                  type: string
+                prompt:
+                  type: string
+                options:
+                  type: object
+                  additionalProperties:
+                    type: string
+                detailWindows:
+                  type: array
+                  maxItems: 3
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [start, end]
+                    properties:
+                      start:
+                        type: number
+                        minimum: 0
+                      end:
+                        type: number
+                        exclusiveMinimum: 0
+                        maximum: 3600
+      responses:
+        "202":
+          description: Asynchroner Medien-Run angenommen.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunAccepted"
+        "200":
+          description: Bereits vorhandener idempotenter Medien-Run wurde zurückgegeben.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunAccepted"
+components:
+  securitySchemes:
+    goAiKey:
+      type: apiKey
+      in: header
+      name: X-GO-AI-Key
+  parameters:
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^run-[a-f0-9]{32}$"
+    UploadId:
+      name: uploadId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^upload-[a-f0-9]{32}$"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+  requestBodies:
+    WebSearch:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [query]
+            properties:
+              query:
+                type: string
+              maximumResults:
+                type: integer
+                minimum: 1
+                maximum: 20
+              language:
+                type: string
+  responses:
+    Problem:
+      description: Standardisierte ProblemDetails-Antwort.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    HealthSnapshot:
+      type: object
+      additionalProperties: false
+      required: [status, protocolVersion, timestamp]
+      properties:
+        status:
+          type: string
+        protocolVersion:
+          const: "1.0"
+        timestamp:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        repair:
+          type: string
+    RunRequest:
+      type: object
+      additionalProperties: false
+      required: [protocolVersion, mode, messages]
+      properties:
+        protocolVersion:
+          const: "1.0"
+        mode:
+          enum: [auto, general, code]
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/RunMessage"
+        uploadIds:
+          type: array
+          maxItems: 64
+          items:
+            type: string
+            pattern: "^upload-[a-f0-9]{32}$"
+        artifactIds:
+          type: array
+          maxItems: 64
+          items:
+            type: string
+            pattern: "^artifact-[a-f0-9]{32}$"
+        clientCapabilities:
+          type: array
+          maxItems: 16
+          items:
+            enum: [filesystem, code, process, bricscad, screenCapture]
+        limits:
+          $ref: "#/components/schemas/RunLimits"
+        sessionId:
+          type: string
+          maxLength: 128
+    RunMessage:
+      type: object
+      additionalProperties: false
+      required: [role, content]
+      properties:
+        role:
+          enum: [user, assistant]
+        content:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ContentPart"
+    ContentPart:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          maxLength: 32
+        text:
+          type: string
+          maxLength: 256000
+        uploadId:
+          type: string
+          pattern: "^upload-[a-f0-9]{32}$"
+        artifactId:
+          type: string
+          pattern: "^artifact-[a-f0-9]{32}$"
+        mediaType:
+          type: string
+          maxLength: 128
+        fileName:
+          type: string
+          maxLength: 512
+    RunLimits:
+      type: object
+      additionalProperties: false
+      properties:
+        maximumOutputTokens:
+          type: integer
+          minimum: 1
+          maximum: 65536
+        maximumContextTokens:
+          type: integer
+          minimum: 1024
+          maximum: 262144
+        timeoutSeconds:
+          type: integer
+          minimum: 30
+          maximum: 3600
+    RunAccepted:
+      type: object
+      additionalProperties: false
+      required: [runId, state, createdAt, eventsUrl]
+      properties:
+        runId:
+          type: string
+        state:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        eventsUrl:
+          type: string
+    RunSnapshot:
+      type: object
+      additionalProperties: false
+      required: [runId, state, mode, lastEventId, createdAt, updatedAt]
+      properties:
+        runId:
+          type: string
+          pattern: "^run-[a-f0-9]{32}$"
+        state:
+          enum: [queued, running, waitingForClient, completed, failed, cancelled, interrupted]
+        mode:
+          enum: [auto, general, code]
+        selectedModel:
+          type: string
+        sessionTitle:
+          type: string
+        lastEventId:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        errorCode:
+          type: string
+    CapabilitySnapshot:
+      type: object
+      additionalProperties: false
+      required: [protocolVersion, serverVersion, models, serverTools, clientTools, uploadLimits, mediaTypes, supportsSseResume, uploadChunkSize, liveCaptions]
+      properties:
+        protocolVersion:
+          const: "1.0"
+        serverVersion:
+          type: string
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelCapability"
+        serverTools:
+          type: array
+          items:
+            type: string
+        clientTools:
+          type: array
+          items:
+            type: string
+        uploadLimits:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        mediaTypes:
+          type: array
+          items:
+            type: string
+        supportsSseResume:
+          type: boolean
+        uploadChunkSize:
+          type: integer
+          const: 8388608
+        liveCaptions:
+          $ref: "#/components/schemas/LiveCaptionCapability"
+    LiveCaptionCapability:
+      type: object
+      additionalProperties: false
+      required: [available, formats, sampleRates, maximumChunkBytes, minimumWindowMilliseconds, maximumWindowMilliseconds, supportsEnglishTranslation]
+      properties:
+        available:
+          type: boolean
+        formats:
+          type: array
+          items:
+            type: string
+        sampleRates:
+          type: array
+          items:
+            type: integer
+        maximumChunkBytes:
+          type: integer
+          const: 524288
+        minimumWindowMilliseconds:
+          type: integer
+          const: 1000
+        maximumWindowMilliseconds:
+          type: integer
+          const: 10000
+        supportsEnglishTranslation:
+          type: boolean
+    ModelCapability:
+      type: object
+      additionalProperties: false
+      required: [id, role, contextTokens, supportsTools, supportsVision, isFallback]
+      properties:
+        id:
+          type: string
+        role:
+          type: string
+        contextTokens:
+          type: integer
+        supportsTools:
+          type: boolean
+        supportsVision:
+          type: boolean
+        isFallback:
+          type: boolean
+    ModelStatusSnapshot:
+      type: object
+      additionalProperties: false
+      required: [providerReachable, providerUrl, models, checkedAt]
+      properties:
+        providerReachable:
+          type: boolean
+        providerUrl:
+          type: string
+          format: uri
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelRuntimeStatus"
+        checkedAt:
+          type: string
+          format: date-time
+        errorCode:
+          type: string
+    ModelRuntimeStatus:
+      type: object
+      additionalProperties: false
+      required: [id, role, downloaded, loaded, state, contextTokens]
+      properties:
+        id:
+          type: string
+        role:
+          type: string
+        downloaded:
+          type: boolean
+        loaded:
+          type: boolean
+        state:
+          type: string
+        contextTokens:
+          type: integer
+    GpuStatusSnapshot:
+      type: object
+      additionalProperties: false
+      required: [available, queueLength, devices, checkedAt]
+      properties:
+        available:
+          type: boolean
+        queueLength:
+          type: integer
+          minimum: 0
+        activeLease:
+          type: string
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/GpuDeviceStatus"
+        checkedAt:
+          type: string
+          format: date-time
+        errorCode:
+          type: string
+    GpuDeviceStatus:
+      type: object
+      additionalProperties: false
+      required: [index, name, memoryTotalMiB, memoryUsedMiB, utilizationPercent, temperatureCelsius]
+      properties:
+        index:
+          type: integer
+        name:
+          type: string
+        memoryTotalMiB:
+          type: integer
+          format: int64
+        memoryUsedMiB:
+          type: integer
+          format: int64
+        utilizationPercent:
+          type: integer
+        temperatureCelsius:
+          type: integer
+    ServiceStatusSnapshot:
+      type: object
+      additionalProperties: false
+      required: [name, state, endpoint, reachable, checkedAt]
+      properties:
+        name:
+          type: string
+        state:
+          type: string
+        endpoint:
+          type: string
+          format: uri
+        reachable:
+          type: boolean
+        checkedAt:
+          type: string
+          format: date-time
+        detail:
+          type: string
+    ClientToolResult:
+      type: object
+      additionalProperties: false
+      required: [proposalId, status, result]
+      properties:
+        proposalId:
+          type: string
+          pattern: "^proposal-[a-f0-9]{32}$"
+        status:
+          enum: [completed, rejected, failed]
+        result: {}
+        errorCode:
+          type: string
+        message:
+          type: string
+    UploadManifest:
+      type: object
+      additionalProperties: false
+      required: [fileName, mediaType, length, sha256]
+      properties:
+        fileName:
+          type: string
+        mediaType:
+          type: string
+        length:
+          type: integer
+          minimum: 1
+        sha256:
+          type: string
+          pattern: "^[A-Fa-f0-9]{64}$"
+        chunkSize:
+          const: 8388608
+        chunkCount:
+          type: integer
+          minimum: 1
+    UploadCreated:
+      type: object
+      additionalProperties: false
+      required: [uploadId, chunkSize, chunkCount, receivedChunks, expiresAt]
+      properties:
+        uploadId:
+          type: string
+        chunkSize:
+          const: 8388608
+        chunkCount:
+          type: integer
+        receivedChunks:
+          type: array
+          items:
+            type: integer
+        expiresAt:
+          type: string
+          format: date-time
+    UploadChunkReceipt:
+      type: object
+      additionalProperties: false
+      required: [uploadId, index, sha256, length, accepted]
+      properties:
+        uploadId:
+          type: string
+          pattern: "^upload-[a-f0-9]{32}$"
+        index:
+          type: integer
+          minimum: 0
+        sha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        length:
+          type: integer
+          format: int64
+        accepted:
+          type: boolean
+    UploadCompleted:
+      type: object
+      additionalProperties: false
+      required: [uploadId, fileName, mediaType, length, sha256, expiresAt]
+      properties:
+        uploadId:
+          type: string
+          pattern: "^upload-[a-f0-9]{32}$"
+        fileName:
+          type: string
+        mediaType:
+          type: string
+        length:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        expiresAt:
+          type: string
+          format: date-time
+    ArtifactDescriptor:
+      type: object
+      additionalProperties: false
+      required: [artifactId, fileName, mediaType, length, sha256, createdAt, expiresAt]
+      properties:
+        artifactId:
+          type: string
+          pattern: "^artifact-[a-f0-9]{32}$"
+        fileName:
+          type: string
+        mediaType:
+          type: string
+        length:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    WebSearchResponse:
+      type: object
+      additionalProperties: false
+      required: [query, results, provider, isFallback, retrievedAt]
+      properties:
+        query:
+          type: string
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebSearchResult"
+        provider:
+          type: string
+        isFallback:
+          type: boolean
+        retrievedAt:
+          type: string
+          format: date-time
+    WebSearchResult:
+      type: object
+      additionalProperties: false
+      required: [title, url]
+      properties:
+        title:
+          type: string
+        url:
+          type: string
+          format: uri
+        snippet:
+          type: string
+        source:
+          type: string
+        publishedAt:
+          type: string
+          format: date-time
+        thumbnailUrl:
+          type: string
+          format: uri
+        duration:
+          type: string
+    WebFetchResponse:
+      type: object
+      additionalProperties: false
+      required: [url, mediaType, content, isUntrusted, retrievedAt, redirectChain]
+      properties:
+        url:
+          type: string
+          format: uri
+        mediaType:
+          type: string
+        content:
+          type: string
+          maxLength: 5242880
+        isUntrusted:
+          type: boolean
+        retrievedAt:
+          type: string
+          format: date-time
+        redirectChain:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            format: uri
+    TranscriptionResponse:
+      type: object
+      additionalProperties: false
+      required: [text, language, languageProbability, segments, provider]
+      properties:
+        text:
+          type: string
+        language:
+          type: string
+        languageProbability:
+          type: number
+          minimum: 0
+          maximum: 1
+        segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/TranscriptionSegment"
+        provider:
+          type: string
+    TranscriptionSegment:
+      type: object
+      additionalProperties: false
+      required: [start, end, text]
+      properties:
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+        text:
+          type: string
+    LiveCaptionSessionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        language:
+          type: string
+          maxLength: 16
+        mode:
+          enum: [transcribe, translateToEnglish]
+        sampleRate:
+          type: integer
+          const: 16000
+        channels:
+          type: integer
+          const: 1
+        windowMilliseconds:
+          type: integer
+          minimum: 1000
+          maximum: 10000
+        overlapMilliseconds:
+          type: integer
+          minimum: 0
+          maximum: 2000
+    LiveCaptionSessionSnapshot:
+      type: object
+      additionalProperties: false
+      required: [sessionId, state, mode, sampleRate, channels, windowMilliseconds, overlapMilliseconds, nextSequence, transcript, createdAt, updatedAt, expiresAt]
+      properties:
+        sessionId:
+          type: string
+          pattern: "^caption-[a-f0-9]{32}$"
+        state:
+          enum: [active, completed]
+        mode:
+          enum: [transcribe, translateToEnglish]
+        language:
+          type: string
+        sampleRate:
+          type: integer
+          const: 16000
+        channels:
+          type: integer
+          const: 1
+        windowMilliseconds:
+          type: integer
+        overlapMilliseconds:
+          type: integer
+        nextSequence:
+          type: integer
+          format: int64
+          minimum: 0
+        transcript:
+          type: string
+          maxLength: 500000
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+    LiveCaptionChunkResponse:
+      type: object
+      additionalProperties: false
+      required: [sessionId, sequence, text, transcript, language, languageProbability, segments, isFinal, provider, createdAt]
+      properties:
+        sessionId:
+          type: string
+          pattern: "^caption-[a-f0-9]{32}$"
+        sequence:
+          type: integer
+          format: int64
+          minimum: 0
+        text:
+          type: string
+        transcript:
+          type: string
+          maxLength: 500000
+        language:
+          type: string
+        languageProbability:
+          type: number
+          minimum: 0
+          maximum: 1
+        segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/TranscriptionSegment"
+        isFinal:
+          const: true
+        provider:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    SpeechResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact, provider, isFallback]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/ArtifactDescriptor"
+        provider:
+          type: string
+        isFallback:
+          type: boolean
+    Problem:
+      type: object
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        errorCode:
+          type: string
+        traceId:
+          type: string

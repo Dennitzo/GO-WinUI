@@ -23,6 +23,9 @@ GO ist ein Greenfield-Neuaufbau von Barebone-Qt als lokale WinUI-3-Anwendung. Di
 | `GoWinUI.BricsCad.Protocol` | Bridge-DTOs, Framing, Vertrag und Loopback-Host |
 | `GoWinUI.BricsCad.Plugin` | optionales .NET-8-x64-Plugin für BricsCAD V26 |
 | `GoWinUI.Tests` | Unit-, Integrations-, Persistenz- und Vertragstests |
+| `GoAi.Server.App` | separate WinUI-3-Oberfläche für den GO AI Server |
+| `GoAi.Gateway` / `GoAi.Server.Core` | versionierte Server-API, Orchestrierung, Persistenz und Worker-Anbindung |
+| `GoAi.Contracts` / `GoAi.Client` | gemeinsame API-Verträge und .NET-Clientpaket |
 
 SQLite ist die einzige Wahrheit für Chats, Dokumente, Workflows, Projekte und Binärobjekte. Einstellungen liegen separat und atomar in `settings.json`; WebView-Storage wird nicht als Anwendungsspeicher verwendet.
 
@@ -38,7 +41,7 @@ Laufzeitdaten werden unter `%LOCALAPPDATA%\GO` gespeichert. Datenbank und Backup
 
 ## Build und Tests
 
-Der einzige öffentliche Einstieg führt Restore, Release-Build, Tests, `win-x64`-Single-file-Publish und einen isolierten Laufzeit-/WebView2-Smoke-Test aus:
+Der öffentliche GO-Client-Einstieg führt Restore, Release-Build, Tests, `win-x64`-Single-file-Publish und einen isolierten Laufzeit-/WebView2-Smoke-Test aus:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1
@@ -53,6 +56,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1 -Include
 ```
 
 Alternativ kann `windows\build-bricscad-plugin.ps1` direkt verwendet werden. Das Ergebnis ist ein eigenes NETLOAD-ZIP unter `artifacts\windows\bricscad-v26`; `GOBricsCad.dll` wird nicht in `GO.exe` eingebettet. Weitere Build-Schalter und Artefakte sind in [windows/README.md](windows/README.md) beschrieben.
+
+Der GO AI Server besitzt einen vollständig getrennten Build und ein eigenes portables Artefakt:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build-ai-server.ps1
+```
+
+Serverbetrieb, Modellpfade, Deployment und Live-Abnahme sind in [GO-AI-SERVER.md](GO-AI-SERVER.md) beschrieben.
 
 ## Nutzung
 

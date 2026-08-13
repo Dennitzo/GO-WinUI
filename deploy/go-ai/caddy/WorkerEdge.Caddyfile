@@ -1,0 +1,16 @@
+{
+  admin off
+  auto_https off
+}
+
+:7082 {
+  reverse_proxy speech:8080
+}
+
+:7083 {
+  reverse_proxy media:8080
+}
+
+:7084 {
+  reverse_proxy image:8080
+}

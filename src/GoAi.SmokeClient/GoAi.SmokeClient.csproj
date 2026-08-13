@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>GoAi.SmokeClient</RootNamespace>
+    <AssemblyName>GoAi.SmokeClient</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GoAi.Client\GoAi.Client.csproj" />
+    <ProjectReference Include="..\GoAi.Contracts\GoAi.Contracts.csproj" />
+  </ItemGroup>
+</Project>
