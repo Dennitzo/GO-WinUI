@@ -16,6 +16,7 @@
         "model.loading",
         "model.fallback",
         "provider.fallback",
+        "context.changed",
         "text.delta",
         "server_tool.started",
         "server_tool.completed",

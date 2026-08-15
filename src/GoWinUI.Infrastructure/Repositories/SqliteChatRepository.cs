@@ -12,10 +12,10 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,title,created_at,updated_at,selected_workflow_id,draft
+            SELECT id,title,created_at,updated_at,selected_workflow_id,draft,assistant_mode,workspace_path,workspace_fingerprint,is_pinned,pinned_at
             FROM chat_sessions
             WHERE $search='' OR rowid IN (SELECT rowid FROM session_search WHERE session_search MATCH $fts)
-            ORDER BY updated_at DESC;
+            ORDER BY is_pinned DESC, updated_at DESC;
             """;
         command.Parameters.AddWithValue("$search", search?.Trim() ?? string.Empty);
         command.Parameters.AddWithValue("$fts", SqliteMapping.ToFtsQuery(search));
@@ -33,7 +33,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,title,created_at,updated_at,selected_workflow_id,draft FROM chat_sessions WHERE id=$id;";
+        command.CommandText = "SELECT id,title,created_at,updated_at,selected_workflow_id,draft,assistant_mode,workspace_path,workspace_fingerprint,is_pinned,pinned_at FROM chat_sessions WHERE id=$id;";
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSession(reader) : null;
@@ -69,6 +69,45 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
     public Task SelectWorkflowAsync(Guid id, Guid? workflowId, CancellationToken cancellationToken = default) =>
         UpdateSessionAsync(id, "selected_workflow_id=$value", workflowId?.ToString("D"), cancellationToken);
 
+    public Task SetAssistantContextAsync(
+        Guid id,
+        AssistantMode mode,
+        string? workspacePath,
+        string? workspaceFingerprint,
+        CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                UPDATE chat_sessions
+                SET assistant_mode=$mode,
+                    workspace_path=$workspace,
+                    workspace_fingerprint=$fingerprint,
+                    updated_at=$now
+                WHERE id=$id;
+                """;
+            command.Parameters.AddWithValue("$id", id.ToString("D"));
+            command.Parameters.AddWithValue("$mode", SqliteMapping.EnumName(mode));
+            command.Parameters.AddWithValue("$workspace", (object?)workspacePath ?? DBNull.Value);
+            command.Parameters.AddWithValue("$fingerprint", (object?)workspaceFingerprint ?? DBNull.Value);
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
+    public Task SetPinnedAsync(Guid id, bool isPinned, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE chat_sessions SET is_pinned=$pinned,pinned_at=$at,updated_at=$now WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", id.ToString("D"));
+            command.Parameters.AddWithValue("$pinned", isPinned ? 1 : 0);
+            command.Parameters.AddWithValue("$at", isPinned ? DateTimeOffset.UtcNow.ToDb() : DBNull.Value);
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
     public Task DeleteSessionAsync(Guid id, CancellationToken cancellationToken = default) => database.WriteAsync(async (connection, transaction, token) =>
     {
         await using var command = connection.CreateCommand();
@@ -101,7 +140,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider
             FROM chat_messages WHERE session_id=$id ORDER BY created_at,id;
             """;
         command.Parameters.AddWithValue("$id", sessionId.ToString("D"));
@@ -156,12 +195,38 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken);
 
+    public Task SetToolExecutionAsync(Guid messageId, ToolExecutionInfo execution, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE chat_messages SET tool_name=$name,tool_context=$context,tool_status=$status,tool_detail=$detail,tool_provider=$provider,updated_at=$now WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+            command.Parameters.AddWithValue("$name", execution.Tool);
+            command.Parameters.AddWithValue("$context", execution.Context);
+            command.Parameters.AddWithValue("$status", execution.Status);
+            command.Parameters.AddWithValue("$detail", (object?)execution.Detail ?? DBNull.Value);
+            command.Parameters.AddWithValue("$provider", (object?)execution.Provider ?? DBNull.Value);
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
     public Task<int> MarkStreamingMessagesInterruptedAsync(CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
-            command.CommandText = "UPDATE chat_messages SET status='interrupted',updated_at=$now WHERE status IN ('pending','streaming');";
+            command.CommandText = """
+                UPDATE chat_messages
+                SET status='interrupted',updated_at=$now
+                WHERE status IN ('pending','streaming')
+                  AND NOT EXISTS(
+                      SELECT 1 FROM go_ai_runs r
+                      WHERE r.assistant_message_id=chat_messages.id
+                        AND r.server_run_id IS NOT NULL
+                        AND r.state IN ('queued','running','waitingForClient')
+                  );
+                """;
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
             var messages = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
             command.CommandText = "UPDATE chat_runs SET status='interrupted',completed_at=$now WHERE status='streaming';";
@@ -183,9 +248,16 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
 
     private static ChatSession ReadSession(SqliteDataReader reader) => new(
         reader.ReadGuid(0), reader.GetString(1), reader.ReadDate(2), reader.ReadDate(3),
-        reader.IsDBNull(4) ? null : reader.ReadGuid(4), reader.GetString(5));
+        reader.IsDBNull(4) ? null : reader.ReadGuid(4), reader.GetString(5), reader.ReadEnum<AssistantMode>(6),
+        reader.IsDBNull(7) ? null : reader.GetString(7),
+        reader.IsDBNull(8) ? null : reader.GetString(8),
+        !reader.IsDBNull(9) && reader.GetInt32(9) != 0,
+        reader.IsDBNull(10) ? null : reader.ReadDate(10));
 
     private static ChatMessage ReadMessage(SqliteDataReader reader) => new(
         reader.ReadGuid(0), reader.ReadGuid(1), reader.ReadEnum<ChatRole>(2), reader.GetString(3),
-        reader.ReadEnum<MessageStatus>(4), reader.ReadDate(5), reader.ReadDate(6), reader.IsDBNull(7) ? null : reader.GetString(7));
+        reader.ReadEnum<MessageStatus>(4), reader.ReadDate(5), reader.ReadDate(6), reader.IsDBNull(7) ? null : reader.GetString(7),
+        reader.IsDBNull(8) ? null : new ToolExecutionInfo(
+            reader.GetString(8), reader.GetString(9), reader.GetString(10),
+            reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12)));
 }

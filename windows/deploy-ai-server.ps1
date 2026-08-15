@@ -87,6 +87,15 @@ if (Test-ServiceExists $serviceName) {
     Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
     $service = Get-Service -Name $serviceName
     $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+    $service.Dispose()
+    Invoke-Sc @('delete', $serviceName)
+    $deleteDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ((Test-ServiceExists $serviceName) -and [DateTime]::UtcNow -lt $deleteDeadline) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (Test-ServiceExists $serviceName) {
+        throw 'The legacy GO AI Server Windows service could not be removed.'
+    }
 }
 
 $stagingRoot = $InstallRoot + '.staging-' + [Guid]::NewGuid().ToString('N')
@@ -109,52 +118,18 @@ finally {
 }
 
 $gatewayExecutable = Join-Path $InstallRoot 'gateway\GoAi.Gateway.exe'
-$serviceEnvironment = @(
-    "GO_AI_DATA_DIRECTORY=$DataRoot",
-    "GO_AI_EXPECTED_LAN_IP=$ExpectedLanIp",
-    "GO_AI_PUBLIC_URL=https://${ExpectedLanIp}:8443"
-)
-if ($AllowUnauthenticatedLmStudio) {
-    $serviceEnvironment += 'GO_AI_ALLOW_UNAUTHENTICATED_LM_STUDIO=1'
+if (-not (Test-Path -LiteralPath $gatewayExecutable -PathType Leaf)) {
+    throw "Diagnostic gateway executable is missing: $gatewayExecutable"
 }
-$serviceEnvironmentRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
-if (Test-ServiceExists $serviceName) {
-    Invoke-Sc @('config', $serviceName, 'binPath=', ('"{0}"' -f $gatewayExecutable), 'start=', 'delayed-auto', 'obj=', ('NT SERVICE\{0}' -f $serviceName))
-}
-else {
-    Invoke-Sc @('create', $serviceName, 'binPath=', ('"{0}"' -f $gatewayExecutable), 'start=', 'delayed-auto', 'obj=', ('NT SERVICE\{0}' -f $serviceName), 'DisplayName=', 'GO AI Server Gateway')
-}
-New-ItemProperty -Path $serviceEnvironmentRegistryPath -Name Environment -PropertyType MultiString -Value $serviceEnvironment -Force | Out-Null
-Invoke-Sc @('description', $serviceName, 'Loopbackgebundenes Gateway für GO-WinUI AI-Dienste')
-Invoke-Sc @('sidtype', $serviceName, 'unrestricted')
-Invoke-Sc @('failure', $serviceName, 'reset=', '86400', 'actions=', 'restart/5000/restart/15000/restart/60000')
 
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$serviceIdentity = "NT SERVICE\$serviceName"
-& icacls.exe $DataRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' ("*{0}:(OI)(CI)F" -f $currentSid) ("{0}:(RX)" -f $serviceIdentity) | Out-Null
+& icacls.exe $DataRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' ("*{0}:(OI)(CI)F" -f $currentSid) | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw 'Unable to apply the GO AI Server root ACL.'
 }
-foreach ($relativeDirectory in @('Data', 'Uploads', 'Artifacts', 'Logs', 'Secrets')) {
-    $mutableDirectory = Join-Path $DataRoot $relativeDirectory
-    New-Item -ItemType Directory -Path $mutableDirectory -Force | Out-Null
-    & icacls.exe $mutableDirectory /grant:r ("{0}:(OI)(CI)M" -f $serviceIdentity) | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to grant the gateway service access to $mutableDirectory."
-    }
-}
-& icacls.exe $InstallRoot /grant:r ("{0}:(OI)(CI)RX" -f $serviceIdentity) | Out-Null
+& icacls.exe $InstallRoot /grant:r ("*{0}:(OI)(CI)RX" -f $currentSid) | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    throw 'Unable to grant the gateway service read access to its installed binaries.'
-}
-
-$caddyAcl = Get-Acl -LiteralPath (Join-Path $DataRoot 'Caddy')
-$unsafeCaddyRules = @($caddyAcl.Access | Where-Object {
-    $_.IdentityReference.Value -eq $serviceIdentity -and
-    ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Write) -ne 0
-})
-if ($unsafeCaddyRules.Count -ne 0) {
-    throw 'The gateway service must not have write access to the Caddy CA directory.'
+    throw 'Unable to grant the interactive server app read access to its installed binaries.'
 }
 
 $lmStudioStartupScript = Join-Path $InstallRoot 'scripts\start-lmstudio-server.ps1'
@@ -162,27 +137,9 @@ if (-not (Test-Path -LiteralPath $lmStudioStartupScript -PathType Leaf)) {
     throw "LM Studio startup script is missing: $lmStudioStartupScript"
 }
 $taskName = 'GO AI LM Studio'
-$taskUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$taskArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -DataRoot "{1}"' -f $lmStudioStartupScript, $DataRoot
-$taskAction = New-ScheduledTaskAction -Execute $powerShell -Argument $taskArguments -WorkingDirectory (Split-Path $lmStudioStartupScript -Parent)
-$taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
-$taskTrigger.Delay = 'PT15S'
-$taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
-$taskSettings = New-ScheduledTaskSettingsSet `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask `
-    -TaskName $taskName `
-    -Action $taskAction `
-    -Trigger $taskTrigger `
-    -Principal $taskPrincipal `
-    -Settings $taskSettings `
-    -Description 'Starts and validates the authenticated LM Studio loopback server for GO AI after AMD signs in.' `
-    -Force | Out-Null
+if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+}
 
 $address = Get-NetIPAddress -AddressFamily IPv4 -IPAddress $ExpectedLanIp -ErrorAction Stop | Select-Object -First 1
 $profile = Get-NetConnectionProfile -InterfaceIndex $address.InterfaceIndex -ErrorAction Stop
@@ -233,22 +190,6 @@ finally {
     $env:GO_AI_EXPECTED_LAN_IP = $previousExpectedLanIp
 }
 
-Start-Service -Name $serviceName
-$gatewayDeadline = [DateTime]::UtcNow.AddSeconds(60)
-$live = $null
-do {
-    try {
-        $live = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:7080/v1/health/live' -TimeoutSec 3
-        if ($live.status -eq 'live') { break }
-    }
-    catch {
-        Start-Sleep -Seconds 1
-    }
-} while ([DateTime]::UtcNow -lt $gatewayDeadline)
-if ($null -eq $live -or $live.status -ne 'live') {
-    throw 'GO AI Gateway did not become live after service start.'
-}
-
 $rootCertificate = Join-Path $DataRoot 'Caddy\data\caddy\pki\authorities\local\root.crt'
 $certificateDeadline = [DateTime]::UtcNow.AddSeconds(60)
 while (-not (Test-Path -LiteralPath $rootCertificate -PathType Leaf) -and [DateTime]::UtcNow -lt $certificateDeadline) {
@@ -260,21 +201,35 @@ if (-not (Test-Path -LiteralPath $rootCertificate -PathType Leaf)) {
 $certificate = Import-Certificate -FilePath $rootCertificate -CertStoreLocation 'Cert:\LocalMachine\Root'
 Write-Host "Trusted Caddy root certificate: $($certificate.Thumbprint)" -ForegroundColor DarkGray
 
-$shortcutPath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonDesktopDirectory)) 'GO AI Server.lnk'
 $shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = Join-Path $InstallRoot 'GO-AI-Server.exe'
-$shortcut.Arguments = '--dashboard-only'
-$shortcut.WorkingDirectory = $InstallRoot
-$shortcut.IconLocation = (Join-Path $InstallRoot 'GO-AI-Server.exe') + ',0'
-$shortcut.Save()
+$shortcutPaths = @(
+    (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonDesktopDirectory)) 'GO AI Server.lnk'),
+    (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonStartup)) 'GO AI Server.lnk')
+)
+foreach ($shortcutPath in $shortcutPaths) {
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = Join-Path $InstallRoot 'GO-AI-Server.exe'
+    $shortcut.Arguments = ''
+    $shortcut.WorkingDirectory = $InstallRoot
+    $shortcut.IconLocation = (Join-Path $InstallRoot 'GO-AI-Server.exe') + ',0'
+    $shortcut.Save()
+}
 
 $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue
 $unexpected = @($listeners | Where-Object {
-    $_.LocalPort -in @(1234, 7080, 7081, 7082, 7083, 7084) -and $_.LocalAddress -notin @('127.0.0.1', '::1')
+    $_.LocalPort -in @(1234, 7080, 7081, 7082, 7083, 7084, 7085) -and $_.LocalAddress -notin @('127.0.0.1', '::1')
 })
 if ($unexpected.Count -ne 0) {
     throw 'A GO AI internal port is bound beyond loopback.'
 }
 
-Write-Host "GO AI Server deployed. Public endpoint: https://${ExpectedLanIp}:8443" -ForegroundColor Green
+& $docker compose --env-file $composeEnvironment --file $composePath stop --timeout 20
+if ($LASTEXITCODE -ne 0) {
+    throw "Docker Compose shutdown after deployment failed with exit code $LASTEXITCODE."
+}
+$lms = Get-Command 'lms' -ErrorAction SilentlyContinue
+if ($null -ne $lms) {
+    & $lms.Source server stop | Out-Null
+}
+
+Write-Host "GO AI Server deployed. Start GO-AI-Server.exe to activate Gateway, LM Studio and Docker services: https://${ExpectedLanIp}:8443" -ForegroundColor Green

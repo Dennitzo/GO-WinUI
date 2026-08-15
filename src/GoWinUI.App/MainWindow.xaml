@@ -244,74 +244,98 @@
       Background="{ThemeResource GoLayerBrush}"
       BorderBrush="{ThemeResource GoStrokeBrush}"
       BorderThickness="0,1,0,0">
-      <Grid MinWidth="0" ColumnSpacing="8">
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="Auto" />
-          <ColumnDefinition Width="*" />
-        </Grid.ColumnDefinitions>
-
-        <Border
-          AutomationProperties.Name="Lokale AI Status"
-          MinHeight="42"
-          Padding="8,4"
+      <Grid MinWidth="0">
+        <ScrollViewer
+          MinWidth="0"
           VerticalAlignment="Center"
-          Background="{ThemeResource GoLayerStrongBrush}"
-          BorderBrush="{ThemeResource GoStrokeBrush}"
-          BorderThickness="1"
-          CornerRadius="8">
-          <Grid ColumnSpacing="8">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="Auto" />
-              <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
-            <Border
-              Width="34"
-              Height="34"
-              VerticalAlignment="Center"
-              Background="{ThemeResource GoAccentSubtleBrush}"
-              CornerRadius="7">
-              <Grid>
-                <FontIcon
-                  HorizontalAlignment="Center"
-                  VerticalAlignment="Center"
-                  FontSize="16"
-                  Foreground="{ThemeResource GoAccentBrush}"
-                  Glyph="&#xE950;" />
-                <ProgressRing
-                  Width="20"
-                  Height="20"
-                  HorizontalAlignment="Center"
-                  VerticalAlignment="Center"
-                  Foreground="{ThemeResource GoAccentBrush}"
-                  IsActive="{x:Bind ViewModel.IsAiRunning, Mode=OneWay}"
-                  IsTabStop="False" />
-              </Grid>
-            </Border>
-            <StackPanel
-              Grid.Column="1"
-              MinWidth="0"
-              VerticalAlignment="Center"
-              Spacing="1">
-              <StackPanel Orientation="Horizontal" Spacing="6">
-                <TextBlock
-                  FontSize="12"
-                  FontWeight="SemiBold"
-                  Text="Lokale AI" />
-                <TextBlock
-                  AutomationProperties.LiveSetting="Polite"
-                  FontSize="12"
-                  Foreground="{ThemeResource GoAccentBrush}"
-                  Text="{x:Bind ViewModel.AiRunStateLabel, Mode=OneWay}" />
-              </StackPanel>
-              <TextBlock
-                MaxLines="1"
-                FontSize="11"
-                Foreground="{ThemeResource GoMutedTextBrush}"
-                Text="{x:Bind ViewModel.AiRunDetail, Mode=OneWay}"
-                TextTrimming="CharacterEllipsis" />
-            </StackPanel>
-          </Grid>
-        </Border>
+          HorizontalScrollBarVisibility="Auto"
+          HorizontalScrollMode="Enabled"
+          VerticalScrollBarVisibility="Disabled"
+          VerticalScrollMode="Disabled">
+          <ItemsControl ItemsSource="{x:Bind ViewModel.AiServices, Mode=OneWay}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <StackPanel Orientation="Horizontal" Spacing="8" />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border
+                  Width="42"
+                  Height="42"
+                  Padding="3"
+                  AutomationProperties.Name="{Binding AutomationLabel}"
+                  Background="{ThemeResource GoLayerStrongBrush}"
+                  BorderBrush="{ThemeResource GoStrokeBrush}"
+                  BorderThickness="1"
+                  CornerRadius="8"
+                  ToolTipService.Placement="Top"
+                  ToolTipService.ToolTip="{Binding ToolTipText}">
+                  <VisualStateManager.VisualStateGroups>
+                    <VisualStateGroup x:Name="ActivityStates">
+                      <VisualState x:Name="Idle">
+                        <VisualState.StateTriggers>
+                          <StateTrigger IsActive="{Binding IsIdle}" />
+                        </VisualState.StateTriggers>
+                      </VisualState>
+                      <VisualState x:Name="Running">
+                        <VisualState.StateTriggers>
+                          <StateTrigger IsActive="{Binding IsBusy}" />
+                        </VisualState.StateTriggers>
+                        <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                          <DoubleAnimation
+                            Storyboard.TargetName="ServiceIconSurfaceBrush"
+                            Storyboard.TargetProperty="Opacity"
+                            From="0.16"
+                            To="0.58"
+                            Duration="0:0:0.85">
+                            <DoubleAnimation.EasingFunction>
+                              <SineEase EasingMode="EaseInOut" />
+                            </DoubleAnimation.EasingFunction>
+                          </DoubleAnimation>
+                        </Storyboard>
+                      </VisualState>
+                    </VisualStateGroup>
+                  </VisualStateManager.VisualStateGroups>
+                  <Grid>
+                    <Border
+                      x:Name="ServiceIconSurface"
+                      Width="34"
+                      Height="34"
+                      HorizontalAlignment="Center"
+                      VerticalAlignment="Center"
+                      CornerRadius="7">
+                      <Border.Background>
+                        <SolidColorBrush
+                          x:Name="ServiceIconSurfaceBrush"
+                          Color="{ThemeResource GoAccentColor}"
+                          Opacity="0.20" />
+                      </Border.Background>
+                      <Grid>
+                        <FontIcon
+                          x:Name="ServiceGlyph"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          FontSize="16"
+                          Foreground="{ThemeResource GoAccentBrush}"
+                          Glyph="{Binding Glyph}" />
+                        <ProgressRing
+                          x:Name="ServiceProgress"
+                          Width="20"
+                          Height="20"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          Foreground="{ThemeResource GoAccentBrush}"
+                          IsActive="{Binding IsBusy}"
+                          IsTabStop="False" />
+                      </Grid>
+                    </Border>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
       </Grid>
     </Border>
   </Grid>

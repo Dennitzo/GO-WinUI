@@ -19,6 +19,10 @@ RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/wh
     && pip install --no-cache-dir --no-deps qwen-tts==0.1.1 \
     && rm /tmp/requirements.txt
 
+# Keep the large CUDA/Whisper dependency layer stable. Piper is the active,
+# low-latency CPU TTS runtime; SpeechBrain provides live-caption diarization.
+RUN pip install --no-cache-dir piper-tts==1.6.0 speechbrain==1.0.3
+
 ENV NUMBA_CACHE_DIR=/tmp/numba-cache \
     XDG_CACHE_HOME=/tmp/cache \
     TORCH_HOME=/tmp/torch

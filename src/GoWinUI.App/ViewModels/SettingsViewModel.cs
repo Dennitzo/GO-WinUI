@@ -3,16 +3,81 @@ using GoWinUI.App.Services;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using System.Collections.ObjectModel;
+using System.Globalization;
 
 namespace GoWinUI.App.ViewModels;
 
 public sealed partial class SettingsViewModel(
     SettingsCoordinator settings,
     ILmStudioClient lmStudio,
+    GoAiConnectionService goAi,
+    IAiSecretStore secrets,
+    IPromptTriggerRepository triggerRepository,
     IBackupService backups,
     ShellViewModel shell) : ObservableObject
 {
+    private static readonly HashSet<string> TriggerSortableColumns =
+    [
+        "Phrase",
+        "Action",
+        "Description",
+        "IsEnabled",
+    ];
+
+    private readonly List<(Guid Id, long Revision)> _deletedTriggers = [];
+
     public ObservableCollection<LmModel> Models { get; } = [];
+    public ObservableCollection<PromptTriggerEditorItem> PromptTriggers { get; } = [];
+    public IReadOnlyList<PromptTriggerActionOption> TriggerActions { get; } =
+        PromptTriggerEditorItem.AvailableActions;
+    public IReadOnlyList<PromptTriggerCategoryFilterOption> TriggerCategoryFilters { get; } =
+    [
+        new(null, "Alle"),
+        .. PromptTriggerEditorItem.AvailableActions.Select(option =>
+            new PromptTriggerCategoryFilterOption(option.Value, option.Label)),
+    ];
+
+    public IEnumerable<PromptTriggerEditorItem> VisiblePromptTriggers => ApplyTriggerSort(
+        (SelectedTriggerCategoryFilter?.Value is { } action
+            ? PromptTriggers.Where(item => item.Action == action)
+            : PromptTriggers)
+        .Where(MatchesTriggerSearch));
+
+    public string TriggerSortColumn { get; private set; } = "Phrase";
+
+    public bool TriggerSortDescending { get; private set; }
+
+    [ObservableProperty]
+    public partial AiProviderKind AiProvider { get; set; } = AiProviderKind.GoAiServer;
+
+    [ObservableProperty]
+    public partial string GoAiServerUrl { get; set; } = "https://192.168.0.67:8443";
+
+    [ObservableProperty]
+    public partial string GoAiApiKey { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string GoAiCaFingerprint { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string LocalToolWorkspacePath { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string LiveCaptionLanguage { get; set; } = "auto";
+
+    [ObservableProperty]
+    public partial bool HasStoredApiKey { get; set; }
+
+    [ObservableProperty]
+    public partial string TriggerSearchText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial PromptTriggerCategoryFilterOption? SelectedTriggerCategoryFilter { get; set; }
+
+    [ObservableProperty]
+    public partial PromptTriggerEditorItem? SelectedPromptTrigger { get; set; }
+
+    public bool CanDeleteSelectedPromptTrigger => SelectedPromptTrigger is not null;
 
     [ObservableProperty]
     public partial string LmStudioBaseUrl { get; set; } = "http://127.0.0.1:1234/v1";
@@ -44,6 +109,11 @@ public sealed partial class SettingsViewModel(
     public void Initialize()
     {
         var current = settings.Current;
+        AiProvider = current.AiProvider;
+        GoAiServerUrl = current.GoAiServerUrl;
+        GoAiCaFingerprint = current.GoAiCaFingerprint ?? string.Empty;
+        LocalToolWorkspacePath = current.LocalToolWorkspacePath ?? string.Empty;
+        LiveCaptionLanguage = current.LiveCaptionLanguage;
         LmStudioBaseUrl = current.LmStudioBaseUrl;
         SelectedModel = current.SelectedModel;
         ReasoningEffort = current.ReasoningEffort;
@@ -53,17 +123,52 @@ public sealed partial class SettingsViewModel(
         Language = current.Language;
     }
 
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        Initialize();
+        HasStoredApiKey = !string.IsNullOrWhiteSpace(await secrets.GetApiKeyAsync(cancellationToken));
+        PromptTriggers.Clear();
+        foreach (var trigger in await triggerRepository.ListAsync(cancellationToken))
+        {
+            PromptTriggers.Add(new PromptTriggerEditorItem(trigger));
+        }
+        SelectedTriggerCategoryFilter ??= TriggerCategoryFilters[0];
+        SelectedPromptTrigger = null;
+        RefreshPromptTriggerView();
+        _deletedTriggers.Clear();
+    }
+
     public async Task SaveAsync(CancellationToken cancellationToken = default)
     {
-        if (!Uri.TryCreate(LmStudioBaseUrl.Trim(), UriKind.Absolute, out var uri)
-            || uri.Scheme is not ("http" or "https"))
+        if (!Uri.TryCreate(LmStudioBaseUrl.Trim(), UriKind.Absolute, out var lmStudioUri)
+            || lmStudioUri.Scheme is not ("http" or "https"))
         {
             throw new InvalidOperationException("Die LM-Studio-Adresse muss eine gültige HTTP- oder HTTPS-URL sein.");
         }
+        if (!Uri.TryCreate(GoAiServerUrl.Trim(), UriKind.Absolute, out var goAiUri)
+            || goAiUri.Scheme is not ("http" or "https")
+            || (goAiUri.Scheme == "http" && !goAiUri.IsLoopback))
+        {
+            throw new InvalidOperationException("GO AI Server benötigt eine gültige HTTPS-Adresse; HTTP ist nur auf Loopback erlaubt.");
+        }
+        if (!string.IsNullOrWhiteSpace(GoAiApiKey))
+        {
+            await secrets.SetApiKeyAsync(GoAiApiKey, cancellationToken);
+            GoAiApiKey = string.Empty;
+            HasStoredApiKey = true;
+        }
 
+        var workspace = string.IsNullOrWhiteSpace(LocalToolWorkspacePath)
+            ? null
+            : Path.GetFullPath(LocalToolWorkspacePath.Trim());
         await settings.UpdateAsync(current => current with
         {
-            LmStudioBaseUrl = uri.ToString().TrimEnd('/'),
+            AiProvider = AiProvider,
+            GoAiServerUrl = goAiUri.ToString().TrimEnd('/'),
+            GoAiCaFingerprint = string.IsNullOrWhiteSpace(GoAiCaFingerprint) ? null : GoAiCaFingerprint,
+            LocalToolWorkspacePath = workspace,
+            LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
+            LmStudioBaseUrl = lmStudioUri.ToString().TrimEnd('/'),
             SelectedModel = string.IsNullOrWhiteSpace(SelectedModel) ? null : SelectedModel,
             ReasoningEffort = ReasoningEffort,
             Theme = Theme,
@@ -71,10 +176,13 @@ public sealed partial class SettingsViewModel(
             BackgroundColor = BackgroundColor,
             Language = Language,
         }, cancellationToken);
+        await SaveTriggersAsync(cancellationToken);
         App.Current.ApplyTheme(Theme);
         App.Current.ApplyAccentColor(AccentColor);
         App.Current.ApplyBackgroundColor(BackgroundColor);
-        shell.IsAiAvailable = await lmStudio.TestConnectionAsync(cancellationToken);
+        shell.IsAiAvailable = AiProvider == AiProviderKind.GoAiServer
+            ? (await goAi.TestAsync(cancellationToken)).IsReady
+            : await lmStudio.TestConnectionAsync(cancellationToken);
     }
 
     public async Task RefreshModelsAsync(CancellationToken cancellationToken = default)
@@ -83,27 +191,46 @@ public sealed partial class SettingsViewModel(
         try
         {
             await SaveAsync(cancellationToken);
-            var items = await lmStudio.ListModelsAsync(cancellationToken);
+            IReadOnlyList<LmModel> items;
+            if (AiProvider == AiProviderKind.GoAiServer)
+            {
+                var status = await goAi.TestAsync(cancellationToken);
+                if (!status.IsReady)
+                {
+                    throw new InvalidOperationException(status.Message);
+                }
+                items = status.Capabilities?.Models
+                    .Select(model => new LmModel(
+                        model.Id,
+                        string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.Role, model.ContextTokens),
+                        model.ContextTokens))
+                    .ToArray() ?? [];
+                ConnectionStatus = status.Message;
+            }
+            else
+            {
+                items = await lmStudio.ListModelsAsync(cancellationToken);
+                ConnectionStatus = items.Count == 0
+                    ? "Verbunden, aber kein Modell geladen"
+                    : string.Format(CultureInfo.CurrentCulture, "Verbunden · {0} Modell(e) geladen", items.Count);
+            }
+
             Models.Clear();
             foreach (var item in items)
             {
                 Models.Add(item);
             }
-
-            if (items.Count == 1)
+            if (AiProvider == AiProviderKind.LmStudioDiagnostic && items.Count == 1)
             {
                 SelectedModel = items[0].Id;
-                await SaveAsync(cancellationToken);
             }
-
-            ConnectionStatus = items.Count == 0
-                ? "Verbunden, aber kein Modell geladen"
-                : $"Verbunden · {items.Count} Modell(e) geladen";
             shell.IsAiAvailable = true;
         }
         catch
         {
-            ConnectionStatus = "LM Studio nicht erreichbar";
+            ConnectionStatus = AiProvider == AiProviderKind.GoAiServer
+                ? "GO AI Server nicht erreichbar"
+                : "LM Studio nicht erreichbar";
             shell.IsAiAvailable = false;
             throw;
         }
@@ -113,6 +240,99 @@ public sealed partial class SettingsViewModel(
         }
     }
 
+    public PromptTriggerEditorItem AddTrigger(
+        PromptTriggerAction action,
+        string phrase,
+        string description = "Benutzerdefinierter Prompt-Trigger.")
+    {
+        var normalizedPhrase = phrase.Trim();
+        if (normalizedPhrase.Length is 0 or > 160)
+        {
+            throw new InvalidOperationException("Die Triggerphrase muss zwischen 1 und 160 Zeichen lang sein.");
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var item = new PromptTriggerEditorItem(new PromptTrigger(
+            Guid.NewGuid(), action, normalizedPhrase, description.Trim(),
+            PromptTriggerMatchMode.Prefix, true, 100, 0, now, now));
+        PromptTriggers.Insert(0, item);
+        RefreshPromptTriggerView();
+        return item;
+    }
+
+    public void RemoveTrigger(PromptTriggerEditorItem item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        if (!item.IsNew)
+        {
+            _deletedTriggers.Add((item.Id, item.Revision));
+        }
+        PromptTriggers.Remove(item);
+        if (ReferenceEquals(SelectedPromptTrigger, item))
+        {
+            SelectedPromptTrigger = null;
+        }
+        RefreshPromptTriggerView();
+    }
+
+    public void SortPromptTriggers(string columnName)
+    {
+        if (!TriggerSortableColumns.Contains(columnName))
+        {
+            return;
+        }
+
+        if (string.Equals(TriggerSortColumn, columnName, StringComparison.Ordinal))
+        {
+            TriggerSortDescending = !TriggerSortDescending;
+        }
+        else
+        {
+            TriggerSortColumn = columnName;
+            TriggerSortDescending = false;
+        }
+        OnPropertyChanged(nameof(VisiblePromptTriggers));
+    }
+
+    public void RefreshPromptTriggerView() =>
+        OnPropertyChanged(nameof(VisiblePromptTriggers));
+
+    public async Task ImportConnectionBundleAsync(string path, CancellationToken cancellationToken = default)
+    {
+        var imported = await goAi.ImportConnectionBundleAsync(path, cancellationToken);
+        AiProvider = AiProviderKind.GoAiServer;
+        GoAiServerUrl = imported.ServerUrl;
+        GoAiCaFingerprint = imported.CaFingerprint;
+    }
+
+    public async Task DeleteApiKeyAsync(CancellationToken cancellationToken = default)
+    {
+        await secrets.DeleteApiKeyAsync(cancellationToken);
+        GoAiApiKey = string.Empty;
+        HasStoredApiKey = false;
+    }
+
+    private async Task SaveTriggersAsync(CancellationToken cancellationToken)
+    {
+        foreach (var deleted in _deletedTriggers)
+        {
+            await triggerRepository.DeleteAsync(deleted.Id, deleted.Revision, cancellationToken);
+        }
+        _deletedTriggers.Clear();
+        foreach (var item in PromptTriggers)
+        {
+            if (!item.IsDirty)
+            {
+                continue;
+            }
+            var saved = item.IsNew
+                ? await triggerRepository.CreateAsync(item.ToModel(), cancellationToken)
+                : await triggerRepository.UpdateAsync(item.ToModel(), item.Revision, cancellationToken);
+            item.ApplySaved(saved);
+        }
+        RefreshPromptTriggerView();
+    }
+
     public Task<BackupResult> CreateBackupAsync(string destinationPath, CancellationToken cancellationToken = default) =>
         backups.CreateAsync(destinationPath, cancellationToken);
 
@@ -120,5 +340,56 @@ public sealed partial class SettingsViewModel(
     {
         await backups.ValidateAsync(backupPath, cancellationToken);
         await backups.RestoreAsync(backupPath, cancellationToken);
+    }
+
+    partial void OnTriggerSearchTextChanged(string value)
+    {
+        SelectedPromptTrigger = null;
+        RefreshPromptTriggerView();
+    }
+
+    partial void OnSelectedTriggerCategoryFilterChanged(PromptTriggerCategoryFilterOption? value)
+    {
+        SelectedPromptTrigger = null;
+        RefreshPromptTriggerView();
+    }
+
+    partial void OnSelectedPromptTriggerChanged(PromptTriggerEditorItem? value) =>
+        OnPropertyChanged(nameof(CanDeleteSelectedPromptTrigger));
+
+    private IEnumerable<PromptTriggerEditorItem> ApplyTriggerSort(
+        IEnumerable<PromptTriggerEditorItem> source)
+    {
+        var textComparer = StringComparer.CurrentCultureIgnoreCase;
+        return TriggerSortColumn switch
+        {
+            "Action" => TriggerSortDescending
+                ? source.OrderByDescending(item => item.ActionDisplayName, textComparer)
+                : source.OrderBy(item => item.ActionDisplayName, textComparer),
+            "Description" => TriggerSortDescending
+                ? source.OrderByDescending(item => item.Description, textComparer)
+                : source.OrderBy(item => item.Description, textComparer),
+            "IsEnabled" => TriggerSortDescending
+                ? source.OrderByDescending(item => item.IsEnabled)
+                : source.OrderBy(item => item.IsEnabled),
+            _ => TriggerSortDescending
+                ? source.OrderByDescending(item => item.Phrase, textComparer)
+                : source.OrderBy(item => item.Phrase, textComparer),
+        };
+    }
+
+    private bool MatchesTriggerSearch(PromptTriggerEditorItem item)
+    {
+        var query = TriggerSearchText.Trim();
+        if (query.Length == 0)
+        {
+            return true;
+        }
+
+        var enabledLabel = item.IsEnabled ? "aktiv" : "inaktiv";
+        return item.Phrase.Contains(query, StringComparison.OrdinalIgnoreCase)
+            || item.Description.Contains(query, StringComparison.OrdinalIgnoreCase)
+            || item.ActionDisplayName.Contains(query, StringComparison.OrdinalIgnoreCase)
+            || enabledLabel.Contains(query, StringComparison.OrdinalIgnoreCase);
     }
 }

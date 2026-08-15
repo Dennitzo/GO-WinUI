@@ -33,8 +33,6 @@ public sealed class GoAiServerOptions
 
     public string VisionModelId { get; set; } = "qwen3-vl-30b-a3b-instruct";
 
-    public string VisionFallbackModelId { get; set; } = "qwen3-vl-8b-instruct";
-
     public string EmbeddingModelId { get; set; } = "text-embedding-bge-m3";
 
     public string? YouTubeApiKey { get; set; }
@@ -44,6 +42,10 @@ public sealed class GoAiServerOptions
     public int MaximumModelRounds { get; set; } = 12;
 
     public int MaximumToolCalls { get; set; } = 30;
+
+    public int MaximumCodingModelRounds { get; set; } = 48;
+
+    public int MaximumCodingToolCalls { get; set; } = 128;
 
     public bool RequireLmStudioAuthentication { get; set; } = true;
 
@@ -77,6 +79,8 @@ public sealed class GoAiServerOptions
     public string LmStudioTokenPath => !string.IsNullOrWhiteSpace(LmStudioTokenFile)
         ? Path.GetFullPath(LmStudioTokenFile)
         : Path.Combine(GetProviderSecretDirectory(), "lmstudio-token.dpapi");
+
+    public string YouTubeApiKeyPath => Path.Combine(GetProviderSecretDirectory(), "youtube-api-key.dpapi");
 
     public string BootstrapKeyExportPath => Path.Combine(SecretDirectory, "bootstrap-client-key.once");
 

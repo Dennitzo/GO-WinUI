@@ -51,7 +51,7 @@ $directories = @(
 foreach ($relative in $directories) {
     New-Item -ItemType Directory -Path (Join-Path $DataRoot $relative) -Force | Out-Null
 }
-foreach ($worker in @('speech', 'media', 'image')) {
+foreach ($worker in @('speech', 'media', 'image', 'video')) {
     $keyPath = Join-Path $DataRoot ("Secrets\{0}-worker.key" -f $worker)
     if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
         New-GoRandomSecret | Set-Content -LiteralPath $keyPath -Encoding ascii -NoNewline
@@ -105,6 +105,7 @@ if (@($profiles | Where-Object NetworkCategory -eq 'Private').Count -eq 0) {
     Write-Warning 'The active network profile is not Private. Deployment readiness will remain false until it is changed.'
 }
 
+Assert-GoCommand -Name 'lms' | Out-Null
 try {
     $lmToken = Get-GoLmStudioToken -DataRoot $DataRoot
     $lmHeaders = Get-GoLmStudioHeaders -Token $lmToken
@@ -118,7 +119,7 @@ catch {
         Write-Warning 'LM Studio is reachable and requires authentication, but no usable DPAPI token is configured yet.'
     }
     else {
-        throw 'LM Studio is not reachable on 127.0.0.1:1234. Start the local server before deployment.'
+        Write-Warning 'LM Studio is currently stopped. This is expected when the GO-AI-Server app is closed; the app starts it after launch.'
     }
 }
 

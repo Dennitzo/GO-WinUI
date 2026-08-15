@@ -6,31 +6,40 @@ namespace GoAi.Server.Core.Runs;
 
 public sealed class AgentToolCatalog
 {
+    private static readonly string[] DefaultServerTools =
+    [
+        "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
+        "image.generate", "math.evaluate", "context.embed", "context.retrieve",
+    ];
+
     private readonly Dictionary<string, AgentToolSpec> _tools = CreateTools();
 
     public IReadOnlyList<AgentToolSpec> GetAvailableTools(RunRequest request)
     {
-        var names = new HashSet<string>(StringComparer.Ordinal)
+        var requestedServerTools = request.AllowedServerTools ?? DefaultServerTools;
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in requestedServerTools)
         {
-            "web.search",
-            "web.fetch",
-            "youtube.search",
-            "media.inspect",
-            "media.analyze",
-            "image.generate",
-            "math.evaluate",
-            "context.embed",
-            "context.retrieve",
-        };
+            if (!_tools.TryGetValue(name, out var tool) || !tool.ServerSide)
+            {
+                throw new ArgumentException($"Unknown or unavailable server tool: {name}");
+            }
+            names.Add(name);
+        }
         var capabilities = request.ClientCapabilities ?? [];
         if (HasCapability(capabilities, "filesystem") || HasCapability(capabilities, "code"))
         {
             names.UnionWith(
             [
+                ClientToolNames.WorkspaceMap,
                 ClientToolNames.FileSystemList,
                 ClientToolNames.FileSystemStat,
+                ClientToolNames.FileSystemFindFiles,
                 ClientToolNames.FileSystemReadText,
+                ClientToolNames.FileSystemReadMany,
                 ClientToolNames.FileSystemSearch,
+                ClientToolNames.FileSystemWriteText,
+                ClientToolNames.FileSystemMove,
                 ClientToolNames.FileSystemProposePatch,
                 ClientToolNames.FileSystemProposeCreate,
                 ClientToolNames.FileSystemProposeDelete,
@@ -39,6 +48,7 @@ public sealed class AgentToolCatalog
         if (HasCapability(capabilities, "process") || HasCapability(capabilities, "code"))
         {
             names.Add(ClientToolNames.ProcessRunPreset);
+            names.Add(ClientToolNames.ProcessRun);
         }
         if (HasCapability(capabilities, "bricscad"))
         {
@@ -145,15 +155,53 @@ public sealed class AgentToolCatalog
                 RequireStringArray(value, "documents", 1, 256, 32_768);
                 OptionalInteger(value, "topK", 1, 20);
                 break;
+            case ClientToolNames.WorkspaceMap:
+                OptionalInteger(value, "maximumDepth", 1, 32);
+                OptionalInteger(value, "maximumEntries", 1, 5000);
+                break;
             case ClientToolNames.FileSystemList:
             case ClientToolNames.FileSystemStat:
+                RequireString(value, "path", 1, 1024);
+                break;
+            case ClientToolNames.FileSystemFindFiles:
+                OptionalString(value, "path", 1, 1024);
+                RequireStringArray(value, "patterns", 1, 64, 256);
+                OptionalInteger(value, "maximumResults", 1, 5000);
+                break;
             case ClientToolNames.FileSystemReadText:
                 RequireString(value, "path", 1, 1024);
+                OptionalInteger(value, "startLine", 1, 10_000_000);
+                OptionalInteger(value, "endLine", 1, 10_000_000);
+                break;
+            case ClientToolNames.FileSystemReadMany:
+                ValidateReadManyItems(value);
+                OptionalInteger(value, "maximumCharacters", 1024, 4 * 1024 * 1024);
                 break;
             case ClientToolNames.FileSystemSearch:
                 RequireString(value, "path", 1, 1024);
-                RequireString(value, "query", 1, 1024);
+                var hasQuery = value.TryGetProperty("query", out _);
+                var hasQueries = value.TryGetProperty("queries", out _);
+                if (hasQuery == hasQueries)
+                {
+                    throw new ArgumentException("fs.search requires exactly one of query or queries.");
+                }
+                if (hasQuery) RequireString(value, "query", 1, 1024);
+                if (hasQueries) RequireStringArray(value, "queries", 1, 64, 1024);
+                OptionalEnum(value, "matchMode", ["literal", "regex"]);
+                OptionalStringArray(value, "includeGlobs", 64, 256);
+                OptionalStringArray(value, "excludeGlobs", 64, 256);
                 OptionalInteger(value, "maximumResults", 1, 1000);
+                OptionalInteger(value, "contextLines", 0, 5);
+                break;
+            case ClientToolNames.FileSystemWriteText:
+                RequireString(value, "path", 1, 1024);
+                RequireString(value, "content", 0, 4 * 1024 * 1024);
+                OptionalString(value, "expectedSha256", 64, 64);
+                break;
+            case ClientToolNames.FileSystemMove:
+                RequireString(value, "source", 1, 1024);
+                RequireString(value, "destination", 1, 1024);
+                OptionalBoolean(value, "overwrite");
                 break;
             case ClientToolNames.FileSystemProposePatch:
                 RequireString(value, "path", 1, 1024);
@@ -169,6 +217,15 @@ public sealed class AgentToolCatalog
             case ClientToolNames.ProcessRunPreset:
                 RequireString(value, "preset", 1, 64);
                 OptionalString(value, "workspace", 1, 1024);
+                break;
+            case ClientToolNames.ProcessRun:
+                RequireString(value, "executable", 1, 1024);
+                RequireString(value, "purpose", 1, 16);
+                OptionalStringArray(value, "arguments", 128, 8192, allowEmpty: true);
+                OptionalString(value, "workingDirectory", 1, 1024);
+                OptionalInteger(value, "timeoutSeconds", 1, 3600);
+                OptionalEnum(value, "purpose", ["inspect", "test", "build", "start"]);
+                OptionalEnum(value, "startMode", ["wait", "smoke"]);
                 break;
             case ClientToolNames.BricsCadGeometryQuery:
             case ClientToolNames.BricsCadMeasure:
@@ -192,14 +249,20 @@ public sealed class AgentToolCatalog
             Server("math.evaluate", "Führe deterministische skalare, Vektor- oder Matrixoperationen ohne Skriptausführung aus.", ToolRiskClass.ReadOnly, MathSchema()),
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
             Server("context.retrieve", "Ordne Dokumenttexte über BGE-M3 semantisch zu einer Anfrage.", ToolRiskClass.ReadOnly, RetrieveSchema()),
+            Client(ClientToolNames.WorkspaceMap, "Erzeuge eine kompakte Karte des freigegebenen Repositorys mit Projekten, Sprachen und relativen Dateipfaden.", ToolRiskClass.ReadOnly, WorkspaceMapSchema()),
             Client(ClientToolNames.FileSystemList, "Liste Einträge innerhalb des freigegebenen Client-Workspace.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
             Client(ClientToolNames.FileSystemStat, "Lese Dateimetadaten innerhalb des freigegebenen Client-Workspace.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
-            Client(ClientToolNames.FileSystemReadText, "Lese eine Textdatei innerhalb des freigegebenen Client-Workspace.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
-            Client(ClientToolNames.FileSystemSearch, "Suche Text im freigegebenen Client-Workspace.", ToolRiskClass.ReadOnly, Schema(["path", "query"], ("path", "string"), ("query", "string"), ("maximumResults", "integer"))),
+            Client(ClientToolNames.FileSystemFindFiles, "Finde mehrere Dateien per Glob oder Dateiname im indexierten Workspace.", ToolRiskClass.ReadOnly, FindFilesSchema()),
+            Client(ClientToolNames.FileSystemReadText, "Lese eine ganze Textdatei oder einen bestimmten Zeilenbereich im Workspace.", ToolRiskClass.ReadOnly, ReadTextSchema()),
+            Client(ClientToolNames.FileSystemReadMany, "Lese mehrere relevante Dateien oder Zeilenbereiche gebündelt und kontextbegrenzt.", ToolRiskClass.ReadOnly, ReadManySchema()),
+            Client(ClientToolNames.FileSystemSearch, "Suche mehrere Literale oder reguläre Ausdrücke mit Globfiltern und Kontextzeilen im indexierten Workspace.", ToolRiskClass.ReadOnly, FileSearchSchema()),
+            Client(ClientToolNames.FileSystemWriteText, "Schreibe oder überschreibe eine Textdatei atomar im freigegebenen Workspace.", ToolRiskClass.LocalMutation, WriteTextSchema()),
+            Client(ClientToolNames.FileSystemMove, "Verschiebe eine Datei oder einen Ordner innerhalb des freigegebenen Workspace.", ToolRiskClass.LocalMutation, MoveSchema()),
             Client(ClientToolNames.FileSystemProposePatch, "Schlage einen Patch für eine vorhandene Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "patch"], ("path", "string"), ("patch", "string"))),
             Client(ClientToolNames.FileSystemProposeCreate, "Schlage das Erstellen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "content"], ("path", "string"), ("content", "string"))),
             Client(ClientToolNames.FileSystemProposeDelete, "Schlage das Löschen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema("path", ("path", "string"))),
-            Client(ClientToolNames.ProcessRunPreset, "Schlage ein versioniertes Build-, Test- oder Git-Preset vor; keine freie Shell.", ToolRiskClass.Process, ProcessSchema()),
+            Client(ClientToolNames.ProcessRunPreset, "Führe ein versioniertes Build-, Test-, Start- oder Git-Preset im freigegebenen Workspace aus.", ToolRiskClass.Process, ProcessSchema()),
+            Client(ClientToolNames.ProcessRun, "Führe ein direktes Programm mit getrennter Argumentliste und Workspace-Arbeitsverzeichnis für Analyse, Test, Build oder Smoke-Start aus.", ToolRiskClass.Process, ProcessRunSchema()),
             Client(ClientToolNames.BricsCadGeometryQuery, "Lese freigegebene BricsCAD-Geometrie.", ToolRiskClass.ReadOnly, CadSchema()),
             Client(ClientToolNames.BricsCadMeasure, "Führe eine lesende BricsCAD-Messung aus.", ToolRiskClass.ReadOnly, CadSchema()),
             Client(ClientToolNames.BricsCadMove, "Schlage eine bestätigungspflichtige BricsCAD-Verschiebung vor.", ToolRiskClass.CadMutation, CadSchema()),
@@ -225,6 +288,34 @@ public sealed class AgentToolCatalog
         {"type":"object","properties":{"query":{"type":"string"},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string"}},"required":["query"],"additionalProperties":false}
         """);
 
+    private static JsonElement WorkspaceMapSchema() => Parse("""
+        {"type":"object","properties":{"maximumDepth":{"type":"integer","minimum":1,"maximum":32},"maximumEntries":{"type":"integer","minimum":1,"maximum":5000}},"required":[],"additionalProperties":false}
+        """);
+
+    private static JsonElement FindFilesSchema() => Parse("""
+        {"type":"object","properties":{"path":{"type":"string"},"patterns":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string"}},"maximumResults":{"type":"integer","minimum":1,"maximum":5000}},"required":["patterns"],"additionalProperties":false}
+        """);
+
+    private static JsonElement ReadTextSchema() => Parse("""
+        {"type":"object","properties":{"path":{"type":"string"},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}
+        """);
+
+    private static JsonElement ReadManySchema() => Parse("""
+        {"type":"object","properties":{"items":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","properties":{"path":{"type":"string"},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}},"maximumCharacters":{"type":"integer","minimum":1024,"maximum":4194304}},"required":["items"],"additionalProperties":false}
+        """);
+
+    private static JsonElement FileSearchSchema() => Parse("""
+        {"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"queries":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string"}},"matchMode":{"type":"string","enum":["literal","regex"]},"includeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"excludeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"maximumResults":{"type":"integer","minimum":1,"maximum":1000},"contextLines":{"type":"integer","minimum":0,"maximum":5}},"required":["path"],"additionalProperties":false}
+        """);
+
+    private static JsonElement WriteTextSchema() => Parse("""
+        {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"expectedSha256":{"type":"string"}},"required":["path","content"],"additionalProperties":false}
+        """);
+
+    private static JsonElement MoveSchema() => Parse("""
+        {"type":"object","properties":{"source":{"type":"string"},"destination":{"type":"string"},"overwrite":{"type":"boolean"}},"required":["source","destination"],"additionalProperties":false}
+        """);
+
     private static JsonElement ImageSchema() => Parse("""
         {"type":"object","properties":{"prompt":{"type":"string"},"width":{"type":"integer","minimum":256,"maximum":1536,"multipleOf":64},"height":{"type":"integer","minimum":256,"maximum":1536,"multipleOf":64},"seed":{"type":"integer","minimum":0},"count":{"type":"integer","minimum":1,"maximum":4}},"required":["prompt"],"additionalProperties":false}
         """);
@@ -247,7 +338,11 @@ public sealed class AgentToolCatalog
         + name + "\"],\"additionalProperties\":false}");
 
     private static JsonElement ProcessSchema() => Parse("""
-        {"type":"object","properties":{"preset":{"type":"string","enum":["git.status","git.diff","dotnet.build","dotnet.test","repository.build"]},"workspace":{"type":"string"}},"required":["preset"],"additionalProperties":false}
+        {"type":"object","properties":{"preset":{"type":"string","enum":["git.status","git.diff","dotnet.build","dotnet.test","repository.build","repository.verify","repository.start","code.run","code.test"]},"target":{"type":"string","description":"Optionaler, stets relativ zum freigegebenen GO-Workspace aufgelöster Dateipfad."}},"required":["preset"],"additionalProperties":false}
+        """);
+
+    private static JsonElement ProcessRunSchema() => Parse("""
+        {"type":"object","properties":{"executable":{"type":"string"},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"}},"workingDirectory":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600},"purpose":{"type":"string","enum":["inspect","test","build","start"]},"startMode":{"type":"string","enum":["wait","smoke"]}},"required":["executable","purpose"],"additionalProperties":false}
         """);
 
     private static JsonElement CadSchema() => Parse("""
@@ -292,6 +387,28 @@ public sealed class AgentToolCatalog
         if (value.TryGetProperty(name, out _))
         {
             _ = RequireString(value, name, minimum, maximum);
+        }
+    }
+
+    private static void OptionalBoolean(JsonElement value, string name)
+    {
+        if (value.TryGetProperty(name, out var property)
+            && property.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            throw new ArgumentException($"Property '{name}' must be a boolean.");
+        }
+    }
+
+    private static void OptionalEnum(JsonElement value, string name, IReadOnlyList<string> allowed)
+    {
+        if (!value.TryGetProperty(name, out _))
+        {
+            return;
+        }
+        var selected = RequireString(value, name, 1, 64);
+        if (!allowed.Contains(selected, StringComparer.Ordinal))
+        {
+            throw new ArgumentException($"Property '{name}' contains an unsupported value.");
         }
     }
 
@@ -363,6 +480,49 @@ public sealed class AgentToolCatalog
             || property.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String || item.GetString()!.Length > maximumItemLength))
         {
             throw new ArgumentException($"Property '{name}' must be a bounded string array.");
+        }
+    }
+
+    private static void OptionalStringArray(
+        JsonElement value,
+        string name,
+        int maximum,
+        int maximumItemLength,
+        bool allowEmpty = false)
+    {
+        if (!value.TryGetProperty(name, out var property))
+        {
+            return;
+        }
+        if (property.ValueKind != JsonValueKind.Array
+            || property.GetArrayLength() > maximum
+            || property.EnumerateArray().Any(item =>
+                item.ValueKind != JsonValueKind.String
+                || item.GetString()!.Length > maximumItemLength
+                || !allowEmpty && string.IsNullOrWhiteSpace(item.GetString())))
+        {
+            throw new ArgumentException($"Property '{name}' must be a bounded string array.");
+        }
+    }
+
+    private static void ValidateReadManyItems(JsonElement value)
+    {
+        if (!value.TryGetProperty("items", out var items)
+            || items.ValueKind != JsonValueKind.Array
+            || items.GetArrayLength() is < 1 or > 128)
+        {
+            throw new ArgumentException("fs.readMany requires 1 to 128 items.");
+        }
+        foreach (var item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object
+                || item.EnumerateObject().Any(static property => property.Name is not ("path" or "startLine" or "endLine")))
+            {
+                throw new ArgumentException("Each fs.readMany item must use the bounded range schema.");
+            }
+            RequireString(item, "path", 1, 1024);
+            OptionalInteger(item, "startLine", 1, 10_000_000);
+            OptionalInteger(item, "endLine", 1, 10_000_000);
         }
     }
 }

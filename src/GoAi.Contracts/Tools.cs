@@ -36,14 +36,20 @@ public sealed record ToolDescriptor(
 
 public static class ClientToolNames
 {
+    public const string WorkspaceMap = "workspace.map";
     public const string FileSystemList = "fs.list";
     public const string FileSystemStat = "fs.stat";
+    public const string FileSystemFindFiles = "fs.findFiles";
     public const string FileSystemReadText = "fs.readText";
+    public const string FileSystemReadMany = "fs.readMany";
     public const string FileSystemSearch = "fs.search";
+    public const string FileSystemWriteText = "fs.writeText";
+    public const string FileSystemMove = "fs.move";
     public const string FileSystemProposePatch = "fs.proposePatch";
     public const string FileSystemProposeCreate = "fs.proposeCreate";
     public const string FileSystemProposeDelete = "fs.proposeDelete";
     public const string ProcessRunPreset = "process.runPreset";
+    public const string ProcessRun = "process.run";
     public const string BricsCadGeometryQuery = "bricscad.geometryQuery";
     public const string BricsCadMeasure = "bricscad.measure";
     public const string BricsCadMove = "bricscad.move";

@@ -1,13 +1,17 @@
 using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
+using GoAi.Contracts;
 using GoWinUI.Core.Contracts;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
 using System.Text.Json;
+using System.Text;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage.Pickers;
+using Windows.Storage.Streams;
 using Windows.System;
 using Windows.UI.ViewManagement;
 using WinRT.Interop;
@@ -19,8 +23,21 @@ public sealed partial class AssistantPage : Page, IDisposable
     private readonly AssistantCoordinator _coordinator;
     private readonly SettingsCoordinator _settings;
     private readonly ShellViewModel _shell;
+    private readonly IChatArtifactRepository _artifacts;
+    private readonly IBinaryObjectStore _blobs;
+    private readonly SystemAudioCaptionService _liveCaptions;
+    private readonly MicrophoneTranscriptionService _microphone;
+    private readonly SystemAudioAnalysisCaptureService _audioCapture;
+    private readonly DesktopScreenshotService _screenshots;
+    private readonly ScreenClipCaptureService _screenClips;
+    private readonly AssistantArtifactPreviewService _previews;
     private readonly ILogger<AssistantPage> _logger;
     private readonly SemaphoreSlim _exportGate = new(1, 1);
+    private readonly SemaphoreSlim _captionResultGate = new(1, 1);
+    private readonly SemaphoreSlim _microphoneBridgeGate = new(1, 1);
+    private readonly SemaphoreSlim _audioCaptureBridgeGate = new(1, 1);
+    private readonly SemaphoreSlim _voiceIntentGate = new(1, 1);
+    private readonly SemaphoreSlim _chatBridgeGate = new(1, 1);
     private readonly UISettings _uiSettings = new();
     private readonly AccessibilitySettings _accessibilitySettings = new();
     private WebView2? _assistantWebView;
@@ -31,6 +48,7 @@ public sealed partial class AssistantPage : Page, IDisposable
     private bool _colorEventsSubscribed;
     private bool _contrastEventsSubscribed;
     private bool _themeEventsSubscribed;
+    private DateTimeOffset? _lastPersistedCaptionStartedAt;
 
     public AssistantPage()
     {
@@ -38,6 +56,14 @@ public sealed partial class AssistantPage : Page, IDisposable
         _coordinator = App.Current.GetService<AssistantCoordinator>();
         _settings = App.Current.GetService<SettingsCoordinator>();
         _shell = App.Current.GetService<ShellViewModel>();
+        _artifacts = App.Current.GetService<IChatArtifactRepository>();
+        _blobs = App.Current.GetService<IBinaryObjectStore>();
+        _liveCaptions = App.Current.GetService<SystemAudioCaptionService>();
+        _microphone = App.Current.GetService<MicrophoneTranscriptionService>();
+        _audioCapture = App.Current.GetService<SystemAudioAnalysisCaptureService>();
+        _screenshots = App.Current.GetService<DesktopScreenshotService>();
+        _screenClips = App.Current.GetService<ScreenClipCaptureService>();
+        _previews = App.Current.GetService<AssistantArtifactPreviewService>();
         _logger = App.Current.GetService<ILogger<AssistantPage>>();
     }
 
@@ -50,6 +76,11 @@ public sealed partial class AssistantPage : Page, IDisposable
 
         _initialized = true;
         _lifetime = new CancellationTokenSource();
+        _liveCaptions.Changed += OnLiveCaptionChanged;
+        _microphone.Changed += OnMicrophoneChanged;
+        _microphone.TurnChanged += OnMicrophoneTurnChanged;
+        _audioCapture.Changed += OnAudioCaptureChanged;
+        _screenClips.Changed += OnScreenClipChanged;
         var initializationStage = "Plattformprüfung";
         try
         {
@@ -82,7 +113,7 @@ public sealed partial class AssistantPage : Page, IDisposable
             var webRoot = ApplicationAssets.ResolvePath("Assets", "Web");
             var userDataFolder = Path.Combine(App.Current.DataDirectory, "WebView2");
             initializationStage = "WebView2-Umgebung";
-            await _bridge.InitializeAsync(webRoot, userDataFolder);
+            await _bridge.InitializeAsync(webRoot, userDataFolder, _previews.CacheRoot);
             initializationStage = "Navigation";
             webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
             _bridge.NavigateToApp();
@@ -156,6 +187,14 @@ public sealed partial class AssistantPage : Page, IDisposable
             App.Current.ThemeChanged -= OnAppThemeChanged;
             _themeEventsSubscribed = false;
         }
+        _liveCaptions.Changed -= OnLiveCaptionChanged;
+        _microphone.Changed -= OnMicrophoneChanged;
+        _microphone.TurnChanged -= OnMicrophoneTurnChanged;
+        _audioCapture.Changed -= OnAudioCaptureChanged;
+        _screenClips.Changed -= OnScreenClipChanged;
+        ClearClientSpeechRuns();
+        _ = StopMicrophoneAfterUnloadAsync();
+        _ = _audioCapture.CancelAsync(CancellationToken.None);
         if (_assistantWebView?.CoreWebView2 is { } core)
         {
             core.NavigationCompleted -= OnNavigationCompleted;
@@ -184,6 +223,9 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
 
         _initialized = false;
+        _microphoneBridgeGate.Dispose();
+        _audioCaptureBridgeGate.Dispose();
+        _chatBridgeGate.Dispose();
         _exportGate.Dispose();
     }
 
@@ -198,6 +240,13 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
 
         await SendThemeAsync();
+        if (_bridge is { } bridge)
+        {
+            await HandleLiveCaptionSnapshotAsync(_liveCaptions.Current, bridge);
+            await bridge.PostAsync("microphone.changed", _microphone.Current);
+            await bridge.PostAsync("audioCapture.changed", _audioCapture.Current);
+            await bridge.PostAsync("screenClip.changed", _screenClips.Current);
+        }
     }
 
     private async void OnBridgeMessageReceived(object? sender, WebBridgeMessageEventArgs args)
@@ -208,9 +257,54 @@ public sealed partial class AssistantPage : Page, IDisposable
             return;
         }
 
-        var updatesAiState = args.Envelope.Type == "chat.send";
+        var updatesAiState = args.Envelope.Type is "chat.send" or "microphone.speak";
+        var microphoneMessageLocked = false;
+        var audioCaptureMessageLocked = false;
+        var chatMessageLocked = false;
         try
         {
+            if (args.Envelope.Type.StartsWith("microphone.", StringComparison.Ordinal))
+            {
+                await _microphoneBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
+                microphoneMessageLocked = true;
+            }
+
+            if (args.Envelope.Type.StartsWith("audioCapture.", StringComparison.Ordinal)
+                || args.Envelope.Type == "chat.send")
+            {
+                await _audioCaptureBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
+                audioCaptureMessageLocked = true;
+            }
+
+            if (args.Envelope.Type == "chat.send")
+            {
+                if (_chatBridgeGate.CurrentCount == 0)
+                {
+                    await _coordinator.CancelCurrentAsync().ConfigureAwait(false);
+                }
+                await _chatBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
+                chatMessageLocked = true;
+                if (_screenClips.Current.IsRecording)
+                {
+                    var promptSessionId = TryReadGuid(args.Envelope.Payload, "sessionId", out var requestedSessionId)
+                        ? requestedSessionId
+                        : (Guid?)null;
+                    await StopScreenClipAsync(args.Envelope, bridge, promptSessionId, suppressSnapshot: true);
+                }
+
+                var requiredCapture = await _coordinator.GetRequiredMediaCaptureAsync(
+                    args.Envelope.Payload,
+                    _lifetime?.Token ?? CancellationToken.None);
+                if (requiredCapture is { } captureAction)
+                {
+                    await bridge.PostAsync("capture.required", new
+                    {
+                        action = AssistantCoordinator.MediaActionName(captureAction),
+                    }, args.Envelope.RequestId);
+                    return;
+                }
+            }
+
             if (updatesAiState)
             {
                 await SetShellAiStateAsync(true);
@@ -221,6 +315,9 @@ public sealed partial class AssistantPage : Page, IDisposable
                 case "document.pick":
                     await PickDocumentAsync(args.Envelope, bridge);
                     break;
+                case "workspace.pick":
+                    await PickWorkspaceAsync(args.Envelope, bridge);
+                    break;
                 case "chat.exportPdf":
                     await ExportPdfAsync(args.Envelope, bridge, selectedMessageOnly: false);
                     break;
@@ -229,6 +326,99 @@ public sealed partial class AssistantPage : Page, IDisposable
                     break;
                 case "message.copy":
                     CopyToClipboard(args.Envelope.Payload);
+                    break;
+                case "artifact.save":
+                    await SaveArtifactAsync(args.Envelope.Payload, bridge);
+                    break;
+                case "artifact.preview":
+                    if (!TryReadGuid(args.Envelope.Payload, "artifactId", out var previewId))
+                    {
+                        throw new InvalidOperationException("Die Artefakt-ID ist ungültig.");
+                    }
+                    var preview = await _previews.PrepareAsync(previewId, _lifetime?.Token ?? CancellationToken.None);
+                    await bridge.PostAsync("artifact.previewReady", new
+                    {
+                        artifactId = previewId,
+                        url = preview.Url,
+                        posterUrl = preview.PosterUrl,
+                    }, args.Envelope.RequestId);
+                    break;
+                case "screen.capture":
+                    await CaptureScreenshotAsync(args.Envelope, bridge);
+                    break;
+                case "screenClip.start":
+                    await StartScreenClipAsync(args.Envelope, bridge);
+                    break;
+                case "screenClip.stop":
+                    await StopScreenClipAsync(args.Envelope, bridge);
+                    break;
+                case "screenClip.cancel":
+                    await _screenClips.CancelAsync(CancellationToken.None);
+                    await bridge.PostAsync("screenClip.changed", _screenClips.Current, args.Envelope.RequestId);
+                    await bridge.PostAsync("capture.cancelled", new { action = "videoAnalysis" }, args.Envelope.RequestId);
+                    break;
+                case "audioCapture.start":
+                    if (!TryReadGuid(args.Envelope.Payload, "sessionId", out var audioSessionId))
+                    {
+                        throw new InvalidOperationException("Die Systemaudio-Aufnahme enthält keine gültige Sitzung.");
+                    }
+                    await _audioCapture.StartAsync(
+                        audioSessionId,
+                        _lifetime?.Token ?? CancellationToken.None);
+                    await bridge.PostAsync("audioCapture.changed", _audioCapture.Current, args.Envelope.RequestId);
+                    break;
+                case "audioCapture.stop":
+                    await StopAudioCaptureAsync(args.Envelope, bridge);
+                    break;
+                case "audioCapture.cancel":
+                    await _audioCapture.CancelAsync(CancellationToken.None);
+                    await bridge.PostAsync("audioCapture.changed", _audioCapture.Current, args.Envelope.RequestId);
+                    await bridge.PostAsync("capture.cancelled", new { action = "audioAnalysis" }, args.Envelope.RequestId);
+                    break;
+                case "microphone.start":
+                    await _microphone.StartAsync(
+                        ReadOptionalText(args.Envelope.Payload, "deviceLabel", 256),
+                        _lifetime?.Token ?? CancellationToken.None);
+                    await bridge.PostAsync("microphone.changed", _microphone.Current, args.Envelope.RequestId);
+                    break;
+                case "microphone.audio":
+                    if (!args.Envelope.Payload.TryGetProperty("chunkIndex", out var chunkElement)
+                        || !chunkElement.TryGetInt32(out var chunkIndex)
+                        || !args.Envelope.Payload.TryGetProperty("isFinal", out var finalElement)
+                        || finalElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    {
+                        throw new InvalidOperationException("Das Mikrofon-Audiofenster ist ungültig.");
+                    }
+                    await _microphone.SubmitChunkAsync(
+                        ReadRequiredText(args.Envelope.Payload, "turnId", 128),
+                        chunkIndex,
+                        ReadRequiredText(args.Envelope.Payload, "pcm", 150_000),
+                        finalElement.GetBoolean(),
+                        _lifetime?.Token ?? CancellationToken.None);
+                    break;
+                case "microphone.stop":
+                    await _microphone.StopAsync(CancellationToken.None);
+                    await bridge.PostAsync("microphone.changed", _microphone.Current, args.Envelope.RequestId);
+                    break;
+                case "microphone.speak":
+                    _ = SpeakWithoutBlockingBridgeAsync(
+                        ReadRequiredText(args.Envelope.Payload, "text", 100_000));
+                    break;
+                case "microphone.stopSpeech":
+                    await _microphone.StopSpeechAsync(CancellationToken.None);
+                    break;
+                case "microphone.cancel":
+                    await _microphone.CancelAsync(CancellationToken.None);
+                    await bridge.PostAsync("microphone.changed", _microphone.Current, args.Envelope.RequestId);
+                    break;
+                case "liveCaption.start":
+                    await _liveCaptions.StartAsync(
+                        LiveCaptionMode.Transcribe,
+                        _lifetime?.Token ?? CancellationToken.None);
+                    await bridge.PostAsync("caption.changed", _liveCaptions.Current, args.Envelope.RequestId);
+                    break;
+                case "liveCaption.stop":
+                    _ = await _liveCaptions.StopAsync(_lifetime?.Token ?? CancellationToken.None);
                     break;
                 case "external.open":
                     await OpenExternalLinkAsync(args.Envelope.Payload);
@@ -256,10 +446,304 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
         finally
         {
+            if (chatMessageLocked)
+            {
+                _chatBridgeGate.Release();
+            }
+            if (microphoneMessageLocked)
+            {
+                _microphoneBridgeGate.Release();
+            }
+            if (audioCaptureMessageLocked)
+            {
+                _audioCaptureBridgeGate.Release();
+            }
             if (updatesAiState)
             {
                 await SetShellAiStateAsync(false);
             }
+        }
+    }
+
+    private async Task SpeakWithoutBlockingBridgeAsync(string text)
+    {
+        try
+        {
+            await _microphone.PlayTextAsync(text, cancellationToken: _lifetime?.Token ?? CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // A voice command or replacement prompt intentionally stopped playback.
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "microphone.speak");
+        }
+    }
+
+    private async void OnLiveCaptionChanged(object? sender, SystemAudioCaptionSnapshot snapshot)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        UpdateClientAiRun(
+            "system-audio-stt",
+            snapshot.IsActive,
+            string.Equals(snapshot.Status, "Sprache wird erkannt", StringComparison.Ordinal)
+                ? "Systemaudio wird transkribiert"
+                : "Live-Untertitel aktiv",
+            "Docker · Whisper large-v3");
+        try
+        {
+            await HandleLiveCaptionSnapshotAsync(snapshot, _bridge);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "liveCaption.update");
+        }
+    }
+
+    private async Task HandleLiveCaptionSnapshotAsync(
+        SystemAudioCaptionSnapshot snapshot,
+        AssistantWebBridge? bridge)
+    {
+        if (snapshot.IsActive && !string.IsNullOrWhiteSpace(snapshot.Error))
+        {
+            _ = await _liveCaptions.StopAsync(CancellationToken.None);
+            return;
+        }
+
+        if (snapshot.IsActive || snapshot.StartedAt is null)
+        {
+            if (bridge is not null)
+            {
+                await bridge.PostAsync("caption.changed", snapshot);
+            }
+            return;
+        }
+
+        await _captionResultGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            if (_lastPersistedCaptionStartedAt == snapshot.StartedAt)
+            {
+                return;
+            }
+
+            await _coordinator.AddLiveCaptionResultAsync(
+                snapshot.Transcript,
+                snapshot.Error,
+                CancellationToken.None);
+            _lastPersistedCaptionStartedAt = snapshot.StartedAt;
+
+            var current = _liveCaptions.Current;
+            if (!current.IsActive && current.StartedAt == snapshot.StartedAt)
+            {
+                _liveCaptions.ClearCompleted();
+            }
+
+            if (bridge is not null)
+            {
+                await bridge.PostAsync(
+                    "session.changed",
+                    await _coordinator.BuildSnapshotAsync(CancellationToken.None));
+                await bridge.PostAsync("caption.changed", _liveCaptions.Current);
+            }
+        }
+        finally
+        {
+            _captionResultGate.Release();
+        }
+    }
+
+    private async void OnMicrophoneChanged(object? sender, MicrophoneSnapshot snapshot)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        UpdateClientAiRun(
+            "microphone-stt-warmup",
+            string.Equals(snapshot.Status, "Sprachmodell wird geladen", StringComparison.Ordinal),
+            "Sprachmodell wird vorbereitet",
+            "Docker · Whisper STT");
+        UpdateClientAiRun(
+            "microphone-stt",
+            string.Equals(snapshot.Status, "Sprache wird erkannt", StringComparison.Ordinal),
+            "Sprache wird live transkribiert",
+            "Docker · Whisper STT");
+        UpdateClientAiRun(
+            "microphone-tts",
+            snapshot.IsSpeaking,
+            "Antwort wird vorgelesen",
+            "Docker · Piper MLS weiblich");
+        var bridge = _bridge;
+        if (bridge is null)
+        {
+            return;
+        }
+        try
+        {
+            await bridge.PostAsync("microphone.changed", snapshot);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "microphone.update");
+        }
+    }
+
+    private async void OnMicrophoneTurnChanged(object? sender, MicrophoneTurnSnapshot snapshot)
+    {
+        var bridge = _bridge;
+        if (_disposed || bridge is null)
+        {
+            return;
+        }
+        try
+        {
+            if (!snapshot.IsFinal)
+            {
+                await bridge.PostAsync("microphone.transcript", snapshot);
+                return;
+            }
+
+            if ((_audioCapture.Current.IsRecording || _screenClips.Current.IsRecording)
+                && IsMediaCaptureFinishCommand(snapshot.Text))
+            {
+                // Aufnahmebefehle dürfen nicht erst einen Intent-Modelllauf abwarten.
+                // Der Web-Composer beendet damit die aktive Aufnahme und behält den
+                // ursprünglichen Analyseprompt für den anschließenden Lauf bei.
+                await bridge.PostAsync("microphone.transcript", new
+                {
+                    snapshot.TurnId,
+                    snapshot.Text,
+                    snapshot.IsFinal,
+                    snapshot.Provider,
+                    Execute = false,
+                    Cancel = true,
+                    Noise = false,
+                });
+                return;
+            }
+
+            await _voiceIntentGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
+            try
+            {
+                var result = await _microphone.ClassifyIntentAsync(
+                    snapshot.Text,
+                    _lifetime?.Token ?? CancellationToken.None);
+                if (result.Intent == UtteranceIntent.Cancel)
+                {
+                    await _microphone.StopSpeechAsync(_lifetime?.Token ?? CancellationToken.None);
+                    await _coordinator.CancelCurrentAsync().ConfigureAwait(false);
+                }
+                await bridge.PostAsync("microphone.transcript", new
+                {
+                    snapshot.TurnId,
+                    Text = result.NormalizedText ?? snapshot.Text,
+                    snapshot.IsFinal,
+                    snapshot.Provider,
+                    Execute = result.Intent is UtteranceIntent.Question or UtteranceIntent.Instruction,
+                    Cancel = result.Intent == UtteranceIntent.Cancel,
+                    Noise = result.Intent == UtteranceIntent.Noise,
+                });
+            }
+            finally
+            {
+                _voiceIntentGate.Release();
+            }
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "microphone.transcript");
+        }
+    }
+
+    internal static bool IsMediaCaptureFinishCommand(string? text)
+    {
+        var normalized = (text ?? string.Empty)
+            .Trim()
+            .TrimEnd('.', '!', '?', ',', ';', ':')
+            .Trim()
+            .ToLowerInvariant();
+        return normalized is "beenden" or "aufnahme beenden" or "abschließen" or "aufnahme abschließen";
+    }
+
+    private async Task StopMicrophoneAfterUnloadAsync()
+    {
+        try
+        {
+            await _microphone.StopAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "microphone.unload");
+        }
+    }
+
+    private void ClearClientSpeechRuns()
+    {
+        var captions = _liveCaptions.Current;
+        _shell.SetClientAiRun(
+            "system-audio-stt",
+            captions.IsActive,
+            "Live-Untertitel aktiv",
+            "Docker · Whisper large-v3");
+        _shell.SetClientAiRun("microphone-stt-warmup", false, string.Empty, string.Empty);
+        _shell.SetClientAiRun("microphone-stt", false, string.Empty, string.Empty);
+        _shell.SetClientAiRun("microphone-tts", false, string.Empty, string.Empty);
+    }
+
+    private void UpdateClientAiRun(
+        string key,
+        bool isActive,
+        string displayName,
+        string runtime)
+    {
+        void Update() => _shell.SetClientAiRun(key, isActive, displayName, runtime);
+
+        if (DispatcherQueue.HasThreadAccess)
+        {
+            Update();
+        }
+        else
+        {
+            _ = DispatcherQueue.TryEnqueue(Update);
+        }
+    }
+
+    private async void OnScreenClipChanged(object? sender, ScreenClipSnapshot snapshot)
+    {
+        var bridge = _bridge;
+        if (_disposed || bridge is null)
+        {
+            return;
+        }
+        try
+        {
+            await bridge.PostAsync("screenClip.changed", snapshot);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "screenClip.update");
+        }
+    }
+
+    private async void OnAudioCaptureChanged(object? sender, SystemAudioCaptureSnapshot snapshot)
+    {
+        var bridge = _bridge;
+        if (_disposed || bridge is null)
+        {
+            return;
+        }
+        try
+        {
+            await bridge.PostAsync("audioCapture.changed", snapshot);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "audioCapture.update");
         }
     }
 
@@ -317,29 +801,433 @@ public sealed partial class AssistantPage : Page, IDisposable
             SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
             ViewMode = PickerViewMode.List,
         };
-        foreach (var extension in _coordinator.SupportedDocumentExtensions.Order(StringComparer.OrdinalIgnoreCase))
-        {
-            picker.FileTypeFilter.Add(extension.StartsWith('.') ? extension : $".{extension}");
-        }
-        picker.FileTypeFilter.Add(".doc");
+        picker.FileTypeFilter.Add("*");
 
         InitializePicker(picker);
-        var file = await picker.PickSingleFileAsync();
-        if (file is null)
+        var files = await picker.PickMultipleFilesAsync();
+        if (files.Count == 0)
         {
             return;
         }
 
-        await using var stream = await file.OpenStreamForReadAsync();
-        await _coordinator.ImportDocumentAsync(
+        foreach (var file in files)
+        {
+            var extension = Path.GetExtension(file.Name);
+            await using var stream = await file.OpenStreamForReadAsync();
+            if (_coordinator.SupportedDocumentExtensions.Contains(extension))
+            {
+                await _coordinator.ImportDocumentAsync(
+                    sessionId,
+                    file.Name,
+                    stream,
+                    _lifetime?.Token ?? CancellationToken.None);
+            }
+            else
+            {
+                await _coordinator.ImportAttachmentAsync(
+                    sessionId,
+                    file.Name,
+                    ResolveAttachmentContentType(file.Name, file.ContentType),
+                    stream,
+                    _lifetime?.Token ?? CancellationToken.None);
+            }
+        }
+        await bridge.PostAsync(
+            "document.changed",
+            await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None),
+            envelope.RequestId);
+    }
+
+    private async Task CaptureScreenshotAsync(WebBridgeEnvelope envelope, AssistantWebBridge bridge)
+    {
+        if (!TryReadGuid(envelope.Payload, "sessionId", out var sessionId))
+        {
+            throw new InvalidOperationException("Öffne oder erstelle zuerst eine Sitzung.");
+        }
+        var selected = await SelectCaptureTargetAsync(
+            "Screenshot aufnehmen",
+            "GO erstellt genau einen Screenshot der gewählten Quelle und fügt ihn als lokalen Sitzungsanhang hinzu.");
+        if (selected is null)
+        {
+            await bridge.PostAsync("capture.cancelled", new { action = "imageAnalysis" }, envelope.RequestId);
+            return;
+        }
+
+        var screenshot = await _screenshots.CaptureAsync(selected, _lifetime?.Token ?? CancellationToken.None);
+        await using var stream = new MemoryStream(screenshot.Content, writable: false);
+        await _coordinator.ImportAttachmentAsync(
             sessionId,
-            file.Name,
+            screenshot.FileName,
+            screenshot.ContentType,
             stream,
             _lifetime?.Token ?? CancellationToken.None);
         await bridge.PostAsync(
             "document.changed",
             await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None),
             envelope.RequestId);
+    }
+
+    internal static string ResolveAttachmentContentType(string fileName, string? reportedContentType)
+    {
+        if (!string.IsNullOrWhiteSpace(reportedContentType)
+            && !string.Equals(reportedContentType, "application/octet-stream", StringComparison.OrdinalIgnoreCase))
+        {
+            return reportedContentType;
+        }
+        return Path.GetExtension(fileName).ToLowerInvariant() switch
+        {
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".webp" => "image/webp",
+            ".gif" => "image/gif",
+            ".bmp" => "image/bmp",
+            ".tif" or ".tiff" => "image/tiff",
+            ".wav" => "audio/wav",
+            ".mp3" => "audio/mpeg",
+            ".m4a" => "audio/mp4",
+            ".flac" => "audio/flac",
+            ".ogg" or ".oga" => "audio/ogg",
+            ".aac" => "audio/aac",
+            ".mp4" or ".m4v" => "video/mp4",
+            ".mov" => "video/quicktime",
+            ".avi" => "video/x-msvideo",
+            ".mkv" => "video/x-matroska",
+            ".webm" => "video/webm",
+            _ => "application/octet-stream",
+        };
+    }
+
+    private async Task StartScreenClipAsync(WebBridgeEnvelope envelope, AssistantWebBridge bridge)
+    {
+        if (!TryReadGuid(envelope.Payload, "sessionId", out var sessionId))
+        {
+            throw new InvalidOperationException("Öffne oder erstelle zuerst eine Sitzung.");
+        }
+        var selected = await SelectCaptureTargetAsync(
+            "Bildschirmclip aufnehmen",
+            "GO nimmt die gewählte Quelle bewusst für maximal 30 Sekunden mit zwei Bildern pro Sekunde und ohne Ton auf. Der Clip bleibt lokal, bis du ihn mit einem AI-Auftrag temporär hochlädst.");
+        if (selected is null)
+        {
+            await bridge.PostAsync("capture.cancelled", new { action = "videoAnalysis" }, envelope.RequestId);
+            return;
+        }
+        await _screenClips.StartAsync(sessionId, selected, CancellationToken.None);
+        await bridge.PostAsync("screenClip.changed", _screenClips.Current, envelope.RequestId);
+    }
+
+    private async Task StopScreenClipAsync(
+        WebBridgeEnvelope envelope,
+        AssistantWebBridge bridge,
+        Guid? targetSessionId = null,
+        bool suppressSnapshot = false)
+    {
+        var result = await _screenClips.StopAsync(CancellationToken.None);
+        try
+        {
+            await using var stream = await OpenCapturedMediaAsync(
+                result.Path,
+                _lifetime?.Token ?? CancellationToken.None);
+            await _coordinator.ImportAttachmentAsync(
+                targetSessionId ?? result.SessionId,
+                result.FileName,
+                result.ContentType,
+                stream,
+                _lifetime?.Token ?? CancellationToken.None);
+        }
+        finally
+        {
+            try { File.Delete(result.Path); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        await bridge.PostAsync("screenClip.changed", _screenClips.Current, envelope.RequestId);
+        if (!suppressSnapshot)
+        {
+            await bridge.PostAsync(
+                "document.changed",
+                await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None),
+                envelope.RequestId);
+        }
+    }
+
+    private async Task StopAudioCaptureAsync(
+        WebBridgeEnvelope envelope,
+        AssistantWebBridge bridge)
+    {
+        var result = await _audioCapture.StopAsync(CancellationToken.None);
+        await using var stream = new MemoryStream(result.Content, writable: false);
+        await _coordinator.ImportAttachmentAsync(
+            result.SessionId,
+            result.FileName,
+            result.ContentType,
+            stream,
+            _lifetime?.Token ?? CancellationToken.None);
+        await bridge.PostAsync("audioCapture.changed", _audioCapture.Current, envelope.RequestId);
+        await bridge.PostAsync(
+            "document.changed",
+            await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None),
+            envelope.RequestId);
+    }
+
+    private static async Task<FileStream> OpenCapturedMediaAsync(string path, CancellationToken cancellationToken)
+    {
+        IOException? lastError = null;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    1_048_576,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+            }
+            catch (IOException exception)
+            {
+                lastError = exception;
+                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        throw new IOException("Der fertiggestellte Bildschirmclip konnte nicht für die lokale Speicherung geöffnet werden.", lastError);
+    }
+
+    private async Task<DesktopCaptureTarget?> SelectCaptureTargetAsync(string title, string description)
+    {
+        var targets = _screenshots.ListTargets();
+        if (targets.Count == 0)
+        {
+            throw new InvalidOperationException("Windows meldet keinen aufnehmbaren Bildschirm oder kein Fenster.");
+        }
+        var selector = new ComboBox
+        {
+            Header = "Aufnahmequelle",
+            ItemsSource = targets,
+            DisplayMemberPath = nameof(DesktopCaptureTarget.DisplayName),
+            SelectedIndex = 0,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        var content = new StackPanel { Spacing = 10 };
+        content.Children.Add(new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap });
+        content.Children.Add(selector);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = title,
+            Content = content,
+            PrimaryButtonText = "Aufnehmen",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        return await dialog.ShowAsync() == ContentDialogResult.Primary
+            ? selector.SelectedItem as DesktopCaptureTarget
+            : null;
+    }
+
+    private async void OnArtifactResourceRequested(
+        CoreWebView2 sender,
+        CoreWebView2WebResourceRequestedEventArgs args)
+    {
+        var deferral = args.GetDeferral();
+        try
+        {
+            if (!Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out var uri)
+                || !string.Equals(uri.Host, AssistantWebBridge.VirtualHost, StringComparison.OrdinalIgnoreCase)
+                || !uri.AbsolutePath.StartsWith("/artifacts/", StringComparison.Ordinal)
+                || !Guid.TryParse(uri.AbsolutePath["/artifacts/".Length..], out var artifactId)
+                || await _artifacts.GetAsync(artifactId, _lifetime?.Token ?? CancellationToken.None) is not { } artifact)
+            {
+                args.Response = sender.Environment.CreateWebResourceResponse(
+                    new MemoryStream().AsRandomAccessStream(), 404, "Not Found", "Cache-Control: no-store\r\n");
+                return;
+            }
+
+            Stream source;
+            if (artifact.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            {
+                var memory = new MemoryStream(artifact.Length <= int.MaxValue ? checked((int)artifact.Length) : 0);
+                await _blobs.ExportAsync(artifact.BlobId, memory, _lifetime?.Token ?? CancellationToken.None);
+                var randomAccess = new InMemoryRandomAccessStream();
+                using (var writer = new DataWriter(randomAccess.GetOutputStreamAt(0)))
+                {
+                    writer.WriteBytes(memory.ToArray());
+                    _ = await writer.StoreAsync();
+                    _ = await writer.FlushAsync();
+                    writer.DetachStream();
+                }
+                randomAccess.Seek(0);
+                var imageHeaders = new StringBuilder()
+                    .Append("Content-Type: ").Append(artifact.ContentType).Append("\r\n")
+                    .Append("Content-Length: ").Append(artifact.Length).Append("\r\n")
+                    .Append("Cache-Control: private, no-store\r\n")
+                    .Append("Cross-Origin-Resource-Policy: same-origin\r\n")
+                    .Append("X-Content-Type-Options: nosniff\r\n")
+                    .Append("Content-Disposition: inline\r\n");
+                args.Response = sender.Environment.CreateWebResourceResponse(
+                    randomAccess,
+                    200,
+                    "OK",
+                    imageHeaders.ToString());
+                return;
+            }
+            else
+            {
+                source = await _blobs.OpenReadAsync(artifact.BlobId, _lifetime?.Token ?? CancellationToken.None);
+            }
+            var rangeHeader = args.Request.Headers.Contains("Range")
+                ? args.Request.Headers.GetHeader("Range")
+                : null;
+            var range = ParseRange(rangeHeader, artifact.Length);
+            Stream content = source;
+            var status = 200;
+            var reason = "OK";
+            var length = artifact.Length;
+            var headers = new StringBuilder()
+                .Append("Content-Type: ").Append(artifact.ContentType).Append("\r\n")
+                .Append("Accept-Ranges: bytes\r\n")
+                .Append("Cache-Control: private, no-store\r\n")
+                .Append("Cross-Origin-Resource-Policy: same-origin\r\n")
+                .Append("X-Content-Type-Options: nosniff\r\n");
+            if (range is { } requested)
+            {
+                content = new RangeReadStream(source, requested.Start, requested.Length);
+                status = 206;
+                reason = "Partial Content";
+                length = requested.Length;
+                headers.Append("Content-Range: bytes ")
+                    .Append(requested.Start).Append('-').Append(requested.End)
+                    .Append('/').Append(artifact.Length).Append("\r\n");
+            }
+            var disposition = uri.Query.Contains("download=1", StringComparison.OrdinalIgnoreCase) ? "attachment" : "inline";
+            var safeName = new string(artifact.FileName
+                .Select(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_' ? character : '_')
+                .ToArray());
+            headers.Append("Content-Length: ").Append(length).Append("\r\n")
+                .Append("Content-Disposition: ").Append(disposition).Append("; filename=\"").Append(safeName)
+                .Append("\"; filename*=UTF-8''").Append(Uri.EscapeDataString(artifact.FileName)).Append("\r\n");
+            args.Response = sender.Environment.CreateWebResourceResponse(
+                content.AsRandomAccessStream(), status, reason, headers.ToString());
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "artifact.read");
+            args.Response = sender.Environment.CreateWebResourceResponse(
+                new MemoryStream().AsRandomAccessStream(), 500, "Internal Server Error", "Cache-Control: no-store\r\n");
+        }
+        finally
+        {
+            deferral.Complete();
+        }
+    }
+
+    private static ByteRange? ParseRange(string? value, long totalLength)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || !value.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase)
+            || value.Contains(',', StringComparison.Ordinal))
+        {
+            return null;
+        }
+        var parts = value[6..].Split('-', 2);
+        if (parts.Length != 2 || !long.TryParse(parts[0], out var start) || start < 0 || start >= totalLength)
+        {
+            return null;
+        }
+        var end = string.IsNullOrWhiteSpace(parts[1]) || !long.TryParse(parts[1], out var parsedEnd)
+            ? totalLength - 1
+            : Math.Min(parsedEnd, totalLength - 1);
+        return end < start ? null : new ByteRange(start, end);
+    }
+
+    private sealed record ByteRange(long Start, long End)
+    {
+        public long Length => End - Start + 1;
+    }
+
+    private sealed class RangeReadStream : Stream
+    {
+        private readonly Stream _source;
+        private readonly long _start;
+        private readonly long _length;
+        private long _position;
+        private long _skip;
+
+        public RangeReadStream(Stream source, long start, long length)
+        {
+            _source = source;
+            _start = start;
+            _skip = start;
+            _length = length;
+            if (_source.CanSeek)
+            {
+                _ = _source.Seek(start, SeekOrigin.Begin);
+                _skip = 0;
+            }
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => _source.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => _length;
+        public override long Position
+        {
+            get => _position;
+            set => _ = Seek(value, SeekOrigin.Begin);
+        }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) =>
+            ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            while (_skip > 0)
+            {
+                var discarded = new byte[(int)Math.Min(81_920, _skip)];
+                var read = await _source.ReadAsync(discarded, cancellationToken).ConfigureAwait(false);
+                if (read == 0) return 0;
+                _skip -= read;
+            }
+            if (_position >= _length) return 0;
+            var count = (int)Math.Min(buffer.Length, _length - _position);
+            var actual = await _source.ReadAsync(buffer[..count], cancellationToken).ConfigureAwait(false);
+            _position += actual;
+            return actual;
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _source.Dispose();
+            base.Dispose(disposing);
+        }
+        public override async ValueTask DisposeAsync()
+        {
+            await _source.DisposeAsync();
+            await base.DisposeAsync();
+        }
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            if (!CanSeek)
+            {
+                throw new NotSupportedException();
+            }
+            var target = origin switch
+            {
+                SeekOrigin.Begin => offset,
+                SeekOrigin.Current => checked(_position + offset),
+                SeekOrigin.End => checked(_length + offset),
+                _ => throw new ArgumentOutOfRangeException(nameof(origin)),
+            };
+            if (target < 0 || target > _length)
+            {
+                throw new IOException("Die angeforderte Artefaktposition liegt außerhalb des HTTP-Bereichs.");
+            }
+            _ = _source.Seek(checked(_start + target), SeekOrigin.Begin);
+            _position = target;
+            _skip = 0;
+            return _position;
+        }
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private async Task ExportPdfAsync(
@@ -438,6 +1326,31 @@ public sealed partial class AssistantPage : Page, IDisposable
         Clipboard.Flush();
     }
 
+    private async Task SaveArtifactAsync(JsonElement payload, AssistantWebBridge bridge)
+    {
+        if (!TryReadGuid(payload, "artifactId", out var artifactId)
+            || await _artifacts.GetAsync(artifactId, _lifetime?.Token ?? CancellationToken.None) is not { } artifact)
+        {
+            throw new InvalidOperationException("Das lokale AI-Artefakt wurde nicht gefunden.");
+        }
+        var extension = Path.GetExtension(artifact.FileName);
+        if (string.IsNullOrWhiteSpace(extension)) extension = ".bin";
+        var picker = new FileSavePicker
+        {
+            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+            SuggestedFileName = Path.GetFileNameWithoutExtension(artifact.FileName),
+            DefaultFileExtension = extension,
+        };
+        picker.FileTypeChoices.Add("AI-Artefakt", new List<string> { extension });
+        InitializePicker(picker);
+        var file = await picker.PickSaveFileAsync();
+        if (file is null) return;
+        await using var output = await file.OpenStreamForWriteAsync();
+        output.SetLength(0);
+        await _blobs.ExportAsync(artifact.BlobId, output, _lifetime?.Token ?? CancellationToken.None);
+        await bridge.PostAsync("status.changed", new { artifactSaved = artifact.FileName });
+    }
+
     private static async Task OpenExternalLinkAsync(JsonElement payload)
     {
         if (!payload.TryGetProperty("url", out var property)
@@ -530,6 +1443,31 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
     }
 
+    private async Task PickWorkspaceAsync(WebBridgeEnvelope envelope, AssistantWebBridge bridge)
+    {
+        var picker = new FolderPicker
+        {
+            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+            ViewMode = PickerViewMode.List,
+        };
+        picker.FileTypeFilter.Add("*");
+        InitializePicker(picker);
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null)
+        {
+            return;
+        }
+
+        var workspace = Path.GetFullPath(folder.Path);
+        await _coordinator.SetActiveWorkspaceAsync(
+            workspace,
+            _lifetime?.Token ?? CancellationToken.None);
+        await bridge.PostAsync(
+            "state.snapshot",
+            await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None),
+            envelope.RequestId);
+    }
+
     private static void InitializePicker(object picker)
     {
         var window = App.Current.MainWindow
@@ -558,5 +1496,24 @@ public sealed partial class AssistantPage : Page, IDisposable
         return !string.IsNullOrWhiteSpace(value) && value.Length <= maximumLength
             ? value
             : throw new InvalidOperationException($"'{name}' fehlt oder ist ungültig.");
+    }
+
+    private static string? ReadOptionalText(JsonElement payload, string name, int maximumLength)
+    {
+        if (!payload.TryGetProperty(name, out var property)
+            || property.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException($"'{name}' ist ungültig.");
+        }
+        var value = property.GetString()?.Trim();
+        return string.IsNullOrEmpty(value)
+            ? null
+            : value.Length <= maximumLength
+                ? value
+                : throw new InvalidOperationException($"'{name}' ist zu lang.");
     }
 }

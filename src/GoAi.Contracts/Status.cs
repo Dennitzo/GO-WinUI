@@ -57,7 +57,16 @@ public sealed record GpuStatusSnapshot(
     string? ActiveLease,
     IReadOnlyList<GpuDeviceStatus> Devices,
     DateTimeOffset CheckedAt,
-    string? ErrorCode = null);
+    string? ErrorCode = null,
+    IReadOnlyList<ActiveAiWorkload>? ActiveWorkloads = null);
+
+public sealed record ActiveAiWorkload(
+    string LeaseId,
+    string Workload,
+    string DisplayName,
+    string Runtime,
+    string? RunId,
+    DateTimeOffset StartedAt);
 
 public sealed record GpuDeviceStatus(
     int Index,
@@ -73,4 +82,6 @@ public sealed record ServiceStatusSnapshot(
     string Endpoint,
     bool Reachable,
     DateTimeOffset CheckedAt,
-    string? Detail = null);
+    string? Detail = null,
+    bool? Loaded = null,
+    IReadOnlyList<string>? LoadedComponents = null);

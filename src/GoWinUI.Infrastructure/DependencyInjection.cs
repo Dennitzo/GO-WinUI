@@ -26,6 +26,11 @@ public static class DependencyInjection
         services.AddSingleton<IGoDatabase>(static provider => provider.GetRequiredService<SqliteDatabase>());
         services.AddSingleton<IChatRepository, SqliteChatRepository>();
         services.AddSingleton<IWorkflowRepository, SqliteWorkflowRepository>();
+        services.AddSingleton<IPromptTriggerRepository, SqlitePromptTriggerRepository>();
+        services.AddSingleton<IAssistantAttachmentRepository, SqliteAssistantAttachmentRepository>();
+        services.AddSingleton<IChatArtifactRepository, SqliteChatArtifactRepository>();
+        services.AddSingleton<IGoAiRunRepository, SqliteGoAiRunRepository>();
+        services.AddSingleton<IClientToolExecutionRepository, SqliteClientToolExecutionRepository>();
         services.AddSingleton<IProjectRepository, SqliteProjectRepository>();
         services.AddSingleton<IProjectAssetWorkingCopyService, ProjectAssetWorkingCopyService>();
         services.AddSingleton<IBinaryObjectStore, SqliteBinaryObjectStore>();

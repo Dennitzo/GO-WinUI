@@ -167,7 +167,9 @@ public sealed class SqliteBinaryObjectStore(SqliteDatabase database) : IBinaryOb
             DELETE FROM binary_objects WHERE id=$id
               AND NOT EXISTS(SELECT 1 FROM documents WHERE blob_id=$id)
               AND NOT EXISTS(SELECT 1 FROM project_assets WHERE blob_id=$id)
-              AND NOT EXISTS(SELECT 1 FROM project_asset_thumbnails WHERE blob_id=$id);
+              AND NOT EXISTS(SELECT 1 FROM project_asset_thumbnails WHERE blob_id=$id)
+              AND NOT EXISTS(SELECT 1 FROM assistant_attachments WHERE blob_id=$id)
+              AND NOT EXISTS(SELECT 1 FROM chat_artifacts WHERE blob_id=$id);
             """;
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
@@ -200,10 +202,14 @@ public sealed class SqliteBinaryObjectStore(SqliteDatabase database) : IBinaryOb
         private byte[] _buffer = [];
 
         public override bool CanRead => true;
-        public override bool CanSeek => false;
+        public override bool CanSeek => true;
         public override bool CanWrite => false;
         public override long Length => descriptor.Length;
-        public override long Position { get => _position; set => throw new NotSupportedException(); }
+        public override long Position
+        {
+            get => _position;
+            set => _ = Seek(value, SeekOrigin.Begin);
+        }
         public override void Flush() { }
         public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public override int Read(byte[] buffer, int offset, int count) => ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
@@ -252,7 +258,22 @@ public sealed class SqliteBinaryObjectStore(SqliteDatabase database) : IBinaryOb
                 ?? throw new InvalidDataException($"Binärblock {index} fehlt.");
         }
 
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            var target = origin switch
+            {
+                SeekOrigin.Begin => offset,
+                SeekOrigin.Current => checked(_position + offset),
+                SeekOrigin.End => checked(Length + offset),
+                _ => throw new ArgumentOutOfRangeException(nameof(origin)),
+            };
+            if (target < 0 || target > Length)
+            {
+                throw new IOException("Die angeforderte Binärposition liegt außerhalb des Objekts.");
+            }
+            _position = target;
+            return _position;
+        }
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }

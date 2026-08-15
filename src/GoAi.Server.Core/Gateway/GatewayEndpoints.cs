@@ -48,8 +48,10 @@ internal static class GatewayEndpoints
 
         endpoints.MapPost("/v1/audio/transcriptions", TranscribeAudioAsync);
         endpoints.MapPost("/v1/audio/speech", SynthesizeSpeechAsync);
+        endpoints.MapPost("/v1/audio/utterance-intent", ClassifyUtteranceIntentAsync);
         endpoints.MapPost("/v1/audio/live-captions/sessions", CreateLiveCaptionSessionAsync);
         endpoints.MapGet("/v1/audio/live-captions/sessions/{sessionId}", GetLiveCaptionSessionAsync);
+        endpoints.MapPost("/v1/audio/live-captions/sessions/{sessionId}/heartbeat", KeepLiveCaptionSessionAliveAsync);
         endpoints.MapPut("/v1/audio/live-captions/sessions/{sessionId}/chunks/{sequence:long}", PutLiveCaptionChunkAsync);
         endpoints.MapPost("/v1/audio/live-captions/sessions/{sessionId}/stop", StopLiveCaptionSessionAsync);
         endpoints.MapPost("/v1/images/generations", GenerateImageAsync);
@@ -377,8 +379,23 @@ internal static class GatewayEndpoints
             throw new ArgumentException("Speech text, voice, format, or speed is outside the protocol limits.");
         }
 
+        request = request with { Text = GermanSpeechTextNormalizer.Normalize(request.Text) };
+        if (string.IsNullOrWhiteSpace(request.Text) || request.Text.Length > 10_000)
+        {
+            throw new ArgumentException("Speech text is empty or too long after mathematical notation was normalized.");
+        }
+
         var workers = context.RequestServices.GetRequiredService<WorkerOrchestrator>();
         await WriteJsonAsync(context, await workers.SynthesizeAsync(request, cancellationToken: context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    private static async Task ClassifyUtteranceIntentAsync(HttpContext context)
+    {
+        var request = await ReadJsonAsync<UtteranceIntentRequest>(context).ConfigureAwait(false);
+        var service = context.RequestServices.GetRequiredService<UtteranceIntentService>();
+        await WriteJsonAsync(
+            context,
+            await service.ClassifyAsync(request, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     private static async Task CreateLiveCaptionSessionAsync(HttpContext context)
@@ -397,6 +414,16 @@ internal static class GatewayEndpoints
         await WriteJsonAsync(
             context,
             await captions.GetAsync(
+                GetRouteString(context, "sessionId"),
+                context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    private static async Task KeepLiveCaptionSessionAliveAsync(HttpContext context)
+    {
+        var captions = context.RequestServices.GetRequiredService<LiveCaptionService>();
+        await WriteJsonAsync(
+            context,
+            await captions.KeepAliveAsync(
                 GetRouteString(context, "sessionId"),
                 context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
     }

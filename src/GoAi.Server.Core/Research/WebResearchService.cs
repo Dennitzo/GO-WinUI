@@ -1,5 +1,6 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
+using GoAi.Server.Core.Security;
 using Microsoft.Extensions.Options;
 using System.Globalization;
 using System.Net;
@@ -18,11 +19,16 @@ public sealed partial class WebResearchService
     private const int MaximumRedirects = 5;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly GoAiServerOptions _options;
+    private readonly DpapiSecretStore? _secretStore;
 
-    public WebResearchService(IHttpClientFactory httpClientFactory, IOptions<GoAiServerOptions> options)
+    public WebResearchService(
+        IHttpClientFactory httpClientFactory,
+        IOptions<GoAiServerOptions> options,
+        DpapiSecretStore? secretStore = null)
     {
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
+        _secretStore = secretStore;
     }
 
     public async Task<WebSearchResponse> SearchAsync(
@@ -41,9 +47,13 @@ public sealed partial class WebResearchService
         }
 
         var maximum = Math.Clamp(request.MaximumResults, 1, 20);
-        if (youtubeFallback && !string.IsNullOrWhiteSpace(_options.YouTubeApiKey))
+        var youtubeApiKey = youtubeFallback && _secretStore is not null
+            ? await _secretStore.ReadYouTubeApiKeyAsync(cancellationToken).ConfigureAwait(false)
+            : null;
+        youtubeApiKey ??= _options.YouTubeApiKey;
+        if (youtubeFallback && !string.IsNullOrWhiteSpace(youtubeApiKey))
         {
-            return await SearchYouTubeAsync(request, maximum, _options.YouTubeApiKey, cancellationToken).ConfigureAwait(false);
+            return await SearchYouTubeAsync(request, maximum, youtubeApiKey, cancellationToken).ConfigureAwait(false);
         }
 
         var query = youtubeFallback ? $"site:youtube.com/watch {request.Query}" : request.Query;

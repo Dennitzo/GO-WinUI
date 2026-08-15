@@ -14,10 +14,11 @@ RUN git clone https://github.com/leejet/stable-diffusion.cpp.git /src \
     && cmake -S /src -B /src/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CUDA_ARCHITECTURES=75 \
+        -DSD_SERVER_BUILD_FRONTEND=OFF \
         -DSD_CUDA=ON \
         -DSD_WEBP=OFF \
         -DSD_WEBM=OFF \
-    && cmake --build /src/build --config Release --target sd-cli --parallel 4
+    && cmake --build /src/build --config Release --target sd-server --parallel 4
 
 FROM nvidia/cuda@sha256:ac55d124da4882b497f732d8dfd9a702d5447a5f29d08d56da6f64f0a1eb34bc
 

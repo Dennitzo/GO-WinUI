@@ -21,6 +21,9 @@ public sealed class GpuLeaseSchedulerTests
         await using var second = await secondTask;
         Assert.Equal(0, scheduler.QueueLength);
         Assert.Equal(second.LeaseId, scheduler.ActiveLease);
+        var activity = Assert.Single(scheduler.ActiveActivities);
+        Assert.Equal("image", activity.Workload);
+        Assert.Equal("run-2", activity.RunId);
     }
 
     [Fact]
@@ -34,6 +37,10 @@ public sealed class GpuLeaseSchedulerTests
         {
             Assert.Contains(general.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
             Assert.Contains(speech.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
+            Assert.Collection(
+                scheduler.ActiveActivities.OrderBy(static activity => activity.Workload),
+                activity => Assert.Equal("live-caption", activity.Workload),
+                activity => Assert.Equal("llm-general", activity.Workload));
 
             var lagunaTask = scheduler.AcquireAsync("llm-code", "run-code", GpuLeaseMode.Exclusive);
             await Task.Delay(100);
@@ -53,6 +60,23 @@ public sealed class GpuLeaseSchedulerTests
             await general.DisposeAsync();
             await speech.DisposeAsync();
         }
+    }
+
+    [Theory]
+    [InlineData("llm-general", "gpt-oss-20b", "LM Studio")]
+    [InlineData("llm-code", "Laguna-S-2.1", "LM Studio")]
+    [InlineData("live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT")]
+    [InlineData("text-to-speech", "Antwort wird vorgelesen", "Docker · Piper MLS weiblich")]
+    [InlineData("image-generation", "Bild wird erstellt", "Docker · Image")]
+    public void GpuStatusMapsWorkloadsToFooterLabels(
+        string workload,
+        string expectedName,
+        string expectedRuntime)
+    {
+        var actual = GpuStatusService.DescribeWorkload(workload);
+
+        Assert.Equal(expectedName, actual.DisplayName);
+        Assert.Equal(expectedRuntime, actual.Runtime);
     }
 
     [Fact]

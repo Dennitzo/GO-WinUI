@@ -17,18 +17,22 @@ public sealed class AssistantWebBridge : IDisposable
     private static readonly HashSet<string> AllowedIncomingTypes = new(StringComparer.Ordinal)
     {
         "app.ready", "chat.send", "chat.cancel", "session.create", "session.open",
-        "session.rename", "session.delete", "session.clear", "session.draft", "document.pick",
-        "document.remove", "workflow.list", "workflow.insert", "workflow.create",
+        "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick",
+        "document.remove", "attachment.remove", "workflow.list", "workflow.insert", "workflow.create",
         "workflow.update", "workflow.delete",
         "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
-        "ui.sessionPane", "external.open",
+        "artifact.save", "artifact.preview", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
+        "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
+        "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.stop", "microphone.cancel",
+        "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "ui.sessionPane", "external.open",
     };
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
         "state.snapshot", "chat.started", "chat.delta", "chat.completed",
         "chat.cancelled", "chat.failed", "session.changed", "workflow.snapshot",
         "workflow.changed", "workflow.draft", "document.changed", "status.changed", "theme.changed",
-        "draft.saved", "host.error",
+        "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
+        "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady", "host.error",
     };
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
@@ -49,7 +53,9 @@ public sealed class AssistantWebBridge : IDisposable
 
     public event EventHandler<WebBridgeMessageEventArgs>? MessageReceived;
 
-    public async Task InitializeAsync(string webRoot, string userDataFolder)
+    internal static bool IsIncomingTypeAllowed(string type) => AllowedIncomingTypes.Contains(type);
+
+    public async Task InitializeAsync(string webRoot, string userDataFolder, string? previewRoot = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_initialized)
@@ -86,6 +92,14 @@ public sealed class AssistantWebBridge : IDisposable
             VirtualHost,
             webRoot,
             CoreWebView2HostResourceAccessKind.DenyCors);
+        if (!string.IsNullOrWhiteSpace(previewRoot))
+        {
+            Directory.CreateDirectory(previewRoot);
+            core.SetVirtualHostNameToFolderMapping(
+                AssistantArtifactPreviewService.VirtualHost,
+                previewRoot,
+                CoreWebView2HostResourceAccessKind.Allow);
+        }
         core.Settings.AreDefaultContextMenusEnabled = false;
         core.Settings.AreDevToolsEnabled = IsDebugBuild;
         core.Settings.AreBrowserAcceleratorKeysEnabled = false;
@@ -96,6 +110,7 @@ public sealed class AssistantWebBridge : IDisposable
         core.WebMessageReceived += OnWebMessageReceived;
         core.NavigationStarting += OnNavigationStarting;
         core.NewWindowRequested += OnNewWindowRequested;
+        core.PermissionRequested += OnPermissionRequested;
         core.ProcessFailed += OnProcessFailed;
         _initialized = true;
     }
@@ -187,6 +202,7 @@ public sealed class AssistantWebBridge : IDisposable
             core.WebMessageReceived -= OnWebMessageReceived;
             core.NavigationStarting -= OnNavigationStarting;
             core.NewWindowRequested -= OnNewWindowRequested;
+            core.PermissionRequested -= OnPermissionRequested;
             core.ProcessFailed -= OnProcessFailed;
         }
     }
@@ -221,7 +237,7 @@ public sealed class AssistantWebBridge : IDisposable
             var envelope = JsonSerializer.Deserialize<WebBridgeEnvelope>(json, SerializerOptions)
                 ?? throw new JsonException("Leere Bridge-Nachricht.");
             if (envelope.Version != ProtocolVersion
-                || !AllowedIncomingTypes.Contains(envelope.Type)
+                || !IsIncomingTypeAllowed(envelope.Type)
                 || string.IsNullOrWhiteSpace(envelope.RequestId)
                 || envelope.RequestId.Length > 128
                 || envelope.Payload.ValueKind is not JsonValueKind.Object)
@@ -250,6 +266,23 @@ public sealed class AssistantWebBridge : IDisposable
     private static void OnNewWindowRequested(CoreWebView2 sender, CoreWebView2NewWindowRequestedEventArgs args)
     {
         args.Handled = true;
+    }
+
+    private static void OnPermissionRequested(
+        CoreWebView2 sender,
+        CoreWebView2PermissionRequestedEventArgs args)
+    {
+        if (args.PermissionKind == CoreWebView2PermissionKind.Microphone
+            && IsTrustedOrigin(args.Uri))
+        {
+            // Default deliberately keeps WebView2's browser-style permission prompt.
+            // A user's decision is stored in the dedicated GO WebView2 profile.
+            args.SavesInProfile = true;
+            args.State = CoreWebView2PermissionState.Default;
+            return;
+        }
+
+        args.State = CoreWebView2PermissionState.Deny;
     }
 
     private async void OnProcessFailed(CoreWebView2 sender, CoreWebView2ProcessFailedEventArgs args)

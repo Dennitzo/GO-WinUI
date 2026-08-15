@@ -4,6 +4,7 @@ namespace GoWinUI.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
+public enum AssistantMode { General, Code }
 public enum ProjectStatus { Active, Archived }
 public enum AssetCategory { Pdf, Drawing, Image, Meeting, Other }
 public enum AppTheme { System, Light, Dark }
@@ -15,7 +16,12 @@ public sealed record ChatSession(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     Guid? SelectedWorkflowId = null,
-    string Draft = "");
+    string Draft = "",
+    AssistantMode AssistantMode = AssistantMode.General,
+    string? WorkspacePath = null,
+    string? WorkspaceFingerprint = null,
+    bool IsPinned = false,
+    DateTimeOffset? PinnedAt = null);
 
 public sealed record ChatMessage(
     Guid Id,
@@ -25,7 +31,15 @@ public sealed record ChatMessage(
     MessageStatus Status,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    string? Error = null);
+    string? Error = null,
+    ToolExecutionInfo? ToolExecution = null);
+
+public sealed record ToolExecutionInfo(
+    string Tool,
+    string Context,
+    string Status,
+    string? Detail = null,
+    string? Provider = null);
 
 public sealed record WorkflowDefinition(
     Guid Id,
@@ -173,7 +187,14 @@ public sealed record AppSettings
     public const string DefaultBackgroundColor = "#6B6872";
     public const int MaximumRecentActivityTextLength = 180;
 
-    public int Version { get; init; } = 2;
+    public int Version { get; init; } = 5;
+    public AiProviderKind AiProvider { get; init; } = AiProviderKind.GoAiServer;
+    public string GoAiServerUrl { get; init; } = "https://192.168.0.67:8443";
+    public string GoAiProtocolVersion { get; init; } = "1.0";
+    public string? GoAiCaFingerprint { get; init; }
+    public string? GoAiConnectionName { get; init; } = "GO AI Server";
+    public string? LocalToolWorkspacePath { get; init; }
+    public string LiveCaptionLanguage { get; init; } = "auto";
     public string LmStudioBaseUrl { get; init; } = "http://127.0.0.1:1234/v1";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
     public string ReasoningEffort { get; init; } = "medium";

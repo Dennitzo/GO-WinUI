@@ -44,6 +44,29 @@ public sealed class AgentToolCatalogTests
         Assert.Throws<ArgumentException>(() => catalog.Validate(media, invalid.RootElement));
     }
 
+    [Fact]
+    public void ExplicitServerToolAllowListPreventsInheritedImageGeneration()
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest(null) with
+        {
+            AllowedServerTools = ["math.evaluate", "context.retrieve"],
+        };
+
+        var tools = catalog.GetAvailableTools(request);
+
+        Assert.Contains(tools, static tool => tool.Name == "math.evaluate");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "image.generate");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "web.search");
+    }
+
+    [Fact]
+    public void NullServerToolAllowListRetainsProtocolCompatibility()
+    {
+        var tools = new AgentToolCatalog().GetAvailableTools(CreateRequest(null));
+        Assert.Contains(tools, static tool => tool.Name == "image.generate");
+    }
+
     private static RunRequest CreateRequest(IReadOnlyList<string>? capabilities) => new(
         GoAiProtocol.Version,
         RunMode.General,

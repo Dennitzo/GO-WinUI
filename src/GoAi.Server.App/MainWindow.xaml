@@ -60,7 +60,7 @@
         <NavigationViewItem x:Name="OverviewItem" Content="Übersicht" IsSelected="True" Tag="overview">
           <NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;" /></NavigationViewItem.Icon>
         </NavigationViewItem>
-        <NavigationViewItem Content="Modelle und GPU" Tag="models">
+        <NavigationViewItem Content="AI Modelle" Tag="models">
           <NavigationViewItem.Icon><FontIcon Glyph="&#xE950;" /></NavigationViewItem.Icon>
         </NavigationViewItem>
         <NavigationViewItem Content="Dienste" Tag="services">
@@ -204,7 +204,7 @@
 
         <ScrollViewer x:Name="ModelsPanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
           <StackPanel MaxWidth="1450" Spacing="18">
-            <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="Modelle und GPU" />
+            <TextBlock Style="{StaticResource GoPageTitleStyle}" Text="AI Modelle" />
             <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="Konfigurierte Rollen – ohne stille Modellumschaltung." />
             <Border Padding="0" Style="{StaticResource GoCardStyle}">
               <StackPanel>
@@ -271,6 +271,7 @@
           x:Name="SecurityPanel"
           HorizontalAlignment="Stretch"
           HorizontalContentAlignment="Stretch"
+          HorizontalScrollBarVisibility="Disabled"
           Visibility="Collapsed"
           VerticalScrollBarVisibility="Auto">
           <StackPanel HorizontalAlignment="Stretch" Spacing="18">
@@ -342,12 +343,99 @@
                   Foreground="{ThemeResource GoMutedTextBrush}"
                   Text="Token wird mit Windows DPAPI geschützt und niemals in der Oberfläche zurückgelesen."
                   TextWrapping="Wrap" />
+                <Border
+                  Padding="14,12"
+                  Background="{ThemeResource GoLayerStrongBrush}"
+                  BorderBrush="{ThemeResource GoStrokeBrush}"
+                  BorderThickness="1"
+                  CornerRadius="8">
+                  <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="2*" />
+                      <ColumnDefinition Width="2*" />
+                      <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Spacing="3">
+                      <TextBlock FontWeight="SemiBold" Text="LM Studio API" />
+                      <TextBlock
+                        Foreground="{ThemeResource GoMutedTextBrush}"
+                        Text="{x:Bind ViewModel.LmStudioCredentialState, Mode=OneWay}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Spacing="3">
+                      <TextBlock
+                        Text="{x:Bind ViewModel.LmStudioCredentialStoredAt, Mode=OneWay}"
+                        TextWrapping="Wrap" />
+                      <TextBlock
+                        Foreground="{ThemeResource GoMutedTextBrush}"
+                        Text="{x:Bind ViewModel.LmStudioCredentialDetail, Mode=OneWay}"
+                        TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Button
+                      Grid.Column="2"
+                      VerticalAlignment="Center"
+                      Click="OnDeleteLmStudioTokenClick"
+                      Content="Entfernen"
+                      IsEnabled="{x:Bind ViewModel.HasLmStudioToken, Mode=OneWay}"
+                      Style="{StaticResource GoDangerButtonStyle}" />
+                  </Grid>
+                </Border>
                 <PasswordBox x:Name="LmStudioTokenBox" PlaceholderText="LM Studio API Token" />
                 <Button
                   HorizontalAlignment="Left"
                   Click="OnSaveLmStudioTokenClick"
                   Style="{StaticResource GoPrimaryButtonStyle}"
                   Content="Token geschützt speichern" />
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource GoCardStyle}">
+              <StackPanel Spacing="14">
+                <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="YouTube Data API" />
+                <TextBlock
+                  Foreground="{ThemeResource GoMutedTextBrush}"
+                  Text="Der Schlüssel wird mit Windows DPAPI geschützt. Ohne Schlüssel bleibt der sichtbar gekennzeichnete SearXNG-Fallback aktiv."
+                  TextWrapping="Wrap" />
+                <Border
+                  Padding="14,12"
+                  Background="{ThemeResource GoLayerStrongBrush}"
+                  BorderBrush="{ThemeResource GoStrokeBrush}"
+                  BorderThickness="1"
+                  CornerRadius="8">
+                  <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="2*" />
+                      <ColumnDefinition Width="2*" />
+                      <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Spacing="3">
+                      <TextBlock FontWeight="SemiBold" Text="YouTube Data API v3" />
+                      <TextBlock
+                        Foreground="{ThemeResource GoMutedTextBrush}"
+                        Text="{x:Bind ViewModel.YouTubeCredentialState, Mode=OneWay}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Spacing="3">
+                      <TextBlock
+                        Text="{x:Bind ViewModel.YouTubeCredentialStoredAt, Mode=OneWay}"
+                        TextWrapping="Wrap" />
+                      <TextBlock
+                        Foreground="{ThemeResource GoMutedTextBrush}"
+                        Text="{x:Bind ViewModel.YouTubeCredentialDetail, Mode=OneWay}"
+                        TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Button
+                      Grid.Column="2"
+                      VerticalAlignment="Center"
+                      Click="OnDeleteYouTubeApiKeyClick"
+                      Content="Entfernen"
+                      IsEnabled="{x:Bind ViewModel.HasYouTubeApiKey, Mode=OneWay}"
+                      Style="{StaticResource GoDangerButtonStyle}" />
+                  </Grid>
+                </Border>
+                <PasswordBox x:Name="YouTubeApiKeyBox" PlaceholderText="YouTube Data API v3 Schlüssel" />
+                <Button
+                  HorizontalAlignment="Left"
+                  Click="OnSaveYouTubeApiKeyClick"
+                  Style="{StaticResource GoPrimaryButtonStyle}"
+                  Content="Schlüssel geschützt speichern" />
               </StackPanel>
             </Border>
           </StackPanel>
@@ -383,15 +471,41 @@
       BorderBrush="{ThemeResource GoStrokeBrush}"
       BorderThickness="0,1,0,0">
       <Grid ColumnSpacing="12">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-        <Border Style="{StaticResource GoStatusPillStyle}">
-          <StackPanel Orientation="Horizontal" Spacing="8">
-            <FontIcon Foreground="{ThemeResource GoAccentBrush}" Glyph="&#xE950;" />
-            <TextBlock FontWeight="SemiBold" Text="GPU Server" />
-            <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="{x:Bind ViewModel.GatewayStatus, Mode=OneWay}" />
-          </StackPanel>
-        </Border>
-        <TextBlock Grid.Column="2" VerticalAlignment="Center" FontFamily="Cascadia Mono" Foreground="{ThemeResource GoMutedTextBrush}" Text="Protocol v1.0" />
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+        <ScrollViewer
+          Grid.Column="0"
+          HorizontalScrollBarVisibility="Hidden"
+          HorizontalScrollMode="Enabled"
+          VerticalScrollBarVisibility="Disabled"
+          VerticalScrollMode="Disabled">
+          <ItemsControl ItemsSource="{x:Bind ViewModel.LoadedComponents, Mode=OneWay}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <StackPanel Orientation="Horizontal" />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border Margin="0,0,8,0" Style="{StaticResource GoStatusPillStyle}">
+                  <StackPanel Orientation="Horizontal" Spacing="7">
+                    <FontIcon
+                      FontSize="14"
+                      Foreground="{ThemeResource GoAccentBrush}"
+                      Glyph="{Binding Glyph}" />
+                    <TextBlock
+                      MaxWidth="210"
+                      FontWeight="SemiBold"
+                      Text="{Binding Name}"
+                      TextTrimming="CharacterEllipsis" />
+                    <TextBlock
+                      Foreground="{ThemeResource GoMutedTextBrush}"
+                      Text="{Binding Detail}" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
       </Grid>
     </Border>
   </Grid>

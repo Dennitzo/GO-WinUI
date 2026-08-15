@@ -12,6 +12,11 @@ public static class RunRequestValidator
         "bricscad",
         "screenCapture",
     };
+    private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
+    {
+        "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
+        "image.generate", "math.evaluate", "context.embed", "context.retrieve",
+    };
 
     public static void Validate(RunRequest request)
     {
@@ -97,9 +102,35 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("The run contains unknown or excessive client capabilities.");
         }
+        if (request.AllowedServerTools is { Count: > 32 }
+            || request.AllowedServerTools?.Any(tool =>
+                string.IsNullOrWhiteSpace(tool) || !ServerTools.Contains(tool)) == true)
+        {
+            throw new ArgumentException("The run contains unknown or excessive allowed server tools.");
+        }
         if (request.SessionId?.Length > 128)
         {
             throw new ArgumentException("sessionId may contain at most 128 characters.");
+        }
+        if (request.Workspace is { } workspace)
+        {
+            if (request.Mode != RunMode.Code
+                || string.IsNullOrWhiteSpace(workspace.Name)
+                || workspace.Name.Length > 256
+                || workspace.Fingerprint.Length != 64
+                || workspace.Revision.Length != 64
+                || workspace.RepositoryMap.Length is < 1 or > 256_000
+                || workspace.FileCount is < 0 or > 100_000
+                || workspace.TextFileCount < 0
+                || workspace.TextFileCount > workspace.FileCount
+                || workspace.TextBytes < 0)
+            {
+                throw new ArgumentException("The coding workspace descriptor is invalid.");
+            }
+            if (!IsLowerHex(workspace.Fingerprint) || !IsLowerHex(workspace.Revision))
+            {
+                throw new ArgumentException("Workspace fingerprints must be lowercase SHA-256 values.");
+            }
         }
         if (request.Limits?.MaximumOutputTokens is { } maximumOutputTokens
             && maximumOutputTokens is < 1 or > 65_536)
@@ -112,9 +143,9 @@ public static class RunRequestValidator
             throw new ArgumentException("maximumContextTokens must be between 1024 and 262144.");
         }
         if (request.Limits?.TimeoutSeconds is { } timeoutSeconds
-            && timeoutSeconds is < 30 or > 3_600)
+            && timeoutSeconds is < 30 or > 14_400)
         {
-            throw new ArgumentException("timeoutSeconds must be between 30 and 3600.");
+            throw new ArgumentException("timeoutSeconds must be between 30 and 14400.");
         }
     }
 
@@ -143,4 +174,7 @@ public static class RunRequestValidator
         }
         return true;
     }
+
+    private static bool IsLowerHex(string value) => value.All(static character =>
+        character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }

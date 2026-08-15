@@ -18,9 +18,17 @@ public interface IChatRepository
     Task DeleteSessionAsync(Guid id, CancellationToken cancellationToken = default);
     Task SaveDraftAsync(Guid id, string draft, CancellationToken cancellationToken = default);
     Task SelectWorkflowAsync(Guid id, Guid? workflowId, CancellationToken cancellationToken = default);
+    Task SetAssistantContextAsync(
+        Guid id,
+        AssistantMode mode,
+        string? workspacePath,
+        string? workspaceFingerprint,
+        CancellationToken cancellationToken = default);
+    Task SetPinnedAsync(Guid id, bool isPinned, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ChatMessage>> ListMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<ChatMessage> AddMessageAsync(Guid sessionId, ChatRole role, string content, MessageStatus status, CancellationToken cancellationToken = default);
     Task UpdateMessageAsync(Guid messageId, string content, MessageStatus status, string? errorMessage = null, CancellationToken cancellationToken = default);
+    Task SetToolExecutionAsync(Guid messageId, ToolExecutionInfo execution, CancellationToken cancellationToken = default);
     Task<int> MarkStreamingMessagesInterruptedAsync(CancellationToken cancellationToken = default);
 }
 
@@ -32,6 +40,73 @@ public interface IWorkflowRepository
     Task<WorkflowDefinition> UpdateAsync(WorkflowDefinition workflow, long expectedRevision, CancellationToken cancellationToken = default);
     Task DeleteAsync(Guid id, long expectedRevision, CancellationToken cancellationToken = default);
     Task<WorkflowDefinition> CloneAsync(Guid id, string title, CancellationToken cancellationToken = default);
+}
+
+public interface IPromptTriggerRepository
+{
+    Task<IReadOnlyList<PromptTrigger>> ListAsync(CancellationToken cancellationToken = default);
+    Task<PromptTrigger?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<PromptTrigger> CreateAsync(PromptTrigger trigger, CancellationToken cancellationToken = default);
+    Task<PromptTrigger> UpdateAsync(PromptTrigger trigger, long expectedRevision, CancellationToken cancellationToken = default);
+    Task DeleteAsync(Guid id, long expectedRevision, CancellationToken cancellationToken = default);
+    Task<PromptTriggerMatch?> MatchAsync(string prompt, CancellationToken cancellationToken = default);
+}
+
+public interface IAssistantAttachmentRepository
+{
+    Task<IReadOnlyList<AssistantAttachment>> ListAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    Task<AssistantAttachment> ImportAsync(Guid sessionId, string fileName, string contentType, Stream content, CancellationToken cancellationToken = default);
+    Task<AssistantAttachment?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+    Task RemoveAsync(Guid id, CancellationToken cancellationToken = default);
+}
+
+public interface IChatArtifactRepository
+{
+    Task<IReadOnlyList<ChatArtifact>> ListForMessageAsync(Guid messageId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyDictionary<Guid, IReadOnlyList<ChatArtifact>>> ListForSessionAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    Task<ChatArtifact?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<ChatArtifact> ImportAsync(
+        Guid messageId,
+        string serverArtifactId,
+        string fileName,
+        string contentType,
+        string sha256,
+        long length,
+        string provider,
+        IReadOnlyDictionary<string, string>? metadata,
+        Stream content,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IGoAiRunRepository
+{
+    Task<GoAiRunRecord> CreateAsync(GoAiRunRecord run, CancellationToken cancellationToken = default);
+    Task<GoAiRunRecord?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<GoAiRunRecord?> GetByServerRunIdAsync(string serverRunId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<GoAiRunRecord>> ListResumableAsync(CancellationToken cancellationToken = default);
+    Task UpdateAsync(
+        Guid id,
+        string? serverRunId,
+        long lastEventId,
+        string state,
+        string? selectedModel = null,
+        string? errorCode = null,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IClientToolExecutionRepository
+{
+    Task<ClientToolExecutionRecord?> GetAsync(string proposalId, CancellationToken cancellationToken = default);
+    Task<ClientToolExecutionRecord> BeginAsync(ClientToolExecutionRecord execution, CancellationToken cancellationToken = default);
+    Task<ClientToolExecutionRecord> CompleteAsync(string proposalId, string resultJson, CancellationToken cancellationToken = default);
+    Task MarkSubmittedAsync(string proposalId, CancellationToken cancellationToken = default);
+}
+
+public interface IAiSecretStore
+{
+    Task<string?> GetApiKeyAsync(CancellationToken cancellationToken = default);
+    Task SetApiKeyAsync(string value, CancellationToken cancellationToken = default);
+    Task DeleteApiKeyAsync(CancellationToken cancellationToken = default);
 }
 
 public interface IProjectRepository

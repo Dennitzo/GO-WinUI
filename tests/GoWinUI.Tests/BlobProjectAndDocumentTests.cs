@@ -30,6 +30,16 @@ public sealed class BlobProjectAndDocumentTests
         Assert.Equal(2, first.ChunkCount);
         Assert.Equal(bytes, exported.ToArray());
         Assert.True(await store.VerifyAsync(first.Id));
+
+        await using var ranged = await store.OpenReadAsync(first.Id);
+        Assert.True(ranged.CanSeek);
+        var rangeStart = SqliteBinaryObjectStore.ChunkSize - 11;
+        Assert.Equal(rangeStart, ranged.Seek(rangeStart, SeekOrigin.Begin));
+        var range = new byte[64];
+        Assert.Equal(range.Length, await ranged.ReadAsync(range));
+        Assert.Equal(bytes.AsSpan(rangeStart, range.Length).ToArray(), range);
+        ranged.Position = ranged.Length - 7;
+        Assert.Equal(7, await ranged.ReadAsync(range));
     }
 
     [Fact]

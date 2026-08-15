@@ -10,6 +10,41 @@ namespace GoAi.Server.Tests;
 public sealed class LmStudioClientTests
 {
     [Fact]
+    public async Task RepeatedAndConcurrentStatusRequestsUseOneProviderCall()
+    {
+        using var context = new TestServerContext();
+        var handler = new ModelStatusHandler();
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        var requests = Enumerable.Range(0, 8)
+            .Select(_ => client.GetStatusAsync())
+            .ToArray();
+        var snapshots = await Task.WhenAll(requests);
+        var repeated = await client.GetStatusAsync();
+
+        Assert.All(snapshots, static snapshot => Assert.True(snapshot.ProviderReachable));
+        Assert.True(repeated.ProviderReachable);
+        Assert.Equal(1, handler.ModelRequests);
+    }
+
+    [Theory]
+    [InlineData("89504E470D0A1A0A00000000", "image/png")]
+    [InlineData("FFD8FFE000104A464946", "image/jpeg")]
+    [InlineData("524946460400000057454250", "image/webp")]
+    public void VisionMediaTypeUsesThePayloadSignatureInsteadOfTheUploadFileExtension(
+        string hex,
+        string expected)
+    {
+        Assert.Equal(expected, LmStudioClient.DetectImageMediaType(Convert.FromHexString(hex)));
+        Assert.Throws<InvalidDataException>(() => LmStudioClient.DetectImageMediaType([1, 2, 3, 4]));
+    }
+
+    [Fact]
     public async Task AgentCompletionUsesResponsesFunctionProtocolAndIgnoresReasoning()
     {
         using var context = new TestServerContext();
@@ -103,6 +138,7 @@ public sealed class LmStudioClientTests
         using var request = JsonDocument.Parse(Assert.IsType<string>(handler.LoadRequestBody));
         Assert.Equal("text-embedding-bge-m3", request.RootElement.GetProperty("model").GetString());
         Assert.Equal(8192, request.RootElement.GetProperty("context_length").GetInt32());
+        Assert.False(request.RootElement.TryGetProperty("ttl", out _));
         Assert.False(request.RootElement.TryGetProperty("parallel", out _));
         Assert.False(request.RootElement.TryGetProperty("flash_attention", out _));
         Assert.False(request.RootElement.TryGetProperty("offload_kv_cache_to_gpu", out _));
@@ -144,6 +180,24 @@ public sealed class LmStudioClientTests
 
         Assert.Equal("laguna-test", instance);
         Assert.Equal(1, handler.UnloadRequests);
+        Assert.Equal(1, handler.LoadRequests);
+    }
+
+    [Fact]
+    public async Task VisionLoadKeepsTheGeneralModelResident()
+    {
+        using var context = new TestServerContext();
+        var handler = new ResidentCoreLoadHandler();
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.EnsureModelLoadedAsync("qwen3-vl-30b-a3b-instruct", 65_536);
+
+        Assert.Equal(0, handler.UnloadRequests);
         Assert.Equal(1, handler.LoadRequests);
     }
 
@@ -209,6 +263,54 @@ public sealed class LmStudioClientTests
         Assert.Equal(4, handler.RequestCount);
     }
 
+    [Fact]
+    public async Task PegNativeFailureUsesChatCompletionsWithTheSameModelAndTypedTools()
+    {
+        using var context = new TestServerContext();
+        var handler = new ResponsesCompatibilityHandler();
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse("""
+            {"type":"object","properties":{"operation":{"type":"string"}},"required":["operation"],"additionalProperties":false}
+            """);
+        using var previousArguments = JsonDocument.Parse("""{"operation":"add"}""");
+
+        var result = await client.CompleteChatAsync(
+            "openai/gpt-oss-20b",
+            [
+                new LmChatMessage("system", "Systemregeln"),
+                new LmChatMessage("user", "Bitte rechnen"),
+                new LmChatMessage(
+                    "assistant",
+                    ToolCalls: [new LmToolCall("call_previous", "math.evaluate", previousArguments.RootElement.Clone())]),
+                new LmChatMessage("tool", "{\"result\":[2]}", ToolCallId: "call_previous"),
+            ],
+            [new LmToolDefinition("math.evaluate", "Rechnet", schemaDocument.RootElement.Clone())]);
+
+        Assert.Equal("Kompatible Antwort", result.Content);
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("call_next", call.Id);
+        Assert.Equal("math.evaluate", call.Name);
+        Assert.Equal(9, result.InputTokens);
+        Assert.Equal(3, result.OutputTokens);
+        Assert.Equal(["/v1/responses", "/v1/chat/completions"], handler.RequestPaths);
+
+        using var request = JsonDocument.Parse(handler.RequestBodies[1]);
+        var root = request.RootElement;
+        Assert.Equal("openai/gpt-oss-20b", root.GetProperty("model").GetString());
+        Assert.Equal("math.evaluate", root.GetProperty("tools")[0].GetProperty("function").GetProperty("name").GetString());
+        Assert.False(root.GetProperty("parallel_tool_calls").GetBoolean());
+        var messages = root.GetProperty("messages");
+        Assert.Contains(messages.EnumerateArray(), static item =>
+            item.GetProperty("role").GetString() == "assistant" && item.TryGetProperty("tool_calls", out _));
+        Assert.Contains(messages.EnumerateArray(), static item =>
+            item.GetProperty("role").GetString() == "tool" && item.GetProperty("tool_call_id").GetString() == "call_previous");
+    }
+
     private sealed class RecordingHandler(string responseJson, int failuresBeforeSuccess = 0) : HttpMessageHandler
     {
         public int RequestCount { get; private set; }
@@ -233,6 +335,88 @@ public sealed class LmStudioClientTests
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(responseJson, Encoding.UTF8, "application/json"),
+            };
+        }
+    }
+
+    private sealed class ResponsesCompatibilityHandler : HttpMessageHandler
+    {
+        public List<string> RequestPaths { get; } = [];
+
+        public List<string> RequestBodies { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestPaths.Add(request.RequestUri?.AbsolutePath ?? string.Empty);
+            RequestBodies.Add(request.Content is null
+                ? string.Empty
+                : await request.Content.ReadAsStringAsync(cancellationToken));
+            if (request.RequestUri?.AbsolutePath == "/v1/responses")
+            {
+                return new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                {
+                    Content = new StringContent(
+                        "{\"error\":{\"message\":\"The model produced output that does not match the expected peg-native format\"}}",
+                        Encoding.UTF8,
+                        "application/json"),
+                };
+            }
+
+            if (request.RequestUri?.AbsolutePath == "/v1/chat/completions")
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""
+                        {
+                          "choices": [{
+                            "message": {
+                              "role": "assistant",
+                              "content": "Kompatible Antwort",
+                              "tool_calls": [{
+                                "id": "call_next",
+                                "type": "function",
+                                "function": {
+                                  "name": "math.evaluate",
+                                  "arguments": "{\"operation\":\"add\"}"
+                                }
+                              }]
+                            }
+                          }],
+                          "usage": { "prompt_tokens": 9, "completion_tokens": 3 }
+                        }
+                        """, Encoding.UTF8, "application/json"),
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+    }
+
+    private sealed class ModelStatusHandler : HttpMessageHandler
+    {
+        private int _modelRequests;
+
+        public int ModelRequests => Volatile.Read(ref _modelRequests);
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            if (request.Method != HttpMethod.Get || request.RequestUri?.AbsolutePath != "/api/v1/models")
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+
+            Interlocked.Increment(ref _modelRequests);
+            await Task.Delay(25, cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"models\":[]}",
+                    Encoding.UTF8,
+                    "application/json"),
             };
         }
     }
@@ -297,13 +481,13 @@ public sealed class LmStudioClientTests
 
         public int UnloadRequests { get; private set; }
 
-        protected override Task<HttpResponseMessage> SendAsync(
+        protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
         {
             if (request.Method == HttpMethod.Get && request.RequestUri?.AbsolutePath == "/api/v1/models")
             {
-                return Task.FromResult(JsonResponse("""
+                return JsonResponse("""
                     {
                       "models": [
                         {
@@ -328,37 +512,53 @@ public sealed class LmStudioClientTests
                           "display_name": "Laguna S 2.1",
                           "loaded_instances": [],
                           "max_context_length": 262144
+                        },
+                        {
+                          "type": "llm",
+                          "key": "qwen3-vl-30b-a3b-instruct",
+                          "display_name": "Qwen3 VL 30B",
+                          "loaded_instances": [],
+                          "max_context_length": 65536
                         }
                       ]
                     }
-                    """));
+                    """);
             }
 
             if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/v1/models/unload")
             {
                 UnloadRequests++;
-                return Task.FromResult(JsonResponse("{}"));
+                return JsonResponse("{}");
             }
 
             if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/v1/models/load")
             {
                 LoadRequests++;
-                return Task.FromResult(JsonResponse("""
+                var requestBody = request.Content is null
+                    ? "{}"
+                    : await request.Content.ReadAsStringAsync(cancellationToken);
+                using var requestDocument = JsonDocument.Parse(requestBody);
+                var modelId = requestDocument.RootElement.GetProperty("model").GetString();
+                var contextLength = requestDocument.RootElement.GetProperty("context_length").GetInt32();
+                var instanceId = string.Equals(modelId, "poolside/laguna-s-2.1", StringComparison.OrdinalIgnoreCase)
+                    ? "laguna-test"
+                    : "vision-test";
+                return JsonResponse($$"""
                     {
-                      "instance_id": "laguna-test",
+                      "instance_id": "{{instanceId}}",
                       "status": "loaded",
                       "load_time_seconds": 1.0,
                       "load_config": {
-                        "context_length": 131072,
+                        "context_length": {{contextLength}},
                         "parallel": 1,
                         "flash_attention": true,
                         "offload_kv_cache_to_gpu": true
                       }
                     }
-                    """));
+                    """);
             }
 
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
 
         private static HttpResponseMessage JsonResponse(string value) => new(HttpStatusCode.OK)

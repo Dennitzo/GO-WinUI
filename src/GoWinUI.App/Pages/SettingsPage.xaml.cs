@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.AppLifecycle;
 using Windows.Storage.Pickers;
+using WinUI.TableView;
 using WinRT.Interop;
 
 namespace GoWinUI.App.Pages;
@@ -54,15 +55,20 @@ public sealed partial class SettingsPage : Page
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        SynchronizeControls();
-        if (_shell.IsAiAvailable)
+        await RunActionAsync(async () =>
         {
-            await RunActionAsync(async () =>
+            await ViewModel.InitializeAsync();
+            SynchronizeControls();
+            UpdatePromptTriggerSortIndicators();
+            UpdateApiKeyState();
+            if (_shell.IsAiAvailable)
             {
                 await ViewModel.RefreshModelsAsync();
                 SynchronizeModelSelection();
-            });
-        }
+                ApiKeyBox.Password = string.Empty;
+                UpdateApiKeyState();
+            }
+        });
     }
 
     private void SynchronizeControls()
@@ -70,7 +76,8 @@ public sealed partial class SettingsPage : Page
         _synchronizing = true;
         try
         {
-            ViewModel.Initialize();
+            SelectByTag(ProviderBox, ViewModel.AiProvider.ToString());
+            SelectByTag(CaptionLanguageBox, ViewModel.LiveCaptionLanguage);
             SelectByTag(ReasoningBox, ViewModel.ReasoningEffort);
             SelectByTag(ThemeBox, ViewModel.Theme.ToString());
             SelectByTag(LanguageBox, ViewModel.Language);
@@ -78,6 +85,10 @@ public sealed partial class SettingsPage : Page
                 string.Equals(color.Value, ViewModel.AccentColor, StringComparison.OrdinalIgnoreCase));
             BackgroundColorList.SelectedItem = BackgroundColors.FirstOrDefault(color =>
                 string.Equals(color.Value, ViewModel.BackgroundColor, StringComparison.OrdinalIgnoreCase));
+            if (NewTriggerActionBox.SelectedItem is null && ViewModel.TriggerActions.Count > 0)
+            {
+                NewTriggerActionBox.SelectedIndex = 0;
+            }
             SynchronizeModelSelection();
         }
         finally
@@ -91,6 +102,8 @@ public sealed partial class SettingsPage : Page
         await RunActionAsync(async () =>
         {
             await ViewModel.SaveAsync();
+            ApiKeyBox.Password = string.Empty;
+            UpdateApiKeyState();
             ShowStatus("Einstellungen gespeichert.", InfoBarSeverity.Success);
         });
     }
@@ -101,9 +114,202 @@ public sealed partial class SettingsPage : Page
         {
             await ViewModel.RefreshModelsAsync();
             SynchronizeModelSelection();
+            ApiKeyBox.Password = string.Empty;
+            UpdateApiKeyState();
 
             ShowStatus(ViewModel.ConnectionStatus, InfoBarSeverity.Success);
         });
+    }
+
+    private void OnProviderChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_synchronizing
+            && (ProviderBox.SelectedItem as ComboBoxItem)?.Tag is string value
+            && Enum.TryParse<AiProviderKind>(value, out var provider))
+        {
+            ViewModel.AiProvider = provider;
+        }
+    }
+
+    private void OnCaptionLanguageChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_synchronizing && (CaptionLanguageBox.SelectedItem as ComboBoxItem)?.Tag is string value)
+        {
+            ViewModel.LiveCaptionLanguage = value;
+        }
+    }
+
+    private void OnApiKeyChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_synchronizing)
+        {
+            ViewModel.GoAiApiKey = ApiKeyBox.Password;
+        }
+    }
+
+    private async void OnImportConnectionBundle(object sender, RoutedEventArgs e)
+    {
+        await RunActionAsync(async () =>
+        {
+            var picker = new FileOpenPicker
+            {
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+                ViewMode = PickerViewMode.List,
+            };
+            picker.FileTypeFilter.Add(".json");
+            InitializePicker(picker);
+            var file = await picker.PickSingleFileAsync();
+            if (file is null)
+            {
+                return;
+            }
+
+            await ViewModel.ImportConnectionBundleAsync(file.Path);
+            SynchronizeControls();
+            ShowStatus("Verbindungspaket und Caddy-Stammzertifikat wurden importiert.", InfoBarSeverity.Success);
+        });
+    }
+
+    private async void OnDeleteApiKey(object sender, RoutedEventArgs e)
+    {
+        await RunActionAsync(async () =>
+        {
+            await ViewModel.DeleteApiKeyAsync();
+            ApiKeyBox.Password = string.Empty;
+            UpdateApiKeyState();
+            ShowStatus("Der gespeicherte API-Schlüssel wurde gelöscht.", InfoBarSeverity.Success);
+        });
+    }
+
+    private async void OnSelectWorkspace(object sender, RoutedEventArgs e)
+    {
+        await RunActionAsync(async () =>
+        {
+            var picker = new FolderPicker
+            {
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+                ViewMode = PickerViewMode.List,
+            };
+            picker.FileTypeFilter.Add("*");
+            InitializePicker(picker);
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder is not null)
+            {
+                ViewModel.LocalToolWorkspacePath = folder.Path;
+            }
+        });
+    }
+
+    private void OnAddTrigger(object sender, RoutedEventArgs e)
+    {
+        if (NewTriggerActionBox.SelectedItem is not PromptTriggerActionOption option)
+        {
+            ShowStatus("Bitte zuerst einen Dienst auswählen.", InfoBarSeverity.Warning);
+            return;
+        }
+
+        try
+        {
+            _ = ViewModel.AddTrigger(option.Value, NewTriggerPhraseBox.Text);
+            NewTriggerPhraseBox.Text = string.Empty;
+            PromptTriggerTable.SelectedItems.Clear();
+            ViewModel.SelectedPromptTrigger = null;
+            ShowStatus("Prompt-Trigger als neue Tabellenzeile hinzugefügt. Mit „Speichern“ in GO.db übernehmen.", InfoBarSeverity.Success);
+        }
+        catch (Exception exception)
+        {
+            ShowStatus(exception.Message, InfoBarSeverity.Warning);
+        }
+    }
+
+    private void OnPromptTriggerTableSorting(object sender, TableViewSortingEventArgs e)
+    {
+        e.Handled = true;
+        if (e.Column.Tag is not string columnName)
+        {
+            return;
+        }
+
+        ViewModel.SortPromptTriggers(columnName);
+        UpdatePromptTriggerSortIndicators();
+    }
+
+    private void UpdatePromptTriggerSortIndicators()
+    {
+        foreach (var column in PromptTriggerTable.Columns)
+        {
+            column.SortDirection = column.Tag is string columnName
+                && string.Equals(columnName, ViewModel.TriggerSortColumn, StringComparison.Ordinal)
+                    ? ViewModel.TriggerSortDescending
+                        ? SortDirection.Descending
+                        : SortDirection.Ascending
+                    : null;
+        }
+    }
+
+    private void OnPromptTriggerSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        ViewModel.SelectedPromptTrigger = PromptTriggerTable.SelectedItems
+            .OfType<PromptTriggerEditorItem>()
+            .LastOrDefault();
+    }
+
+    private void OnTriggerSearchTextChanged(
+        AutoSuggestBox sender,
+        AutoSuggestBoxTextChangedEventArgs e)
+    {
+        if (e.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
+        {
+            return;
+        }
+
+        PromptTriggerTable.SelectedItems.Clear();
+        ViewModel.SelectedPromptTrigger = null;
+    }
+
+    private void OnPromptTriggerCellEditEnded(
+        object sender,
+        TableViewCellEditEndedEventArgs e)
+    {
+        if (e.EditAction == TableViewEditAction.Commit
+            && e.DataItem is PromptTriggerEditorItem)
+        {
+            ViewModel.RefreshPromptTriggerView();
+        }
+    }
+
+    private async void OnDeleteSelectedTriggers(object sender, RoutedEventArgs e)
+    {
+        var items = PromptTriggerTable.SelectedItems
+            .OfType<PromptTriggerEditorItem>()
+            .Distinct()
+            .ToArray();
+        if (items.Length == 0)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = $"{items.Length:N0} Prompt-Trigger löschen?",
+            Content = "Die ausgewählten Tabellenzeilen werden beim nächsten Speichern aus GO.db gelöscht.",
+            PrimaryButtonText = "Zeile löschen",
+            CloseButtonText = "Abbrechen",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        foreach (var item in items)
+        {
+            ViewModel.RemoveTrigger(item);
+        }
+        PromptTriggerTable.SelectedItems.Clear();
+        ViewModel.SelectedPromptTrigger = null;
+        ShowStatus("Ausgewählte Prompt-Trigger zum Löschen vorgemerkt. Mit „Speichern“ übernehmen.", InfoBarSeverity.Success);
     }
 
     private void OnModelChanged(object sender, SelectionChangedEventArgs e)
@@ -251,6 +457,13 @@ public sealed partial class SettingsPage : Page
         {
             _synchronizing = false;
         }
+    }
+
+    private void UpdateApiKeyState()
+    {
+        ApiKeyStateText.Text = ViewModel.HasStoredApiKey
+            ? "Ein API-Schlüssel ist sicher im Windows-Anmeldeinformationsspeicher hinterlegt."
+            : "Noch kein API-Schlüssel gespeichert.";
     }
 
     private static void SelectByTag(ComboBox comboBox, string value)

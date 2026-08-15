@@ -34,7 +34,7 @@ public sealed class WindowsSpeechService
             .ToArray();
         var selected = installed.FirstOrDefault(static voice =>
                 voice.Culture.Name.Equals("de-DE", StringComparison.OrdinalIgnoreCase)
-                && voice.Name.Contains("Hedda", StringComparison.OrdinalIgnoreCase))
+                && voice.Name.Contains("Katja", StringComparison.OrdinalIgnoreCase))
             ?? installed.FirstOrDefault(static voice => voice.Culture.Name.Equals("de-DE", StringComparison.OrdinalIgnoreCase))
             ?? synthesizer.GetInstalledVoices(CultureInfo.GetCultureInfo("en-US"))
                 .Where(static voice => voice.Enabled)

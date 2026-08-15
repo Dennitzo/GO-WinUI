@@ -57,3 +57,17 @@ public sealed record LmChatResult(
     IReadOnlyList<LmToolCall> ToolCalls,
     int InputTokens,
     int OutputTokens);
+
+public sealed class LmStudioContextLengthException(
+    string modelId,
+    int requestedContextLength,
+    int availableContextLength)
+    : InvalidOperationException(
+        $"Das Coding-Modell '{modelId}' stellt nur {availableContextLength:N0} statt der erforderlichen {requestedContextLength:N0} Kontexttoken bereit.")
+{
+    public string ModelId { get; } = modelId;
+
+    public int RequestedContextLength { get; } = requestedContextLength;
+
+    public int AvailableContextLength { get; } = availableContextLength;
+}

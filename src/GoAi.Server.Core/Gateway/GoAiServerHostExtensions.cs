@@ -42,6 +42,7 @@ public static class GoAiServerHostExtensions
         services.AddSingleton<AgentToolCatalog>();
         services.AddSingleton<AgentToolExecutor>();
         services.AddSingleton<GpuLeaseScheduler>();
+        services.AddSingleton<ServiceActivityTracker>();
         services.AddSingleton<GpuStatusService>();
         services.AddSingleton<UploadService>();
         services.AddSingleton<ArtifactService>();
@@ -51,15 +52,21 @@ public static class GoAiServerHostExtensions
         services.AddSingleton<ServerMetricsService>();
         services.AddSingleton<WebResearchService>();
         services.AddSingleton<WindowsSpeechService>();
+        services.AddSingleton<UtteranceIntentService>();
         services.AddSingleton<WorkerOrchestrator>();
         services.AddSingleton<LiveCaptionService>();
         services.AddHttpClient();
-        services.AddHttpClient<LmStudioClient>();
+        services.AddSingleton(static provider => new LmStudioClient(
+            provider.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(LmStudioClient)),
+            provider.GetRequiredService<IOptions<GoAiServerOptions>>(),
+            provider.GetRequiredService<DpapiSecretStore>(),
+            provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<LmStudioClient>>()));
         services.AddHttpClient<WorkerApiClient>();
         services.AddSingleton<RunProcessor>();
         if (includeHostedServices)
         {
             services.AddHostedService<ServerInitializationService>();
+            services.AddHostedService<SharedModelWarmupService>();
             services.AddHostedService(static provider => provider.GetRequiredService<RunProcessor>());
             services.AddHostedService<StorageCleanupService>();
             services.AddHostedService(static provider => provider.GetRequiredService<LiveCaptionService>());

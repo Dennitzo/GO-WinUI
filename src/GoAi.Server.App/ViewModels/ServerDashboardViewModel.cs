@@ -74,6 +74,30 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
     public partial string SecurityMessage { get; set; } = "API-Schlüssel werden nur gehasht gespeichert.";
 
     [ObservableProperty]
+    public partial string LmStudioCredentialState { get; set; } = "Nicht hinterlegt";
+
+    [ObservableProperty]
+    public partial string LmStudioCredentialStoredAt { get; set; } = "Noch nicht gespeichert";
+
+    [ObservableProperty]
+    public partial string LmStudioCredentialDetail { get; set; } = "LM Studio API-Authentifizierung fehlt";
+
+    [ObservableProperty]
+    public partial bool HasLmStudioToken { get; set; }
+
+    [ObservableProperty]
+    public partial string YouTubeCredentialState { get; set; } = "Nicht hinterlegt";
+
+    [ObservableProperty]
+    public partial string YouTubeCredentialStoredAt { get; set; } = "Noch nicht gespeichert";
+
+    [ObservableProperty]
+    public partial string YouTubeCredentialDetail { get; set; } = "SearXNG-Fallback aktiv";
+
+    [ObservableProperty]
+    public partial bool HasYouTubeApiKey { get; set; }
+
+    [ObservableProperty]
     public partial string LogText { get; set; } = string.Empty;
 
     [ObservableProperty]
@@ -104,6 +128,7 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
         LoopbackEndpoint = $"http://127.0.0.1:{_options.GatewayPort.ToString(CultureInfo.InvariantCulture)}";
         DataDirectory = _options.DataDirectory;
         OneTimeApiKey = runtime.OneTimeBootstrapKey;
+        RefreshCredentialStatuses();
         RebuildLogText();
         _runtime.LogAdded += OnLogAdded;
         _runtime.Changed += OnRuntimeChanged;
@@ -114,6 +139,8 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
     public ObservableCollection<GpuStatusRow> Gpus { get; } = [];
 
     public ObservableCollection<ServiceStatusRow> Services { get; } = [];
+
+    public ObservableCollection<ServerFooterItem> LoadedComponents { get; } = [];
 
     public ObservableCollection<ApiKeyRow> ApiKeys { get; } = [];
 
@@ -127,16 +154,15 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
         IsRefreshing = true;
         try
         {
-            var readinessTask = _readiness.GetSnapshotAsync(cancellationToken);
             var modelTask = _lmStudio.GetStatusAsync(cancellationToken);
             var gpuTask = _gpu.GetStatusAsync(cancellationToken);
             var servicesTask = _probes.GetStatusesAsync(cancellationToken);
             var metricsTask = _metrics.GetSnapshotAsync(cancellationToken);
             var apiKeysTask = _apiKeys.ListAsync(cancellationToken: cancellationToken);
-            await Task.WhenAll(readinessTask, modelTask, gpuTask, servicesTask, metricsTask, apiKeysTask);
+            await Task.WhenAll(modelTask, gpuTask, servicesTask, metricsTask, apiKeysTask);
 
-            var readiness = await readinessTask;
             var models = await modelTask;
+            var readiness = await _readiness.GetSnapshotAsync(models, cancellationToken);
             var gpu = await gpuTask;
             var services = await servicesTask;
             var metrics = await metricsTask;
@@ -153,13 +179,15 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
             DiskFree = $"{FormatBytes(metrics.DiskFreeBytes)} frei";
             DataDirectory = metrics.DataDirectory;
             ApiKeySummary = $"{metrics.ActiveApiKeys:N0} aktive Schlüssel";
+            RefreshCredentialStatuses();
 
-            ReplaceRows(Models, models.Models.Select(static model => new ModelStatusRow(
+            var modelRows = models.Models.Select(static model => new ModelStatusRow(
                 model.Id,
                 model.Role,
                 $"{model.ContextTokens:N0} Token",
                 model.State,
-                model.Downloaded ? "Vorhanden" : "Fehlt")));
+                model.Downloaded ? "Vorhanden" : "Fehlt")).ToList();
+            ReplaceRows(Models, modelRows);
             ReplaceRows(Gpus, gpu.Devices.Select(static device => new GpuStatusRow(
                 $"GPU {device.Index}: {device.Name}",
                 $"{device.MemoryUsedMiB:N0} / {device.MemoryTotalMiB:N0} MiB",
@@ -170,6 +198,9 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
                 service.Endpoint,
                 service.State,
                 service.Detail ?? string.Empty)));
+            ReplaceRows(
+                LoadedComponents,
+                BuildLoadedComponents(models.Models, services));
             ReplaceRows(ApiKeys, apiKeys.Select(key => new ApiKeyRow(
                 key.KeyId,
                 key.Name,
@@ -209,7 +240,35 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
     public async Task SaveLmStudioTokenAsync(string token, CancellationToken cancellationToken = default)
     {
         await _secretStore.SaveLmStudioTokenAsync(token, cancellationToken);
-        SecurityMessage = "LM-Studio-Token wurde DPAPI-geschützt für dieses Windows-Konto gespeichert.";
+        RefreshCredentialStatuses();
+        SecurityMessage = "LM-Studio-Token wurde mit Windows DPAPI geschützt auf diesem Server gespeichert.";
+    }
+
+    public void DeleteLmStudioToken()
+    {
+        _secretStore.DeleteLmStudioToken();
+        RefreshCredentialStatuses();
+        SecurityMessage = "LM-Studio-Token wurde entfernt. Die LM-Studio-Authentifizierung ist nicht mehr konfiguriert.";
+    }
+
+    public async Task SaveYouTubeApiKeyAsync(string apiKey, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        if (apiKey.Trim().Length > 512)
+        {
+            throw new ArgumentOutOfRangeException(nameof(apiKey), "Der YouTube-API-Schlüssel ist zu lang.");
+        }
+
+        await _secretStore.SaveYouTubeApiKeyAsync(apiKey, cancellationToken);
+        RefreshCredentialStatuses();
+        SecurityMessage = "YouTube-API-Schlüssel wurde DPAPI-geschützt gespeichert. Die nächste Suche verwendet die offizielle YouTube Data API.";
+    }
+
+    public void DeleteYouTubeApiKey()
+    {
+        _secretStore.DeleteYouTubeApiKey();
+        RefreshCredentialStatuses();
+        SecurityMessage = "YouTube-API-Schlüssel wurde entfernt. YouTube-Suchen verwenden wieder den gekennzeichneten SearXNG-Fallback.";
     }
 
     public void HideOneTimeApiKey()
@@ -256,6 +315,44 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
                 $"[{entry.Timestamp:HH:mm:ss}] {entry.Level,-11} {entry.EventId}  {entry.Message}"));
     }
 
+    private void RefreshCredentialStatuses()
+    {
+        HasLmStudioToken = _secretStore.HasLmStudioToken;
+        LmStudioCredentialState = HasLmStudioToken ? "Gespeichert" : "Nicht hinterlegt";
+        LmStudioCredentialStoredAt = FormatSecretStoredAt(_options.LmStudioTokenPath);
+        LmStudioCredentialDetail = HasLmStudioToken
+            ? "LM-Studio-Token hinterlegt · Windows DPAPI geschützt"
+            : "LM Studio API-Authentifizierung fehlt";
+
+        HasYouTubeApiKey = _secretStore.HasYouTubeApiKey;
+        YouTubeCredentialState = HasYouTubeApiKey ? "Gespeichert" : "Nicht hinterlegt";
+        YouTubeCredentialStoredAt = FormatSecretStoredAt(_options.YouTubeApiKeyPath);
+        YouTubeCredentialDetail = HasYouTubeApiKey
+            ? "API-Schlüssel hinterlegt · Windows DPAPI geschützt"
+            : "SearXNG-Fallback aktiv";
+    }
+
+    private static string FormatSecretStoredAt(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return "Noch nicht gespeichert";
+        }
+
+        try
+        {
+            return $"Gespeichert {File.GetLastWriteTime(path):dd.MM.yyyy, HH:mm}";
+        }
+        catch (IOException)
+        {
+            return "Gespeichert · Zeitpunkt nicht verfügbar";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return "Gespeichert · Zeitpunkt nicht verfügbar";
+        }
+    }
+
     private static void ReplaceRows<T>(ObservableCollection<T> target, IEnumerable<T> rows)
     {
         target.Clear();
@@ -264,6 +361,65 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
             target.Add(row);
         }
     }
+
+    internal static IReadOnlyList<ServerFooterItem> BuildLoadedComponents(
+        IReadOnlyList<ModelRuntimeStatus> models,
+        IReadOnlyList<ServiceStatusSnapshot> services)
+    {
+        var result = new List<ServerFooterItem>();
+        result.AddRange(models
+            .Where(static model => model.Loaded)
+            .Select(static model => new ServerFooterItem(
+                $"model:{model.Id}",
+                ShortModelName(model.Id),
+                $"LM Studio · {RoleLabel(model.Role)}",
+                "\uE950")));
+        foreach (var service in services.Where(static service => service.Reachable && service.Loaded != false))
+        {
+            if (service.LoadedComponents is { Count: > 0 } components)
+            {
+                result.AddRange(components.Select(component => new ServerFooterItem(
+                    $"service:{service.Name}:{component}",
+                    component,
+                    ServiceRoleLabel(service.Name),
+                    "\uE968")));
+                continue;
+            }
+
+            result.Add(new ServerFooterItem(
+                $"service:{service.Name}",
+                service.Name,
+                "Dienst aktiv",
+                "\uE968"));
+        }
+        return result;
+    }
+
+    private static string ServiceRoleLabel(string serviceName) => serviceName switch
+    {
+        "Speech / Live-Untertitel" => "Speech",
+        "Image Worker" => "Bildgenerierung",
+        "Video Worker" => "Videogenerierung",
+        "Media Worker" => "Medienanalyse",
+        _ => "Dienst aktiv",
+    };
+
+    private static string ShortModelName(string modelId)
+    {
+        var separator = modelId.LastIndexOf('/');
+        return separator >= 0 && separator < modelId.Length - 1
+            ? modelId[(separator + 1)..]
+            : modelId;
+    }
+
+    private static string RoleLabel(string role) => role.ToLowerInvariant() switch
+    {
+        "general" => "General",
+        "code" => "Coding",
+        "vision" => "Vision",
+        "embedding" => "Embeddings",
+        _ => role,
+    };
 
     private static string FormatBytes(long bytes)
     {
@@ -280,3 +436,9 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
         return $"{display:0.#} {units[unit]}";
     }
 }
+
+public sealed record ServerFooterItem(
+    string Key,
+    string Name,
+    string Detail,
+    string Glyph);

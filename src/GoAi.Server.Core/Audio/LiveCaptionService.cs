@@ -3,13 +3,14 @@ using GoAi.Server.Core.Runtime;
 using GoAi.Server.Core.Workers;
 using Microsoft.Extensions.Hosting;
 using System.Buffers.Binary;
+using System.Text;
+using System.Text.Json;
 
 namespace GoAi.Server.Core.Audio;
 
 public sealed class LiveCaptionService : BackgroundService
 {
     private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(2);
-    private static readonly TimeSpan MaximumSessionLifetime = TimeSpan.FromHours(2);
     private const int MaximumTranscriptCharacters = 500_000;
     private readonly WorkerOrchestrator _workers;
     private readonly ServerRuntimeState _runtime;
@@ -59,11 +60,13 @@ public sealed class LiveCaptionService : BackgroundService
             }
 
             var now = DateTimeOffset.UtcNow;
+            var sessionId = $"caption-{Guid.NewGuid():N}";
+            await _workers.PrepareLiveCaptionResourcesAsync(sessionId, cancellationToken).ConfigureAwait(false);
             await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             try
             {
                 _active = new CaptionSession(
-                    $"caption-{Guid.NewGuid():N}",
+                    sessionId,
                     request,
                     now,
                     now);
@@ -94,6 +97,28 @@ public sealed class LiveCaptionService : BackgroundService
                 throw new KeyNotFoundException("Live-Untertitel-Sitzung ist abgelaufen.");
             }
 
+            return session.ToSnapshot("active");
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    public async Task<LiveCaptionSessionSnapshot> KeepAliveAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var session = GetRequiredSession(sessionId);
+            if (session.IsStopping || session.IsExpired(DateTimeOffset.UtcNow))
+            {
+                throw new KeyNotFoundException("Live-Untertitel-Sitzung ist abgelaufen.");
+            }
+
+            session.UpdatedAt = DateTimeOffset.UtcNow;
             return session.ToSnapshot("active");
         }
         finally
@@ -161,22 +186,56 @@ public sealed class LiveCaptionService : BackgroundService
                 session.Request.Language,
                 session.Request.Mode,
                 session.SessionId,
+                session.RawTranscript,
                 cancellationToken).ConfigureAwait(false);
 
-            var uniqueText = RemoveRepeatedPrefix(session.Transcript, transcription.Text);
+            IReadOnlyList<TranscriptionSegment> rawSegments = transcription.Segments.Count > 0
+                ? transcription.Segments
+                : string.IsNullOrWhiteSpace(transcription.Text)
+                    ? []
+                    : [new TranscriptionSegment(0, session.Request.WindowMilliseconds / 1000d, transcription.Text, "Person 1")];
+            var uniqueRawSegments = RemoveRepeatedSegments(session.RawTranscript, rawSegments);
+            var uniqueRawText = string.Join(' ', uniqueRawSegments.Select(static segment => segment.Text)).Trim();
+            IReadOnlyList<TranscriptionSegment> displaySegments = uniqueRawSegments;
+            var provider = transcription.Provider;
+            // Bereits als Deutsch erkannte Abschnitte bleiben unverändert. Dadurch
+            // entstehen weder ein unnötiger General-AI-Lauf noch Verfälschungen bei
+            // deutschen Sätzen mit üblichen englischen Fachbegriffen (Denglisch).
+            if (displaySegments.Count > 0 && RequiresGermanTranslation(transcription.Language))
+            {
+                try
+                {
+                    displaySegments = await _workers.TranslateCaptionSegmentsAsync(
+                        displaySegments,
+                        session.SessionId,
+                        cancellationToken).ConfigureAwait(false);
+                    provider += " + gpt-oss-20b → Deutsch";
+                }
+                catch (Exception exception) when (exception is HttpRequestException or JsonException)
+                {
+                    // Ein einzelner Upstream-Fehler darf die dauerhaft laufende
+                    // Untertitelsitzung nicht beenden. Unübersetzten Text zeigen wir
+                    // nicht an; das überlappende Folgefenster versucht ihn erneut.
+                    _runtime.WriteLog(
+                        "Warning",
+                        "caption.translation.skipped",
+                        $"Untertitelfenster nach {exception.GetType().Name} verworfen; Sitzung bleibt aktiv.");
+                    displaySegments = [];
+                    uniqueRawText = string.Empty;
+                    provider += " + Übersetzung wird wiederholt";
+                }
+            }
+
+            var uniqueText = FormatDialogueChunk(displaySegments);
             var windowStepSeconds = (session.Request.WindowMilliseconds - session.Request.OverlapMilliseconds) / 1000d;
             var windowOffset = sequence * windowStepSeconds;
-            IReadOnlyList<TranscriptionSegment> segments = [];
-            if (!string.IsNullOrWhiteSpace(uniqueText) && transcription.Segments.Count > 0)
-            {
-                segments =
-                [
-                    new TranscriptionSegment(
-                        windowOffset + transcription.Segments[0].Start,
-                        windowOffset + transcription.Segments[^1].End,
-                        uniqueText),
-                ];
-            }
+            IReadOnlyList<TranscriptionSegment> segments = displaySegments
+                .Select(segment => segment with
+                {
+                    Start = windowOffset + segment.Start,
+                    End = windowOffset + segment.End,
+                })
+                .ToArray();
 
             await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
@@ -185,14 +244,10 @@ public sealed class LiveCaptionService : BackgroundService
                 {
                     throw new KeyNotFoundException("Live-Untertitel-Sitzung wurde beendet.");
                 }
-                if (!string.IsNullOrWhiteSpace(uniqueText))
+                if (!string.IsNullOrWhiteSpace(uniqueRawText))
                 {
-                    var separator = session.Transcript.Length == 0 ? string.Empty : " ";
-                    if (session.Transcript.Length + separator.Length + uniqueText.Length > MaximumTranscriptCharacters)
-                    {
-                        throw new InvalidOperationException("Das Live-Untertitel-Textlimit wurde erreicht; starte eine neue Sitzung.");
-                    }
-                    session.Transcript += separator + uniqueText;
+                    AppendBoundedPlainTranscript(session, uniqueRawText);
+                    AppendDialogueTranscript(session, displaySegments);
                 }
 
                 session.NextSequence++;
@@ -206,7 +261,7 @@ public sealed class LiveCaptionService : BackgroundService
                     transcription.LanguageProbability,
                     segments,
                     true,
-                    transcription.Provider,
+                    provider,
                     DateTimeOffset.UtcNow);
                 session.Responses[sequence] = response;
                 foreach (var oldSequence in session.Responses.Keys.Where(value => value < sequence - 15).ToArray())
@@ -390,6 +445,18 @@ public sealed class LiveCaptionService : BackgroundService
         return session;
     }
 
+    internal static bool RequiresGermanTranslation(string? language)
+    {
+        if (string.IsNullOrWhiteSpace(language))
+        {
+            return true;
+        }
+
+        var normalized = language.Trim().Replace('_', '-').ToLowerInvariant();
+        return normalized is not "de" and not "deutsch" and not "german"
+            && !normalized.StartsWith("de-", StringComparison.Ordinal);
+    }
+
     private static void ValidateRequest(LiveCaptionSessionRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -513,6 +580,112 @@ public sealed class LiveCaptionService : BackgroundService
         return candidate;
     }
 
+    internal static IReadOnlyList<TranscriptionSegment> RemoveRepeatedSegments(
+        string previous,
+        IReadOnlyList<TranscriptionSegment> segments)
+    {
+        if (segments.Count == 0)
+        {
+            return [];
+        }
+        var current = string.Join(' ', segments.Select(static segment => segment.Text)).Trim();
+        var unique = RemoveRepeatedPrefix(previous, current);
+        if (unique.Length == 0)
+        {
+            return [];
+        }
+        var currentWordCount = current.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
+        var uniqueWordCount = unique.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
+        var wordsToSkip = Math.Max(0, currentWordCount - uniqueWordCount);
+        if (wordsToSkip == 0)
+        {
+            return segments;
+        }
+
+        var result = new List<TranscriptionSegment>(segments.Count);
+        foreach (var segment in segments)
+        {
+            var words = segment.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (wordsToSkip >= words.Length)
+            {
+                wordsToSkip -= words.Length;
+                continue;
+            }
+            var text = string.Join(' ', words.Skip(wordsToSkip));
+            wordsToSkip = 0;
+            if (text.Length > 0)
+            {
+                result.Add(segment with { Text = text });
+            }
+        }
+        return result;
+    }
+
+    internal static string FormatDialogueChunk(IReadOnlyList<TranscriptionSegment> segments)
+    {
+        var result = new StringBuilder();
+        string? previousSpeaker = null;
+        foreach (var segment in segments.Where(static item => !string.IsNullOrWhiteSpace(item.Text)))
+        {
+            var speaker = string.IsNullOrWhiteSpace(segment.Speaker) ? "Person 1" : segment.Speaker.Trim();
+            if (!string.Equals(previousSpeaker, speaker, StringComparison.Ordinal))
+            {
+                if (result.Length > 0)
+                {
+                    result.AppendLine();
+                }
+                result.Append(speaker).Append(": ");
+                previousSpeaker = speaker;
+            }
+            else if (result.Length > 0 && result[^1] != ' ')
+            {
+                result.Append(' ');
+            }
+            result.Append(segment.Text.Trim());
+        }
+        return result.ToString();
+    }
+
+    private static void AppendBoundedPlainTranscript(CaptionSession session, string text)
+    {
+        session.RawTranscript += session.RawTranscript.Length == 0 ? text : " " + text;
+        if (session.RawTranscript.Length > MaximumTranscriptCharacters)
+        {
+            session.RawTranscript = session.RawTranscript[^MaximumTranscriptCharacters..];
+        }
+    }
+
+    private static void AppendDialogueTranscript(
+        CaptionSession session,
+        IReadOnlyList<TranscriptionSegment> segments)
+    {
+        foreach (var segment in segments.Where(static item => !string.IsNullOrWhiteSpace(item.Text)))
+        {
+            var speaker = string.IsNullOrWhiteSpace(segment.Speaker) ? "Person 1" : segment.Speaker.Trim();
+            if (session.Transcript.Length == 0)
+            {
+                session.Transcript = $"{speaker}: {segment.Text.Trim()}";
+            }
+            else if (string.Equals(session.LastSpeaker, speaker, StringComparison.Ordinal))
+            {
+                session.Transcript += " " + segment.Text.Trim();
+            }
+            else
+            {
+                session.Transcript += $"{Environment.NewLine}{speaker}: {segment.Text.Trim()}";
+            }
+            session.LastSpeaker = speaker;
+        }
+        if (session.Transcript.Length > MaximumTranscriptCharacters)
+        {
+            var start = session.Transcript.Length - MaximumTranscriptCharacters;
+            var nextLine = session.Transcript.IndexOf('\n', start);
+            session.Transcript = nextLine >= 0
+                ? session.Transcript[(nextLine + 1)..]
+                : session.Transcript[^MaximumTranscriptCharacters..];
+        }
+    }
+
     private static string NormalizeWord(string value) => value.Trim(
         ' ', '.', ',', ':', ';', '!', '?', '-', '–', '—', '(', ')', '[', ']', '{', '}', '"', '\'');
 
@@ -544,17 +717,19 @@ public sealed class LiveCaptionService : BackgroundService
 
         public string Transcript { get; set; } = string.Empty;
 
+        public string RawTranscript { get; set; } = string.Empty;
+
+        public string? LastSpeaker { get; set; }
+
         public Dictionary<long, LiveCaptionChunkResponse> Responses { get; } = [];
 
         public SemaphoreSlim ChunkGate { get; } = new(1, 1);
 
-        public bool IsExpired(DateTimeOffset now) =>
-            now - UpdatedAt >= IdleTimeout || now - CreatedAt >= MaximumSessionLifetime;
+        public bool IsExpired(DateTimeOffset now) => now - UpdatedAt >= IdleTimeout;
 
         public LiveCaptionSessionSnapshot ToSnapshot(string state)
         {
             var idleExpiry = UpdatedAt.Add(IdleTimeout);
-            var absoluteExpiry = CreatedAt.Add(MaximumSessionLifetime);
             return new LiveCaptionSessionSnapshot(
                 SessionId,
                 state,
@@ -568,7 +743,7 @@ public sealed class LiveCaptionService : BackgroundService
                 Transcript,
                 CreatedAt,
                 UpdatedAt,
-                idleExpiry < absoluteExpiry ? idleExpiry : absoluteExpiry);
+                idleExpiry);
         }
     }
 }

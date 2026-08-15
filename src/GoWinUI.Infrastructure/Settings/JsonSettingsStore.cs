@@ -74,6 +74,13 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         var baseUrl = settings.LmStudioBaseUrl.Trim();
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
             baseUrl = "http://127.0.0.1:1234/v1";
+        var goAiServerUrl = settings.GoAiServerUrl.Trim();
+        if (!Uri.TryCreate(goAiServerUrl, UriKind.Absolute, out var goAiUri)
+            || goAiUri.Scheme is not ("http" or "https")
+            || (goAiUri.Scheme == "http" && !goAiUri.IsLoopback))
+        {
+            goAiServerUrl = "https://192.168.0.67:8443";
+        }
         var window = settings.Window with
         {
             Width = Math.Clamp(settings.Window.Width, 640, 10_000),
@@ -88,9 +95,26 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         var lastActivityAt = lastActivityText is null ? null : settings.LastActivityAt;
         return settings with
         {
-            Version = 2,
+            Version = 5,
+            GoAiServerUrl = goAiServerUrl.TrimEnd('/'),
+            GoAiProtocolVersion = string.IsNullOrWhiteSpace(settings.GoAiProtocolVersion)
+                ? "1.0"
+                : settings.GoAiProtocolVersion.Trim(),
+            GoAiCaFingerprint = NormalizeFingerprint(settings.GoAiCaFingerprint),
+            GoAiConnectionName = string.IsNullOrWhiteSpace(settings.GoAiConnectionName)
+                ? "GO AI Server"
+                : settings.GoAiConnectionName.Trim(),
+            LocalToolWorkspacePath = NormalizeWorkspace(settings.LocalToolWorkspacePath),
+            LiveCaptionLanguage = settings.Version < 5
+                && string.Equals(settings.LiveCaptionLanguage, "de", StringComparison.OrdinalIgnoreCase)
+                    ? "auto"
+                    : string.IsNullOrWhiteSpace(settings.LiveCaptionLanguage)
+                        ? "auto"
+                        : settings.LiveCaptionLanguage.Trim(),
             LmStudioBaseUrl = baseUrl.TrimEnd('/'),
             SelectedModel = string.IsNullOrWhiteSpace(settings.SelectedModel)
+                || (settings.Version < 4
+                    && string.Equals(settings.SelectedModel.Trim(), "openai/gpt-oss-120b", StringComparison.OrdinalIgnoreCase))
                 ? AppSettings.DefaultSelectedModel
                 : settings.SelectedModel.Trim(),
             AccentColor = accentColor,
@@ -102,6 +126,28 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             LastActivityAt = lastActivityAt,
             Window = window,
         };
+    }
+
+    private static string? NormalizeFingerprint(string? value)
+    {
+        var normalized = new string((value ?? string.Empty).Where(Uri.IsHexDigit).ToArray()).ToLowerInvariant();
+        return normalized.Length == 64 ? normalized : null;
+    }
+
+    private static string? NormalizeWorkspace(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+        try
+        {
+            return Path.GetFullPath(value.Trim());
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
     }
 
     private static string NormalizePaletteColor(string? value, string fallback)

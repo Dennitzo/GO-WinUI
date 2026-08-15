@@ -84,7 +84,7 @@ if ($LASTEXITCODE -ne 0) {
 & $lms.Source server stop | Out-Null
 
 $httpConfig = Get-Content -LiteralPath $httpConfigPath -Raw -Encoding utf8 | ConvertFrom-Json
-Set-JsonProperty $httpConfig 'autoStartOnLaunch' $true
+Set-JsonProperty $httpConfig 'autoStartOnLaunch' $false
 Set-JsonProperty $httpConfig 'port' $Port
 Set-JsonProperty $httpConfig 'cors' $false
 Set-JsonProperty $httpConfig 'logSensitiveData' $false
@@ -118,7 +118,7 @@ if ($LASTEXITCODE -ne 0) {
 # The CLI owns bind/CORS/start state and may rewrite the JSON file while starting.
 # Reapply the privacy-only values after startup; the live listener is verified below.
 $httpConfig = Get-Content -LiteralPath $httpConfigPath -Raw -Encoding utf8 | ConvertFrom-Json
-Set-JsonProperty $httpConfig 'autoStartOnLaunch' $true
+Set-JsonProperty $httpConfig 'autoStartOnLaunch' $false
 Set-JsonProperty $httpConfig 'cors' $false
 Set-JsonProperty $httpConfig 'logSensitiveData' $false
 Set-JsonProperty $httpConfig 'logIncomingTokens' $false

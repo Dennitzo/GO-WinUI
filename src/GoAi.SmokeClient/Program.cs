@@ -17,7 +17,7 @@ if (!string.IsNullOrWhiteSpace(options.RootCertificatePath))
 using var http = new HttpClient(handler)
 {
     BaseAddress = new Uri(options.ServerUrl.EndsWith('/') ? options.ServerUrl : options.ServerUrl + "/"),
-    Timeout = TimeSpan.FromMinutes(35),
+    Timeout = TimeSpan.FromHours(3),
 };
 using var client = new GoAiClient(http, options.ApiKey);
 var json = GoAiProtocol.CreateJsonOptions();
@@ -169,7 +169,7 @@ async Task<object> RunLiveSmokeAsync()
         "Live-caption session did not preserve the confirmed transcript.");
 
     var speech = await client.SynthesizeSpeechAsync(new SpeechRequest("GO AI Sprachtest für die technische Gebäudeausrüstung."));
-    Ensure(!speech.IsFallback, $"Primary Qwen TTS failed; provider was {speech.Provider}.");
+    Ensure(!speech.IsFallback, $"Primary Piper TTS failed; provider was {speech.Provider}.");
     Ensure(speech.Artifact.MediaType == "audio/wav", "TTS did not create WAV audio.");
     await AssertArtifactRangeAsync(speech.Artifact);
 

@@ -14,13 +14,21 @@ namespace GoAi.Server.App;
 public sealed partial class MainWindow : Window
 {
     private readonly DispatcherQueueTimer _refreshTimer;
+    private readonly DispatcherQueueTimer _stateSaveTimer;
     private readonly AppWindow _appWindow;
+    private readonly ServerWindowStateStore _windowStateStore;
+    private RectInt32 _lastNormalBounds;
     private bool _allowClose;
     private bool _closing;
+    private bool _isMaximized;
+    private bool _stateRestored;
 
-    public MainWindow(ServerDashboardViewModel viewModel)
+    public MainWindow(
+        ServerDashboardViewModel viewModel,
+        ServerWindowStateStore windowStateStore)
     {
         ViewModel = viewModel;
+        _windowStateStore = windowStateStore;
         InitializeComponent();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
@@ -28,12 +36,19 @@ public sealed partial class MainWindow : Window
         _appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(windowHandle));
         ConfigureTitleBar();
         _appWindow.Resize(new SizeInt32(1380, 880));
+        _lastNormalBounds = GetCurrentBounds();
         _appWindow.Closing += OnClosing;
+        _appWindow.Changed += OnAppWindowChanged;
         Closed += OnClosed;
+        RootNavigation.PaneOpened += OnNavigationPaneChanged;
+        RootNavigation.PaneClosed += OnNavigationPaneChanged;
         _refreshTimer = DispatcherQueue.CreateTimer();
-        _refreshTimer.Interval = TimeSpan.FromSeconds(5);
+        _refreshTimer.Interval = TimeSpan.FromSeconds(15);
         _refreshTimer.Tick += OnRefreshTimerTick;
         _refreshTimer.Start();
+        _stateSaveTimer = DispatcherQueue.CreateTimer();
+        _stateSaveTimer.Interval = TimeSpan.FromMilliseconds(450);
+        _stateSaveTimer.Tick += OnStateSaveTimerTick;
         _ = RefreshAsync();
     }
 
@@ -77,6 +92,12 @@ public sealed partial class MainWindow : Window
 
     private async void OnRefreshTimerTick(DispatcherQueueTimer sender, object args) => await RefreshAsync();
 
+    private async void OnStateSaveTimerTick(DispatcherQueueTimer sender, object args)
+    {
+        _stateSaveTimer.Stop();
+        await SaveWindowStateAsync();
+    }
+
     private async void OnRefreshClick(object sender, RoutedEventArgs e) => await RefreshAsync();
 
     private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -87,6 +108,106 @@ public sealed partial class MainWindow : Window
         ServicesPanel.Visibility = route == "services" ? Visibility.Visible : Visibility.Collapsed;
         SecurityPanel.Visibility = route == "security" ? Visibility.Visible : Visibility.Collapsed;
         LogsPanel.Visibility = route == "logs" ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnNavigationPaneChanged(NavigationView sender, object args) => ScheduleWindowStateSave();
+
+    private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (sender.Presenter is OverlappedPresenter presenter)
+        {
+            if (presenter.State == OverlappedPresenterState.Restored &&
+                (args.DidPositionChange || args.DidSizeChange))
+            {
+                _lastNormalBounds = GetCurrentBounds();
+                _isMaximized = false;
+            }
+            else if (presenter.State == OverlappedPresenterState.Maximized && args.DidPresenterChange)
+            {
+                _isMaximized = true;
+            }
+        }
+
+        ScheduleWindowStateSave();
+    }
+
+    internal async Task RestoreWindowStateAsync()
+    {
+        if (_stateRestored)
+        {
+            return;
+        }
+
+        var state = await _windowStateStore.LoadAsync();
+        if (_closing)
+        {
+            return;
+        }
+
+        if (state is not null)
+        {
+            var bounds = ClampToDisplay(state);
+            _appWindow.MoveAndResize(bounds);
+            _lastNormalBounds = bounds;
+            RootNavigation.OpenPaneLength = Math.Clamp(state.PaneWidth, 180, 420);
+            RootNavigation.IsPaneOpen = state.IsPaneOpen;
+            _isMaximized = state.IsMaximized;
+            if (state.IsMaximized && _appWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.Maximize();
+            }
+        }
+
+        _stateRestored = true;
+    }
+
+    private void ScheduleWindowStateSave()
+    {
+        if (!_stateRestored || _closing)
+        {
+            return;
+        }
+
+        _stateSaveTimer.Stop();
+        _stateSaveTimer.Start();
+    }
+
+    private async Task SaveWindowStateAsync()
+    {
+        if (!_stateRestored)
+        {
+            return;
+        }
+
+        var bounds = _isMaximized ? _lastNormalBounds : GetCurrentBounds();
+        await _windowStateStore.SaveAsync(new ServerWindowState
+        {
+            X = bounds.X,
+            Y = bounds.Y,
+            Width = bounds.Width,
+            Height = bounds.Height,
+            IsMaximized = _isMaximized,
+            IsPaneOpen = RootNavigation.IsPaneOpen,
+            PaneWidth = RootNavigation.OpenPaneLength,
+        });
+    }
+
+    private RectInt32 GetCurrentBounds()
+    {
+        var position = _appWindow.Position;
+        var size = _appWindow.Size;
+        return new RectInt32(position.X, position.Y, size.Width, size.Height);
+    }
+
+    private static RectInt32 ClampToDisplay(ServerWindowState state)
+    {
+        var display = DisplayArea.GetFromPoint(new PointInt32(state.X, state.Y), DisplayAreaFallback.Primary);
+        var workArea = display.WorkArea;
+        var width = Math.Min(Math.Max(state.Width, 960), workArea.Width);
+        var height = Math.Min(Math.Max(state.Height, 640), workArea.Height);
+        var x = Math.Clamp(state.X, workArea.X, workArea.X + workArea.Width - width);
+        var y = Math.Clamp(state.Y, workArea.Y, workArea.Y + workArea.Height - height);
+        return new RectInt32(x, y, width, height);
     }
 
     private async void OnCreateApiKeyClick(object sender, RoutedEventArgs e)
@@ -130,6 +251,31 @@ public sealed partial class MainWindow : Window
         await RefreshAsync();
     }
 
+    private void OnDeleteLmStudioTokenClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.DeleteLmStudioToken();
+        LmStudioTokenBox.Password = string.Empty;
+    }
+
+    private async void OnSaveYouTubeApiKeyClick(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(YouTubeApiKeyBox.Password))
+        {
+            ViewModel.SecurityMessage = "Bitte zuerst einen YouTube Data API v3 Schlüssel eingeben.";
+            return;
+        }
+
+        await ViewModel.SaveYouTubeApiKeyAsync(YouTubeApiKeyBox.Password);
+        YouTubeApiKeyBox.Password = string.Empty;
+        await RefreshAsync();
+    }
+
+    private void OnDeleteYouTubeApiKeyClick(object sender, RoutedEventArgs e)
+    {
+        ViewModel.DeleteYouTubeApiKey();
+        YouTubeApiKeyBox.Password = string.Empty;
+    }
+
     private void OnLogTextChanged(object sender, TextChangedEventArgs e)
     {
         if (sender is TextBox textBox)
@@ -157,6 +303,8 @@ public sealed partial class MainWindow : Window
 
         _closing = true;
         _refreshTimer.Stop();
+        _stateSaveTimer.Stop();
+        await SaveWindowStateAsync();
         if (PrepareShutdownAsync is not null)
         {
             await PrepareShutdownAsync();
@@ -169,8 +317,13 @@ public sealed partial class MainWindow : Window
     private void OnClosed(object sender, WindowEventArgs args)
     {
         _refreshTimer.Stop();
+        _stateSaveTimer.Stop();
         _refreshTimer.Tick -= OnRefreshTimerTick;
+        _stateSaveTimer.Tick -= OnStateSaveTimerTick;
         _appWindow.Closing -= OnClosing;
+        _appWindow.Changed -= OnAppWindowChanged;
+        RootNavigation.PaneOpened -= OnNavigationPaneChanged;
+        RootNavigation.PaneClosed -= OnNavigationPaneChanged;
         ViewModel.DisposeSubscriptions();
     }
 

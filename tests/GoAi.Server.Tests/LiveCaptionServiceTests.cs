@@ -1,4 +1,5 @@
 using GoAi.Server.Core.Audio;
+using GoAi.Contracts;
 using System.Buffers.Binary;
 using System.Text;
 
@@ -6,6 +7,27 @@ namespace GoAi.Server.Tests;
 
 public sealed class LiveCaptionServiceTests
 {
+    [Theory]
+    [InlineData("de")]
+    [InlineData("de-DE")]
+    [InlineData("de_DE")]
+    [InlineData("Deutsch")]
+    [InlineData("German")]
+    public void GermanCaptionsBypassGeneralAiTranslation(string language)
+    {
+        Assert.False(LiveCaptionService.RequiresGermanTranslation(language));
+    }
+
+    [Theory]
+    [InlineData("en")]
+    [InlineData("ko")]
+    [InlineData("fr-FR")]
+    [InlineData(null)]
+    public void ForeignOrUnknownCaptionsStillTranslateToGerman(string? language)
+    {
+        Assert.True(LiveCaptionService.RequiresGermanTranslation(language));
+    }
+
     [Fact]
     public void ValidatesBoundedPcm16MonoWaveWindows()
     {
@@ -38,6 +60,31 @@ public sealed class LiveCaptionServiceTests
 
         Assert.Equal("Der Volumenstrom bleibt stabil.", unique);
         Assert.Equal("Neue Aussage ohne Überlappung.", LiveCaptionService.RemoveRepeatedPrefix(previous, "Neue Aussage ohne Überlappung."));
+    }
+
+    [Fact]
+    public void PreservesSpeakerChangesWhileRemovingOverlappingWords()
+    {
+        IReadOnlyList<TranscriptionSegment> segments =
+        [
+            new(0, 1, "liefert Außenluft.", "Person 1"),
+            new(1, 2, "Der Volumenstrom bleibt stabil.", "Person 2"),
+        ];
+
+        var unique = LiveCaptionService.RemoveRepeatedSegments(
+            "Die Anlage liefert Außenluft.",
+            segments);
+
+        var remaining = Assert.Single(unique);
+        Assert.Equal("Person 2", remaining.Speaker);
+        Assert.Equal("Der Volumenstrom bleibt stabil.", remaining.Text);
+        Assert.Equal(
+            "Person 1: Guten Morgen.\nPerson 2: Hallo zusammen.",
+            LiveCaptionService.FormatDialogueChunk(
+            [
+                new(0, 1, "Guten Morgen.", "Person 1"),
+                new(1, 2, "Hallo zusammen.", "Person 2"),
+            ]).Replace("\r\n", "\n", StringComparison.Ordinal));
     }
 
     private static byte[] CreateWave(int sampleRate, int channels, int durationMilliseconds)

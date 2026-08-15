@@ -4,17 +4,23 @@
   const version = 1;
   const allowedOutbound = new Set([
     "app.ready", "chat.send", "chat.cancel", "session.create", "session.open",
-    "session.rename", "session.delete", "session.clear", "session.draft", "document.pick",
+    "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick",
     "document.remove", "workflow.list", "workflow.insert", "workflow.create",
     "workflow.update", "workflow.delete",
     "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
-    "ui.sessionPane", "external.open"
+    "attachment.remove",
+    "artifact.save", "artifact.preview", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
+    "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
+    "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.stop", "microphone.cancel",
+    "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "ui.sessionPane", "external.open"
   ]);
   const allowedInbound = new Set([
     "state.snapshot", "chat.started", "chat.delta", "chat.completed",
     "chat.cancelled", "chat.failed", "session.changed", "workflow.snapshot",
     "workflow.changed", "workflow.draft", "document.changed", "status.changed", "theme.changed",
-    "draft.saved", "host.error"
+    "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
+    "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady",
+    "host.error"
   ]);
 
   function newRequestId() {

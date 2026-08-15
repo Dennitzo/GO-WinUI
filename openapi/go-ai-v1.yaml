@@ -357,7 +357,7 @@ paths:
                 $ref: "#/components/schemas/TranscriptionResponse"
   /v1/audio/speech:
     post:
-      summary: Sprache mit Qwen3-TTS erzeugen
+      summary: Sprache mit Piper Kerstin erzeugen
       operationId: synthesizeSpeech
       requestBody:
         required: true
@@ -381,11 +381,28 @@ paths:
                   maximum: 2
       responses:
         "200":
-          description: Qwen3-TTS- oder sichtbar markiertes Windows-TTS-Artefakt.
+          description: Piper-Kerstin- oder sichtbar markiertes Windows-Katja-Artefakt.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SpeechResponse"
+  /v1/audio/utterance-intent:
+    post:
+      summary: Finale Spracheingabe als Frage, Anweisung, Abbruch oder Störgeräusch klassifizieren
+      operationId: classifyUtteranceIntent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UtteranceIntentRequest"
+      responses:
+        "200":
+          description: Klassifizierte Sprachabsicht ohne serverseitige Speicherung des Textes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UtteranceIntentResponse"
   /v1/audio/live-captions/sessions:
     post:
       summary: Explizite Live-Untertitel-Sitzung für Client-Systemaudio starten
@@ -467,6 +484,26 @@ paths:
         "409":
           $ref: "#/components/responses/Problem"
         "422":
+          $ref: "#/components/responses/Problem"
+  /v1/audio/live-captions/sessions/{sessionId}/heartbeat:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^caption-[a-f0-9]{32}$"
+    post:
+      summary: Aktive Live-Sprachsitzung ohne Audio dauerhaft halten
+      operationId: keepLiveCaptionSessionAlive
+      responses:
+        "200":
+          description: Aktualisierter Sitzungsstand.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveCaptionSessionSnapshot"
+        "404":
           $ref: "#/components/responses/Problem"
   /v1/audio/live-captions/sessions/{sessionId}/stop:
     parameters:
@@ -688,11 +725,54 @@ components:
           maxItems: 16
           items:
             enum: [filesystem, code, process, bricscad, screenCapture]
+        allowedServerTools:
+          type: array
+          maxItems: 32
+          items:
+            enum: [web.search, web.fetch, youtube.search, media.inspect, media.analyze, image.generate, math.evaluate, context.embed, context.retrieve]
         limits:
           $ref: "#/components/schemas/RunLimits"
         sessionId:
           type: string
           maxLength: 128
+        workspace:
+          $ref: "#/components/schemas/WorkspaceDescriptor"
+    WorkspaceDescriptor:
+      type: object
+      additionalProperties: false
+      required: [name, fingerprint, revision, repositoryMap, fileCount, textFileCount, textBytes, indexedAt]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        fingerprint:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        revision:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        repositoryMap:
+          type: string
+          minLength: 1
+          maxLength: 256000
+        fileCount:
+          type: integer
+          minimum: 0
+          maximum: 100000
+        textFileCount:
+          type: integer
+          minimum: 0
+          maximum: 100000
+        textBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        indexedAt:
+          type: string
+          format: date-time
+        isTruncated:
+          type: boolean
     RunMessage:
       type: object
       additionalProperties: false
@@ -744,7 +824,7 @@ components:
         timeoutSeconds:
           type: integer
           minimum: 30
-          maximum: 3600
+          maximum: 14400
     RunAccepted:
       type: object
       additionalProperties: false
@@ -923,6 +1003,28 @@ components:
           format: date-time
         errorCode:
           type: string
+        activeWorkloads:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActiveAiWorkload"
+    ActiveAiWorkload:
+      type: object
+      additionalProperties: false
+      required: [leaseId, workload, displayName, runtime, startedAt]
+      properties:
+        leaseId:
+          type: string
+        workload:
+          type: string
+        displayName:
+          type: string
+        runtime:
+          type: string
+        runId:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
     GpuDeviceStatus:
       type: object
       additionalProperties: false
@@ -1178,6 +1280,9 @@ components:
           minimum: 0
         text:
           type: string
+        speaker:
+          type: [string, "null"]
+          description: Stabile, sitzungsbezogene Sprecherbezeichnung bei Live-Untertiteln.
     LiveCaptionSessionRequest:
       type: object
       additionalProperties: false
@@ -1286,6 +1391,26 @@ components:
           type: string
         isFallback:
           type: boolean
+    UtteranceIntentRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text:
+          type: string
+          maxLength: 10000
+        language:
+          type: string
+          maxLength: 16
+    UtteranceIntentResponse:
+      type: object
+      additionalProperties: false
+      required: [intent]
+      properties:
+        intent:
+          enum: [question, instruction, cancel, noise]
+        normalizedText:
+          type: string
     Problem:
       type: object
       required: [type, title, status, detail]

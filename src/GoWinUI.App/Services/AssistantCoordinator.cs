@@ -14,8 +14,13 @@ public sealed class AssistantCoordinator(
     ILmStudioClient lmStudio,
     IContextAssembler contextAssembler,
     IChatOrchestrator orchestrator,
+    IPromptTriggerRepository promptTriggers,
+    IAssistantAttachmentRepository attachments,
+    IChatArtifactRepository artifacts,
+    GoAiAssistantService? goAi,
     SettingsCoordinator settings,
-    RecentActivityService recentActivity) : IDisposable
+    RecentActivityService recentActivity,
+    MicrophoneTranscriptionService? microphone = null) : IDisposable
 {
     private const string DefaultSessionTitle = "Neue Sitzung";
     private const string DefaultSystemPrompt = "GO ist ein lokales Arbeitstool für TGA-Fachplanung. Unterstütze Fachplaner bei technischer Gebäudeausrüstung, Anlagenkonzepten, Berechnungen, Koordination und Dokumentation. GO ist hier ein Produktname und nicht die Programmiersprache Go. Weise auf Unsicherheit, fehlende Projektdaten und erforderliche fachliche Prüfungen hin; erfinde keine Norminhalte, Quellen oder Projektangaben.";
@@ -29,13 +34,141 @@ public sealed class AssistantCoordinator(
         return chats.SaveDraftAsync(sessionId, draft, cancellationToken);
     }
 
+    public async Task<PromptTriggerAction?> GetRequiredMediaCaptureAsync(
+        JsonElement payload,
+        CancellationToken cancellationToken = default)
+    {
+        var prompt = GetRequiredString(payload, "prompt", 100_000);
+        var sessionId = GetOptionalGuid(payload, "sessionId")
+            ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
+        var explicitTool = GetOptionalString(payload, "toolAction", 40);
+        var match = explicitTool is null
+            ? session.AssistantMode == AssistantMode.Code
+                ? CreateToolMatch("code", prompt)
+                : await promptTriggers.MatchAsync(prompt, cancellationToken).ConfigureAwait(false)
+            : CreateToolMatch(explicitTool, prompt);
+        var action = match?.Trigger.Action;
+        if (action is not (PromptTriggerAction.AudioAnalysis
+            or PromptTriggerAction.VideoAnalysis
+            or PromptTriggerAction.ImageAnalysis))
+        {
+            return null;
+        }
+
+        var hasDocuments = (await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false)).Count > 0;
+        var sessionAttachments = await attachments.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        return HasMediaAnalysisContext(action.Value, hasDocuments, sessionAttachments)
+            ? null
+            : action;
+    }
+
+    internal static bool HasMediaAnalysisContext(
+        PromptTriggerAction action,
+        bool hasDocuments,
+        IReadOnlyList<AssistantAttachment> sessionAttachments) =>
+        hasDocuments || sessionAttachments.Any(item => action switch
+        {
+            PromptTriggerAction.ImageAnalysis => item.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase),
+            PromptTriggerAction.VideoAnalysis => item.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase),
+            PromptTriggerAction.AudioAnalysis => item.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase),
+            _ => false,
+        });
+
+    internal static string MediaActionName(PromptTriggerAction action) => action switch
+    {
+        PromptTriggerAction.AudioAnalysis => "audioAnalysis",
+        PromptTriggerAction.VideoAnalysis => "videoAnalysis",
+        PromptTriggerAction.ImageAnalysis => "imageAnalysis",
+        _ => throw new ArgumentOutOfRangeException(nameof(action)),
+    };
+
+    public async Task SetActiveWorkspaceAsync(string workspacePath, CancellationToken cancellationToken = default)
+    {
+        var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspacePath));
+        if (!Directory.Exists(normalized))
+        {
+            throw new DirectoryNotFoundException("Der ausgewählte Workspace wurde nicht gefunden.");
+        }
+        var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
+        await chats.SetAssistantContextAsync(
+            session.Id,
+            session.AssistantMode,
+            normalized,
+            WorkspaceRepositoryIndex.CreateWorkspaceFingerprint(normalized),
+            cancellationToken).ConfigureAwait(false);
+        await settings.UpdateAsync(
+            current => current with { LocalToolWorkspacePath = normalized },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task CancelCurrentAsync()
+    {
+        _activeChatCancellation?.Cancel();
+        orchestrator.Cancel();
+        if (goAi is not null)
+        {
+            await goAi.CancelCurrentAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    public async Task AddLiveCaptionResultAsync(
+        string? transcript,
+        string? error,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedTranscript = FormatLiveCaptionText(transcript);
+        var normalizedError = error?.Trim() ?? string.Empty;
+        var title = normalizedError.Length == 0 ? "Live-Untertitel" : "Live-Untertitel fehlgeschlagen";
+        var details = normalizedTranscript.Length > 0
+            ? normalizedTranscript
+            : normalizedError.Length > 0
+                ? normalizedError
+                : "Es wurde kein Sprachinhalt erkannt.";
+        if (normalizedError.Length > 0 && normalizedTranscript.Length > 0)
+        {
+            details += $"\n\n**Fehler:** {normalizedError}";
+        }
+        var session = await EnsureSessionWorkspaceAsync(
+            await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+        await chats.AddMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            $"**{title}**\n\n{details}",
+            MessageStatus.Completed,
+            cancellationToken).ConfigureAwait(false);
+        await recentActivity.RecordAsync(
+            $"Live-Untertitel in AI-Sitzung „{session.Title}“ gespeichert",
+            CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private static string FormatLiveCaptionText(string? value)
+    {
+        var normalized = (value ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n').Trim();
+        if (normalized.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        // Markdown paragraphs preserve the speaker/segment boundaries in the
+        // rendered chat. A single newline inside a paragraph would otherwise
+        // be collapsed by HTML whitespace handling.
+        var lines = normalized
+            .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        return string.Join("\n\n", lines);
+    }
+
     public async Task<object> BuildSnapshotAsync(CancellationToken cancellationToken = default)
     {
         var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         var sessions = await chats.ListSessionsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         var messages = await chats.ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false);
+        var artifactItems = await artifacts.ListForSessionAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var workflowItems = await workflows.ListAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         var documentItems = await documents.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
+        var attachmentItems = await attachments.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var pages = new List<DocumentPage>();
         foreach (var document in documentItems)
         {
@@ -44,7 +177,9 @@ public sealed class AssistantCoordinator(
 
         // A snapshot is local UI state. Never make sidebar/session interaction wait for
         // LM Studio, which may take several seconds to time out when it is offline.
-        var contextLimit = ResolveKnownContextLimit();
+        var contextLimit = settings.Current.AiProvider == AiProviderKind.GoAiServer
+            ? session.AssistantMode == AssistantMode.Code ? 262_144 : 131_072
+            : ResolveKnownContextLimit();
         var context = contextAssembler.Build(new(
             DefaultSystemPrompt,
             string.IsNullOrWhiteSpace(session.Draft) ? "Nächste Benutzereingabe" : session.Draft,
@@ -55,18 +190,30 @@ public sealed class AssistantCoordinator(
         return new
         {
             sessions = sessions.Select(ToSessionDto),
-            messages = messages.Select(ToMessageDto),
+            messages = messages.Select(message => ToMessageDto(
+                message,
+                artifactItems.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
             workflows = workflowItems.Select(ToWorkflowDto),
             documents = documentItems.Select(ToDocumentDto),
+            attachments = attachmentItems.Select(ToAttachmentDto),
             activeSessionId = session.Id,
             draft = session.Draft,
-            isRunning = orchestrator.IsRunning,
-            model = settings.Current.SelectedModel,
+            isRunning = settings.Current.AiProvider == AiProviderKind.GoAiServer ? goAi?.IsRunning == true : orchestrator.IsRunning,
+            model = settings.Current.AiProvider == AiProviderKind.GoAiServer ? "GO AI Server" : settings.Current.SelectedModel,
+            provider = settings.Current.AiProvider.ToString(),
             reasoningEffort = settings.Current.ReasoningEffort,
             contextUsed = context.EstimatedTokens,
             contextLimit,
             contextWasTruncated = context.WasTruncated,
             contextNotice = context.TruncationNotice,
+            selectedToolAction = session.AssistantMode == AssistantMode.Code ? "code" : null,
+            assistantMode = session.AssistantMode.ToString().ToLowerInvariant(),
+            workspacePath = session.WorkspacePath,
+            workspaceFingerprint = session.WorkspaceFingerprint,
+            workspaceAvailable = !string.IsNullOrWhiteSpace(session.WorkspacePath) && Directory.Exists(session.WorkspacePath),
+            workspaceName = string.IsNullOrWhiteSpace(session.WorkspacePath)
+                ? null
+                : Path.GetFileName(session.WorkspacePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
             isSessionPaneOpen = settings.Current.IsAssistantSessionPaneOpen,
         };
     }
@@ -80,6 +227,19 @@ public sealed class AssistantCoordinator(
         {
             case "app.ready":
                 await emit("state.snapshot", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
+                if (settings.Current.AiProvider == AiProviderKind.GoAiServer && goAi is not null)
+                {
+                    try
+                    {
+                        await goAi.ResumePendingAsync(
+                            update => EmitGoAiUpdateAsync(update, emit, envelope.RequestId),
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (GoAiStreamDetachedException)
+                    {
+                        // The persisted Last-Event-ID remains authoritative for the next WebView instance.
+                    }
+                }
                 break;
             case "session.create":
                 await CreateSessionAsync(emit, envelope.RequestId, cancellationToken);
@@ -108,15 +268,35 @@ public sealed class AssistantCoordinator(
                     cancellationToken);
                 await emit("draft.saved", new { }, envelope.RequestId);
                 break;
+            case "session.pin":
+                await SetSessionPinnedAsync(
+                    GetRequiredGuid(envelope.Payload, "sessionId"),
+                    envelope.Payload.TryGetProperty("pinned", out var pinnedElement) && pinnedElement.ValueKind == JsonValueKind.True,
+                    emit,
+                    envelope.RequestId,
+                    cancellationToken).ConfigureAwait(false);
+                break;
+            case "session.mode":
+                await SetSessionModeAsync(
+                    GetRequiredString(envelope.Payload, "mode", 16),
+                    emit,
+                    envelope.RequestId,
+                    cancellationToken).ConfigureAwait(false);
+                break;
             case "chat.send":
                 await SendChatAsync(envelope, emit, cancellationToken);
                 break;
             case "chat.cancel":
-                _activeChatCancellation?.Cancel();
-                orchestrator.Cancel();
+                await CancelCurrentAsync().ConfigureAwait(false);
                 break;
             case "document.remove":
+                EnsureContextCanChange();
                 await documents.RemoveAsync(GetRequiredGuid(envelope.Payload, "documentId"), cancellationToken);
+                await emit("document.changed", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
+                break;
+            case "attachment.remove":
+                EnsureContextCanChange();
+                await attachments.RemoveAsync(GetRequiredGuid(envelope.Payload, "attachmentId"), cancellationToken);
                 await emit("document.changed", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
                 break;
             case "workflow.list":
@@ -156,6 +336,7 @@ public sealed class AssistantCoordinator(
         Stream content,
         CancellationToken cancellationToken = default)
     {
+        EnsureContextCanChange();
         var result = await documents.ImportAsync(sessionId, fileName, content, cancellationToken).ConfigureAwait(false);
         if (!result.Success)
         {
@@ -181,6 +362,31 @@ public sealed class AssistantCoordinator(
 
     public IReadOnlySet<string> SupportedDocumentExtensions => documents.SupportedExtensions;
 
+    public async Task ImportAttachmentAsync(
+        Guid sessionId,
+        string fileName,
+        string contentType,
+        Stream content,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureContextCanChange();
+        _ = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
+        _ = await attachments.ImportAsync(sessionId, fileName, contentType, content, cancellationToken).ConfigureAwait(false);
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        await recentActivity.RecordAsync(
+            $"Datei „{fileName}“ zur AI-Sitzung „{session?.Title ?? DefaultSessionTitle}“ hinzugefügt",
+            CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private void EnsureContextCanChange()
+    {
+        if (orchestrator.IsRunning || goAi?.IsRunning == true)
+        {
+            throw new InvalidOperationException("Anhänge und Dokumente können während eines laufenden AI-Auftrags nicht geändert werden.");
+        }
+    }
+
     private async Task<ChatSession> EnsureActiveSessionAsync(CancellationToken cancellationToken)
     {
         if (settings.Current.ActiveSessionId is { } activeId
@@ -197,17 +403,61 @@ public sealed class AssistantCoordinator(
         return session;
     }
 
+    private async Task<ChatSession> EnsureSessionWorkspaceAsync(
+        ChatSession session,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(session.WorkspacePath)
+            || string.IsNullOrWhiteSpace(settings.Current.LocalToolWorkspacePath)
+            || !Directory.Exists(settings.Current.LocalToolWorkspacePath))
+        {
+            return session;
+        }
+        var workspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(settings.Current.LocalToolWorkspacePath));
+        await chats.SetAssistantContextAsync(
+            session.Id,
+            session.AssistantMode,
+            workspace,
+            WorkspaceRepositoryIndex.CreateWorkspaceFingerprint(workspace),
+            cancellationToken).ConfigureAwait(false);
+        return (await chats.GetSessionAsync(session.Id, cancellationToken).ConfigureAwait(false))!;
+    }
+
     private async Task CreateSessionAsync(
         Func<string, object, string?, Task> emit,
         string requestId,
         CancellationToken cancellationToken)
     {
         var session = await chats.CreateSessionAsync(DefaultSessionTitle, cancellationToken).ConfigureAwait(false);
+        session = await EnsureSessionWorkspaceAsync(session, cancellationToken).ConfigureAwait(false);
         await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id }, cancellationToken).ConfigureAwait(false);
         await recentActivity.RecordAsync(
             $"AI-Sitzung „{session.Title}“ erstellt",
             CancellationToken.None).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
+    }
+
+    private async Task SetSessionModeAsync(
+        string requestedMode,
+        Func<string, object, string?, Task> emit,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        var mode = requestedMode.Equals("code", StringComparison.OrdinalIgnoreCase)
+            ? AssistantMode.Code
+            : requestedMode.Equals("general", StringComparison.OrdinalIgnoreCase)
+                ? AssistantMode.General
+                : throw new InvalidOperationException("Der angeforderte AI-Modus ist unbekannt.");
+        var session = await EnsureSessionWorkspaceAsync(
+            await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+        await chats.SetAssistantContextAsync(
+            session.Id,
+            mode,
+            session.WorkspacePath,
+            session.WorkspaceFingerprint,
+            cancellationToken).ConfigureAwait(false);
+        await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId).ConfigureAwait(false);
     }
 
     private async Task OpenSessionAsync(
@@ -241,12 +491,32 @@ public sealed class AssistantCoordinator(
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
     }
 
+    private async Task SetSessionPinnedAsync(
+        Guid sessionId,
+        bool pinned,
+        Func<string, object, string?, Task> emit,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
+        await chats.SetPinnedAsync(sessionId, pinned, cancellationToken).ConfigureAwait(false);
+        await recentActivity.RecordAsync(
+            $"AI-Sitzung „{session.Title}“ { (pinned ? "angepinnt" : "losgelöst") }",
+            CancellationToken.None).ConfigureAwait(false);
+        await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId).ConfigureAwait(false);
+    }
+
     private async Task DeleteSessionAsync(
         Guid sessionId,
         Func<string, object, string?, Task> emit,
         string requestId,
         CancellationToken cancellationToken)
     {
+        if (orchestrator.IsRunning || goAi?.IsRunning == true)
+        {
+            throw new InvalidOperationException("Eine Sitzung kann während eines laufenden AI-Auftrags nicht gelöscht werden.");
+        }
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
         await chats.DeleteSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
@@ -267,7 +537,7 @@ public sealed class AssistantCoordinator(
         string requestId,
         CancellationToken cancellationToken)
     {
-        if (orchestrator.IsRunning)
+        if (orchestrator.IsRunning || goAi?.IsRunning == true)
         {
             throw new InvalidOperationException("Die Sitzungen können während einer laufenden Antwort nicht gelöscht werden.");
         }
@@ -291,6 +561,215 @@ public sealed class AssistantCoordinator(
     }
 
     private async Task SendChatAsync(
+        WebBridgeEnvelope envelope,
+        Func<string, object, string?, Task> emit,
+        CancellationToken cancellationToken)
+    {
+        if (settings.Current.AiProvider == AiProviderKind.GoAiServer)
+        {
+            await SendGoAiChatAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await SendDiagnosticChatAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SendGoAiChatAsync(
+        WebBridgeEnvelope envelope,
+        Func<string, object, string?, Task> emit,
+        CancellationToken cancellationToken)
+    {
+        var prompt = GetRequiredString(envelope.Payload, "prompt", 100_000);
+        if (IsCancelCommand(prompt))
+        {
+            if (microphone is not null)
+            {
+                await microphone.StopSpeechAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await emit("status.changed", new { runStatus = "Vorlesen abgebrochen", runDetail = (string?)null }, envelope.RequestId).ConfigureAwait(false);
+            return;
+        }
+        var sessionId = GetOptionalGuid(envelope.Payload, "sessionId")
+            ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
+        session = await EnsureSessionWorkspaceAsync(session, cancellationToken).ConfigureAwait(false);
+        var reasoning = GetOptionalString(envelope.Payload, "reasoningEffort", 20)
+            ?? settings.Current.ReasoningEffort;
+        await settings.UpdateAsync(current => current with
+        {
+            ActiveSessionId = sessionId,
+            ReasoningEffort = reasoning,
+        }, cancellationToken).ConfigureAwait(false);
+        await chats.SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
+        var explicitTool = GetOptionalString(envelope.Payload, "toolAction", 40);
+        var match = explicitTool is null
+            ? session.AssistantMode == AssistantMode.Code
+                ? CreateToolMatch("code", prompt)
+                : await promptTriggers.MatchAsync(prompt, cancellationToken).ConfigureAwait(false)
+            : CreateToolMatch(explicitTool, prompt);
+        if (string.Equals(explicitTool, "textToSpeech", StringComparison.Ordinal)
+            && GetOptionalGuid(envelope.Payload, "speechMessageId") is { } speechMessageId)
+        {
+            var sourceMessage = (await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false))
+                .FirstOrDefault(item => item.Id == speechMessageId && item.Role == ChatRole.Assistant)
+                ?? throw new InvalidOperationException("Die ausgewählte AI-Nachricht wurde nicht gefunden.");
+            match = match! with { RemainingPrompt = sourceMessage.Content };
+        }
+        var nextMode = explicitTool == "code" || match?.Trigger.Action == PromptTriggerAction.Code
+            ? AssistantMode.Code
+            : explicitTool is not null && session.AssistantMode == AssistantMode.Code
+                ? AssistantMode.General
+                : session.AssistantMode;
+        if (nextMode != session.AssistantMode)
+        {
+            await chats.SetAssistantContextAsync(
+                session.Id,
+                nextMode,
+                session.WorkspacePath,
+                session.WorkspaceFingerprint,
+                cancellationToken).ConfigureAwait(false);
+        }
+        try
+        {
+            var serverAssistant = goAi
+                ?? throw new InvalidOperationException("Der GO-AI-Clientdienst ist nicht verfügbar.");
+            _ = await serverAssistant.SendAsync(
+                sessionId,
+                prompt,
+                match,
+                update => EmitGoAiUpdateAsync(update, emit, envelope.RequestId),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (GoAiStreamDetachedException)
+        {
+            // Navigating away only detaches the local SSE reader. The run is resumed from SQLite later.
+        }
+    }
+
+    internal static PromptTriggerMatch CreateToolMatch(string toolAction, string prompt)
+    {
+        var action = toolAction switch
+        {
+            "audioAnalysis" => PromptTriggerAction.AudioAnalysis,
+            "imageAnalysis" => PromptTriggerAction.ImageAnalysis,
+            "imageGeneration" => PromptTriggerAction.ImageGeneration,
+            "bricsCad" => PromptTriggerAction.BricsCad,
+            "code" => PromptTriggerAction.Code,
+            "textToSpeech" => PromptTriggerAction.TextToSpeech,
+            "translation" => PromptTriggerAction.Translation,
+            "videoAnalysis" => PromptTriggerAction.VideoAnalysis,
+            "webSearch" => PromptTriggerAction.WebSearch,
+            "youTubeSearch" => PromptTriggerAction.YouTubeSearch,
+            _ => throw new ArgumentException("Die ausgewählte Tool-Aktion ist nicht bekannt."),
+        };
+        var now = DateTimeOffset.UtcNow;
+        var trigger = new PromptTrigger(
+            Guid.Empty,
+            action,
+            toolAction,
+            "Einmalig über das Prompt-Tools-Menü ausgewählt.",
+            PromptTriggerMatchMode.Exact,
+            true,
+            int.MaxValue,
+            0,
+            now,
+            now);
+        return new PromptTriggerMatch(trigger, prompt, prompt.Trim());
+    }
+
+    private async Task EmitGoAiUpdateAsync(
+        GoAiAssistantUpdate update,
+        Func<string, object, string?, Task> emit,
+        string requestId)
+    {
+        var artifactsForMessage = update.Artifacts
+            ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false);
+        switch (update.Kind)
+        {
+            case GoAiAssistantUpdateKind.Started:
+                var sessionMessages = await chats.ListMessagesAsync(
+                    update.Message.SessionId,
+                    CancellationToken.None).ConfigureAwait(false);
+                var pendingAttachments = await attachments.ListAsync(
+                    update.Message.SessionId,
+                    CancellationToken.None).ConfigureAwait(false);
+                var precedingUserMessage = sessionMessages
+                    .TakeWhile(message => message.Id != update.Message.Id)
+                    .LastOrDefault(message => message.Role == ChatRole.User);
+                var precedingUserArtifacts = precedingUserMessage is null
+                    ? null
+                    : await artifacts.ListForMessageAsync(precedingUserMessage.Id, CancellationToken.None).ConfigureAwait(false);
+                await emit("chat.started", new
+                {
+                    userMessage = precedingUserMessage is null
+                        ? null
+                        : ToMessageDto(precedingUserMessage, precedingUserArtifacts),
+                    message = ToMessageDto(update.Message, artifactsForMessage),
+                    contextUsed = update.ContextUsed ?? 0,
+                    contextLimit = update.ContextLimit ?? 131_072,
+                    contextWasTruncated = update.ContextWasCompacted,
+                    runStatus = update.Status,
+                    runDetail = update.Detail,
+                    loadedFiles = update.LoadedFiles,
+                    attachments = pendingAttachments.Select(ToAttachmentDto),
+                }, requestId).ConfigureAwait(false);
+                break;
+            case GoAiAssistantUpdateKind.Delta:
+                await emit("chat.delta", new
+                {
+                    messageId = update.Message.Id,
+                    sessionId = update.Message.SessionId,
+                    content = update.Message.Content,
+                }, requestId).ConfigureAwait(false);
+                break;
+            case GoAiAssistantUpdateKind.Status:
+                await emit("status.changed", new
+                {
+                    messageId = update.Message.Id,
+                    sessionId = update.Message.SessionId,
+                    runStatus = update.Status,
+                    runDetail = update.Detail,
+                    contextUsed = update.ContextUsed,
+                    contextLimit = update.ContextLimit,
+                    contextWasTruncated = update.ContextWasCompacted,
+                    loadedFiles = update.LoadedFiles,
+                }, requestId).ConfigureAwait(false);
+                break;
+            case GoAiAssistantUpdateKind.ArtifactsChanged:
+                await emit("session.changed", await BuildSnapshotAsync(CancellationToken.None), requestId).ConfigureAwait(false);
+                break;
+            case GoAiAssistantUpdateKind.Completed:
+                await emit("chat.completed", new
+                {
+                    message = ToMessageDto(update.Message, artifactsForMessage),
+                    session = update.Session is null ? null : ToSessionDto(update.Session),
+                    runStatus = update.Status,
+                    runDetail = update.Detail,
+                }, requestId).ConfigureAwait(false);
+                break;
+            case GoAiAssistantUpdateKind.Cancelled:
+                await emit("chat.cancelled", new
+                {
+                    message = ToMessageDto(update.Message, artifactsForMessage),
+                    runStatus = update.Status,
+                }, requestId).ConfigureAwait(false);
+                break;
+            case GoAiAssistantUpdateKind.Failed:
+                await emit("chat.failed", new
+                {
+                    message = ToMessageDto(update.Message, artifactsForMessage),
+                    error = update.Error,
+                    runStatus = update.Status,
+                }, requestId).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    private static bool IsCancelCommand(string prompt) =>
+        prompt.Trim(' ', '.', ',', '!', '?').Equals("abbrechen", StringComparison.OrdinalIgnoreCase);
+
+    private async Task SendDiagnosticChatAsync(
         WebBridgeEnvelope envelope,
         Func<string, object, string?, Task> emit,
         CancellationToken cancellationToken)
@@ -509,7 +988,7 @@ public sealed class AssistantCoordinator(
         Func<string, object, string?, Task> emit,
         CancellationToken cancellationToken)
     {
-        if (orchestrator.IsRunning)
+        if (orchestrator.IsRunning || goAi?.IsRunning == true)
         {
             throw new InvalidOperationException("Ein Workflow kann nicht während einer laufenden Antwort eingefügt werden.");
         }
@@ -625,9 +1104,14 @@ public sealed class AssistantCoordinator(
         session.Title,
         session.CreatedAt,
         session.UpdatedAt,
+        assistantMode = session.AssistantMode.ToString().ToLowerInvariant(),
+        session.WorkspacePath,
+        session.WorkspaceFingerprint,
+        session.IsPinned,
+        session.PinnedAt,
     };
 
-    private static object ToMessageDto(ChatMessage message) => new
+    private static object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null) => new
     {
         id = message.Id,
         sessionId = message.SessionId,
@@ -637,6 +1121,21 @@ public sealed class AssistantCoordinator(
         message.CreatedAt,
         message.UpdatedAt,
         message.Error,
+        tool = message.ToolExecution,
+        artifacts = (messageArtifacts ?? []).Select(ToArtifactDto),
+    };
+
+    private static object ToArtifactDto(ChatArtifact artifact) => new
+    {
+        id = artifact.Id,
+        artifact.FileName,
+        contentType = artifact.ContentType,
+        artifact.Length,
+        artifact.Provider,
+        artifact.CreatedAt,
+        url = $"https://{AssistantWebBridge.VirtualHost}/artifacts/{artifact.Id:D}",
+        downloadUrl = $"https://{AssistantWebBridge.VirtualHost}/artifacts/{artifact.Id:D}?download=1",
+        artifact.Metadata,
     };
 
     private static object ToWorkflowDto(WorkflowDefinition workflow) => new
@@ -661,6 +1160,15 @@ public sealed class AssistantCoordinator(
         document.Length,
         document.PageCount,
         document.CreatedAt,
+    };
+
+    private static object ToAttachmentDto(AssistantAttachment attachment) => new
+    {
+        id = attachment.Id,
+        attachment.FileName,
+        contentType = attachment.ContentType,
+        attachment.Length,
+        attachment.CreatedAt,
     };
 
     private static string EventTypeFor(MessageStatus status) => status switch

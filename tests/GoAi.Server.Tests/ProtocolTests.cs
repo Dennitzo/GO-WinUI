@@ -1,6 +1,8 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Policies;
+using GoAi.Server.Core.Status;
+using Microsoft.Extensions.Options;
 using System.Text.Json;
 
 namespace GoAi.Server.Tests;
@@ -39,6 +41,18 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public void CapabilitiesExposeOnlyThePrimaryVisionModel()
+    {
+        var snapshot = new CapabilityService(Options.Create(new GoAiServerOptions())).GetSnapshot();
+
+        var vision = Assert.Single(snapshot.Models, static model => model.Role == "vision");
+        Assert.Equal("qwen3-vl-30b-a3b-instruct", vision.Id);
+        Assert.False(vision.IsFallback);
+        Assert.DoesNotContain(snapshot.Models, static model => model.Role.Contains("fallback", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(snapshot.Models, static model => model.Id.Contains("qwen3-vl-8b", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void UnknownContractPropertiesAreRejected()
     {
         const string json = """
@@ -58,6 +72,20 @@ public sealed class ProtocolTests
         Assert.Contains("\"mode\":\"translateToEnglish\"", json, StringComparison.Ordinal);
         Assert.Equal(512 * 1024, GoAiProtocol.MaximumLiveCaptionChunkBytes);
         Assert.Equal(16_000, GoAiProtocol.LiveCaptionSampleRate);
+    }
+
+    [Fact]
+    public void GpuStatusRemainsCompatibleWithGatewayWithoutStructuredWorkloads()
+    {
+        const string json = """
+            {"available":true,"queueLength":0,"activeLease":"lease-old","devices":[],"checkedAt":"2026-08-14T08:00:00+00:00"}
+            """;
+
+        var status = JsonSerializer.Deserialize<GpuStatusSnapshot>(json, GoAiProtocol.CreateJsonOptions());
+
+        Assert.NotNull(status);
+        Assert.Equal("lease-old", status.ActiveLease);
+        Assert.Null(status.ActiveWorkloads);
     }
 
     [Fact]

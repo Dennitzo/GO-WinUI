@@ -62,6 +62,12 @@ public sealed class GoAiClient : IDisposable
     public Task<SpeechResponse> SynthesizeSpeechAsync(SpeechRequest request, CancellationToken cancellationToken = default) =>
         PostAsync<SpeechRequest, SpeechResponse>("v1/audio/speech", request, cancellationToken);
 
+    public Task<UtteranceIntentResponse> ClassifyUtteranceIntentAsync(
+        UtteranceIntentRequest request,
+        CancellationToken cancellationToken = default) =>
+        PostAsync<UtteranceIntentRequest, UtteranceIntentResponse>(
+            "v1/audio/utterance-intent", request, cancellationToken);
+
     public Task<LiveCaptionSessionSnapshot> CreateLiveCaptionSessionAsync(
         LiveCaptionSessionRequest request,
         CancellationToken cancellationToken = default) =>
@@ -75,6 +81,13 @@ public sealed class GoAiClient : IDisposable
         CancellationToken cancellationToken = default) =>
         GetAsync<LiveCaptionSessionSnapshot>(
             $"v1/audio/live-captions/sessions/{Uri.EscapeDataString(sessionId)}",
+            cancellationToken);
+
+    public Task<LiveCaptionSessionSnapshot> KeepLiveCaptionSessionAliveAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default) =>
+        PostWithoutBodyAsync<LiveCaptionSessionSnapshot>(
+            $"v1/audio/live-captions/sessions/{Uri.EscapeDataString(sessionId)}/heartbeat",
             cancellationToken);
 
     public async Task<LiveCaptionChunkResponse> SendLiveCaptionChunkAsync(

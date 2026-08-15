@@ -6,7 +6,7 @@
     <RootNamespace>GoAi.Server.App</RootNamespace>
     <AssemblyName>GO-AI-Server</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>..\GoWinUI.App\Assets\AppLogo.ico</ApplicationIcon>
+    <ApplicationIcon>Assets\AppLogo.Dark.ico</ApplicationIcon>
     <Configurations>Debug;Release;Portable</Configurations>
     <Platforms>x64</Platforms>
     <Platform>x64</Platform>
@@ -38,7 +38,7 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="..\GoWinUI.App\Assets\AppLogo.ico" Link="Assets\AppLogo.ico">
+    <Content Include="Assets\AppLogo.Dark.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

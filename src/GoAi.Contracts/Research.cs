@@ -41,7 +41,8 @@ public sealed record TranscriptionRequest(
 public sealed record TranscriptionSegment(
     double Start,
     double End,
-    string Text);
+    string Text,
+    string? Speaker = null);
 
 public sealed record TranscriptionResponse(
     string Text,

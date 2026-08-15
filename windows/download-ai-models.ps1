@@ -5,9 +5,7 @@ param(
 
     [switch] $SkipLmStudioModels,
 
-    [switch] $SkipWorkerModels,
-
-    [switch] $SkipVisionFallback
+    [switch] $SkipWorkerModels
 )
 
 Set-StrictMode -Version 2.0
@@ -154,28 +152,6 @@ if (-not $SkipLmStudioModels) {
             Sha256 = 'aa473d51f451a22f0fcf39ba3330c14bed38a385712b1113440f69df4047a173'
         }
     )
-    if (-not $SkipVisionFallback) {
-        $lmFiles += @(
-            [pscustomobject]@{
-                Repository = 'Qwen/Qwen3-VL-8B-Instruct-GGUF'
-                Revision = 'f982a07559d4a2f6c8744d840bf6fccab30eea96'
-                FileName = 'Qwen3VL-8B-Instruct-Q4_K_M.gguf'
-                RelativePath = 'Qwen\Qwen3-VL-8B-Instruct-GGUF\Qwen3VL-8B-Instruct-Q4_K_M.gguf'
-                ExistingPartialPath = $null
-                Length = 5027784800
-                Sha256 = '67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2'
-            },
-            [pscustomobject]@{
-                Repository = 'Qwen/Qwen3-VL-8B-Instruct-GGUF'
-                Revision = 'f982a07559d4a2f6c8744d840bf6fccab30eea96'
-                FileName = 'mmproj-Qwen3VL-8B-Instruct-F16.gguf'
-                RelativePath = 'Qwen\Qwen3-VL-8B-Instruct-GGUF\mmproj-Qwen3VL-8B-Instruct-F16.gguf'
-                ExistingPartialPath = $null
-                Length = 1159029824
-                Sha256 = 'ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38'
-            }
-        )
-    }
     foreach ($file in $lmFiles) {
         $arguments = @{
             Repository = $file.Repository
@@ -190,9 +166,6 @@ if (-not $SkipLmStudioModels) {
     }
 
     $requiredCatalogModels = @('qwen3-vl-30b-a3b-instruct', 'bge-m3')
-    if (-not $SkipVisionFallback) {
-        $requiredCatalogModels += 'qwen3-vl-8b-instruct'
-    }
     & (Join-Path $PSScriptRoot 'refresh-lmstudio-model-catalog.ps1') `
         -RequiredNameFragments $requiredCatalogModels
 }
@@ -211,30 +184,49 @@ if (-not $SkipWorkerModels) {
         throw "Hugging Face client is missing: $hf"
     }
 
-    $whisperRoot = Join-Path $modelRoot 'faster-whisper-large-v3-turbo'
-    $ttsRoot = Join-Path $modelRoot 'Qwen3-TTS-12Hz-0.6B-Base'
+    $whisperRoot = Join-Path $modelRoot 'faster-whisper-large-v3'
+    $speakerRoot = Join-Path $modelRoot 'spkrec-ecapa-voxceleb'
+    $ttsRoot = Join-Path $modelRoot 'piper\de_DE-kerstin-low'
     $zImageRoot = Join-Path $modelRoot 'z-image'
     New-Item -ItemType Directory -Path $zImageRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $ttsRoot -Force | Out-Null
 
     Invoke-CheckedCommand -FilePath $hf -Arguments @(
-        'download', 'dropbox-dash/faster-whisper-large-v3-turbo',
-        '--revision', '0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf',
+        'download', 'Systran/faster-whisper-large-v3',
+        '--revision', 'edaa852ec7e145841d8ffdb056a99866b5f0a478',
         '--exclude', 'model.bin',
         '--local-dir', $whisperRoot
     ) -FailureMessage 'Faster Whisper CTranslate2 model download failed.'
     Invoke-PinnedModelFileDownload `
-        -Repository 'dropbox-dash/faster-whisper-large-v3-turbo' `
-        -Revision '0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf' `
+        -Repository 'Systran/faster-whisper-large-v3' `
+        -Revision 'edaa852ec7e145841d8ffdb056a99866b5f0a478' `
         -FileName 'model.bin' `
         -Destination (Join-Path $whisperRoot 'model.bin') `
-        -ExpectedLength 1617884929 `
-        -Sha256 'e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da' `
+        -ExpectedLength 3087284237 `
+        -Sha256 '69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1' `
         -StagingDirectory $downloadRoot
     Invoke-CheckedCommand -FilePath $hf -Arguments @(
-        'download', 'Qwen/Qwen3-TTS-12Hz-0.6B-Base',
-        '--revision', '5d83992436eae1d760afd27aff78a71d676296fc',
-        '--local-dir', $ttsRoot
-    ) -FailureMessage 'Qwen3-TTS model download failed.'
+        'download', 'speechbrain/spkrec-ecapa-voxceleb',
+        '--revision', '0f99f2d0ebe89ac095bcc5903c4dd8f72b367286',
+        '--exclude', 'example1.wav', 'example2.flac', 'README.md',
+        '--local-dir', $speakerRoot
+    ) -FailureMessage 'ECAPA speaker-recognition model download failed.'
+    Invoke-PinnedModelFileDownload `
+        -Repository 'rhasspy/piper-voices' `
+        -Revision '664c651454f055ed34bd83f09e024ffbc0da09ac' `
+        -FileName 'de/de_DE/kerstin/low/de_DE-kerstin-low.onnx' `
+        -Destination (Join-Path $ttsRoot 'de_DE-kerstin-low.onnx') `
+        -ExpectedLength 63104526 `
+        -Sha256 'd352a7641892cebf2903859af94e9ba81a141110215fe3943bcda7f7da401b7a' `
+        -StagingDirectory $downloadRoot
+    Invoke-PinnedModelFileDownload `
+        -Repository 'rhasspy/piper-voices' `
+        -Revision '664c651454f055ed34bd83f09e024ffbc0da09ac' `
+        -FileName 'de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json' `
+        -Destination (Join-Path $ttsRoot 'de_DE-kerstin-low.onnx.json') `
+        -ExpectedLength 5952 `
+        -Sha256 '370e4a87c1d3df1f1b2d251e75d750cf3f9d869563d5fbf7fa1ced557bfefa8d' `
+        -StagingDirectory $downloadRoot
     Invoke-CheckedCommand -FilePath $hf -Arguments @(
         'download', 'leejet/Z-Image-Turbo-GGUF', 'z_image_turbo-Q4_K.gguf',
         '--revision', 'c61c0e422dc8b541b7548cf33a4ef8302b0f8085',

@@ -20,6 +20,7 @@ param(
     [string] $VideoFixture,
 
     [switch] $SkipWindowsTtsFallback
+
 )
 
 Set-StrictMode -Version 2.0
@@ -203,11 +204,14 @@ try {
     $env:GO_AI_API_KEY = $apiKey
     $env:GO_AI_SERVER_URL = $ServerUrl
     $env:GO_AI_ROOT_CERTIFICATE = $RootCertificatePath
-    & $SmokeClientPath live-smoke `
-        --image $ImageFixture `
-        --audio $AudioFixture `
-        --video $VideoFixture `
-        --output $OutputDirectory
+    $smokeClientArguments = @(
+        'live-smoke',
+        '--image', $ImageFixture,
+        '--audio', $AudioFixture,
+        '--video', $VideoFixture,
+        '--output', $OutputDirectory
+    )
+    & $SmokeClientPath @smokeClientArguments
     if ($LASTEXITCODE -ne 0) {
         throw "GO AI live smoke client failed with exit code $LASTEXITCODE."
     }
@@ -236,7 +240,7 @@ try {
         $speechStopped = $false
     }
 
-    $internalPorts = @(1234, 7080, 7081, 7082, 7083, 7084)
+    $internalPorts = @(1234, 7080, 7081, 7082, 7083, 7084, 7085)
     $unsafeListeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {
         $_.LocalPort -in $internalPorts -and $_.LocalAddress -notin @('127.0.0.1', '::1')
     })

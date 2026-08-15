@@ -36,7 +36,20 @@ public sealed record RunRequest(
     IReadOnlyList<string>? ClientCapabilities = null,
     RunLimits? Limits = null,
     string? SessionId = null,
-    RunWorkload? Workload = null);
+    RunWorkload? Workload = null,
+    IReadOnlyList<string>? AllowedServerTools = null,
+    WorkspaceDescriptor? Workspace = null);
+
+public sealed record WorkspaceDescriptor(
+    string Name,
+    string Fingerprint,
+    string Revision,
+    string RepositoryMap,
+    int FileCount,
+    int TextFileCount,
+    long TextBytes,
+    DateTimeOffset IndexedAt,
+    bool IsTruncated = false);
 
 public sealed record RunWorkload(
     RunWorkloadKind Kind,
@@ -46,6 +59,8 @@ public sealed record RunWorkload(
     int? Height = null,
     int? Seed = null,
     int? Count = null,
+    string? OutputFormat = null,
+    int? DurationSeconds = null,
     IReadOnlyDictionary<string, string>? Options = null,
     IReadOnlyList<MediaTimeWindow>? DetailWindows = null);
 
@@ -98,6 +113,7 @@ public static class RunEventTypes
     public const string ModelLoading = "model.loading";
     public const string ModelFallback = "model.fallback";
     public const string ProviderFallback = "provider.fallback";
+    public const string ContextChanged = "context.changed";
     public const string TextDelta = "text.delta";
     public const string ServerToolStarted = "server_tool.started";
     public const string ServerToolCompleted = "server_tool.completed";
@@ -112,6 +128,19 @@ public static class RunEventTypes
 public sealed record TextDeltaEvent(string Delta);
 
 public sealed record ModelSelectedEvent(string ModelId, string Role, bool IsFallback = false);
+
+public sealed record ModelLoadingEvent(
+    string ModelId,
+    string State,
+    int RequestedContextLength,
+    int EffectiveContextLength);
+
+public sealed record ContextChangedEvent(
+    int EstimatedInputTokens,
+    int ContextLimit,
+    int LoadedFiles,
+    bool WasCompacted,
+    string? Detail = null);
 
 public sealed record QueueChangedEvent(int Position, int Waiting, string Lane = "gpu");
 

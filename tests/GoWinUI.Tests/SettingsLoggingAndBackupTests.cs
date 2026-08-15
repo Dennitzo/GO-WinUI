@@ -51,9 +51,35 @@ public sealed class SettingsLoggingAndBackupTests
         });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(2, restored.Version);
+        Assert.Equal(5, restored.Version);
         Assert.Equal("#8FBD45", restored.AccentColor);
         Assert.Equal("#8FBD45", restored.BackgroundColor);
+    }
+
+    [Fact]
+    public async Task VersionThreeSettingsMigrateTheFormer120BDefaultTo20B()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+        await settings.SaveAsync(new AppSettings
+        {
+            Version = 3,
+            SelectedModel = "openai/gpt-oss-120b",
+        });
+
+        var restored = await settings.LoadAsync();
+        Assert.Equal(5, restored.Version);
+        Assert.Equal("openai/gpt-oss-20b", restored.SelectedModel);
+    }
+
+    [Fact]
+    public async Task VersionFourGermanCaptionsMigrateToAutomaticLanguageDetection()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+        await settings.SaveAsync(new AppSettings { Version = 4, LiveCaptionLanguage = "de" });
+
+        Assert.Equal("auto", (await settings.LoadAsync()).LiveCaptionLanguage);
     }
 
     [Fact]

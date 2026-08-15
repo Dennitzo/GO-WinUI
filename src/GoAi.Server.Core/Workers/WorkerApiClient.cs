@@ -4,6 +4,7 @@ using GoAi.Server.Core.Security;
 using Microsoft.Extensions.Options;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 
 namespace GoAi.Server.Core.Workers;
@@ -23,7 +24,7 @@ public sealed class WorkerApiClient
         _httpClient = httpClient;
         _keys = keys;
         _options = options.Value;
-        _httpClient.Timeout = TimeSpan.FromMinutes(35);
+        _httpClient.Timeout = TimeSpan.FromHours(2);
     }
 
     public Task<TranscriptionResponse> TranscribeAsync(
@@ -40,6 +41,8 @@ public sealed class WorkerApiClient
         ReadOnlyMemory<byte> waveAudio,
         string? language,
         LiveCaptionMode mode,
+        string sessionId,
+        string? previousContext,
         CancellationToken cancellationToken = default)
     {
         using var request = new HttpRequestMessage(
@@ -55,6 +58,16 @@ public sealed class WorkerApiClient
         request.Headers.TryAddWithoutValidation(
             "X-GO-AI-Caption-Task",
             mode == LiveCaptionMode.TranslateToEnglish ? "translate" : "transcribe");
+        request.Headers.TryAddWithoutValidation("X-GO-AI-Caption-Session", sessionId);
+        if (!string.IsNullOrWhiteSpace(previousContext))
+        {
+            var boundedContext = previousContext.Length <= 1_000
+                ? previousContext
+                : previousContext[^1_000..];
+            request.Headers.TryAddWithoutValidation(
+                "X-GO-AI-Caption-Context-B64",
+                Convert.ToBase64String(Encoding.UTF8.GetBytes(boundedContext)));
+        }
         request.Content = new ReadOnlyMemoryContent(waveAudio);
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
 
@@ -82,6 +95,46 @@ public sealed class WorkerApiClient
             "/speech",
             request,
             cancellationToken);
+
+    public Task<JsonElement> LoadSpeechComponentAsync(
+        string component,
+        CancellationToken cancellationToken = default)
+    {
+        if (component is not ("stt" or "tts" or "speaker"))
+        {
+            throw new ArgumentOutOfRangeException(nameof(component));
+        }
+
+        return SendAsync<JsonElement>(
+            "speech",
+            _options.SpeechWorkerUri,
+            "/load",
+            new { component },
+            cancellationToken);
+    }
+
+    public Task<JsonElement> LoadWorkerAsync(
+        string workerName,
+        CancellationToken cancellationToken = default) =>
+        SendAsync<JsonElement>(
+            workerName,
+            ResolveWorkerUri(workerName),
+            "/load",
+            body: null,
+            cancellationToken);
+
+    public async Task<JsonElement> GetStatusAsync(
+        string workerName,
+        CancellationToken cancellationToken = default)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        return await SendGetAsync<JsonElement>(
+            workerName,
+            ResolveWorkerUri(workerName),
+            "/status",
+            timeout.Token).ConfigureAwait(false);
+    }
 
     public Task<WorkerImageResult> GenerateImageAsync(
         ImageGenerationRequest request,
@@ -136,14 +189,39 @@ public sealed class WorkerApiClient
 
     public async Task ReleaseAsync(string workerName, CancellationToken cancellationToken = default)
     {
-        var uri = workerName switch
-        {
-            "speech" => _options.SpeechWorkerUri,
-            "media" => _options.MediaWorkerUri,
-            "image" => _options.ImageWorkerUri,
-            _ => throw new ArgumentOutOfRangeException(nameof(workerName)),
-        };
+        var uri = ResolveWorkerUri(workerName);
         _ = await SendAsync<JsonElement>(workerName, uri, "/release", null, cancellationToken).ConfigureAwait(false);
+    }
+
+    private Uri ResolveWorkerUri(string workerName) => workerName switch
+    {
+        "speech" => _options.SpeechWorkerUri,
+        "media" => _options.MediaWorkerUri,
+        "image" => _options.ImageWorkerUri,
+        _ => throw new ArgumentOutOfRangeException(nameof(workerName)),
+    };
+
+    private async Task<T> SendGetAsync<T>(
+        string workerName,
+        Uri baseUri,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(baseUri, path));
+        request.Headers.TryAddWithoutValidation(
+            GoAiHeaders.WorkerKey,
+            await _keys.ReadAsync(workerName, cancellationToken).ConfigureAwait(false));
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new HttpRequestException(
+                $"Worker {workerName} returned HTTP {(int)response.StatusCode}.",
+                inner: null,
+                response.StatusCode);
+        }
+
+        return await response.Content.ReadFromJsonAsync<T>(_jsonOptions, cancellationToken).ConfigureAwait(false)
+            ?? throw new JsonException($"Worker {workerName} returned an empty response.");
     }
 
     private async Task<T> SendAsync<T>(

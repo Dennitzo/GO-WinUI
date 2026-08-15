@@ -1,5 +1,6 @@
 using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
+using GoAi.Contracts;
 using GoWinUI.BricsCad.Protocol;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
@@ -71,7 +72,15 @@ public partial class App : Application
                 services.AddSingleton<BricsCadBridgeLifecycle>();
                 services.AddHostedService(static provider => provider.GetRequiredService<BricsCadBridgeLifecycle>());
                 services.AddSingleton<SettingsCoordinator>();
+                services.AddSingleton<IAiSecretStore, WindowsCredentialSecretStore>();
+                services.AddSingleton<GoAiConnectionService>();
+                services.AddSingleton<SystemAudioCaptionService>();
+                services.AddSingleton<MicrophoneTranscriptionService>();
+                services.AddSingleton<SystemAudioAnalysisCaptureService>();
+                services.AddSingleton<DesktopScreenshotService>();
+                services.AddSingleton<ScreenClipCaptureService>();
                 services.AddSingleton<ProjectAssetThumbnailService>();
+                services.AddSingleton<AssistantArtifactPreviewService>();
                 services.AddSingleton<ShellViewModel>();
                 services.AddSingleton<RecentActivityService>();
                 services.AddSingleton<ProjectAssetActivityService>();
@@ -80,6 +89,10 @@ public partial class App : Application
                 services.AddSingleton<LogsViewModel>();
                 services.AddSingleton<SettingsViewModel>();
                 services.AddSingleton<MainWindow>();
+                services.AddSingleton<ToolConfirmationService>();
+                services.AddSingleton<WorkspaceRepositoryIndex>();
+                services.AddSingleton<LocalToolBroker>();
+                services.AddSingleton<GoAiAssistantService>();
             })
             .Build();
     }
@@ -168,6 +181,7 @@ public partial class App : Application
             var settings = GetService<SettingsCoordinator>();
             await settings.InitializeAsync();
             await settings.UpdateAsync(static current => current);
+            _ = await GetService<GoAiConnectionService>().TryProvisionLocalHostAsync();
 
             var shell = GetService<ShellViewModel>();
             shell.DatabaseStatus = "Datenbank bereit";
@@ -205,10 +219,12 @@ public partial class App : Application
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            await RefreshLocalAiAvailabilityAsync(cancellationToken).ConfigureAwait(false);
+            var hasActiveRuns = await RefreshLocalAiAvailabilityAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+                await Task.Delay(
+                    hasActiveRuns ? TimeSpan.FromMilliseconds(750) : TimeSpan.FromSeconds(2),
+                    cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -217,18 +233,42 @@ public partial class App : Application
         }
     }
 
-    private async Task RefreshLocalAiAvailabilityAsync(CancellationToken cancellationToken)
+    private async Task<bool> RefreshLocalAiAvailabilityAsync(CancellationToken cancellationToken)
     {
         var connected = false;
+        GpuStatusSnapshot? gpuStatus = null;
+        ModelStatusSnapshot? modelStatus = null;
+        IReadOnlyList<ServiceStatusSnapshot>? serviceStatus = null;
         try
         {
-            connected = await GetService<ILmStudioClient>()
-                .TestConnectionAsync(cancellationToken)
-                .ConfigureAwait(false);
+            var settings = GetService<SettingsCoordinator>().Current;
+            if (settings.AiProvider == AiProviderKind.GoAiServer)
+            {
+                using var client = await GetService<GoAiConnectionService>()
+                    .CreateClientAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var healthTask = client.GetReadyHealthAsync(cancellationToken);
+                var gpuTask = client.GetGpuStatusAsync(cancellationToken);
+                var modelTask = client.GetModelStatusAsync(cancellationToken);
+                var serviceTask = client.GetServiceStatusAsync(cancellationToken);
+                await Task.WhenAll(healthTask, gpuTask, modelTask, serviceTask).ConfigureAwait(false);
+                var health = await healthTask.ConfigureAwait(false);
+                gpuStatus = await gpuTask.ConfigureAwait(false);
+                modelStatus = await modelTask.ConfigureAwait(false);
+                serviceStatus = await serviceTask.ConfigureAwait(false);
+                connected = string.Equals(health.Status, "ready", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(health.ProtocolVersion, settings.GoAiProtocolVersion, StringComparison.Ordinal);
+            }
+            else
+            {
+                connected = await GetService<ILmStudioClient>()
+                    .TestConnectionAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return;
+            return false;
         }
         catch (Exception exception)
         {
@@ -237,23 +277,36 @@ public partial class App : Application
 
         if (cancellationToken.IsCancellationRequested)
         {
-            return;
+            return false;
         }
 
-        SetLocalAiAvailability(connected);
+        SetLocalAiStatus(connected, gpuStatus, modelStatus, serviceStatus);
+        return gpuStatus?.ActiveWorkloads is { Count: > 0 }
+            || !string.IsNullOrWhiteSpace(gpuStatus?.ActiveLease);
     }
 
-    private void SetLocalAiAvailability(bool connected)
+    private void SetLocalAiStatus(
+        bool connected,
+        GpuStatusSnapshot? gpuStatus,
+        ModelStatusSnapshot? modelStatus,
+        IReadOnlyList<ServiceStatusSnapshot>? serviceStatus)
     {
         var shell = GetService<ShellViewModel>();
         var dispatcher = _window?.DispatcherQueue;
         if (dispatcher is null || dispatcher.HasThreadAccess)
         {
             shell.IsAiAvailable = connected;
+            shell.SetAiServiceAvailability(connected, modelStatus, serviceStatus);
+            shell.SetActiveAiRuns(gpuStatus);
             return;
         }
 
-        _ = dispatcher.TryEnqueue(() => shell.IsAiAvailable = connected);
+        _ = dispatcher.TryEnqueue(() =>
+        {
+            shell.IsAiAvailable = connected;
+            shell.SetAiServiceAvailability(connected, modelStatus, serviceStatus);
+            shell.SetActiveAiRuns(gpuStatus);
+        });
     }
 
     private void OnWindowClosed(object sender, WindowEventArgs args)

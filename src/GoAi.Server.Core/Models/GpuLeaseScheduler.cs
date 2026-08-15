@@ -13,7 +13,7 @@ public sealed class GpuLeaseScheduler : IDisposable
     private readonly GoAiDatabase _database;
     private readonly ServerRuntimeState _runtime;
     private readonly object _activeGate = new();
-    private readonly HashSet<string> _activeLeases = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GpuLeaseActivity> _activeLeases = new(StringComparer.Ordinal);
     private int _queueLength;
 
     public GpuLeaseScheduler(GoAiDatabase database, ServerRuntimeState runtime)
@@ -32,7 +32,20 @@ public sealed class GpuLeaseScheduler : IDisposable
             {
                 return _activeLeases.Count == 0
                     ? null
-                    : string.Join(",", _activeLeases.Order(StringComparer.Ordinal));
+                    : string.Join(",", _activeLeases.Keys.Order(StringComparer.Ordinal));
+            }
+        }
+    }
+
+    public IReadOnlyList<GpuLeaseActivity> ActiveActivities
+    {
+        get
+        {
+            lock (_activeGate)
+            {
+                return _activeLeases.Values
+                    .OrderBy(static activity => activity.StartedAt)
+                    .ToArray();
             }
         }
     }
@@ -102,9 +115,15 @@ public sealed class GpuLeaseScheduler : IDisposable
         }
 
         _ = Interlocked.Decrement(ref _queueLength);
+        var startedAt = DateTimeOffset.UtcNow;
         lock (_activeGate)
         {
-            _activeLeases.Add(leaseId);
+            _activeLeases.Add(leaseId, new GpuLeaseActivity(
+                leaseId,
+                workload,
+                runId,
+                mode,
+                startedAt));
         }
         await MarkAsync(leaseId, "active", true, cancellationToken).ConfigureAwait(false);
         _runtime.WriteLog("Information", "gpu.lease.acquired", $"GPU-Lane für {workload} belegt ({mode}, {leaseId}).");
@@ -200,3 +219,10 @@ public enum GpuLeaseMode
     Shared,
     Exclusive,
 }
+
+public sealed record GpuLeaseActivity(
+    string LeaseId,
+    string Workload,
+    string? RunId,
+    GpuLeaseMode Mode,
+    DateTimeOffset StartedAt);

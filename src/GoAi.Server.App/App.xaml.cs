@@ -1,4 +1,5 @@
 using GoAi.Server.App.ViewModels;
+using GoAi.Server.App.Services;
 using GoAi.Server.Core.Gateway;
 using GoAi.Server.Core.Runtime;
 using Microsoft.Extensions.DependencyInjection;
@@ -16,13 +17,17 @@ namespace GoAi.Server.App;
 public partial class App : Application
 {
     private readonly IHost _host;
+    private readonly bool _dashboardOnly;
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
     private AppInstance? _appInstance;
     private MainWindow? _window;
+    private bool _hostStarted;
     private int _shutdownStarted;
 
     public App()
     {
         InitializeComponent();
+        _dashboardOnly = IsDashboardOnly();
         var options = CreateServerOptions();
         var builder = Host.CreateDefaultBuilder()
             .ConfigureLogging(logging =>
@@ -31,11 +36,13 @@ public partial class App : Application
                 logging.AddDebug();
                 logging.AddFilter("System.Net.Http.HttpClient", LogLevel.None);
             });
-        if (IsDashboardOnly())
+        if (_dashboardOnly)
         {
             builder.ConfigureServices(services =>
             {
                 services.AddGoAiServerServices(options, includeHostedServices: false);
+                services.AddSingleton<ManagedServiceController>();
+                services.AddSingleton<ServerWindowStateStore>();
                 services.AddSingleton<ServerDashboardViewModel>();
                 services.AddSingleton<MainWindow>();
             });
@@ -45,6 +52,8 @@ public partial class App : Application
             builder.ConfigureGoAiServer(configure => CopyOptions(options, configure));
             builder.ConfigureServices(services =>
             {
+                services.AddSingleton<ManagedServiceController>();
+                services.AddSingleton<ServerWindowStateStore>();
                 services.AddSingleton<ServerDashboardViewModel>();
                 services.AddSingleton<MainWindow>();
             });
@@ -71,6 +80,7 @@ public partial class App : Application
         try
         {
             await _host.StartAsync();
+            _hostStarted = true;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
@@ -81,7 +91,24 @@ public partial class App : Application
 
         _window = GetService<MainWindow>();
         _window.PrepareShutdownAsync = ShutdownAsync;
+        await _window.RestoreWindowStateAsync();
         _window.Activate();
+
+        if (_hostStarted && !_dashboardOnly)
+        {
+            try
+            {
+                await GetService<ManagedServiceController>().StartAsync(_lifetimeCancellation.Token);
+                if (Volatile.Read(ref _shutdownStarted) == 0)
+                {
+                    await GetService<ServerDashboardViewModel>().RefreshAsync(_lifetimeCancellation.Token);
+                }
+            }
+            catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+            {
+                // Normal window shutdown can cancel an in-progress Docker/LM Studio start.
+            }
+        }
     }
 
     private void OnActivated(object? sender, AppActivationArguments args) => _window?.BringToForeground();
@@ -95,7 +122,35 @@ public partial class App : Application
 
         try
         {
-            await _host.StopAsync(TimeSpan.FromSeconds(8));
+            _lifetimeCancellation.Cancel();
+            if (_hostStarted)
+            {
+                try
+                {
+                    await _host.StopAsync(TimeSpan.FromSeconds(12));
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                {
+                    var runtime = GetService<ServerRuntimeState>();
+                    runtime.WriteLog("Error", "gateway.stop_failed", $"Gateway-Stopp fehlgeschlagen ({exception.GetType().Name}).");
+                }
+                finally
+                {
+                    _hostStarted = false;
+                }
+            }
+            if (!_dashboardOnly)
+            {
+                try
+                {
+                    await GetService<ManagedServiceController>().StopAsync(CancellationToken.None);
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                {
+                    var runtime = GetService<ServerRuntimeState>();
+                    runtime.WriteLog("Error", "services.stop_failed", $"Zentraler Dienststopp fehlgeschlagen ({exception.GetType().Name}).");
+                }
+            }
         }
         finally
         {
@@ -108,6 +163,7 @@ public partial class App : Application
             {
                 _host.Dispose();
             }
+            _lifetimeCancellation.Dispose();
         }
     }
 
@@ -161,16 +217,7 @@ public partial class App : Application
             return true;
         }
 
-        using var client = new System.Net.Sockets.TcpClient();
-        try
-        {
-            var connection = client.ConnectAsync(System.Net.IPAddress.Loopback, ReadGatewayPort());
-            return connection.Wait(TimeSpan.FromMilliseconds(350)) && client.Connected;
-        }
-        catch (Exception exception) when (exception is System.Net.Sockets.SocketException or AggregateException)
-        {
-            return false;
-        }
+        return false;
     }
 
     private static void CopyOptions(
@@ -186,6 +233,10 @@ public partial class App : Application
         destination.LmStudioTokenFile = source.LmStudioTokenFile;
         destination.WorkerKeyDirectory = source.WorkerKeyDirectory;
         destination.WorkerDataDirectory = source.WorkerDataDirectory;
+        destination.SpeechWorkerUri = source.SpeechWorkerUri;
+        destination.MediaWorkerUri = source.MediaWorkerUri;
+        destination.ImageWorkerUri = source.ImageWorkerUri;
+        destination.SearxngUri = source.SearxngUri;
         destination.RequireLmStudioAuthentication = source.RequireLmStudioAuthentication;
     }
 }

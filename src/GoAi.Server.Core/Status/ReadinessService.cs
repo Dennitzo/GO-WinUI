@@ -27,6 +27,15 @@ public sealed class ReadinessService
 
     public async Task<HealthSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
     {
+        var modelStatus = await _lmStudio.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        return await GetSnapshotAsync(modelStatus, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<HealthSnapshot> GetSnapshotAsync(
+        ModelStatusSnapshot modelStatus,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(modelStatus);
         if (!IPAddress.TryParse(_options.ExpectedLanIp, out var expectedIp)
             || expectedIp.AddressFamily != AddressFamily.InterNetwork)
         {
@@ -43,7 +52,6 @@ public sealed class ReadinessService
                 "Routerreservierung setzen oder ExpectedLanIp, Caddy-Zertifikat und Client-Verbindungspaket neu erzeugen.");
         }
 
-        var modelStatus = await _lmStudio.GetStatusAsync(cancellationToken).ConfigureAwait(false);
         if (!modelStatus.ProviderReachable)
         {
             return NotReady(

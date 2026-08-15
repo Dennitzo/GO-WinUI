@@ -18,8 +18,13 @@ public sealed partial class LmStudioClient : IDisposable
     private readonly DpapiSecretStore _secretStore;
     private readonly ILogger<LmStudioClient> _logger;
     private readonly SemaphoreSlim _modelOperationGate = new(1, 1);
+    private readonly SemaphoreSlim _statusGate = new(1, 1);
     private readonly object _idleTimerSync = new();
+    private readonly object _statusCacheSync = new();
     private CancellationTokenSource? _idleUnloadCancellation;
+    private ModelStatusSnapshot? _cachedStatus;
+    private DateTimeOffset _statusCacheExpiresAt;
+    private static readonly TimeSpan StatusCacheDuration = TimeSpan.FromSeconds(15);
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
@@ -41,24 +46,41 @@ public sealed partial class LmStudioClient : IDisposable
 
     public async Task<ModelStatusSnapshot> GetStatusAsync(CancellationToken cancellationToken = default)
     {
+        var cached = GetCachedStatus();
+        if (cached is not null)
+        {
+            return cached;
+        }
+
+        await _statusGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            cached = GetCachedStatus();
+            if (cached is not null)
+            {
+                return cached;
+            }
+
             using var request = await CreateRequestAsync(HttpMethod.Get, "api/v1/models", null, cancellationToken).ConfigureAwait(false);
             using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
             var result = await response.Content.ReadFromJsonAsync<LmStudioModelList>(_jsonOptions, cancellationToken).ConfigureAwait(false)
                 ?? new LmStudioModelList([]);
             var models = CreateConfiguredModelStatus(result.Models);
-            return new ModelStatusSnapshot(true, _options.LmStudioUri.ToString(), models, DateTimeOffset.UtcNow);
+            return CacheStatus(new ModelStatusSnapshot(true, _options.LmStudioUri.ToString(), models, DateTimeOffset.UtcNow));
         }
         catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
         {
-            return new ModelStatusSnapshot(
+            return CacheStatus(new ModelStatusSnapshot(
                 false,
                 _options.LmStudioUri.ToString(),
                 CreateConfiguredModelStatus([]),
                 DateTimeOffset.UtcNow,
-                exception is TaskCanceledException ? "lmstudio.timeout" : "lmstudio.unreachable");
+                exception is TaskCanceledException ? "lmstudio.timeout" : "lmstudio.unreachable"));
+        }
+        finally
+        {
+            _statusGate.Release();
         }
     }
 
@@ -76,6 +98,11 @@ public sealed partial class LmStudioClient : IDisposable
             var status = await GetRawModelsAsync(cancellationToken).ConfigureAwait(false);
             var selected = status.Models.FirstOrDefault(model => string.Equals(model.Key, modelId, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException($"Configured LM Studio model is not downloaded: {modelId}");
+            if (string.Equals(modelId, _options.CodeModelId, StringComparison.OrdinalIgnoreCase)
+                && selected.MaximumContextLength < contextLength)
+            {
+                throw new LmStudioContextLengthException(modelId, contextLength, selected.MaximumContextLength);
+            }
             var expectedContextLength = Math.Min(contextLength, selected.MaximumContextLength);
             var loaded = selected.LoadedInstances is { Count: > 0 } loadedInstances
                 ? loadedInstances[0]
@@ -84,6 +111,7 @@ public sealed partial class LmStudioClient : IDisposable
             await UnloadIncompatibleModelsAsync(status.Models, modelId, cancellationToken).ConfigureAwait(false);
             if (loaded is not null && HasRequiredConfiguration(loaded, expectedContextLength, isEmbedding))
             {
+                InvalidateStatusCache();
                 return loaded.ModelInstanceId ?? loaded.Id ?? modelId;
             }
 
@@ -91,6 +119,9 @@ public sealed partial class LmStudioClient : IDisposable
             {
                 await UnloadModelInstancesAsync([selected], cancellationToken).ConfigureAwait(false);
             }
+            // The installed LM Studio load API rejects a `ttl` property. Explicit
+            // loads are released by this client's own ModelTtlSeconds idle timer;
+            // inference requests still carry LM Studio's supported JIT TTL.
             object body = isEmbedding
                 ? new
                 {
@@ -130,6 +161,7 @@ public sealed partial class LmStudioClient : IDisposable
         }
         finally
         {
+            InvalidateStatusCache();
             CancelIdleUnload();
             _modelOperationGate.Release();
         }
@@ -151,6 +183,7 @@ public sealed partial class LmStudioClient : IDisposable
         }
         finally
         {
+            InvalidateStatusCache();
             EndModelOperation();
         }
     }
@@ -282,8 +315,35 @@ public sealed partial class LmStudioClient : IDisposable
             body["parallel_tool_calls"] = false;
         }
 
-        using var response = await SendResponsesWithRetryAsync(modelId, body, cancellationToken).ConfigureAwait(false);
-        using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+        HttpResponseMessage response;
+        try
+        {
+            response = await SendResponsesWithRetryAsync(modelId, body, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ResponsesCompatibilityException exception)
+        {
+            LogResponsesEndpointFallback((int)exception.StatusCode, modelId);
+            return await CompleteChatViaChatCompletionsAsync(
+                modelId,
+                messages,
+                tools,
+                maximumOutputTokens,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException exception) when (
+            exception.StatusCode is { } statusCode && IsTransientProviderStatus(statusCode))
+        {
+            LogResponsesEndpointFallback((int)statusCode, modelId);
+            return await CompleteChatViaChatCompletionsAsync(
+                modelId,
+                messages,
+                tools,
+                maximumOutputTokens,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        using var responseScope = response;
+        using var document = JsonDocument.Parse(await responseScope.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
         var root = document.RootElement;
         if (root.TryGetProperty("status", out var status)
             && status.ValueKind == JsonValueKind.String
@@ -430,12 +490,7 @@ public sealed partial class LmStudioClient : IDisposable
             }
 
             var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
-            var mediaType = Path.GetExtension(path).ToLowerInvariant() switch
-            {
-                ".png" => "image/png",
-                ".webp" => "image/webp",
-                _ => "image/jpeg",
-            };
+            var mediaType = DetectImageMediaType(bytes);
             content.Add(new
             {
                 type = "image_url",
@@ -470,6 +525,26 @@ public sealed partial class LmStudioClient : IDisposable
         {
             EndModelOperation();
         }
+    }
+
+    internal static string DetectImageMediaType(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.Length >= 8
+            && bytes[..8].SequenceEqual(new byte[] { 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a }))
+        {
+            return "image/png";
+        }
+        if (bytes.Length >= 3 && bytes[..3].SequenceEqual(new byte[] { 0xff, 0xd8, 0xff }))
+        {
+            return "image/jpeg";
+        }
+        if (bytes.Length >= 12
+            && bytes[..4].SequenceEqual("RIFF"u8)
+            && bytes.Slice(8, 4).SequenceEqual("WEBP"u8))
+        {
+            return "image/webp";
+        }
+        throw new InvalidDataException("Vision input is not a supported PNG, JPEG, or WebP image.");
     }
 
     private async Task BeginModelOperationAsync(CancellationToken cancellationToken)
@@ -592,6 +667,7 @@ public sealed partial class LmStudioClient : IDisposable
         }
 
         _modelOperationGate.Dispose();
+        _statusGate.Dispose();
     }
 
     [LoggerMessage(
@@ -618,6 +694,12 @@ public sealed partial class LmStudioClient : IDisposable
         Message = "LM Studio model load returned transient HTTP {statusCode}; retrying attempt {attempt} for the same model {modelId}.")]
     private partial void LogTransientModelLoadRetry(int statusCode, int attempt, string modelId);
 
+    [LoggerMessage(
+        EventId = 3105,
+        Level = LogLevel.Warning,
+        Message = "LM Studio Responses returned incompatible HTTP {statusCode}; using Chat Completions with the same model {modelId}.")]
+    private partial void LogResponsesEndpointFallback(int statusCode, string modelId);
+
     private async Task<string> LoadModelWithRetryAsync(
         string modelId,
         object body,
@@ -641,6 +723,7 @@ public sealed partial class LmStudioClient : IDisposable
                     cancellationToken).ConfigureAwait(false)
                     ?? throw new JsonException("LM Studio returned no model load response.");
                 ValidateLoadResponse(loadedResponse, expectedContextLength, isEmbedding);
+                InvalidateStatusCache();
                 return loadedResponse.InstanceId
                     ?? loadedResponse.ModelInstanceId
                     ?? throw new JsonException("LM Studio returned no model instance identifier.");
@@ -665,6 +748,7 @@ public sealed partial class LmStudioClient : IDisposable
                 HasRequiredConfiguration(instance, expectedContextLength, isEmbedding));
             if (refreshedInstance is not null)
             {
+                InvalidateStatusCache();
                 return refreshedInstance.ModelInstanceId ?? refreshedInstance.Id ?? modelId;
             }
 
@@ -761,6 +845,7 @@ public sealed partial class LmStudioClient : IDisposable
 
     private bool IsGeneralCompatibleModel(string modelId) =>
         string.Equals(modelId, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
         || string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase);
 
     private async Task UnloadModelInstancesAsync(
@@ -784,7 +869,37 @@ public sealed partial class LmStudioClient : IDisposable
                     cancellationToken).ConfigureAwait(false);
                 using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
                 response.EnsureSuccessStatusCode();
+                InvalidateStatusCache();
             }
+        }
+    }
+
+    private ModelStatusSnapshot? GetCachedStatus()
+    {
+        lock (_statusCacheSync)
+        {
+            return _cachedStatus is not null && DateTimeOffset.UtcNow < _statusCacheExpiresAt
+                ? _cachedStatus
+                : null;
+        }
+    }
+
+    private ModelStatusSnapshot CacheStatus(ModelStatusSnapshot status)
+    {
+        lock (_statusCacheSync)
+        {
+            _cachedStatus = status;
+            _statusCacheExpiresAt = DateTimeOffset.UtcNow.Add(StatusCacheDuration);
+            return status;
+        }
+    }
+
+    private void InvalidateStatusCache()
+    {
+        lock (_statusCacheSync)
+        {
+            _cachedStatus = null;
+            _statusCacheExpiresAt = default;
         }
     }
 
@@ -795,7 +910,6 @@ public sealed partial class LmStudioClient : IDisposable
             (_options.GeneralModelId, "general", _options.GeneralContextLength),
             (_options.CodeModelId, "code", _options.CodeContextLength),
             (_options.VisionModelId, "vision", 65536),
-            (_options.VisionFallbackModelId, "vision-fallback", 65536),
             (_options.EmbeddingModelId, "embedding", 8192),
         };
         return definitions.Select(definition =>
@@ -856,7 +970,12 @@ public sealed partial class LmStudioClient : IDisposable
             }
 
             var statusCode = response.StatusCode;
+            var errorPayload = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             response.Dispose();
+            if (IsResponsesCompatibilityFailure(errorPayload))
+            {
+                throw new ResponsesCompatibilityException(statusCode);
+            }
             if (attempt < maximumAttempts && IsTransientProviderStatus(statusCode))
             {
                 LogTransientResponseRetry((int)statusCode, attempt + 1);
@@ -878,6 +997,154 @@ public sealed partial class LmStudioClient : IDisposable
         System.Net.HttpStatusCode.BadGateway or
         System.Net.HttpStatusCode.ServiceUnavailable or
         System.Net.HttpStatusCode.GatewayTimeout;
+
+    private static bool IsResponsesCompatibilityFailure(string payload) =>
+        payload.Contains("peg-native", StringComparison.OrdinalIgnoreCase)
+        || payload.Contains("expected peg native", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<LmChatResult> CompleteChatViaChatCompletionsAsync(
+        string modelId,
+        IReadOnlyList<LmChatMessage> messages,
+        IReadOnlyList<LmToolDefinition> tools,
+        int maximumOutputTokens,
+        CancellationToken cancellationToken)
+    {
+        var body = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["model"] = modelId,
+            ["messages"] = CreateChatCompletionMessages(messages),
+            ["stream"] = false,
+            ["temperature"] = 0.2,
+            ["max_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
+            ["ttl"] = _options.ModelTtlSeconds,
+        };
+        if (tools.Count > 0)
+        {
+            body["tools"] = tools.Select(static tool => new
+            {
+                type = "function",
+                function = new
+                {
+                    name = tool.Name,
+                    description = tool.Description,
+                    parameters = tool.Parameters,
+                },
+            }).ToArray();
+            body["tool_choice"] = "auto";
+            body["parallel_tool_calls"] = false;
+        }
+
+        using var request = await CreateRequestAsync(
+            HttpMethod.Post,
+            "v1/chat/completions",
+            body,
+            cancellationToken).ConfigureAwait(false);
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(
+            await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+        var root = document.RootElement;
+        if (!root.TryGetProperty("choices", out var choices)
+            || choices.ValueKind != JsonValueKind.Array
+            || choices.GetArrayLength() == 0
+            || !choices[0].TryGetProperty("message", out var message))
+        {
+            throw new JsonException("LM Studio Chat Completions result contains no assistant message.");
+        }
+
+        var content = message.TryGetProperty("content", out var contentElement)
+            && contentElement.ValueKind == JsonValueKind.String
+            ? contentElement.GetString()
+            : null;
+        var calls = new List<LmToolCall>();
+        if (message.TryGetProperty("tool_calls", out var toolCalls)
+            && toolCalls.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var call in toolCalls.EnumerateArray())
+            {
+                var id = call.TryGetProperty("id", out var idElement) ? idElement.GetString() : null;
+                if (!call.TryGetProperty("function", out var function)
+                    || function.ValueKind != JsonValueKind.Object)
+                {
+                    throw new JsonException("LM Studio returned an incomplete Chat Completions tool call.");
+                }
+                var name = function.TryGetProperty("name", out var nameElement) ? nameElement.GetString() : null;
+                var argumentsText = function.TryGetProperty("arguments", out var argumentsElement)
+                    ? argumentsElement.ValueKind == JsonValueKind.String
+                        ? argumentsElement.GetString()
+                        : argumentsElement.GetRawText()
+                    : null;
+                if (string.IsNullOrWhiteSpace(id)
+                    || string.IsNullOrWhiteSpace(name)
+                    || string.IsNullOrWhiteSpace(argumentsText))
+                {
+                    throw new JsonException("LM Studio returned an incomplete Chat Completions tool call.");
+                }
+
+                using var argumentsDocument = JsonDocument.Parse(argumentsText);
+                calls.Add(new LmToolCall(id, name, argumentsDocument.RootElement.Clone()));
+            }
+        }
+
+        var inputTokens = 0;
+        var outputTokens = 0;
+        if (root.TryGetProperty("usage", out var usage))
+        {
+            inputTokens = TryReadInt32(usage, "prompt_tokens");
+            outputTokens = TryReadInt32(usage, "completion_tokens");
+        }
+        return new LmChatResult(content, calls, inputTokens, outputTokens);
+    }
+
+    private static object[] CreateChatCompletionMessages(IReadOnlyList<LmChatMessage> messages)
+    {
+        var result = new List<object>(messages.Count);
+        foreach (var message in messages)
+        {
+            if (message.ToolCalls is { Count: > 0 })
+            {
+                result.Add(new
+                {
+                    role = "assistant",
+                    content = message.Content,
+                    tool_calls = message.ToolCalls.Select(static call => new
+                    {
+                        id = call.Id,
+                        type = "function",
+                        function = new
+                        {
+                            name = call.Name,
+                            arguments = call.Arguments.GetRawText(),
+                        },
+                    }).ToArray(),
+                });
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(message.ToolCallId))
+            {
+                result.Add(new
+                {
+                    role = "tool",
+                    tool_call_id = message.ToolCallId,
+                    content = message.Content ?? string.Empty,
+                });
+                continue;
+            }
+
+            result.Add(new
+            {
+                role = NormalizeRole(message.Role),
+                content = message.Content ?? string.Empty,
+            });
+        }
+        return result.ToArray();
+    }
+
+    private sealed class ResponsesCompatibilityException(System.Net.HttpStatusCode statusCode) : Exception
+    {
+        public System.Net.HttpStatusCode StatusCode { get; } = statusCode;
+    }
 
     private static (int InputTokens, int OutputTokens) TryReadUsage(JsonElement root)
     {

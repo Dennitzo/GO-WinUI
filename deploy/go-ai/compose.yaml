@@ -5,7 +5,7 @@ services:
     image: caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     container_name: go-ai-caddy
     network_mode: host
-    restart: unless-stopped
+    restart: "no"
     read_only: true
     cap_drop:
       - ALL
@@ -34,7 +34,7 @@ services:
   searxng:
     image: searxng/searxng@sha256:c2dc2d9e6b910653e8628361c23443222490e4cabbb9e02667b7847143db843b
     container_name: go-ai-searxng
-    restart: unless-stopped
+    restart: "no"
     read_only: true
     cap_drop:
       - ALL
@@ -66,7 +66,7 @@ services:
   worker-edge:
     image: caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     container_name: go-ai-worker-edge
-    restart: unless-stopped
+    restart: "no"
     read_only: true
     cap_drop:
       - ALL
@@ -78,6 +78,7 @@ services:
       - "127.0.0.1:7082:7082"
       - "127.0.0.1:7083:7083"
       - "127.0.0.1:7084:7084"
+      - "127.0.0.1:7085:7085"
     volumes:
       - ./caddy/WorkerEdge.Caddyfile:/etc/caddy/Caddyfile:ro
     tmpfs:
@@ -99,7 +100,7 @@ services:
       context: ../../workers
       dockerfile: speech/Dockerfile
     container_name: go-ai-speech
-    restart: unless-stopped
+    restart: "no"
     read_only: true
     user: "10001:10001"
     cap_drop:
@@ -116,11 +117,13 @@ services:
         target: worker_key
     environment:
       GO_AI_WORKER_KEY_FILE: /run/secrets/worker_key
-      GO_AI_WHISPER_MODEL: /models/faster-whisper-large-v3-turbo
-      GO_AI_TTS_MODEL: /models/Qwen3-TTS-12Hz-0.6B-Base
-      GO_AI_TTS_REFERENCE: /data/Voices/hedda-reference.wav
-      GO_AI_TTS_REFERENCE_TEXT: Willkommen beim GO AI Server. Ich unterstütze die technische Gebäudeausrüstung klar und zuverlässig.
-      GO_AI_TTS_DTYPE: bfloat16
+      GO_AI_WHISPER_MODEL: /models/faster-whisper-large-v3
+      GO_AI_SPEAKER_MODEL: /models/spkrec-ecapa-voxceleb
+      GO_AI_PRELOAD_STT: "0"
+      GO_AI_MODEL_TTL_SECONDS: "600"
+      GO_AI_TTS_MODEL: /models/piper/de_DE-kerstin-low/de_DE-kerstin-low.onnx
+      GO_AI_TTS_CONFIG: /models/piper/de_DE-kerstin-low/de_DE-kerstin-low.onnx.json
+      CUDA_VISIBLE_DEVICES: "0"
       NUMBA_CACHE_DIR: /tmp/numba-cache
       XDG_CACHE_HOME: /tmp/cache
       TORCH_HOME: /tmp/torch
@@ -151,7 +154,7 @@ services:
       context: ../../workers
       dockerfile: media/Dockerfile
     container_name: go-ai-media
-    restart: unless-stopped
+    restart: "no"
     read_only: true
     user: "10001:10001"
     cap_drop:
@@ -192,7 +195,7 @@ services:
       args:
         STABLE_DIFFUSION_CPP_COMMIT: de298c225bed97c3f9026b73cd7b71e7879bd41b
     container_name: go-ai-image
-    restart: unless-stopped
+    restart: "no"
     read_only: true
     user: "10001:10001"
     cap_drop:
@@ -210,6 +213,10 @@ services:
       GO_AI_Z_IMAGE_MODEL: /models/z-image/z_image_turbo-Q4_K.gguf
       GO_AI_Z_IMAGE_VAE: /models/z-image/ae.safetensors
       GO_AI_Z_IMAGE_ENCODER: /models/z-image/Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+      GO_AI_PRELOAD_IMAGE: "0"
+      GO_AI_MODEL_TTL_SECONDS: "600"
+      GO_AI_IMAGE_LOAD_TIMEOUT_SECONDS: "1200"
+      CUDA_VISIBLE_DEVICES: "1"
       NVIDIA_VISIBLE_DEVICES: all
     gpus: all
     shm_size: "2gb"

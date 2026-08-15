@@ -1,6 +1,7 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Research;
+using GoAi.Server.Core.Security;
 using Microsoft.Extensions.Options;
 using System.Net;
 using System.Text;
@@ -29,6 +30,43 @@ public sealed class WebResearchServiceTests
         Assert.Equal("Fachkanal", result.Source);
         Assert.Equal("1:02", result.Duration);
         Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task ProtectedYouTubeKeyOverridesEnvironmentConfiguration()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"go-ai-youtube-{Guid.NewGuid():N}");
+        try
+        {
+            var options = Options.Create(new GoAiServerOptions
+            {
+                DataDirectory = root,
+                ProviderDataDirectory = root,
+                YouTubeApiKey = "stale-environment-key",
+            });
+            var secrets = new DpapiSecretStore(options);
+            await secrets.SaveYouTubeApiKeyAsync("secret-youtube-key");
+            var service = new WebResearchService(
+                new TestHttpClientFactory(new YouTubeHandler()),
+                options,
+                secrets);
+
+            var response = await service.SearchAsync(
+                new WebSearchRequest("TGA Planung", 5, "de-DE"),
+                youtubeFallback: true);
+
+            Assert.Equal("youtube-data-api-v3", response.Provider);
+            Assert.True(secrets.HasYouTubeApiKey);
+            secrets.DeleteYouTubeApiKey();
+            Assert.False(secrets.HasYouTubeApiKey);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 
     [Theory]
