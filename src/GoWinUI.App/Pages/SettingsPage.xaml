@@ -44,7 +44,7 @@
               <TextBlock
                 Margin="0,3,0,0"
                 Foreground="{ThemeResource GoMutedTextBrush}"
-                Text="Verbindung mit GO AI Server unter https://192.168.0.67:8443. Benötigt wird nur der in LM Studio verwendete API-Schlüssel."
+                Text="Im GO AI Server unter „Sicherheit und Schlüssel“ einen GO-Client API-Schlüssel erzeugen, kopieren und hier einfügen."
                 TextWrapping="Wrap" />
             </StackPanel>
             <Border Grid.Column="1" Style="{StaticResource GoStatusPillStyle}">
@@ -64,9 +64,9 @@
             <StackPanel Spacing="5">
               <PasswordBox
                 x:Name="ApiKeyBox"
-                Header="LM-Studio-API-Schlüssel"
+                Header="GO-AI-Server-Schlüssel"
                 PasswordChanged="OnApiKeyChanged"
-                PlaceholderText="Nur zum Ändern eingeben" />
+                PlaceholderText="Auf dem Server erzeugten Schlüssel einfügen" />
               <TextBlock x:Name="ApiKeyStateText" FontSize="12" Foreground="{ThemeResource GoMutedTextBrush}" />
             </StackPanel>
             <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">

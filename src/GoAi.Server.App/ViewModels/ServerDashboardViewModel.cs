@@ -216,11 +216,22 @@ public sealed partial class ServerDashboardViewModel : ObservableObject
         }
     }
 
-    public async Task<string> CreateApiKeyAsync(CancellationToken cancellationToken = default)
+    public async Task<string> CreateApiKeyAsync(
+        string clientName,
+        CancellationToken cancellationToken = default)
     {
-        var issued = await _apiKeys.CreateKeyAsync("GO Client", cancellationToken);
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientName);
+        var normalizedName = clientName.Trim();
+        if (normalizedName.Length > 80)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(clientName),
+                "Der PC-Name darf höchstens 80 Zeichen lang sein.");
+        }
+
+        var issued = await _apiKeys.CreateKeyAsync(normalizedName, cancellationToken);
         OneTimeApiKey = issued.PlainText;
-        SecurityMessage = $"Neuer Schlüssel {issued.KeyId} – jetzt kopieren; er wird nicht erneut angezeigt.";
+        SecurityMessage = $"Neuer Schlüssel {issued.KeyId} für „{normalizedName}“ – jetzt kopieren; er wird nicht erneut angezeigt.";
         await RefreshAsync(cancellationToken);
         return issued.PlainText;
     }

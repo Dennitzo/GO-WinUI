@@ -281,6 +281,11 @@
                 <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="GO-Client API-Schlüssel" />
                 <TextBlock Text="{x:Bind ViewModel.SecurityMessage, Mode=OneWay}" TextWrapping="Wrap" />
                 <TextBox
+                  x:Name="ClientNameBox"
+                  Header="PC-Name zur Schlüsselzuordnung"
+                  MaxLength="80"
+                  PlaceholderText="z. B. CAD-Arbeitsplatz 01" />
+                <TextBox
                   x:Name="ApiKeyBox"
                   IsReadOnly="True"
                   FontFamily="Cascadia Mono"

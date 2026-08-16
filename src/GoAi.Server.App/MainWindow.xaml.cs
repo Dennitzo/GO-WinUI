@@ -212,7 +212,16 @@ public sealed partial class MainWindow : Window
 
     private async void OnCreateApiKeyClick(object sender, RoutedEventArgs e)
     {
-        _ = await ViewModel.CreateApiKeyAsync();
+        var clientName = ClientNameBox.Text.Trim();
+        if (clientName.Length == 0)
+        {
+            ViewModel.SecurityMessage = "Bitte zuerst den PC-Namen zur Zuordnung des Schlüssels eingeben.";
+            _ = ClientNameBox.Focus(FocusState.Programmatic);
+            return;
+        }
+
+        _ = await ViewModel.CreateApiKeyAsync(clientName);
+        ClientNameBox.Text = string.Empty;
     }
 
     private void OnCopyApiKeyClick(object sender, RoutedEventArgs e)

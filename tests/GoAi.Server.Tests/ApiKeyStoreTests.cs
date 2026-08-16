@@ -50,6 +50,7 @@ public sealed class ApiKeyStoreTests
         Assert.True(await store.ValidateAsync(first.PlainText));
         var initial = Assert.Single(await store.ListAsync());
         Assert.Equal(first.KeyId, initial.KeyId);
+        Assert.Equal("Erster Client", initial.Name);
         Assert.NotNull(initial.LastUsedAt);
         Assert.False(await store.TryRevokePreservingOneAsync(first.KeyId));
 

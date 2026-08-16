@@ -42,7 +42,7 @@ public sealed class GoAiConnectionService(
         var apiKey = await secrets.GetApiKeyAsync(cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            throw new InvalidOperationException("Der LM-Studio-API-Schlüssel ist noch nicht gespeichert.");
+            throw new InvalidOperationException("Der GO-AI-Server-Schlüssel ist noch nicht gespeichert.");
         }
 
         var handler = new HttpClientHandler
