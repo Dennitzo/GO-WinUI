@@ -479,7 +479,7 @@
         spinner.setAttribute("aria-hidden", "true");
         const status = document.createElement("span");
         status.className = "message-status streaming";
-        status.textContent = [liveStatus.status, liveStatus.detail].filter(Boolean).join(" · ");
+        status.textContent = runStatusText(liveStatus);
         meta.append(" · ", spinner, status);
       }
       body.append(meta);
@@ -601,6 +601,18 @@
       failed: "Fehlgeschlagen",
       interrupted: "Unterbrochen"
     })[String(status).toLowerCase()] || String(status);
+  }
+
+  function runStatusText(liveStatus) {
+    const status = String(liveStatus?.status || "").trim();
+    const detail = String(liveStatus?.detail || "").trim();
+    const model = String(liveStatus?.model || state.model || "").trim();
+    const parts = [status];
+    if (model && !detail.toLocaleLowerCase().includes(model.toLocaleLowerCase())) {
+      parts.push(`Modell: ${model}`);
+    }
+    if (detail) parts.push(detail);
+    return parts.filter(Boolean).join(" · ");
   }
 
   function hasMediaAnalysisContext(action) {
@@ -1339,8 +1351,8 @@
     state.activeSessionId = payload.activeSessionId || null;
     state.isRunning = Boolean(payload.isRunning);
     state.model = payload.model || null;
-    state.contextUsed = payload.contextUsed || 0;
-    state.contextLimit = payload.contextLimit || 8192;
+    if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
+    if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
     state.contextWasTruncated = Boolean(payload.contextWasTruncated);
     state.contextNotice = payload.contextNotice || null;
     state.workspacePath = payload.workspacePath || null;
@@ -1415,14 +1427,16 @@
           renderContext();
         }
         if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
-        if (Number.isFinite(payload.contextLimit)) state.contextLimit = payload.contextLimit;
+        if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
+        if (payload.model) state.model = payload.model;
         state.contextWasTruncated = Boolean(payload.contextWasTruncated);
         state.contextNotice = payload.contextNotice || null;
         state.runStatus = payload.runStatus || "Denkt nach";
         state.runDetail = payload.runDetail || null;
         if (payload.message?.id) state.messageRunStatus.set(String(payload.message.id), {
           status: payload.runStatus || "Denkt nach",
-          detail: payload.runDetail || null
+          detail: payload.runDetail || null,
+          model: payload.model || state.model || null
         });
         for (const nextMessage of [payload.userMessage, payload.message]) {
           if (!nextMessage || nextMessage.sessionId !== state.activeSessionId) continue;
@@ -1531,10 +1545,17 @@
         showWorkflowEditor(payload.workflow || null);
         break;
       case "status.changed":
-        Object.assign(state, payload);
+        if (payload.model) state.model = payload.model;
+        if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
+        if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
+        if (typeof payload.contextWasTruncated === "boolean") state.contextWasTruncated = payload.contextWasTruncated;
+        if (Object.hasOwn(payload, "loadedFiles")) state.loadedFiles = payload.loadedFiles;
+        state.runStatus = payload.runStatus || state.runStatus;
+        state.runDetail = payload.runDetail ?? state.runDetail;
         if (payload?.messageId) state.messageRunStatus.set(String(payload.messageId), {
           status: payload.runStatus || "Denkt nach",
-          detail: payload.runDetail || null
+          detail: payload.runDetail || null,
+          model: payload.model || state.model || null
         });
         renderContext();
         renderMessages(false);

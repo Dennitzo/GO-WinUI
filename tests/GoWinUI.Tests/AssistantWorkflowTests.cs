@@ -462,6 +462,17 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("position: absolute", css, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void RunningMessageShowsItsModelAndPreservesContextWhenUpdatesOmitTokenCounts()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+
+        Assert.Contains("runStatusText(liveStatus)", app, StringComparison.Ordinal);
+        Assert.Contains("parts.push(`Modell: ${model}`)", app, StringComparison.Ordinal);
+        Assert.Contains("if (Number.isFinite(payload.contextUsed))", app, StringComparison.Ordinal);
+    }
+
     private static ChatMessage Message(Guid sessionId, string content) => new(
         Guid.NewGuid(), sessionId, ChatRole.Assistant, content, MessageStatus.Completed,
         DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);

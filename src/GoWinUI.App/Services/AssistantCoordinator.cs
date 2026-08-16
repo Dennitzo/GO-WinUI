@@ -708,11 +708,12 @@ public sealed class AssistantCoordinator(
                         ? null
                         : ToMessageDto(precedingUserMessage, precedingUserArtifacts),
                     message = ToMessageDto(update.Message, artifactsForMessage),
-                    contextUsed = update.ContextUsed ?? 0,
-                    contextLimit = update.ContextLimit ?? 131_072,
+                    contextUsed = update.ContextUsed,
+                    contextLimit = update.ContextLimit,
                     contextWasTruncated = update.ContextWasCompacted,
                     runStatus = update.Status,
                     runDetail = update.Detail,
+                    model = update.Model,
                     loadedFiles = update.LoadedFiles,
                     attachments = pendingAttachments.Select(ToAttachmentDto),
                 }, requestId).ConfigureAwait(false);
@@ -732,6 +733,7 @@ public sealed class AssistantCoordinator(
                     sessionId = update.Message.SessionId,
                     runStatus = update.Status,
                     runDetail = update.Detail,
+                    model = update.Model,
                     contextUsed = update.ContextUsed,
                     contextLimit = update.ContextLimit,
                     contextWasTruncated = update.ContextWasCompacted,

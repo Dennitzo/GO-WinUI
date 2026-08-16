@@ -27,6 +27,7 @@ public sealed record GoAiAssistantUpdate(
     ChatSession? Session = null,
     string? Status = null,
     string? Detail = null,
+    string? Model = null,
     string? Error = null,
     int? ContextUsed = null,
     int? ContextLimit = null,
@@ -510,7 +511,8 @@ public sealed class GoAiAssistantService(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: selected?.IsFallback == true ? "Fallback-Modell" : "Modell gewählt",
-                            Detail: selected?.ModelId)).ConfigureAwait(false);
+                            Detail: selected?.ModelId,
+                            Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ModelLoading:
                         var loading = item.Data.Deserialize<ModelLoadingEvent>(JsonOptions);
@@ -521,7 +523,8 @@ public sealed class GoAiAssistantService(
                             Status: loading?.State == "loaded" ? "Denkt nach" : "Modell wird geladen",
                             Detail: loading is null
                                 ? model
-                                : $"{loading.ModelId} Â· {loading.EffectiveContextLength:N0} Kontexttoken",
+                                : $"{loading.ModelId} · {loading.EffectiveContextLength:N0} Kontexttoken",
+                            Model: model,
                             ContextLimit: loading?.EffectiveContextLength)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ContextChanged:
@@ -534,6 +537,7 @@ public sealed class GoAiAssistantService(
                                 Status: context.WasCompacted ? "Kontext verdichtet" : "Repositorykontext bereit",
                                 Detail: context.Detail
                                     ?? $"{context.LoadedFiles:N0} Quelldateien geladen",
+                                Model: model,
                                 ContextUsed: context.EstimatedInputTokens,
                                 ContextLimit: context.ContextLimit,
                                 LoadedFiles: context.LoadedFiles,
@@ -541,7 +545,7 @@ public sealed class GoAiAssistantService(
                         }
                         break;
                     case RunEventTypes.ServerToolStarted:
-                        await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Serverwerkzeug", Detail: StringProperty(item.Data, "tool"))).ConfigureAwait(false);
+                        await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Serverwerkzeug", Detail: StringProperty(item.Data, "tool"), Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ServerToolCompleted:
                         var extracted = ExtractToolResultText(item.Data);
@@ -567,7 +571,7 @@ public sealed class GoAiAssistantService(
                         {
                             throw new InvalidDataException("Der Client-Toolvorschlag gehört nicht zum aktiven Serverlauf.");
                         }
-                        await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Lokale Aktion", Detail: proposal.Summary)).ConfigureAwait(false);
+                        await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Lokale Aktion", Detail: proposal.Summary, Model: model)).ConfigureAwait(false);
                         var result = await ExecuteClientToolOnceAsync(localRun, item, proposal, cancellationToken).ConfigureAwait(false);
                         await client.SubmitClientToolResultAsync(item.RunId, result, cancellationToken).ConfigureAwait(false);
                         await toolExecutions.MarkSubmittedAsync(proposal.ProposalId, CancellationToken.None).ConfigureAwait(false);
@@ -841,11 +845,56 @@ public sealed class GoAiAssistantService(
                     Limits: new RunLimits(MaximumOutputTokens: 4_096, MaximumContextTokens: 131_072, TimeoutSeconds: 600),
                     AllowedServerTools: []),
                     $"go-speech-prep-{Guid.NewGuid():N}", cancellationToken).ConfigureAwait(false);
+                string? activeModel = null;
                 await foreach (var item in client.StreamRunEventsAsync(accepted.RunId, cancellationToken: cancellationToken).ConfigureAwait(false))
                 {
-                    if (!string.Equals(item.Type, RunEventTypes.TextDelta, StringComparison.Ordinal)) continue;
-                    var delta = item.Data.Deserialize<TextDeltaEvent>(GoAiProtocol.CreateJsonOptions());
-                    if (!string.IsNullOrEmpty(delta?.Delta)) output.Append(delta.Delta);
+                    switch (item.Type)
+                    {
+                        case RunEventTypes.ModelSelected:
+                        case RunEventTypes.ModelFallback:
+                            activeModel = item.Data.Deserialize<ModelSelectedEvent>(JsonOptions)?.ModelId ?? activeModel;
+                            await update(new(
+                                GoAiAssistantUpdateKind.Status,
+                                assistant,
+                                Status: "Text wird für Sprachausgabe aufbereitet",
+                                Detail: "Das Sprachmodell formuliert den Text für natürliches Vorlesen um.",
+                                Model: activeModel)).ConfigureAwait(false);
+                            break;
+                        case RunEventTypes.ModelLoading:
+                            var loading = item.Data.Deserialize<ModelLoadingEvent>(JsonOptions);
+                            activeModel = loading?.ModelId ?? activeModel;
+                            await update(new(
+                                GoAiAssistantUpdateKind.Status,
+                                assistant,
+                                Status: loading?.State == "loaded"
+                                    ? "Text wird für Sprachausgabe aufbereitet"
+                                    : "Modell wird geladen",
+                                Detail: loading is null
+                                    ? "Sprachausgabe wird vorbereitet."
+                                    : $"{loading.ModelId} · {loading.EffectiveContextLength:N0} Kontexttoken",
+                                Model: activeModel,
+                                ContextLimit: loading?.EffectiveContextLength)).ConfigureAwait(false);
+                            break;
+                        case RunEventTypes.ContextChanged:
+                            var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
+                            if (context is not null)
+                            {
+                                await update(new(
+                                    GoAiAssistantUpdateKind.Status,
+                                    assistant,
+                                    Status: "Text wird für Sprachausgabe aufbereitet",
+                                    Detail: "Das Sprachmodell formuliert den Text für natürliches Vorlesen um.",
+                                    Model: activeModel,
+                                    ContextUsed: context.EstimatedInputTokens,
+                                    ContextLimit: context.ContextLimit,
+                                    ContextWasCompacted: context.WasCompacted)).ConfigureAwait(false);
+                            }
+                            break;
+                        case RunEventTypes.TextDelta:
+                            var delta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions);
+                            if (!string.IsNullOrEmpty(delta?.Delta)) output.Append(delta.Delta);
+                            break;
+                    }
                 }
                 if (output.Length > 0 && !char.IsWhiteSpace(output[^1])) output.AppendLine();
             }
