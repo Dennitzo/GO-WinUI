@@ -44,7 +44,7 @@
               <TextBlock
                 Margin="0,3,0,0"
                 Foreground="{ThemeResource GoMutedTextBrush}"
-                Text="GO AI Server ist der reguläre Anbieter. Direkter LM-Studio-Zugriff bleibt ein manuell aktivierbarer Diagnosemodus ohne automatischen Fallback."
+                Text="GO AI Server ist der zentrale AI-Anbieter. Authentifizierung und Serververbindung werden hier verwaltet."
                 TextWrapping="Wrap" />
             </StackPanel>
             <Border Grid.Column="1" Style="{StaticResource GoStatusPillStyle}">
@@ -54,11 +54,6 @@
               </StackPanel>
             </Border>
           </Grid>
-
-          <ComboBox x:Name="ProviderBox" Header="Aktiver AI-Anbieter" SelectionChanged="OnProviderChanged">
-            <ComboBoxItem Content="GO AI Server" Tag="GoAiServer" />
-            <ComboBoxItem Content="LM Studio · Diagnosemodus" Tag="LmStudioDiagnostic" />
-          </ComboBox>
 
           <Grid ColumnSpacing="12" RowSpacing="10">
             <Grid.ColumnDefinitions>
@@ -82,14 +77,7 @@
                 PlaceholderText="Nur zum Ändern eingeben" />
               <TextBlock x:Name="ApiKeyStateText" FontSize="12" Foreground="{ThemeResource GoMutedTextBrush}" />
             </StackPanel>
-            <TextBox
-              Grid.Row="1"
-              Grid.ColumnSpan="2"
-              Header="Caddy-CA-Fingerprint (SHA-256)"
-              IsReadOnly="True"
-              Text="{x:Bind ViewModel.GoAiCaFingerprint, Mode=OneWay}" />
-            <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="8">
-              <Button Click="OnImportConnectionBundle" Content="Verbindungspaket importieren" />
+            <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="8">
               <Button Click="OnDeleteApiKey" Content="Gespeicherten Schlüssel löschen" />
               <Button Click="OnRefreshModels" Content="Verbindung testen und Fähigkeiten laden" Style="{StaticResource GoPrimaryButtonStyle}" />
             </StackPanel>
@@ -116,28 +104,11 @@
           <ComboBox
             x:Name="ModelBox"
             DisplayMemberPath="Id"
-            Header="Verfügbare Servermodelle / ausgewähltes Diagnosemodell"
+            Header="Verfügbare AI-Servermodelle"
             ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
             PlaceholderText="Verbindung testen"
             SelectionChanged="OnModelChanged" />
 
-          <Expander Header="Direkter LM-Studio-Diagnosemodus">
-            <StackPanel Padding="0,10,0,0" Spacing="10">
-              <TextBlock
-                Foreground="{ThemeResource GoMutedTextBrush}"
-                Text="Nur bei ausdrücklich gewähltem Diagnoseanbieter aktiv. GO wechselt bei Serverfehlern niemals automatisch hierher."
-                TextWrapping="Wrap" />
-              <TextBox
-                Header="LM-Studio-Basisadresse"
-                PlaceholderText="http://127.0.0.1:1234/v1"
-                Text="{x:Bind ViewModel.LmStudioBaseUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-              <ComboBox x:Name="ReasoningBox" Header="Reasoning-Aufwand" SelectionChanged="OnReasoningChanged">
-                <ComboBoxItem Content="Niedrig" Tag="low" />
-                <ComboBoxItem Content="Mittel" Tag="medium" />
-                <ComboBoxItem Content="Hoch" Tag="high" />
-              </ComboBox>
-            </StackPanel>
-          </Expander>
         </StackPanel>
       </Border>
 
@@ -186,15 +157,6 @@
             <Button Click="OnCreateBackup" Content="Backup erstellen" Style="{StaticResource GoPrimaryButtonStyle}" />
             <Button Click="OnRestoreBackup" Content="Backup wiederherstellen" />
           </StackPanel>
-        </StackPanel>
-      </Border>
-
-      <Border Style="{StaticResource GoCardStyle}">
-        <StackPanel Spacing="10">
-          <TextBlock Style="{StaticResource GoSectionTitleStyle}" Text="Über GO" />
-          <TextBlock Text="GO · WinUI 3" />
-          <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="TGA-Arbeitsbereich mit lokalem GO AI Server" />
-          <TextBlock Foreground="{ThemeResource GoMutedTextBrush}" Text="WebView2 Evergreen Runtime erforderlich" />
         </StackPanel>
       </Border>
 

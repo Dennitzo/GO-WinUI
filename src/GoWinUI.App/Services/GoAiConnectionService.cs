@@ -45,16 +45,11 @@ public sealed class GoAiConnectionService(
             throw new InvalidOperationException("Für GO AI Server ist noch kein API-Schlüssel gespeichert.");
         }
 
-        var expectedFingerprint = NormalizeFingerprint(current.GoAiCaFingerprint);
-        if (!baseAddress.IsLoopback && expectedFingerprint is null)
-        {
-            throw new InvalidOperationException("Für einen entfernten GO AI Server muss der 64-stellige SHA-256-Fingerprint der Server-CA hinterlegt sein.");
-        }
         var handler = new HttpClientHandler
         {
             UseProxy = false,
             ServerCertificateCustomValidationCallback = (_, certificate, chain, errors) =>
-                ValidateCertificate(certificate, chain, errors, expectedFingerprint),
+                ValidateCertificate(certificate, chain, errors),
         };
         var httpClient = new HttpClient(handler, disposeHandler: true)
         {
@@ -248,22 +243,13 @@ public sealed class GoAiConnectionService(
     private static bool ValidateCertificate(
         X509Certificate2? certificate,
         X509Chain? chain,
-        SslPolicyErrors errors,
-        string? expectedFingerprint)
+        SslPolicyErrors errors)
     {
         if (certificate is null || chain is null || errors != SslPolicyErrors.None)
         {
             return false;
         }
-        if (expectedFingerprint is null)
-        {
-            return true;
-        }
-        var root = chain.ChainElements.Count == 0
-            ? certificate
-            : chain.ChainElements[^1].Certificate;
-        var actual = SHA256.HashData(root.RawData);
-        return CryptographicOperations.FixedTimeEquals(actual, Convert.FromHexString(expectedFingerprint));
+        return true;
     }
 
     private static string? NormalizeFingerprint(string? value)

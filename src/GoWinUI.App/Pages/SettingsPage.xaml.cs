@@ -76,9 +76,7 @@ public sealed partial class SettingsPage : Page
         _synchronizing = true;
         try
         {
-            SelectByTag(ProviderBox, ViewModel.AiProvider.ToString());
             SelectByTag(CaptionLanguageBox, ViewModel.LiveCaptionLanguage);
-            SelectByTag(ReasoningBox, ViewModel.ReasoningEffort);
             SelectByTag(ThemeBox, ViewModel.Theme.ToString());
             SelectByTag(LanguageBox, ViewModel.Language);
             AccentColorList.SelectedItem = AccentColors.FirstOrDefault(color =>
@@ -119,16 +117,6 @@ public sealed partial class SettingsPage : Page
 
             ShowStatus(ViewModel.ConnectionStatus, InfoBarSeverity.Success);
         });
-    }
-
-    private void OnProviderChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_synchronizing
-            && (ProviderBox.SelectedItem as ComboBoxItem)?.Tag is string value
-            && Enum.TryParse<AiProviderKind>(value, out var provider))
-        {
-            ViewModel.AiProvider = provider;
-        }
     }
 
     private void OnCaptionLanguageChanged(object sender, SelectionChangedEventArgs e)
@@ -317,14 +305,6 @@ public sealed partial class SettingsPage : Page
         if (!_synchronizing && ModelBox.SelectedItem is LmModel model)
         {
             ViewModel.SelectedModel = model.Id;
-        }
-    }
-
-    private void OnReasoningChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_synchronizing && (ReasoningBox.SelectedItem as ComboBoxItem)?.Tag is string value)
-        {
-            ViewModel.ReasoningEffort = value;
         }
     }
 

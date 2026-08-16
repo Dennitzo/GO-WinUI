@@ -565,13 +565,7 @@ public sealed class AssistantCoordinator(
         Func<string, object, string?, Task> emit,
         CancellationToken cancellationToken)
     {
-        if (settings.Current.AiProvider == AiProviderKind.GoAiServer)
-        {
-            await SendGoAiChatAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        await SendDiagnosticChatAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
+        await SendGoAiChatAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task SendGoAiChatAsync(

@@ -473,10 +473,13 @@
         meta.append(" · ", status);
       }
       if (liveStatus?.status) {
+        const spinner = document.createElement("span");
+        spinner.className = "message-status-spinner";
+        spinner.setAttribute("aria-hidden", "true");
         const status = document.createElement("span");
         status.className = "message-status streaming";
         status.textContent = [liveStatus.status, liveStatus.detail].filter(Boolean).join(" · ");
-        meta.append(" · ", status);
+        meta.append(" · ", spinner, status);
       }
       body.append(meta);
     }

@@ -3,7 +3,6 @@ namespace GoWinUI.Core.Models;
 public enum AiProviderKind
 {
     GoAiServer,
-    LmStudioDiagnostic,
 }
 
 public enum PromptTriggerAction

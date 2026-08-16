@@ -175,7 +175,6 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .chat-pane { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; height: 100%; overflow: hidden; background: var(--bg); }
 .chat-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 56px; padding: 8px 20px; }
 .chat-title-row, .header-actions, .toolbar-group { display: flex; align-items: center; gap: 10px; }
-.pin-chip { min-width: 64px; border: 1px solid var(--accent); border-radius: 999px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); padding: 6px 13px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; }
 .pin-chip:disabled { opacity: .45; cursor: default; }
 .pdf-chip { border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); color: var(--text); padding: 6px 13px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; }
 .session-item.pinned { background: color-mix(in srgb, var(--accent) 15%, var(--surface-raised)); box-shadow: inset 3px 0 0 var(--accent); }
@@ -235,6 +234,9 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .message-footer-link { padding: 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 13px; line-height: 1.4; text-decoration: underline; text-underline-offset: 3px; }
 .message-footer-link:hover { color: var(--text); }
 .message-status { color: var(--muted); }
+.message-status.streaming { color: var(--accent); font-weight: 650; }
+.message-status-spinner { display: inline-block; width: 12px; height: 12px; margin: 0 5px 0 2px; vertical-align: -2px; border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: message-status-spin .9s linear infinite; }
+@keyframes message-status-spin { to { transform: rotate(360deg); } }
 .message-status.failed { color: var(--danger); }
 .stream-cursor::after { display: inline-block; width: 7px; height: 16px; margin-left: 3px; vertical-align: -2px; background: var(--accent); content: ""; animation: blink .8s steps(2) infinite; }
 .code-block { margin: 13px 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); background: color-mix(in srgb, var(--background-accent) 6%, #111); color: #eee; }

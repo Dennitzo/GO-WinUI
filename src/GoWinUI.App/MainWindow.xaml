@@ -239,6 +239,7 @@
 
     <Border
       Grid.Row="2"
+      Visibility="Collapsed"
       MinHeight="58"
       Padding="14,8"
       Background="{ThemeResource GoLayerBrush}"

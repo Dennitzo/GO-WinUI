@@ -9,7 +9,6 @@ namespace GoWinUI.App.ViewModels;
 
 public sealed partial class SettingsViewModel(
     SettingsCoordinator settings,
-    ILmStudioClient lmStudio,
     GoAiConnectionService goAi,
     IAiSecretStore secrets,
     IPromptTriggerRepository triggerRepository,
@@ -48,22 +47,22 @@ public sealed partial class SettingsViewModel(
     public bool TriggerSortDescending { get; private set; }
 
     [ObservableProperty]
-    public partial AiProviderKind AiProvider { get; set; } = AiProviderKind.GoAiServer;
-
-    [ObservableProperty]
     public partial string GoAiServerUrl { get; set; } = "https://192.168.0.67:8443";
 
     [ObservableProperty]
     public partial string GoAiApiKey { get; set; } = string.Empty;
 
     [ObservableProperty]
-    public partial string GoAiCaFingerprint { get; set; } = string.Empty;
-
-    [ObservableProperty]
     public partial string LocalToolWorkspacePath { get; set; } = string.Empty;
 
     [ObservableProperty]
     public partial string LiveCaptionLanguage { get; set; } = "auto";
+
+    [ObservableProperty]
+    public partial string? SelectedModel { get; set; }
+
+    [ObservableProperty]
+    public partial string ReasoningEffort { get; set; } = "medium";
 
     [ObservableProperty]
     public partial bool HasStoredApiKey { get; set; }
@@ -78,15 +77,6 @@ public sealed partial class SettingsViewModel(
     public partial PromptTriggerEditorItem? SelectedPromptTrigger { get; set; }
 
     public bool CanDeleteSelectedPromptTrigger => SelectedPromptTrigger is not null;
-
-    [ObservableProperty]
-    public partial string LmStudioBaseUrl { get; set; } = "http://127.0.0.1:1234/v1";
-
-    [ObservableProperty]
-    public partial string? SelectedModel { get; set; }
-
-    [ObservableProperty]
-    public partial string ReasoningEffort { get; set; } = "medium";
 
     [ObservableProperty]
     public partial AppTheme Theme { get; set; } = AppTheme.System;
@@ -109,13 +99,11 @@ public sealed partial class SettingsViewModel(
     public void Initialize()
     {
         var current = settings.Current;
-        AiProvider = current.AiProvider;
         GoAiServerUrl = current.GoAiServerUrl;
-        GoAiCaFingerprint = current.GoAiCaFingerprint ?? string.Empty;
         LocalToolWorkspacePath = current.LocalToolWorkspacePath ?? string.Empty;
         LiveCaptionLanguage = current.LiveCaptionLanguage;
-        LmStudioBaseUrl = current.LmStudioBaseUrl;
         SelectedModel = current.SelectedModel;
+        ReasoningEffort = current.ReasoningEffort;
         ReasoningEffort = current.ReasoningEffort;
         Theme = current.Theme;
         AccentColor = current.AccentColor;
@@ -140,11 +128,6 @@ public sealed partial class SettingsViewModel(
 
     public async Task SaveAsync(CancellationToken cancellationToken = default)
     {
-        if (!Uri.TryCreate(LmStudioBaseUrl.Trim(), UriKind.Absolute, out var lmStudioUri)
-            || lmStudioUri.Scheme is not ("http" or "https"))
-        {
-            throw new InvalidOperationException("Die LM-Studio-Adresse muss eine gültige HTTP- oder HTTPS-URL sein.");
-        }
         if (!Uri.TryCreate(GoAiServerUrl.Trim(), UriKind.Absolute, out var goAiUri)
             || goAiUri.Scheme is not ("http" or "https")
             || (goAiUri.Scheme == "http" && !goAiUri.IsLoopback))
@@ -163,13 +146,9 @@ public sealed partial class SettingsViewModel(
             : Path.GetFullPath(LocalToolWorkspacePath.Trim());
         await settings.UpdateAsync(current => current with
         {
-            AiProvider = AiProvider,
             GoAiServerUrl = goAiUri.ToString().TrimEnd('/'),
-            GoAiCaFingerprint = string.IsNullOrWhiteSpace(GoAiCaFingerprint) ? null : GoAiCaFingerprint,
             LocalToolWorkspacePath = workspace,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
-            LmStudioBaseUrl = lmStudioUri.ToString().TrimEnd('/'),
-            SelectedModel = string.IsNullOrWhiteSpace(SelectedModel) ? null : SelectedModel,
             ReasoningEffort = ReasoningEffort,
             Theme = Theme,
             AccentColor = AccentColor,
@@ -180,9 +159,7 @@ public sealed partial class SettingsViewModel(
         App.Current.ApplyTheme(Theme);
         App.Current.ApplyAccentColor(AccentColor);
         App.Current.ApplyBackgroundColor(BackgroundColor);
-        shell.IsAiAvailable = AiProvider == AiProviderKind.GoAiServer
-            ? (await goAi.TestAsync(cancellationToken)).IsReady
-            : await lmStudio.TestConnectionAsync(cancellationToken);
+        shell.IsAiAvailable = (await goAi.TestAsync(cancellationToken)).IsReady;
     }
 
     public async Task RefreshModelsAsync(CancellationToken cancellationToken = default)
@@ -192,45 +169,26 @@ public sealed partial class SettingsViewModel(
         {
             await SaveAsync(cancellationToken);
             IReadOnlyList<LmModel> items;
-            if (AiProvider == AiProviderKind.GoAiServer)
+            var status = await goAi.TestAsync(cancellationToken);
+            if (!status.IsReady)
             {
-                var status = await goAi.TestAsync(cancellationToken);
-                if (!status.IsReady)
-                {
-                    throw new InvalidOperationException(status.Message);
-                }
-                items = status.Capabilities?.Models
-                    .Select(model => new LmModel(
-                        model.Id,
-                        string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.Role, model.ContextTokens),
-                        model.ContextTokens))
-                    .ToArray() ?? [];
-                ConnectionStatus = status.Message;
+                throw new InvalidOperationException(status.Message);
             }
-            else
-            {
-                items = await lmStudio.ListModelsAsync(cancellationToken);
-                ConnectionStatus = items.Count == 0
-                    ? "Verbunden, aber kein Modell geladen"
-                    : string.Format(CultureInfo.CurrentCulture, "Verbunden · {0} Modell(e) geladen", items.Count);
-            }
+            items = status.Capabilities?.Models
+                .Select(model => new LmModel(model.Id, string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.Role, model.ContextTokens), model.ContextTokens))
+                .ToArray() ?? [];
+            ConnectionStatus = status.Message;
 
             Models.Clear();
             foreach (var item in items)
             {
                 Models.Add(item);
             }
-            if (AiProvider == AiProviderKind.LmStudioDiagnostic && items.Count == 1)
-            {
-                SelectedModel = items[0].Id;
-            }
             shell.IsAiAvailable = true;
         }
         catch
         {
-            ConnectionStatus = AiProvider == AiProviderKind.GoAiServer
-                ? "GO AI Server nicht erreichbar"
-                : "LM Studio nicht erreichbar";
+            ConnectionStatus = "GO AI Server nicht erreichbar";
             shell.IsAiAvailable = false;
             throw;
         }
@@ -300,9 +258,7 @@ public sealed partial class SettingsViewModel(
     public async Task ImportConnectionBundleAsync(string path, CancellationToken cancellationToken = default)
     {
         var imported = await goAi.ImportConnectionBundleAsync(path, cancellationToken);
-        AiProvider = AiProviderKind.GoAiServer;
         GoAiServerUrl = imported.ServerUrl;
-        GoAiCaFingerprint = imported.CaFingerprint;
     }
 
     public async Task DeleteApiKeyAsync(CancellationToken cancellationToken = default)
