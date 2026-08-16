@@ -55,8 +55,8 @@ public sealed class ReadinessService
         if (!modelStatus.ProviderReachable)
         {
             return NotReady(
-                "LM Studio ist über 127.0.0.1:1234 nicht erreichbar.",
-                "LM Studio starten und den lokalen API-Server auf Port 1234 aktivieren.");
+                $"LM Studio ist über {_options.LmStudioUri} nicht erreichbar.",
+                "LM Studio starten und 'Serve on Local Network' auf Port 1234 aktivieren.");
         }
 
         if (_options.RequireLmStudioAuthentication

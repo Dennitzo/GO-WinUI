@@ -79,18 +79,35 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
-# A stopped API server is a valid precondition after login. Starting it below is
-# authoritative, so a non-zero stop result is intentionally tolerated.
-& $lms.Source server stop | Out-Null
+$serverStatus = $null
+try {
+    $serverStatus = & $lms.Source server status --json --quiet | ConvertFrom-Json
+}
+catch {
+    $serverStatus = $null
+}
+$existingLanListener = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
+    Where-Object { $_.LocalAddress -in @('0.0.0.0', '::') }).Count -gt 0
+$serverAlreadyOnLan = $null -ne $serverStatus `
+    -and $serverStatus.running -eq $true `
+    -and [int]$serverStatus.port -eq $Port `
+    -and $existingLanListener
+
+if (-not $serverAlreadyOnLan) {
+    # A one-time restart is required when an older GO configuration still binds
+    # LM Studio to loopback. Once the LAN listener is active, later GO starts do
+    # not interrupt applications that already use LM Studio.
+    & $lms.Source server stop | Out-Null
+}
 
 $httpConfig = Get-Content -LiteralPath $httpConfigPath -Raw -Encoding utf8 | ConvertFrom-Json
-Set-JsonProperty $httpConfig 'autoStartOnLaunch' $false
+Set-JsonProperty $httpConfig 'autoStartOnLaunch' $true
 Set-JsonProperty $httpConfig 'port' $Port
 Set-JsonProperty $httpConfig 'cors' $false
 Set-JsonProperty $httpConfig 'logSensitiveData' $false
 Set-JsonProperty $httpConfig 'logIncomingTokens' $false
 Set-JsonProperty $httpConfig 'verbose' $false
-Set-JsonProperty $httpConfig 'networkInterface' '127.0.0.1'
+Set-JsonProperty $httpConfig 'networkInterface' '0.0.0.0'
 Set-JsonProperty $httpConfig 'justInTimeModelLoading' $true
 Set-JsonProperty $httpConfig 'fileLoggingMode' 'succinct'
 Write-JsonUtf8NoBom -Path $httpConfigPath -Value $httpConfig -Depth 20
@@ -110,20 +127,22 @@ Set-JsonProperty $settings.developer 'jitModelTTL' ([PSCustomObject]@{
 })
 Write-JsonUtf8NoBom -Path $settingsPath -Value $settings -Depth 30
 
-& $lms.Source server start --port $Port --bind 127.0.0.1 | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "LM Studio server start failed with exit code $LASTEXITCODE."
+if (-not $serverAlreadyOnLan) {
+    & $lms.Source server start --port $Port --bind 0.0.0.0 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "LM Studio server start failed with exit code $LASTEXITCODE."
+    }
 }
 
 # The CLI owns bind/CORS/start state and may rewrite the JSON file while starting.
 # Reapply the privacy-only values after startup; the live listener is verified below.
 $httpConfig = Get-Content -LiteralPath $httpConfigPath -Raw -Encoding utf8 | ConvertFrom-Json
-Set-JsonProperty $httpConfig 'autoStartOnLaunch' $false
+Set-JsonProperty $httpConfig 'autoStartOnLaunch' $true
 Set-JsonProperty $httpConfig 'cors' $false
 Set-JsonProperty $httpConfig 'logSensitiveData' $false
 Set-JsonProperty $httpConfig 'logIncomingTokens' $false
 Set-JsonProperty $httpConfig 'verbose' $false
-Set-JsonProperty $httpConfig 'networkInterface' '127.0.0.1'
+Set-JsonProperty $httpConfig 'networkInterface' '0.0.0.0'
 Write-JsonUtf8NoBom -Path $httpConfigPath -Value $httpConfig -Depth 20
 
 $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -146,9 +165,9 @@ if ($null -eq $models) {
 & (Join-Path $PSScriptRoot 'refresh-lmstudio-model-catalog.ps1')
 
 $listeners = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop
-$unsafeListeners = @($listeners | Where-Object { $_.LocalAddress -notin @('127.0.0.1', '::1') })
-if ($unsafeListeners.Count -ne 0) {
-    throw "LM Studio still has a non-loopback listener on port $Port."
+$lanListeners = @($listeners | Where-Object { $_.LocalAddress -in @('0.0.0.0', '::') })
+if ($lanListeners.Count -eq 0) {
+    throw "LM Studio does not expose port $Port to the local network."
 }
 
 if (-not $SkipEstimates) {
@@ -177,7 +196,7 @@ if (-not $authenticationEnabled) {
     Write-Warning $message
 }
 
-Write-Host "LM Studio is hardened on 127.0.0.1:$Port; JIT TTL is $TtlSeconds seconds. Backup: $backupRoot" -ForegroundColor Green
+Write-Host "LM Studio serves the local network on port $Port with authentication; JIT TTL is $TtlSeconds seconds. Backup: $backupRoot" -ForegroundColor Green
 }
 finally {
     if ($null -ne $previousElectronRunAsNode) {

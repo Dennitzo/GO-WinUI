@@ -8,7 +8,8 @@ namespace GoAi.Server.App.Services;
 /// <summary>
 /// Owns the user-session services that belong to the GO AI Server desktop app.
 /// The gateway itself runs in-process; LM Studio and the Docker Compose project
-/// are started and stopped together with the window lifetime.
+/// are started with the window lifetime. Docker workers stop with GO AI Server,
+/// while LM Studio deliberately remains available to other LAN applications.
 /// </summary>
 internal sealed class ManagedServiceController : IDisposable
 {
@@ -85,10 +86,10 @@ internal sealed class ManagedServiceController : IDisposable
                 return;
             }
 
-            _runtime.SetGatewayState("Wird beendet", "AI-Worker und LM Studio werden gestoppt.");
+            _runtime.SetGatewayState("Wird beendet", "AI-Worker werden gestoppt. LM Studio bleibt aktiv.");
             await TryStopDockerServicesAsync(cancellationToken).ConfigureAwait(false);
-            await TryStopLmStudioAsync(cancellationToken).ConfigureAwait(false);
-            _runtime.SetGatewayState("Beendet", "Alle von der GO-AI-Server-App verwalteten Dienste wurden beendet.");
+            _runtime.WriteLog("Information", "services.lmstudio.preserved", "LM Studio bleibt für andere Anwendungen im lokalen Netzwerk aktiv.");
+            _runtime.SetGatewayState("Beendet", "GO-AI-Dienste wurden beendet. LM Studio bleibt aktiv.");
         }
         finally
         {
@@ -179,24 +180,6 @@ internal sealed class ManagedServiceController : IDisposable
         }
     }
 
-    private async Task TryStopLmStudioAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            var result = await RunProcessAsync(
-                ResolveLmStudioExecutable(),
-                ["server", "stop"],
-                TimeSpan.FromSeconds(45),
-                cancellationToken).ConfigureAwait(false);
-            EnsureSucceeded(result, "LM Studio");
-            _runtime.WriteLog("Information", "services.lmstudio.stopped", "Der LM-Studio-API-Server wurde gestoppt.");
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
-        {
-            _runtime.WriteLog("Error", "services.lmstudio.stop_failed", $"LM Studio konnte nicht vollständig gestoppt werden ({exception.GetType().Name}).");
-        }
-    }
-
     private DockerDeployment ResolveDockerDeployment()
     {
         var compose = ResolveBundledFile(Path.Combine("deploy", "go-ai", "compose.yaml"));
@@ -270,16 +253,6 @@ internal sealed class ManagedServiceController : IDisposable
             "bin",
             "docker.exe");
         return File.Exists(candidate) ? candidate : "docker";
-    }
-
-    private static string ResolveLmStudioExecutable()
-    {
-        var candidate = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".lmstudio",
-            "bin",
-            "lms.exe");
-        return File.Exists(candidate) ? candidate : "lms";
     }
 
     private static async Task<ProcessResult> RunProcessAsync(

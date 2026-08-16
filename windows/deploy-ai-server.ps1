@@ -157,6 +157,17 @@ else {
     $firewall | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet | Out-Null
 }
 
+$lmStudioFirewallName = 'LM Studio API 1234 (Private LAN)'
+$lmStudioFirewall = Get-NetFirewallRule -DisplayName $lmStudioFirewallName -ErrorAction SilentlyContinue
+if ($null -eq $lmStudioFirewall) {
+    New-NetFirewallRule -DisplayName $lmStudioFirewallName -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1234 -Profile Private -RemoteAddress LocalSubnet | Out-Null
+}
+else {
+    Set-NetFirewallRule -DisplayName $lmStudioFirewallName -Enabled True -Direction Inbound -Action Allow -Profile Private | Out-Null
+    $lmStudioFirewall | Get-NetFirewallPortFilter | Set-NetFirewallPortFilter -Protocol TCP -LocalPort 1234 | Out-Null
+    $lmStudioFirewall | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -RemoteAddress LocalSubnet | Out-Null
+}
+
 $composePath = Join-Path $InstallRoot 'deploy\go-ai\compose.yaml'
 $composeEnvironment = Join-Path $DataRoot 'Config\compose.env'
 $caddyFile = Join-Path $InstallRoot 'deploy\go-ai\caddy\Caddyfile'
@@ -217,7 +228,7 @@ foreach ($shortcutPath in $shortcutPaths) {
 
 $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue
 $unexpected = @($listeners | Where-Object {
-    $_.LocalPort -in @(1234, 7080, 7081, 7082, 7083, 7084, 7085) -and $_.LocalAddress -notin @('127.0.0.1', '::1')
+    $_.LocalPort -in @(7080, 7081, 7082, 7083, 7084, 7085) -and $_.LocalAddress -notin @('127.0.0.1', '::1')
 })
 if ($unexpected.Count -ne 0) {
     throw 'A GO AI internal port is bound beyond loopback.'

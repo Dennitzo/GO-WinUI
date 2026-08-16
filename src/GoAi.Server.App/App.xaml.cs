@@ -192,22 +192,32 @@ public partial class App : Application
             : 7080;
     }
 
-    private static GoAi.Server.Core.Configuration.GoAiServerOptions CreateServerOptions() => new()
+    private static GoAi.Server.Core.Configuration.GoAiServerOptions CreateServerOptions()
     {
-        DataDirectory = ResolveDataDirectory(),
-        ExpectedLanIp = Environment.GetEnvironmentVariable("GO_AI_EXPECTED_LAN_IP") ?? "192.168.0.67",
-        GatewayPort = ReadGatewayPort(),
-        PublicUrl = Environment.GetEnvironmentVariable("GO_AI_PUBLIC_URL") ?? "https://192.168.0.67:8443",
-        YouTubeApiKey = Environment.GetEnvironmentVariable("GO_AI_YOUTUBE_API_KEY"),
-        ProviderDataDirectory = Environment.GetEnvironmentVariable("GO_AI_PROVIDER_DATA_DIRECTORY"),
-        LmStudioTokenFile = Environment.GetEnvironmentVariable("GO_AI_LM_STUDIO_TOKEN_FILE"),
-        WorkerKeyDirectory = Environment.GetEnvironmentVariable("GO_AI_WORKER_KEY_DIRECTORY"),
-        WorkerDataDirectory = Environment.GetEnvironmentVariable("GO_AI_WORKER_DATA_DIRECTORY"),
-        RequireLmStudioAuthentication = !string.Equals(
-            Environment.GetEnvironmentVariable("GO_AI_ALLOW_UNAUTHENTICATED_LM_STUDIO"),
-            "1",
-            StringComparison.Ordinal),
-    };
+        var expectedLanIp = Environment.GetEnvironmentVariable("GO_AI_EXPECTED_LAN_IP") ?? "192.168.0.67";
+        var configuredLmStudioUrl = Environment.GetEnvironmentVariable("GO_AI_LM_STUDIO_URL");
+        var lmStudioUri = Uri.TryCreate(configuredLmStudioUrl, UriKind.Absolute, out var configuredUri)
+            && configuredUri.Scheme is "http" or "https"
+            ? configuredUri
+            : new Uri($"http://{expectedLanIp}:1234", UriKind.Absolute);
+        return new()
+        {
+            DataDirectory = ResolveDataDirectory(),
+            ExpectedLanIp = expectedLanIp,
+            GatewayPort = ReadGatewayPort(),
+            PublicUrl = Environment.GetEnvironmentVariable("GO_AI_PUBLIC_URL") ?? "https://192.168.0.67:8443",
+            LmStudioUri = lmStudioUri,
+            YouTubeApiKey = Environment.GetEnvironmentVariable("GO_AI_YOUTUBE_API_KEY"),
+            ProviderDataDirectory = Environment.GetEnvironmentVariable("GO_AI_PROVIDER_DATA_DIRECTORY"),
+            LmStudioTokenFile = Environment.GetEnvironmentVariable("GO_AI_LM_STUDIO_TOKEN_FILE"),
+            WorkerKeyDirectory = Environment.GetEnvironmentVariable("GO_AI_WORKER_KEY_DIRECTORY"),
+            WorkerDataDirectory = Environment.GetEnvironmentVariable("GO_AI_WORKER_DATA_DIRECTORY"),
+            RequireLmStudioAuthentication = !string.Equals(
+                Environment.GetEnvironmentVariable("GO_AI_ALLOW_UNAUTHENTICATED_LM_STUDIO"),
+                "1",
+                StringComparison.Ordinal),
+        };
+    }
 
     private static bool IsDashboardOnly()
     {
@@ -228,6 +238,7 @@ public partial class App : Application
         destination.ExpectedLanIp = source.ExpectedLanIp;
         destination.GatewayPort = source.GatewayPort;
         destination.PublicUrl = source.PublicUrl;
+        destination.LmStudioUri = source.LmStudioUri;
         destination.YouTubeApiKey = source.YouTubeApiKey;
         destination.ProviderDataDirectory = source.ProviderDataDirectory;
         destination.LmStudioTokenFile = source.LmStudioTokenFile;

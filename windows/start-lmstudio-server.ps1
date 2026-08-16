@@ -63,7 +63,7 @@ try {
         throw 'LM Studio returned no model list after startup.'
     }
 
-    Write-LmStudioStartupLog 'LM Studio daemon and authenticated loopback server are ready.'
+    Write-LmStudioStartupLog 'LM Studio daemon and authenticated local-network server are ready.'
 }
 catch {
     Write-LmStudioStartupLog ("LM Studio startup failed ({0}): {1}" -f $_.Exception.GetType().Name, $_.Exception.Message)

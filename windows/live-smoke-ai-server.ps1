@@ -240,12 +240,17 @@ try {
         $speechStopped = $false
     }
 
-    $internalPorts = @(1234, 7080, 7081, 7082, 7083, 7084, 7085)
+    $internalPorts = @(7080, 7081, 7082, 7083, 7084, 7085)
     $unsafeListeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {
         $_.LocalPort -in $internalPorts -and $_.LocalAddress -notin @('127.0.0.1', '::1')
     })
     if ($unsafeListeners.Count -ne 0) {
         throw 'At least one GO AI internal service is reachable beyond loopback.'
+    }
+    $lmStudioLanListener = @(Get-NetTCPConnection -State Listen -LocalPort 1234 -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -in @('0.0.0.0', '::') })
+    if ($lmStudioLanListener.Count -eq 0) {
+        throw 'LM Studio is not serving the local network on port 1234.'
     }
 }
 finally {

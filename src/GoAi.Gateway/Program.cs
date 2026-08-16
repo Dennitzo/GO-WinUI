@@ -4,12 +4,14 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
+var expectedLanIp = Environment.GetEnvironmentVariable("GO_AI_EXPECTED_LAN_IP") ?? "192.168.0.67";
 var options = new GoAiServerOptions
 {
     DataDirectory = ResolveDataDirectory(),
-    ExpectedLanIp = Environment.GetEnvironmentVariable("GO_AI_EXPECTED_LAN_IP") ?? "192.168.0.67",
+    ExpectedLanIp = expectedLanIp,
     GatewayPort = ReadGatewayPort(),
     PublicUrl = Environment.GetEnvironmentVariable("GO_AI_PUBLIC_URL") ?? "https://192.168.0.67:8443",
+    LmStudioUri = ResolveLmStudioUri(expectedLanIp),
     YouTubeApiKey = Environment.GetEnvironmentVariable("GO_AI_YOUTUBE_API_KEY"),
     ProviderDataDirectory = Environment.GetEnvironmentVariable("GO_AI_PROVIDER_DATA_DIRECTORY"),
     LmStudioTokenFile = Environment.GetEnvironmentVariable("GO_AI_LM_STUDIO_TOKEN_FILE"),
@@ -63,4 +65,13 @@ static int ReadGatewayPort()
         && port is >= 1024 and <= 65535
         ? port
         : 7080;
+}
+
+static Uri ResolveLmStudioUri(string expectedLanIp)
+{
+    var configured = Environment.GetEnvironmentVariable("GO_AI_LM_STUDIO_URL");
+    return Uri.TryCreate(configured, UriKind.Absolute, out var uri)
+        && uri.Scheme is "http" or "https"
+        ? uri
+        : new Uri($"http://{expectedLanIp}:1234", UriKind.Absolute);
 }
