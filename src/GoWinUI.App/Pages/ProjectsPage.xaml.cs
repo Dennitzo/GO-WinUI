@@ -3,6 +3,7 @@ using GoWinUI.App.ViewModels;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
+using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -21,6 +22,7 @@ public sealed partial class ProjectsPage : Page
     private readonly ILogger<ProjectsPage> _logger;
     private readonly IProjectAssetWorkingCopyService _workingCopies;
     private readonly RecentActivityService _recentActivity;
+    private readonly HashSet<TextBox> _committingAssetTitleEditors = [];
     private Task _archiveFilterUpdate = Task.CompletedTask;
     private bool _initialized;
     private bool _isWorkingCopySubscribed;
@@ -453,6 +455,21 @@ public sealed partial class ProjectsPage : Page
         }
     }
 
+    private void OnAssetTitleDisplayClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: ProjectAsset asset, Parent: Grid host } displayButton
+            || FindAssetTitleEditor(host) is not { } editor)
+        {
+            return;
+        }
+
+        editor.Text = asset.Title ?? string.Empty;
+        displayButton.Visibility = Visibility.Collapsed;
+        editor.Visibility = Visibility.Visible;
+        _ = editor.Focus(FocusState.Programmatic);
+        editor.SelectAll();
+    }
+
     private async void OnAssetTitleKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key != VirtualKey.Enter || sender is not TextBox textBox)
@@ -461,36 +478,97 @@ public sealed partial class ProjectsPage : Page
         }
 
         e.Handled = true;
-        MoveFocusOutsideTextBoxes(FocusState.Programmatic);
-        await SaveAssetTitleAsync(textBox);
+        await CommitAssetTitleEditAsync(textBox, moveFocus: true);
     }
 
     private async void OnAssetTitleLostFocus(object sender, RoutedEventArgs e)
     {
-        if (sender is TextBox textBox)
+        if (sender is TextBox { Visibility: Visibility.Visible } textBox)
         {
-            await SaveAssetTitleAsync(textBox);
+            await CommitAssetTitleEditAsync(textBox, moveFocus: false);
         }
     }
 
-    private async Task SaveAssetTitleAsync(TextBox textBox)
+    private async Task CommitAssetTitleEditAsync(TextBox textBox, bool moveFocus)
     {
-        if (textBox.DataContext is not ProjectAsset asset)
+        if (!_committingAssetTitleEditors.Add(textBox))
         {
             return;
         }
 
-        var title = string.IsNullOrWhiteSpace(textBox.Text) ? null : textBox.Text.Trim();
-        if (string.Equals(asset.Title, title, StringComparison.Ordinal)
-            || (textBox.Tag is string savedTitle && string.Equals(savedTitle, title, StringComparison.Ordinal))
-            || (textBox.Tag == DBNull.Value && title is null))
+        try
         {
-            return;
-        }
+            if (textBox.DataContext is not ProjectAsset asset)
+            {
+                return;
+            }
 
-        textBox.Tag = (object?)title ?? DBNull.Value;
-        await RunUiActionAsync(() => ViewModel.SaveAssetTitleAsync(asset, title));
+            var title = string.IsNullOrWhiteSpace(textBox.Text) ? null : textBox.Text.Trim();
+            if (moveFocus)
+            {
+                MoveFocusOutsideTextBoxes(FocusState.Programmatic);
+            }
+
+            if (!string.Equals(asset.Title, title, StringComparison.Ordinal)
+                && !await RunUiActionAsync(() => ViewModel.SaveAssetTitleAsync(asset, title)))
+            {
+                return;
+            }
+
+            if (textBox.Parent is Grid host
+                && FindAssetTitleDisplayButton(host) is { } displayButton)
+            {
+                if (displayButton.Content is TextBlock displayText)
+                {
+                    UpdateAssetTitleDisplay(displayText, title);
+                }
+
+                textBox.Text = title ?? string.Empty;
+                textBox.Visibility = Visibility.Collapsed;
+                displayButton.Visibility = Visibility.Visible;
+            }
+        }
+        finally
+        {
+            _committingAssetTitleEditors.Remove(textBox);
+        }
     }
+
+    private void OnAssetTitleDisplayLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is TextBlock { DataContext: ProjectAsset asset } text)
+        {
+            UpdateAssetTitleDisplay(text, asset.Title);
+        }
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Performance",
+        "CA1822:Mark members as static",
+        Justification = "WinUI XAML event handlers must be instance methods.")]
+    private void OnAssetTitleDisplayDataContextChanged(
+        FrameworkElement sender,
+        DataContextChangedEventArgs args)
+    {
+        if (sender is TextBlock text && args.NewValue is ProjectAsset asset)
+        {
+            UpdateAssetTitleDisplay(text, asset.Title);
+        }
+    }
+
+    private static void UpdateAssetTitleDisplay(TextBlock text, string? title)
+    {
+        var hasTitle = !string.IsNullOrWhiteSpace(title);
+        text.Text = hasTitle ? title!.Trim() : "Überschrift eingeben";
+        text.FontWeight = hasTitle ? FontWeights.SemiBold : FontWeights.Normal;
+        text.Opacity = hasTitle ? 1 : 0.55;
+    }
+
+    private static TextBox? FindAssetTitleEditor(Grid host) =>
+        host.Children.OfType<TextBox>().FirstOrDefault(static child => child.Name == "AssetTitleEditor");
+
+    private static Button? FindAssetTitleDisplayButton(Grid host) =>
+        host.Children.OfType<Button>().FirstOrDefault(static child => child.Name == "AssetTitleDisplayButton");
 
     private async void OnAssetThumbnailLoaded(object sender, RoutedEventArgs e)
     {
@@ -537,8 +615,7 @@ public sealed partial class ProjectsPage : Page
     {
         if (sender is FontIcon { DataContext: ProjectAsset asset } icon)
         {
-            icon.Glyph = AssetIconGlyph(asset);
-            ToolTipService.SetToolTip(icon, GetAssetFormatLabel(asset));
+            UpdateAssetFormatIcon(icon, asset);
         }
     }
 
@@ -546,7 +623,7 @@ public sealed partial class ProjectsPage : Page
     {
         if (sender is TextBlock { DataContext: ProjectAsset asset } badge)
         {
-            badge.Text = GetAssetFormatLabel(asset);
+            UpdateAssetFormatBadge(badge, asset);
         }
     }
 
@@ -554,25 +631,63 @@ public sealed partial class ProjectsPage : Page
     {
         if (sender is TextBlock { DataContext: ProjectAsset asset } text)
         {
-            text.Text = FriendlyAssetType(asset);
+            UpdateAssetTypeText(text, asset);
         }
     }
 
-    private void OnAssetSizeTextLoaded(object sender, RoutedEventArgs e)
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Performance",
+        "CA1822:Mark members as static",
+        Justification = "WinUI XAML event handlers must be instance methods.")]
+    private void OnAssetFormatIconDataContextChanged(
+        FrameworkElement sender,
+        DataContextChangedEventArgs args)
     {
-        if (sender is TextBlock { DataContext: ProjectAsset asset } text)
+        if (sender is FontIcon icon && args.NewValue is ProjectAsset asset)
         {
-            text.Text = FormatBytes(asset.Length);
+            UpdateAssetFormatIcon(icon, asset);
         }
     }
 
-    private void OnAssetModifiedTextLoaded(object sender, RoutedEventArgs e)
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Performance",
+        "CA1822:Mark members as static",
+        Justification = "WinUI XAML event handlers must be instance methods.")]
+    private void OnAssetFormatBadgeDataContextChanged(
+        FrameworkElement sender,
+        DataContextChangedEventArgs args)
     {
-        if (sender is TextBlock { DataContext: ProjectAsset asset } text)
+        if (sender is TextBlock badge && args.NewValue is ProjectAsset asset)
         {
-            text.Text = $"Geändert {asset.UpdatedAt.ToLocalTime():dd.MM.yyyy, HH:mm}";
+            UpdateAssetFormatBadge(badge, asset);
         }
     }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Performance",
+        "CA1822:Mark members as static",
+        Justification = "WinUI XAML event handlers must be instance methods.")]
+    private void OnAssetTypeTextDataContextChanged(
+        FrameworkElement sender,
+        DataContextChangedEventArgs args)
+    {
+        if (sender is TextBlock text && args.NewValue is ProjectAsset asset)
+        {
+            UpdateAssetTypeText(text, asset);
+        }
+    }
+
+    private static void UpdateAssetFormatIcon(FontIcon icon, ProjectAsset asset)
+    {
+        icon.Glyph = AssetIconGlyph(asset);
+        ToolTipService.SetToolTip(icon, GetAssetFormatLabel(asset));
+    }
+
+    private static void UpdateAssetFormatBadge(TextBlock badge, ProjectAsset asset) =>
+        badge.Text = GetAssetFormatLabel(asset);
+
+    private static void UpdateAssetTypeText(TextBlock text, ProjectAsset asset) =>
+        text.Text = FriendlyAssetType(asset);
 
     private void UpdateProjectOverviewState()
     {
@@ -623,18 +738,20 @@ public sealed partial class ProjectsPage : Page
         ProjectDetailsPane.ChangeView(null, 0, null, disableAnimation: true);
     }
 
-    private async Task RunUiActionAsync(Func<Task> action)
+    private async Task<bool> RunUiActionAsync(Func<Task> action)
     {
         try
         {
             ErrorBar.IsOpen = false;
             await action();
+            return true;
         }
         catch (Exception exception)
         {
             AppLog.ProjectActionFailed(_logger, exception);
             ErrorBar.Message = exception.Message;
             ErrorBar.IsOpen = true;
+            return false;
         }
     }
 
@@ -702,20 +819,6 @@ public sealed partial class ProjectsPage : Page
             AssetCategory.Image => $"{format}-Bild",
             _ => $"{format}-Datei",
         };
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        string[] units = ["B", "KB", "MB", "GB", "TB"];
-        var value = Math.Max(0, (double)bytes);
-        var unit = 0;
-        while (value >= 1024 && unit < units.Length - 1)
-        {
-            value /= 1024;
-            unit++;
-        }
-
-        return $"{value:0.#} {units[unit]}";
     }
 
     private static void InitializePicker(object picker)

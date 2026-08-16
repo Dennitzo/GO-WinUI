@@ -65,6 +65,21 @@ public sealed class ProjectAssetWorkingCopyTests
     }
 
     [Fact]
+    public async Task MaterializedWorkingCopyUsesTheExactOriginalFileName()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var repository = environment.Get<IProjectRepository>();
+        var blobs = environment.Get<IBinaryObjectStore>();
+        var workingCopies = environment.Get<IProjectAssetWorkingCopyService>();
+        var asset = await CreateAssetAsync(repository, blobs, [1, 2, 3], "Zeichnung1.DWG");
+
+        var workingCopy = await workingCopies.MaterializeAsync(asset);
+
+        Assert.Equal(asset.FileName, Path.GetFileName(workingCopy.Path));
+        Assert.Equal(new byte[] { 1, 2, 3 }, await File.ReadAllBytesAsync(workingCopy.Path));
+    }
+
+    [Fact]
     public async Task WatchedWorkingCopyAutomaticallySynchronizesChangesBackToTheDatabase()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -95,6 +110,40 @@ public sealed class ProjectAssetWorkingCopyTests
         Assert.Equal(new byte[] { 8, 7, 6, 5 }, buffer.ToArray());
     }
 
+    [Fact]
+    public async Task WatchedWorkingCopySynchronizesAfterAnExtendedExclusiveFileLock()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var repository = environment.Get<IProjectRepository>();
+        var blobs = environment.Get<IBinaryObjectStore>();
+        var workingCopies = environment.Get<IProjectAssetWorkingCopyService>();
+        var asset = await CreateAssetAsync(repository, blobs, [1, 2, 3]);
+        var synchronized = new TaskCompletionSource<ProjectAsset>(TaskCreationOptions.RunContinuationsAsynchronously);
+        workingCopies.AssetSynchronized += (_, args) =>
+        {
+            if (args.Asset.Id == asset.Id)
+            {
+                synchronized.TrySetResult(args.Asset);
+            }
+        };
+
+        var workingCopy = await workingCopies.MaterializeAndWatchAsync(asset);
+        await File.WriteAllBytesAsync(workingCopy.Path, [9, 8, 7, 6, 5]);
+        await using (var locked = new FileStream(
+            workingCopy.Path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.None))
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5));
+        }
+
+        var updated = await synchronized.Task.WaitAsync(TimeSpan.FromSeconds(12));
+        Assert.Equal(asset.Revision + 1, updated.Revision);
+        Assert.Equal(5, updated.Length);
+        Assert.True(updated.UpdatedAt > asset.UpdatedAt);
+    }
+
     [Theory]
     [InlineData("  plan final.pdf  ", "plan final.pdf")]
     [InlineData("Foto_01.png", "Foto_01.png")]
@@ -112,7 +161,8 @@ public sealed class ProjectAssetWorkingCopyTests
     private static async Task<ProjectAsset> CreateAssetAsync(
         IProjectRepository repository,
         IBinaryObjectStore blobs,
-        byte[] content)
+        byte[] content,
+        string fileName = "modell.bin")
     {
         var now = DateTimeOffset.UtcNow;
         var project = await repository.CreateAsync(new(
@@ -130,7 +180,7 @@ public sealed class ProjectAssetWorkingCopyTests
             Guid.Empty,
             project.Id,
             blob.Id,
-            "modell.bin",
+            fileName,
             "application/octet-stream",
             AssetCategory.Other,
             null,

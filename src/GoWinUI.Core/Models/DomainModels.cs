@@ -187,7 +187,8 @@ public sealed record AppSettings
     public const string DefaultBackgroundColor = "#6B6872";
     public const int MaximumRecentActivityTextLength = 180;
 
-    public int Version { get; init; } = 5;
+    public int Version { get; init; } = 6;
+    public bool IsAiConnectionEnabled { get; init; }
     public AiProviderKind AiProvider { get; init; } = AiProviderKind.GoAiServer;
     public string GoAiServerUrl { get; init; } = "https://192.168.0.67:8443";
     public string GoAiProtocolVersion { get; init; } = "1.0";

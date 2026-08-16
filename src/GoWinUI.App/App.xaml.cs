@@ -48,6 +48,7 @@ public partial class App : Application
     private AppTheme _appliedTheme = AppTheme.System;
     private CancellationTokenSource? _aiAvailabilityCancellation;
     private Task? _aiAvailabilityMonitor;
+    private readonly SemaphoreSlim _aiAvailabilityLifecycle = new(1, 1);
     private int _shutdownStarted;
 
     public App()
@@ -185,6 +186,7 @@ public partial class App : Application
 
             var shell = GetService<ShellViewModel>();
             shell.DatabaseStatus = "Datenbank bereit";
+            shell.IsAiConnectionEnabled = settings.Current.IsAiConnectionEnabled;
             GetService<RecentActivityService>().Restore();
             GetService<ProjectAssetActivityService>().Start();
             _window = GetService<MainWindow>();
@@ -200,13 +202,52 @@ public partial class App : Application
             _window.Closed += OnWindowClosed;
             _window.BeforeCloseAsync = PrepareShutdownAsync;
             _window.Activate();
-            _aiAvailabilityCancellation = new CancellationTokenSource();
-            _aiAvailabilityMonitor = MonitorLocalAiAvailabilityAsync(_aiAvailabilityCancellation.Token);
+            await ApplyAiConnectionModeAsync(settings.Current.IsAiConnectionEnabled);
         }
         catch (Exception exception)
         {
             System.Diagnostics.Debug.WriteLine($"GO startup failed: {exception}");
             throw;
+        }
+    }
+
+    public async Task ApplyAiConnectionModeAsync(bool enabled)
+    {
+        await _aiAvailabilityLifecycle.WaitAsync();
+        try
+        {
+            var previousCancellation = Interlocked.Exchange(ref _aiAvailabilityCancellation, null);
+            var previousMonitor = Interlocked.Exchange(ref _aiAvailabilityMonitor, null);
+            previousCancellation?.Cancel();
+            GetService<GoAiConnectionService>().ApplyConnectionMode(enabled);
+            if (previousMonitor is not null)
+            {
+                try
+                {
+                    await previousMonitor;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Changing connection mode intentionally stops an active availability probe.
+                }
+            }
+            previousCancellation?.Dispose();
+
+            var shell = GetService<ShellViewModel>();
+            shell.IsAiConnectionEnabled = enabled;
+            SetLocalAiStatus(false, null, null, null);
+            if (!enabled || Volatile.Read(ref _shutdownStarted) != 0)
+            {
+                return;
+            }
+
+            var cancellation = new CancellationTokenSource();
+            _aiAvailabilityCancellation = cancellation;
+            _aiAvailabilityMonitor = MonitorLocalAiAvailabilityAsync(cancellation.Token);
+        }
+        finally
+        {
+            _aiAvailabilityLifecycle.Release();
         }
     }
 
@@ -235,14 +276,20 @@ public partial class App : Application
 
     private async Task<bool> RefreshLocalAiAvailabilityAsync(CancellationToken cancellationToken)
     {
+        var currentSettings = GetService<SettingsCoordinator>().Current;
+        if (!currentSettings.IsAiConnectionEnabled)
+        {
+            SetLocalAiStatus(false, null, null, null);
+            return false;
+        }
+
         var connected = false;
         GpuStatusSnapshot? gpuStatus = null;
         ModelStatusSnapshot? modelStatus = null;
         IReadOnlyList<ServiceStatusSnapshot>? serviceStatus = null;
         try
         {
-            var settings = GetService<SettingsCoordinator>().Current;
-            if (settings.AiProvider == AiProviderKind.GoAiServer)
+            if (currentSettings.AiProvider == AiProviderKind.GoAiServer)
             {
                 using var client = await GetService<GoAiConnectionService>()
                     .CreateClientAsync(cancellationToken)
@@ -257,7 +304,7 @@ public partial class App : Application
                 modelStatus = await modelTask.ConfigureAwait(false);
                 serviceStatus = await serviceTask.ConfigureAwait(false);
                 connected = string.Equals(health.Status, "ready", StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(health.ProtocolVersion, settings.GoAiProtocolVersion, StringComparison.Ordinal);
+                    && string.Equals(health.ProtocolVersion, currentSettings.GoAiProtocolVersion, StringComparison.Ordinal);
             }
             else
             {
@@ -267,6 +314,10 @@ public partial class App : Application
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (GoAiConnectionDisabledException)
         {
             return false;
         }
@@ -295,17 +346,13 @@ public partial class App : Application
         var dispatcher = _window?.DispatcherQueue;
         if (dispatcher is null || dispatcher.HasThreadAccess)
         {
-            shell.IsAiAvailable = connected;
-            shell.SetAiServiceAvailability(connected, modelStatus, serviceStatus);
-            shell.SetActiveAiRuns(gpuStatus);
+            shell.ApplyAiAvailabilitySnapshot(connected, gpuStatus, modelStatus, serviceStatus);
             return;
         }
 
         _ = dispatcher.TryEnqueue(() =>
         {
-            shell.IsAiAvailable = connected;
-            shell.SetAiServiceAvailability(connected, modelStatus, serviceStatus);
-            shell.SetActiveAiRuns(gpuStatus);
+            shell.ApplyAiAvailabilitySnapshot(connected, gpuStatus, modelStatus, serviceStatus);
         });
     }
 

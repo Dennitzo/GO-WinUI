@@ -6,6 +6,53 @@ namespace GoWinUI.Tests;
 public sealed class ShellViewModelTests
 {
     [Fact]
+    public void ConnectionModeChipDistinguishesOfflineReachableAndUnavailableModes()
+    {
+        var viewModel = new ShellViewModel();
+
+        Assert.False(viewModel.IsAiConnectionEnabled);
+        Assert.Equal("Offline", viewModel.AiConnectionModeText);
+
+        viewModel.IsAiConnectionEnabled = true;
+
+        Assert.Equal("Nicht erreichbar", viewModel.AiConnectionModeText);
+
+        viewModel.IsAiAvailable = true;
+
+        Assert.Equal("Online", viewModel.AiConnectionModeText);
+
+        viewModel.IsAiAvailable = false;
+
+        Assert.Equal("Nicht erreichbar", viewModel.AiConnectionModeText);
+
+        viewModel.IsAiConnectionEnabled = false;
+
+        Assert.Equal("Offline", viewModel.AiConnectionModeText);
+    }
+
+    [Fact]
+    public void ActiveAiRunKeepsAConfirmedOnlineStateAcrossATransientFailedProbe()
+    {
+        var viewModel = new ShellViewModel
+        {
+            IsAiConnectionEnabled = true,
+        };
+        viewModel.ApplyAiAvailabilitySnapshot(true, null, ReadyModels(), ReadyServices());
+        viewModel.IsAiRunning = true;
+
+        viewModel.ApplyAiAvailabilitySnapshot(false, null, null, null);
+
+        Assert.True(viewModel.IsAiAvailable);
+        Assert.Equal("Online", viewModel.AiConnectionModeText);
+
+        viewModel.IsAiRunning = false;
+        viewModel.ApplyAiAvailabilitySnapshot(false, null, null, null);
+
+        Assert.False(viewModel.IsAiAvailable);
+        Assert.Equal("Nicht erreichbar", viewModel.AiConnectionModeText);
+    }
+
+    [Fact]
     public void FooterAlwaysContainsEveryConfiguredServiceIncludingCoding()
     {
         var viewModel = new ShellViewModel();

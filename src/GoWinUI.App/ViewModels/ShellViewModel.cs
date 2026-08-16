@@ -41,7 +41,18 @@ public sealed partial class ShellViewModel : ObservableObject
     public partial bool IsAiRunning { get; set; }
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AiConnectionModeText))]
     public partial bool IsAiAvailable { get; set; }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AiConnectionModeText))]
+    public partial bool IsAiConnectionEnabled { get; set; }
+
+    public string AiConnectionModeText => !IsAiConnectionEnabled
+        ? "Offline"
+        : IsAiAvailable
+            ? "Online"
+            : "Nicht erreichbar";
 
     public ObservableCollection<AiServiceFooterItem> AiServices { get; } = [];
 
@@ -80,6 +91,24 @@ public sealed partial class ShellViewModel : ObservableObject
         _modelStatus = modelStatus;
         _serviceStatus = serviceStatus ?? [];
         RefreshAiServices();
+    }
+
+    public void ApplyAiAvailabilitySnapshot(
+        bool gatewayReachable,
+        GpuStatusSnapshot? gpuStatus,
+        ModelStatusSnapshot? modelStatus,
+        IReadOnlyList<ServiceStatusSnapshot>? serviceStatus)
+    {
+        // A running request already has an established server connection. Do not
+        // replace that stronger signal with a transiently failed parallel status poll.
+        if (!gatewayReachable && IsAiConnectionEnabled && IsAiRunning && IsAiAvailable)
+        {
+            return;
+        }
+
+        IsAiAvailable = gatewayReachable;
+        SetAiServiceAvailability(gatewayReachable, modelStatus, serviceStatus);
+        SetActiveAiRuns(gpuStatus);
     }
 
     public void SetClientAiRun(

@@ -74,6 +74,7 @@
   };
 
   const byId = id => document.getElementById(id);
+  const persistentToolActions = new Set(["code", "bricsCad"]);
   const toolVisuals = Object.freeze({
     audioAnalysis: ["Audio analysieren", "M4 12h2m2-5 4 10 3-7 2 4h3"],
     imageAnalysis: ["Bild analysieren", "M4 5h16v14H4zM7 15l3-3 3 3 2-2 2 2"],
@@ -762,37 +763,89 @@
       elements.activeTools.append(chip);
     }
 
-    for (const documentItem of state.documents) {
+    const createFileChip = file => {
       const chip = document.createElement("div");
-      chip.className = "context-chip";
+      chip.className = `context-chip${file.kind === "attachment" ? " attachment" : ""}`;
       const icon = document.createElement("span");
-      icon.textContent = "▤";
+      icon.textContent = file.kind === "attachment"
+        && String(file.item.contentType || "").startsWith("image/") ? "▧" : "◇";
       const name = document.createElement("span");
-      name.textContent = documentItem.fileName;
-      name.title = documentItem.fileName;
+      name.textContent = file.item.fileName;
+      name.title = file.item.fileName;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "×";
-      remove.setAttribute("aria-label", `${documentItem.fileName} entfernen`);
-      remove.addEventListener("click", () => post("document.remove", { documentId: documentItem.id }));
+      remove.setAttribute("aria-label", `${file.item.fileName} entfernen`);
+      remove.addEventListener("click", () => post(
+        file.kind === "document" ? "document.remove" : "attachment.remove",
+        file.kind === "document" ? { documentId: file.item.id } : { attachmentId: file.item.id }
+      ));
       chip.append(icon, name, remove);
-      elements.documents.append(chip);
-    }
-    for (const attachment of state.attachments) {
-      const chip = document.createElement("div");
-      chip.className = "context-chip attachment";
+      return chip;
+    };
+    const attachedFiles = [
+      ...state.documents.map(item => ({ kind: "document", item })),
+      ...state.attachments.map(item => ({ kind: "attachment", item }))
+    ];
+    if (attachedFiles.length < 2) {
+      for (const file of attachedFiles) elements.documents.append(createFileChip(file));
+    } else {
+      const anchor = document.createElement("div");
+      anchor.className = "attachment-menu-anchor";
+      const summary = document.createElement("div");
+      summary.className = "active-tool-chip attachment-summary";
+      const summaryToggle = document.createElement("button");
+      summaryToggle.type = "button";
+      summaryToggle.className = "attachment-summary__toggle";
+      summaryToggle.setAttribute("aria-haspopup", "menu");
+      summaryToggle.setAttribute("aria-expanded", "false");
       const icon = document.createElement("span");
-      icon.textContent = String(attachment.contentType || "").startsWith("image/") ? "▧" : "◇";
-      const name = document.createElement("span");
-      name.textContent = attachment.fileName;
-      name.title = attachment.fileName;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.textContent = "×";
-      remove.setAttribute("aria-label", `${attachment.fileName} entfernen`);
-      remove.addEventListener("click", () => post("attachment.remove", { attachmentId: attachment.id }));
-      chip.append(icon, name, remove);
-      elements.documents.append(chip);
+      icon.textContent = "◇";
+      const label = document.createElement("span");
+      label.textContent = `${attachedFiles.length} Dateien`;
+      const removeAll = document.createElement("button");
+      removeAll.type = "button";
+      removeAll.className = "attachment-summary__remove active-tool-chip__remove";
+      removeAll.textContent = "×";
+      removeAll.title = "Alle Dateianhänge entfernen";
+      removeAll.setAttribute("aria-label", "Alle Dateianhänge entfernen");
+      summaryToggle.append(icon, label);
+      summary.append(summaryToggle, removeAll);
+
+      const menu = document.createElement("div");
+      menu.className = "attachment-menu";
+      menu.setAttribute("role", "menu");
+      menu.hidden = true;
+      const title = document.createElement("div");
+      title.className = "attachment-menu__title";
+      title.textContent = "Dateianhänge";
+      menu.append(title);
+      for (const file of attachedFiles) {
+        const row = createFileChip(file);
+        row.classList.add("attachment-menu__item");
+        menu.append(row);
+      }
+      summaryToggle.addEventListener("click", event => {
+        event.stopPropagation();
+        setToolsMenuOpen(false);
+        const open = menu.hidden;
+        closeAttachmentMenu();
+        menu.hidden = !open;
+        summaryToggle.setAttribute("aria-expanded", String(open));
+      });
+      removeAll.addEventListener("click", event => {
+        event.stopPropagation();
+        closeAttachmentMenu();
+        for (const file of attachedFiles) {
+          post(
+            file.kind === "document" ? "document.remove" : "attachment.remove",
+            file.kind === "document" ? { documentId: file.item.id } : { attachmentId: file.item.id }
+          );
+        }
+      });
+      menu.addEventListener("click", event => event.stopPropagation());
+      anchor.append(summary, menu);
+      elements.documents.append(anchor);
     }
     elements.contextStrip.hidden = state.documents.length === 0
       && state.attachments.length === 0
@@ -1048,6 +1101,13 @@
     elements.toolsButton.setAttribute("aria-expanded", String(open));
   }
 
+  function closeAttachmentMenu() {
+    const menu = elements.documents.querySelector(".attachment-menu");
+    const summary = elements.documents.querySelector(".attachment-summary__toggle");
+    if (menu) menu.hidden = true;
+    if (summary) summary.setAttribute("aria-expanded", "false");
+  }
+
   function renderWorkflows() {
     const query = elements.workflowSearch.value.trim().toLocaleLowerCase();
     const workflows = state.workflows.filter(item => !query ||
@@ -1239,7 +1299,7 @@
   }
 
   function clearCompletedOneShotToolAction() {
-    if (state.selectedToolAction && state.selectedToolAction !== "code") {
+    if (state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction)) {
       selectToolAction(null, false);
     }
   }
@@ -1332,7 +1392,7 @@
   function renderSessionPin() {
     const session = state.sessions.find(item => item.id === state.activeSessionId);
     if (!elements.pinSession) return;
-    const label = session?.isPinned ? "Unpin" : "Pin";
+    const label = session?.isPinned ? "Sitzung loslösen" : "Sitzung anpinnen";
     elements.pinSession.textContent = label;
     elements.pinSession.title = label;
     elements.pinSession.setAttribute("aria-label", label);
@@ -1760,7 +1820,10 @@
     });
   }
   elements.stopLiveCaption.addEventListener("click", () => post("liveCaption.stop", {}));
-  document.addEventListener("click", () => setToolsMenuOpen(false));
+  document.addEventListener("click", () => {
+    setToolsMenuOpen(false);
+    closeAttachmentMenu();
+  });
 
   byId("open-workflows").addEventListener("click", openWorkflows);
   elements.workspaceButton.addEventListener("click", () => post("workspace.pick", {}));
@@ -1818,7 +1881,8 @@
   globalThis.addEventListener("go:host-message", handleHostMessage);
   globalThis.addEventListener("keydown", event => {
     if (event.key !== "Escape") return;
-    if (!elements.toolsMenu.hidden) setToolsMenuOpen(false);
+    if (elements.documents.querySelector(".attachment-menu:not([hidden])")) closeAttachmentMenu();
+    else if (!elements.toolsMenu.hidden) setToolsMenuOpen(false);
     else if (!elements.overlay.hidden) closeWorkflows();
   });
   globalThis.goCaptureDraft = () => ({ sessionId: state.activeSessionId, draft: elements.prompt.value });

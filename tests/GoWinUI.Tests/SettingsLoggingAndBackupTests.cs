@@ -51,7 +51,7 @@ public sealed class SettingsLoggingAndBackupTests
         });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(5, restored.Version);
+        Assert.Equal(6, restored.Version);
         Assert.Equal("#8FBD45", restored.AccentColor);
         Assert.Equal("#8FBD45", restored.BackgroundColor);
     }
@@ -68,7 +68,7 @@ public sealed class SettingsLoggingAndBackupTests
         });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(5, restored.Version);
+        Assert.Equal(6, restored.Version);
         Assert.Equal("openai/gpt-oss-20b", restored.SelectedModel);
     }
 
@@ -80,6 +80,21 @@ public sealed class SettingsLoggingAndBackupTests
         await settings.SaveAsync(new AppSettings { Version = 4, LiveCaptionLanguage = "de" });
 
         Assert.Equal("auto", (await settings.LoadAsync()).LiveCaptionLanguage);
+    }
+
+    [Fact]
+    public async Task NewAndExistingSettingsDefaultToOfflineMode()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+
+        Assert.False((await settings.LoadAsync()).IsAiConnectionEnabled);
+
+        await settings.SaveAsync(new AppSettings { Version = 5 });
+
+        var restored = await settings.LoadAsync();
+        Assert.Equal(6, restored.Version);
+        Assert.False(restored.IsAiConnectionEnabled);
     }
 
     [Fact]

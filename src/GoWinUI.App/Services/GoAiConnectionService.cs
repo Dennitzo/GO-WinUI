@@ -20,7 +20,7 @@ public sealed record GoAiConnectionStatus(
 public sealed class GoAiConnectionService(
     SettingsCoordinator settings,
     IAiSecretStore secrets,
-    ILogger<GoAiConnectionService> logger)
+    ILogger<GoAiConnectionService> logger) : IDisposable
 {
     public const string DefaultServerUrl = "https://192.168.0.67:8443";
     private const int MaximumBootstrapKeyLength = 512;
@@ -28,10 +28,16 @@ public sealed class GoAiConnectionService(
         LogLevel.Warning,
         new EventId(5200, nameof(ConnectionFailed)),
         "GO AI Server connection check failed ({FailureKind}).");
+    private readonly object _connectionModeSync = new();
+    private readonly List<CancellationTokenSource> _retiredModeCancellations = [];
+    private CancellationTokenSource? _connectionModeCancellation =
+        settings.Current.IsAiConnectionEnabled ? new CancellationTokenSource() : null;
+    private bool _disposed;
 
     public async Task<GoAiClient> CreateClientAsync(CancellationToken cancellationToken = default)
     {
-        if (!Uri.TryCreate(DefaultServerUrl + "/", UriKind.Absolute, out var baseAddress))
+        var connectionModeToken = GetConnectionModeToken();
+        if (!Uri.TryCreate(settings.Current.GoAiServerUrl.TrimEnd('/') + "/", UriKind.Absolute, out var baseAddress))
         {
             throw new InvalidOperationException("Die GO-AI-Serveradresse ist ungültig.");
         }
@@ -51,7 +57,8 @@ public sealed class GoAiConnectionService(
             ServerCertificateCustomValidationCallback = (_, certificate, chain, errors) =>
                 ValidateCertificate(certificate, chain, errors),
         };
-        var httpClient = new HttpClient(handler, disposeHandler: true)
+        var modeHandler = new ConnectionModeHandler(handler, connectionModeToken);
+        var httpClient = new HttpClient(modeHandler, disposeHandler: true)
         {
             BaseAddress = baseAddress,
             Timeout = Timeout.InfiniteTimeSpan,
@@ -62,6 +69,11 @@ public sealed class GoAiConnectionService(
 
     public async Task<bool> TryProvisionLocalHostAsync(CancellationToken cancellationToken = default)
     {
+        if (!settings.Current.IsAiConnectionEnabled)
+        {
+            return false;
+        }
+
         var dataRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "GO-AI-Server");
@@ -150,6 +162,11 @@ public sealed class GoAiConnectionService(
 
     public async Task<GoAiConnectionStatus> TestAsync(CancellationToken cancellationToken = default)
     {
+        if (!settings.Current.IsAiConnectionEnabled)
+        {
+            return new(false, "Offline · AI-Verbindungen sind deaktiviert.");
+        }
+
         try
         {
             using var client = await CreateClientAsync(cancellationToken).ConfigureAwait(false);
@@ -275,10 +292,92 @@ public sealed class GoAiConnectionService(
 
     private static string FriendlyConnectionError(Exception exception) => exception switch
     {
+        GoAiConnectionDisabledException => exception.Message,
         HttpRequestException => "GO AI Server ist nicht erreichbar.",
         TaskCanceledException => "Die Verbindung zu GO AI Server hat das Zeitlimit überschritten.",
         _ => exception.Message,
     };
+
+    public void ApplyConnectionMode(bool enabled)
+    {
+        CancellationTokenSource? cancellation = null;
+        lock (_connectionModeSync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (enabled)
+            {
+                _connectionModeCancellation ??= new CancellationTokenSource();
+            }
+            else if (_connectionModeCancellation is { } active)
+            {
+                _connectionModeCancellation = null;
+                _retiredModeCancellations.Add(active);
+                cancellation = active;
+            }
+        }
+
+        cancellation?.Cancel();
+    }
+
+    public void Dispose()
+    {
+        CancellationTokenSource[] sources;
+        lock (_connectionModeSync)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            if (_connectionModeCancellation is { } active)
+            {
+                _retiredModeCancellations.Add(active);
+                _connectionModeCancellation = null;
+            }
+            sources = [.. _retiredModeCancellations];
+            _retiredModeCancellations.Clear();
+        }
+
+        foreach (var source in sources)
+        {
+            source.Cancel();
+            source.Dispose();
+        }
+    }
+
+    private CancellationToken GetConnectionModeToken()
+    {
+        lock (_connectionModeSync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!settings.Current.IsAiConnectionEnabled || _connectionModeCancellation is null)
+            {
+                throw new GoAiConnectionDisabledException();
+            }
+
+            return _connectionModeCancellation.Token;
+        }
+    }
+
+    private sealed class ConnectionModeHandler(
+        HttpMessageHandler innerHandler,
+        CancellationToken connectionModeToken) : DelegatingHandler(innerHandler)
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            if (connectionModeToken.IsCancellationRequested)
+            {
+                throw new GoAiConnectionDisabledException();
+            }
+
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                connectionModeToken);
+            return await base.SendAsync(request, linkedCancellation.Token).ConfigureAwait(false);
+        }
+    }
 
     private static readonly Action<ILogger, Exception?> LocalProvisioningCompleted = LoggerMessage.Define(
         LogLevel.Information,
@@ -297,6 +396,9 @@ public sealed class GoAiConnectionService(
         new EventId(5204, nameof(LocalProvisioningCleanupFailed)),
         "The consumed local bootstrap key file could not be removed.");
 }
+
+public sealed class GoAiConnectionDisabledException()
+    : InvalidOperationException("Offline · AI-Verbindungen sind deaktiviert.");
 
 public sealed record GoAiImportedConnection(
     string ServerUrl,

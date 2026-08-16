@@ -95,7 +95,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         var lastActivityAt = lastActivityText is null ? null : settings.LastActivityAt;
         return settings with
         {
-            Version = 5,
+            Version = 6,
             GoAiServerUrl = goAiServerUrl.TrimEnd('/'),
             GoAiProtocolVersion = string.IsNullOrWhiteSpace(settings.GoAiProtocolVersion)
                 ? "1.0"

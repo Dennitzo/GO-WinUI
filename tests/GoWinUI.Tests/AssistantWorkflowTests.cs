@@ -35,16 +35,16 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void SessionPinUsesPinAndUnpinLabelsAcrossTheWebViewContract()
+    public void SessionPinUsesDescriptiveGermanLabelsAcrossTheWebViewContract()
     {
         Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.pin"));
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
         Assert.Contains("\"session.pin\"", bridge, StringComparison.Ordinal);
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.Contains("title=\"Pin\"", html, StringComparison.Ordinal);
+        Assert.Contains("title=\"Sitzung anpinnen\"", html, StringComparison.Ordinal);
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("session?.isPinned ? \"Unpin\" : \"Pin\"", app, StringComparison.Ordinal);
+        Assert.Contains("session?.isPinned ? \"Sitzung loslösen\" : \"Sitzung anpinnen\"", app, StringComparison.Ordinal);
         Assert.Contains("post(\"session.pin\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain("className = `session-pin", app, StringComparison.Ordinal);
         Assert.Contains("item.append(open, remove)", app, StringComparison.Ordinal);
@@ -433,16 +433,33 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void ComposerClearsOneShotToolsButKeepsCodingAfterEveryTerminalRunState()
+    public void ComposerClearsOneShotToolsButKeepsCodingAndBricsCadAfterEveryTerminalRunState()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("state.selectedToolAction !== \"code\"", app, StringComparison.Ordinal);
+        Assert.Contains("new Set([\"code\", \"bricsCad\"])", app, StringComparison.Ordinal);
+        Assert.Contains("!persistentToolActions.has(state.selectedToolAction)", app, StringComparison.Ordinal);
         Assert.Contains("clearCompletedOneShotToolAction();", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.completed\":", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.cancelled\":", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.failed\":", app, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ComposerCollapsesTwoOrMoreAttachedFilesIntoAnUpwardOverlayMenu()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        var css = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
+
+        Assert.Contains("if (attachedFiles.length < 2)", app, StringComparison.Ordinal);
+        Assert.Contains("summary.className = \"active-tool-chip attachment-summary\"", app, StringComparison.Ordinal);
+        Assert.Contains("menu.className = \"attachment-menu\"", app, StringComparison.Ordinal);
+        Assert.Contains("removeAll.className = \"attachment-summary__remove active-tool-chip__remove\"", app, StringComparison.Ordinal);
+        Assert.Contains("Alle Dateianhänge entfernen", app, StringComparison.Ordinal);
+        Assert.Contains("bottom: calc(100% + 8px)", css, StringComparison.Ordinal);
+        Assert.Contains("position: absolute", css, StringComparison.Ordinal);
     }
 
     private static ChatMessage Message(Guid sessionId, string content) => new(

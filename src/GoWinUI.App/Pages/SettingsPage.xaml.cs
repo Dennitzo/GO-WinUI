@@ -15,6 +15,7 @@ public sealed partial class SettingsPage : Page
 {
     private readonly ILogger<SettingsPage> _logger;
     private readonly ShellViewModel _shell;
+    private bool _connectionModeReady;
     private bool _synchronizing;
 
     public SettingsPage()
@@ -55,19 +56,45 @@ public sealed partial class SettingsPage : Page
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        _connectionModeReady = false;
+        try
+        {
+            await RunActionAsync(async () =>
+            {
+                await ViewModel.InitializeAsync();
+                SynchronizeControls();
+                UpdatePromptTriggerSortIndicators();
+                UpdateApiKeyState();
+                if (_shell.IsAiAvailable)
+                {
+                    await ViewModel.RefreshModelsAsync();
+                    SynchronizeModelSelection();
+                    ApiKeyBox.Password = string.Empty;
+                    UpdateApiKeyState();
+                }
+            });
+        }
+        finally
+        {
+            _connectionModeReady = true;
+        }
+    }
+
+    private async void OnAiConnectionModeToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_connectionModeReady || _synchronizing || sender is not ToggleSwitch toggle)
+        {
+            return;
+        }
+
         await RunActionAsync(async () =>
         {
-            await ViewModel.InitializeAsync();
-            SynchronizeControls();
-            UpdatePromptTriggerSortIndicators();
-            UpdateApiKeyState();
-            if (_shell.IsAiAvailable)
-            {
-                await ViewModel.RefreshModelsAsync();
-                SynchronizeModelSelection();
-                ApiKeyBox.Password = string.Empty;
-                UpdateApiKeyState();
-            }
+            await ViewModel.SetAiConnectionEnabledAsync(toggle.IsOn);
+            ShowStatus(
+                toggle.IsOn
+                    ? "Onlinemodus aktiviert. GO prüft die Verbindung zum AI-Server."
+                    : "Offlinemodus aktiviert. Sämtliche AI-Serververbindungen wurden beendet.",
+                InfoBarSeverity.Success);
         });
     }
 

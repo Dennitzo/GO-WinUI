@@ -50,6 +50,9 @@ public sealed partial class SettingsViewModel(
     public partial string GoAiServerUrl { get; set; } = GoAiConnectionService.DefaultServerUrl;
 
     [ObservableProperty]
+    public partial bool IsAiConnectionEnabled { get; set; }
+
+    [ObservableProperty]
     public partial string GoAiApiKey { get; set; } = string.Empty;
 
     [ObservableProperty]
@@ -99,7 +102,8 @@ public sealed partial class SettingsViewModel(
     public void Initialize()
     {
         var current = settings.Current;
-        GoAiServerUrl = GoAiConnectionService.DefaultServerUrl;
+        IsAiConnectionEnabled = current.IsAiConnectionEnabled;
+        GoAiServerUrl = current.GoAiServerUrl;
         LocalToolWorkspacePath = current.LocalToolWorkspacePath ?? string.Empty;
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel;
@@ -108,6 +112,9 @@ public sealed partial class SettingsViewModel(
         AccentColor = current.AccentColor;
         BackgroundColor = current.BackgroundColor;
         Language = current.Language;
+        ConnectionStatus = IsAiConnectionEnabled
+            ? "Nicht geprüft"
+            : "Offline · keine Serververbindungen";
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
@@ -125,7 +132,30 @@ public sealed partial class SettingsViewModel(
         _deletedTriggers.Clear();
     }
 
-    public async Task SaveAsync(CancellationToken cancellationToken = default)
+    public async Task SetAiConnectionEnabledAsync(
+        bool enabled,
+        CancellationToken cancellationToken = default)
+    {
+        IsAiConnectionEnabled = enabled;
+        if (!enabled)
+        {
+            await App.Current.ApplyAiConnectionModeAsync(false);
+        }
+        await settings.UpdateAsync(
+            current => current with { IsAiConnectionEnabled = enabled },
+            cancellationToken);
+        if (enabled)
+        {
+            await App.Current.ApplyAiConnectionModeAsync(true);
+            ConnectionStatus = "Online aktiviert · Verbindung wird geprüft";
+            return;
+        }
+
+        Models.Clear();
+        ConnectionStatus = "Offline · keine Serververbindungen";
+    }
+
+    public async Task<GoAiConnectionStatus?> SaveAsync(CancellationToken cancellationToken = default)
     {
         if (!Uri.TryCreate(GoAiServerUrl.Trim(), UriKind.Absolute, out var goAiUri)
             || goAiUri.Scheme is not ("http" or "https")
@@ -145,6 +175,7 @@ public sealed partial class SettingsViewModel(
             : Path.GetFullPath(LocalToolWorkspacePath.Trim());
         await settings.UpdateAsync(current => current with
         {
+            IsAiConnectionEnabled = IsAiConnectionEnabled,
             GoAiServerUrl = goAiUri.ToString().TrimEnd('/'),
             LocalToolWorkspacePath = workspace,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
@@ -154,11 +185,21 @@ public sealed partial class SettingsViewModel(
             BackgroundColor = BackgroundColor,
             Language = Language,
         }, cancellationToken);
+        await App.Current.ApplyAiConnectionModeAsync(IsAiConnectionEnabled);
         await SaveTriggersAsync(cancellationToken);
         App.Current.ApplyTheme(Theme);
         App.Current.ApplyAccentColor(AccentColor);
         App.Current.ApplyBackgroundColor(BackgroundColor);
-        shell.IsAiAvailable = (await goAi.TestAsync(cancellationToken)).IsReady;
+        if (!IsAiConnectionEnabled)
+        {
+            ConnectionStatus = "Offline · keine Serververbindungen";
+            return null;
+        }
+
+        var status = await goAi.TestAsync(cancellationToken);
+        ConnectionStatus = status.Message;
+        shell.IsAiAvailable = status.IsReady;
+        return status;
     }
 
     public async Task RefreshModelsAsync(CancellationToken cancellationToken = default)
@@ -166,9 +207,13 @@ public sealed partial class SettingsViewModel(
         IsBusy = true;
         try
         {
-            await SaveAsync(cancellationToken);
+            var status = await SaveAsync(cancellationToken);
+            if (status is null)
+            {
+                Models.Clear();
+                return;
+            }
             IReadOnlyList<LmModel> items;
-            var status = await goAi.TestAsync(cancellationToken);
             if (!status.IsReady)
             {
                 throw new InvalidOperationException(status.Message);

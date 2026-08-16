@@ -55,6 +55,18 @@
             </Border>
           </Grid>
 
+          <ToggleSwitch
+            Header="AI-Verbindungen aktivieren"
+            IsOn="{x:Bind ViewModel.IsAiConnectionEnabled, Mode=TwoWay}"
+            OffContent="Offline"
+            OnContent="Online"
+            Toggled="OnAiConnectionModeToggled" />
+          <TextBlock
+            Margin="0,-10,0,0"
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            Text="Offline bleibt der AI-Assistent als Oberfläche verfügbar; GO führt dabei keinerlei API-Verbindungsversuche aus."
+            TextWrapping="Wrap" />
+
           <Grid RowSpacing="10">
             <Grid.RowDefinitions>
               <RowDefinition Height="Auto" />
@@ -71,7 +83,11 @@
             </StackPanel>
             <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
               <Button Click="OnDeleteApiKey" Content="Gespeicherten Schlüssel löschen" />
-              <Button Click="OnRefreshModels" Content="Verbindung testen und Fähigkeiten laden" Style="{StaticResource GoPrimaryButtonStyle}" />
+              <Button
+                Click="OnRefreshModels"
+                Content="Verbindung testen und Fähigkeiten laden"
+                IsEnabled="{x:Bind ViewModel.IsAiConnectionEnabled, Mode=OneWay}"
+                Style="{StaticResource GoPrimaryButtonStyle}" />
             </StackPanel>
           </Grid>
 

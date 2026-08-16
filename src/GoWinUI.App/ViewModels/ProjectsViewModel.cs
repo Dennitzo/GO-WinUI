@@ -295,7 +295,10 @@ public sealed partial class ProjectsViewModel(
         await thumbnails.GenerateAsync(asset, cancellationToken);
         if (SelectedProject?.Id == asset.ProjectId)
         {
-            await RefreshAssetsAsync(cancellationToken);
+            if (!TryReplaceAsset(asset))
+            {
+                await RefreshAssetsAsync(cancellationToken);
+            }
         }
     }
 
@@ -332,8 +335,65 @@ public sealed partial class ProjectsViewModel(
             return;
         }
 
-        _ = await projects.UpdateAssetAsync(asset with { Title = title }, asset.Revision, cancellationToken);
-        await RefreshAssetsAsync(cancellationToken);
+        var candidate = asset;
+        ProjectAsset updated;
+        try
+        {
+            updated = await projects.UpdateAssetAsync(
+                candidate with { Title = title },
+                candidate.Revision,
+                cancellationToken);
+        }
+        catch (RevisionConflictException)
+        {
+            candidate = (await projects.ListAssetsAsync(asset.ProjectId, cancellationToken))
+                .FirstOrDefault(item => item.Id == asset.Id)
+                ?? throw new InvalidOperationException("Die Projektdatei wurde zwischenzeitlich gelöscht.");
+            updated = string.Equals(candidate.Title, title, StringComparison.Ordinal)
+                ? candidate
+                : await projects.UpdateAssetAsync(
+                    candidate with { Title = title },
+                    candidate.Revision,
+                    cancellationToken);
+        }
+        if (!TryReplaceAsset(updated))
+        {
+            await RefreshAssetsAsync(cancellationToken);
+        }
+    }
+
+    private bool TryReplaceAsset(ProjectAsset asset)
+    {
+        if (!TryReplaceAsset(Assets, asset))
+        {
+            return false;
+        }
+
+        var categoryAssets = asset.Category switch
+        {
+            AssetCategory.Pdf => ConstructionPlans,
+            AssetCategory.Drawing => ConstructionDrawings,
+            AssetCategory.Meeting => MeetingFiles,
+            AssetCategory.Image => Images,
+            _ => OtherFiles,
+        };
+        return TryReplaceAsset(categoryAssets, asset);
+    }
+
+    private static bool TryReplaceAsset(
+        ObservableCollection<ProjectAsset> assets,
+        ProjectAsset replacement)
+    {
+        for (var index = 0; index < assets.Count; index++)
+        {
+            if (assets[index].Id == replacement.Id)
+            {
+                assets[index] = replacement;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void ReplaceAssets(IEnumerable<ProjectAsset> items)

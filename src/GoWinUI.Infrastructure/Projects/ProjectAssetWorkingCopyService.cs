@@ -15,6 +15,7 @@ public sealed class ProjectAssetWorkingCopyService(
     private const int BufferSize = 1024 * 1024;
     private static readonly TimeSpan ChangeDebounce = TimeSpan.FromMilliseconds(900);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan MaximumRetryDelay = TimeSpan.FromSeconds(5);
     private static readonly Action<ILogger, Guid, Exception?> SynchronizationFailed = LoggerMessage.Define<Guid>(
         LogLevel.Warning,
         new EventId(2300, nameof(SynchronizationFailed)),
@@ -29,7 +30,7 @@ public sealed class ProjectAssetWorkingCopyService(
         ProjectAsset asset,
         CancellationToken cancellationToken = default)
     {
-        var path = ResolveExistingPath(asset) ?? GetExpectedPath(asset);
+        var path = GetExpectedPath(asset);
         if (!File.Exists(path))
         {
             return new(asset.Id, path, AssetWorkingCopyState.Missing, null, 0);
@@ -56,7 +57,7 @@ public sealed class ProjectAssetWorkingCopyService(
             var existing = await InspectAsync(asset, cancellationToken).ConfigureAwait(false);
             if (existing.State != AssetWorkingCopyState.Missing)
             {
-                return await MoveUnchangedCopyToExpectedPathAsync(asset, existing, cancellationToken).ConfigureAwait(false);
+                return existing;
             }
 
             return await ExportAuthoritativeCopyAsync(asset, cancellationToken).ConfigureAwait(false);
@@ -241,41 +242,8 @@ public sealed class ProjectAssetWorkingCopyService(
         }
     }
 
-    private async Task<AssetWorkingCopy> MoveUnchangedCopyToExpectedPathAsync(
-        ProjectAsset asset,
-        AssetWorkingCopy existing,
-        CancellationToken cancellationToken)
-    {
-        var expected = GetExpectedPath(asset);
-        if (existing.State != AssetWorkingCopyState.Unchanged
-            || string.Equals(existing.Path, expected, StringComparison.OrdinalIgnoreCase))
-        {
-            return existing;
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        File.Move(existing.Path, expected, overwrite: true);
-        return existing with { Path = expected };
-    }
-
-    private string? ResolveExistingPath(ProjectAsset asset)
-    {
-        var expected = GetExpectedPath(asset);
-        if (File.Exists(expected))
-        {
-            return expected;
-        }
-
-        var directory = GetAssetDirectory(asset.Id);
-        return Directory.Exists(directory)
-            ? Directory.EnumerateFiles(directory, "working-copy*", SearchOption.TopDirectoryOnly)
-                .Order(StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault()
-            : null;
-    }
-
     private string GetExpectedPath(ProjectAsset asset) =>
-        Path.Combine(GetAssetDirectory(asset.Id), $"working-copy{GetSafeExtension(asset.FileName)}");
+        Path.Combine(GetAssetDirectory(asset.Id), ProjectAssetFileName.Normalize(asset.FileName));
 
     private string GetAssetDirectory(Guid assetId)
     {
@@ -344,7 +312,8 @@ public sealed class ProjectAssetWorkingCopyService(
 
     private async Task SynchronizeAsync(Guid assetId, CancellationToken cancellationToken)
     {
-        for (var attempt = 0; attempt < 8; attempt++)
+        var transientRetryDelay = RetryDelay;
+        for (var attempt = 0; ; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!_watchedAssets.TryGetValue(assetId, out var registration))
@@ -386,9 +355,10 @@ public sealed class ProjectAssetWorkingCopyService(
                     if (attempt < 7)
                     {
                         await Task.Delay(RetryDelay, cancellationToken).ConfigureAwait(false);
+                        continue;
                     }
 
-                    continue;
+                    return;
                 }
 
                 var updated = await ReimportAsync(current, current.Revision, cancellationToken).ConfigureAwait(false);
@@ -397,10 +367,17 @@ public sealed class ProjectAssetWorkingCopyService(
                 return;
             }
             catch (Exception exception) when (
-                attempt < 7
-                && exception is IOException or UnauthorizedAccessException or RevisionConflictException)
+                exception is IOException or UnauthorizedAccessException or RevisionConflictException)
             {
-                await Task.Delay(RetryDelay, cancellationToken).ConfigureAwait(false);
+                if (!_watchedAssets.ContainsKey(assetId))
+                {
+                    return;
+                }
+
+                await Task.Delay(transientRetryDelay, cancellationToken).ConfigureAwait(false);
+                transientRetryDelay = TimeSpan.FromMilliseconds(Math.Min(
+                    transientRetryDelay.TotalMilliseconds * 2,
+                    MaximumRetryDelay.TotalMilliseconds));
             }
         }
     }
@@ -422,15 +399,6 @@ public sealed class ProjectAssetWorkingCopyService(
         {
             registration.Dispose();
         }
-    }
-
-    private static string GetSafeExtension(string fileName)
-    {
-        var extension = Path.GetExtension(Path.GetFileName(fileName));
-        return extension.Length is > 0 and <= 16
-               && extension.Skip(1).All(char.IsLetterOrDigit)
-            ? extension.ToLowerInvariant()
-            : ".bin";
     }
 
     private static async Task<(string Sha256, long Length)> HashFileAsync(

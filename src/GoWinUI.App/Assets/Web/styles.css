@@ -288,6 +288,17 @@ tr:last-child td { border-bottom: 0; }
 .context-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .context-chip button { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: transparent; }
 .context-chip button:hover { background: var(--surface-hover); }
+.attachment-menu-anchor { position: relative; }
+.attachment-summary { gap: 0; padding: 0 6px 0 0; color: var(--text); }
+.attachment-summary__toggle { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 4px 0 10px; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.attachment-summary__toggle svg { width: 18px; height: 18px; color: var(--accent); }
+.attachment-summary__remove { width: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.attachment-summary__remove:hover { background: var(--surface-hover); color: var(--text); }
+.attachment-menu { position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 21; width: min(430px, calc(100vw - 44px)); max-height: min(320px, 50vh); padding: 9px; overflow-y: auto; border: 1px solid var(--border); border-radius: 13px; background: var(--surface-solid); box-shadow: var(--shadow); }
+.attachment-menu__title { padding: 7px 9px 8px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.attachment-menu .attachment-menu__item { display: flex; width: 100%; max-width: none; margin-top: 4px; border-radius: 9px; background: transparent; }
+.attachment-menu .attachment-menu__item:hover { background: var(--surface-hover); }
+.attachment-menu .attachment-menu__item > span:nth-child(2) { flex: 1 1 auto; text-align: left; }
 .composer { width: min(820px, 100%); margin: 0 auto; padding: 14px; border: 1px solid var(--border); border-radius: 30px; background: var(--composer); box-shadow: 0 9px 28px color-mix(in srgb, var(--background-accent) 10%, rgba(0, 0, 0, .16)); transition: border-color .15s ease, box-shadow .15s ease; }
 .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 72%, var(--border)); box-shadow: 0 9px 30px color-mix(in srgb, var(--accent) 14%, transparent); }
 .composer textarea { display: block; width: 100%; height: 58px; min-height: 58px; max-height: 58px; padding: 2px 6px 11px; overflow-y: auto; resize: none; border: 0; outline: 0; background: transparent; font-size: 16px; line-height: 1.45; }

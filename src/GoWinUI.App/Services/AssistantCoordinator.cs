@@ -198,7 +198,8 @@ public sealed class AssistantCoordinator(
             attachments = attachmentItems.Select(ToAttachmentDto),
             activeSessionId = session.Id,
             draft = session.Draft,
-            isRunning = settings.Current.AiProvider == AiProviderKind.GoAiServer ? goAi?.IsRunning == true : orchestrator.IsRunning,
+            isRunning = settings.Current.IsAiConnectionEnabled
+                && (settings.Current.AiProvider == AiProviderKind.GoAiServer ? goAi?.IsRunning == true : orchestrator.IsRunning),
             model = settings.Current.AiProvider == AiProviderKind.GoAiServer ? "GO AI Server" : settings.Current.SelectedModel,
             provider = settings.Current.AiProvider.ToString(),
             reasoningEffort = settings.Current.ReasoningEffort,
@@ -227,7 +228,9 @@ public sealed class AssistantCoordinator(
         {
             case "app.ready":
                 await emit("state.snapshot", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
-                if (settings.Current.AiProvider == AiProviderKind.GoAiServer && goAi is not null)
+                if (settings.Current.IsAiConnectionEnabled
+                    && settings.Current.AiProvider == AiProviderKind.GoAiServer
+                    && goAi is not null)
                 {
                     try
                     {
@@ -565,6 +568,11 @@ public sealed class AssistantCoordinator(
         Func<string, object, string?, Task> emit,
         CancellationToken cancellationToken)
     {
+        if (!settings.Current.IsAiConnectionEnabled)
+        {
+            throw new GoAiConnectionDisabledException();
+        }
+
         await SendGoAiChatAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
     }
 
