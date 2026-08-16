@@ -40,6 +40,35 @@ public sealed class DpapiSecretStore
         return Encoding.UTF8.GetString(clearBytes);
     }
 
+    public async Task<bool> ValidateLmStudioTokenAsync(
+        string? presentedToken,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(presentedToken))
+        {
+            return false;
+        }
+
+        var configuredToken = await ReadLmStudioTokenAsync(cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(configuredToken))
+        {
+            return false;
+        }
+
+        var presentedBytes = Encoding.UTF8.GetBytes(presentedToken);
+        var configuredBytes = Encoding.UTF8.GetBytes(configuredToken);
+        try
+        {
+            return presentedBytes.Length == configuredBytes.Length
+                && CryptographicOperations.FixedTimeEquals(presentedBytes, configuredBytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(presentedBytes);
+            CryptographicOperations.ZeroMemory(configuredBytes);
+        }
+    }
+
     public bool HasLmStudioToken => File.Exists(_options.LmStudioTokenPath);
 
     public void DeleteLmStudioToken()

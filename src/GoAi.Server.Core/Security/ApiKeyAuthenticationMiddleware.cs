@@ -18,7 +18,10 @@ public sealed class ApiKeyAuthenticationMiddleware
         _next = next;
     }
 
-    public async Task InvokeAsync(HttpContext context, ApiKeyStore keyStore)
+    public async Task InvokeAsync(
+        HttpContext context,
+        ApiKeyStore keyStore,
+        DpapiSecretStore secretStore)
     {
         if (AnonymousPaths.Any(path => context.Request.Path.Equals(path)))
         {
@@ -34,7 +37,9 @@ public sealed class ApiKeyAuthenticationMiddleware
             presented = authorization[7..].Trim();
         }
 
-        if (!await keyStore.ValidateAsync(presented, context.RequestAborted).ConfigureAwait(false))
+        var authenticated = await keyStore.ValidateAsync(presented, context.RequestAborted).ConfigureAwait(false)
+            || await secretStore.ValidateLmStudioTokenAsync(presented, context.RequestAborted).ConfigureAwait(false);
+        if (!authenticated)
         {
             context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
             context.Response.ContentType = "application/problem+json";
@@ -43,7 +48,7 @@ public sealed class ApiKeyAuthenticationMiddleware
                     "https://go-ai.local/problems/authentication",
                     "Authentifizierung fehlgeschlagen",
                     (int)HttpStatusCode.Unauthorized,
-                    "Ein gültiger GO-AI-API-Schlüssel ist erforderlich.",
+                    "Der in GO AI Server gespeicherte LM-Studio-API-Schlüssel ist erforderlich.",
                     "authentication.invalid_api_key",
                     context.TraceIdentifier),
                 GoAiProtocol.CreateJsonOptions(),

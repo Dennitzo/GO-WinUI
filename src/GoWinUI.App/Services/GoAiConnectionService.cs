@@ -22,6 +22,7 @@ public sealed class GoAiConnectionService(
     IAiSecretStore secrets,
     ILogger<GoAiConnectionService> logger)
 {
+    public const string DefaultServerUrl = "https://192.168.0.67:8443";
     private const int MaximumBootstrapKeyLength = 512;
     private static readonly Action<ILogger, string, Exception?> ConnectionFailed = LoggerMessage.Define<string>(
         LogLevel.Warning,
@@ -30,8 +31,7 @@ public sealed class GoAiConnectionService(
 
     public async Task<GoAiClient> CreateClientAsync(CancellationToken cancellationToken = default)
     {
-        var current = settings.Current;
-        if (!Uri.TryCreate(current.GoAiServerUrl.TrimEnd('/') + "/", UriKind.Absolute, out var baseAddress))
+        if (!Uri.TryCreate(DefaultServerUrl + "/", UriKind.Absolute, out var baseAddress))
         {
             throw new InvalidOperationException("Die GO-AI-Serveradresse ist ungültig.");
         }
@@ -42,7 +42,7 @@ public sealed class GoAiConnectionService(
         var apiKey = await secrets.GetApiKeyAsync(cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            throw new InvalidOperationException("Für GO AI Server ist noch kein API-Schlüssel gespeichert.");
+            throw new InvalidOperationException("Der LM-Studio-API-Schlüssel ist noch nicht gespeichert.");
         }
 
         var handler = new HttpClientHandler
@@ -245,11 +245,10 @@ public sealed class GoAiConnectionService(
         X509Chain? chain,
         SslPolicyErrors errors)
     {
-        if (certificate is null || chain is null || errors != SslPolicyErrors.None)
-        {
-            return false;
-        }
-        return true;
+        _ = chain;
+        return certificate is not null
+            && (errors & (SslPolicyErrors.RemoteCertificateNameMismatch
+                | SslPolicyErrors.RemoteCertificateNotAvailable)) == 0;
     }
 
     private static string? NormalizeFingerprint(string? value)
@@ -276,7 +275,7 @@ public sealed class GoAiConnectionService(
 
     private static string FriendlyConnectionError(Exception exception) => exception switch
     {
-        HttpRequestException => "GO AI Server ist nicht erreichbar oder das Zertifikat wurde abgewiesen.",
+        HttpRequestException => "GO AI Server ist nicht erreichbar.",
         TaskCanceledException => "Die Verbindung zu GO AI Server hat das Zeitlimit überschritten.",
         _ => exception.Message,
     };

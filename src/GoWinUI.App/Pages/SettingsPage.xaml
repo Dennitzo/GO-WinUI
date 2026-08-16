@@ -44,7 +44,7 @@
               <TextBlock
                 Margin="0,3,0,0"
                 Foreground="{ThemeResource GoMutedTextBrush}"
-                Text="GO AI Server ist der zentrale AI-Anbieter. Authentifizierung und Serververbindung werden hier verwaltet."
+                Text="Verbindung mit GO AI Server unter https://192.168.0.67:8443. Benötigt wird nur der in LM Studio verwendete API-Schlüssel."
                 TextWrapping="Wrap" />
             </StackPanel>
             <Border Grid.Column="1" Style="{StaticResource GoStatusPillStyle}">
@@ -55,29 +55,21 @@
             </Border>
           </Grid>
 
-          <Grid ColumnSpacing="12" RowSpacing="10">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*" />
-              <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
+          <Grid RowSpacing="10">
             <Grid.RowDefinitions>
               <RowDefinition Height="Auto" />
               <RowDefinition Height="Auto" />
               <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
-            <TextBox
-              Header="GO-AI-Serveradresse"
-              PlaceholderText="https://192.168.0.67:8443"
-              Text="{x:Bind ViewModel.GoAiServerUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <StackPanel Grid.Column="1" Spacing="5">
+            <StackPanel Spacing="5">
               <PasswordBox
                 x:Name="ApiKeyBox"
-                Header="Neuer API-Schlüssel"
+                Header="LM-Studio-API-Schlüssel"
                 PasswordChanged="OnApiKeyChanged"
                 PlaceholderText="Nur zum Ändern eingeben" />
               <TextBlock x:Name="ApiKeyStateText" FontSize="12" Foreground="{ThemeResource GoMutedTextBrush}" />
             </StackPanel>
-            <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="8">
+            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
               <Button Click="OnDeleteApiKey" Content="Gespeicherten Schlüssel löschen" />
               <Button Click="OnRefreshModels" Content="Verbindung testen und Fähigkeiten laden" Style="{StaticResource GoPrimaryButtonStyle}" />
             </StackPanel>

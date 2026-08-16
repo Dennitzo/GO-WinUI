@@ -442,8 +442,8 @@ public sealed partial class SettingsPage : Page
     private void UpdateApiKeyState()
     {
         ApiKeyStateText.Text = ViewModel.HasStoredApiKey
-            ? "Ein API-Schlüssel ist sicher im Windows-Anmeldeinformationsspeicher hinterlegt."
-            : "Noch kein API-Schlüssel gespeichert.";
+            ? "Der LM-Studio-API-Schlüssel ist sicher im Windows-Anmeldeinformationsspeicher hinterlegt."
+            : "Noch kein LM-Studio-API-Schlüssel gespeichert.";
     }
 
     private static void SelectByTag(ComboBox comboBox, string value)

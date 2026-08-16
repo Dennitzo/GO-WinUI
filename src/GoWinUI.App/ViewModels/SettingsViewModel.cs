@@ -47,7 +47,7 @@ public sealed partial class SettingsViewModel(
     public bool TriggerSortDescending { get; private set; }
 
     [ObservableProperty]
-    public partial string GoAiServerUrl { get; set; } = "https://192.168.0.67:8443";
+    public partial string GoAiServerUrl { get; set; } = GoAiConnectionService.DefaultServerUrl;
 
     [ObservableProperty]
     public partial string GoAiApiKey { get; set; } = string.Empty;
@@ -99,11 +99,10 @@ public sealed partial class SettingsViewModel(
     public void Initialize()
     {
         var current = settings.Current;
-        GoAiServerUrl = current.GoAiServerUrl;
+        GoAiServerUrl = GoAiConnectionService.DefaultServerUrl;
         LocalToolWorkspacePath = current.LocalToolWorkspacePath ?? string.Empty;
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel;
-        ReasoningEffort = current.ReasoningEffort;
         ReasoningEffort = current.ReasoningEffort;
         Theme = current.Theme;
         AccentColor = current.AccentColor;
