@@ -32,7 +32,8 @@ public sealed record ChatMessage(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     string? Error = null,
-    ToolExecutionInfo? ToolExecution = null);
+    ToolExecutionInfo? ToolExecution = null,
+    string? ContextSummary = null);
 
 public sealed record ToolExecutionInfo(
     string Tool,

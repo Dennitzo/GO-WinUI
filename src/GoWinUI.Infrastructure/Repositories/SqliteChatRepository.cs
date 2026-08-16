@@ -140,7 +140,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary
             FROM chat_messages WHERE session_id=$id ORDER BY created_at,id;
             """;
         command.Parameters.AddWithValue("$id", sessionId.ToString("D"));
@@ -211,6 +211,18 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken);
 
+    public Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE chat_messages SET context_summary=$summary,updated_at=$now WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+            command.Parameters.AddWithValue("$summary", contextSummary.Trim());
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
     public Task<int> MarkStreamingMessagesInterruptedAsync(CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
         {
@@ -259,5 +271,6 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         reader.ReadEnum<MessageStatus>(4), reader.ReadDate(5), reader.ReadDate(6), reader.IsDBNull(7) ? null : reader.GetString(7),
         reader.IsDBNull(8) ? null : new ToolExecutionInfo(
             reader.GetString(8), reader.GetString(9), reader.GetString(10),
-            reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12)));
+            reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12)),
+        reader.IsDBNull(13) ? null : reader.GetString(13));
 }

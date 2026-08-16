@@ -362,13 +362,14 @@ public sealed partial class LmStudioClient(
     {
         type = "object",
         additionalProperties = false,
-        required = new[] { "schema", "type", "message", "sessionTitle" },
+        required = new[] { "schema", "type", "message", "sessionTitle", "contextSummary" },
         properties = new Dictionary<string, object>
         {
             ["schema"] = new { type = "string", @const = "barebone.agent.response.v2" },
             ["type"] = new { type = "string", @const = "message" },
             ["message"] = new { type = "string", minLength = 1 },
             ["sessionTitle"] = new { type = "string", minLength = 1, maxLength = 64 },
+            ["contextSummary"] = new { type = "string", minLength = 1, maxLength = 320 },
         },
     };
 

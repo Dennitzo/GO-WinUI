@@ -51,4 +51,22 @@ public sealed class DatabaseAndWorkflowTests
         Assert.Equal("Arbeitskopie", clone.Title);
         Assert.Equal(updated.Id, Assert.Single(await repository.ListAsync("Geänd")).Id);
     }
+
+    [Fact]
+    public async Task AiMessageContextSummaryIsPersistedWithItsSessionMessage()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var repository = environment.Get<IChatRepository>();
+        var session = await repository.CreateSessionAsync("Workflow-Sitzung");
+        var message = await repository.AddMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            "## Projektstart\n\nDie Räume werden vorbereitet.",
+            MessageStatus.Completed);
+
+        await repository.SetMessageContextSummaryAsync(message.Id, "Kurzer Projektstart für die Raum-Erstellung.");
+
+        var stored = Assert.Single(await repository.ListMessagesAsync(session.Id));
+        Assert.Equal("Kurzer Projektstart für die Raum-Erstellung.", stored.ContextSummary);
+    }
 }

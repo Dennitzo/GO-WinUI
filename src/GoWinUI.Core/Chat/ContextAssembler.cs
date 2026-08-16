@@ -263,7 +263,7 @@ public sealed class ContextAssembler : IContextAssembler
             {
                 ["schema"] = GeneralAgentResponseParser.ResponseSchema,
                 ["type"] = "message",
-                ["required"] = new[] { "schema", "type", "message", "sessionTitle" },
+                ["required"] = new[] { "schema", "type", "message", "sessionTitle", "contextSummary" },
                 ["messageFormat"] = "visible-markdown",
                 ["sessionTitle"] = new Dictionary<string, object?>
                 {
@@ -271,6 +271,13 @@ public sealed class ContextAssembler : IContextAssembler
                     ["maximumWords"] = 6,
                     ["mustBeSpecific"] = true,
                     ["refreshOnEveryRun"] = true,
+                },
+                ["contextSummary"] = new Dictionary<string, object?>
+                {
+                    ["language"] = "de",
+                    ["maximumCharacters"] = 320,
+                    ["purpose"] = "Kurze Klartext-Zusammenfassung für einen später aus dieser Antwort erstellten Workflow.",
+                    ["mustNotContainMarkdown"] = true,
                 },
             },
             ["includeConversationHistory"] = true,

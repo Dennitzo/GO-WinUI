@@ -1,6 +1,7 @@
 using GoAi.Client;
 using GoAi.Contracts;
 using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Chat;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
@@ -595,10 +596,21 @@ public sealed class GoAiAssistantService(
                                 ? "Der Auftrag wurde abgeschlossen. Das Ergebnis ist unten lokal gespeichert."
                                 : "Der GO-AI-Auftrag wurde abgeschlossen.";
                         }
+                        var parsedResponse = GeneralAgentResponseParser.Parse(content, completed?.SessionTitle ?? string.Empty);
+                        content = parsedResponse.Message;
                         await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Completed, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                        await chats.SetMessageContextSummaryAsync(assistant.Id, parsedResponse.ContextSummary, CancellationToken.None).ConfigureAwait(false);
                         if (!string.IsNullOrWhiteSpace(completed?.SessionTitle))
                         {
-                            await chats.RenameSessionAsync(assistant.SessionId, completed.SessionTitle, CancellationToken.None).ConfigureAwait(false);
+                            var sessionTitle = GeneralAgentResponseParser.NormalizeTitle(completed.SessionTitle);
+                            if (sessionTitle is not null)
+                            {
+                                await chats.RenameSessionAsync(assistant.SessionId, sessionTitle, CancellationToken.None).ConfigureAwait(false);
+                            }
+                        }
+                        else if (!string.IsNullOrWhiteSpace(parsedResponse.SessionTitle))
+                        {
+                            await chats.RenameSessionAsync(assistant.SessionId, parsedResponse.SessionTitle, CancellationToken.None).ConfigureAwait(false);
                         }
                         await runs.UpdateAsync(localRun.Id, item.RunId, item.Id, "completed", model, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                         var final = (await chats.ListMessagesAsync(assistant.SessionId, CancellationToken.None).ConfigureAwait(false)).Single(value => value.Id == assistant.Id);
@@ -638,7 +650,10 @@ public sealed class GoAiAssistantService(
                 {
                     content = "Der GO-AI-Auftrag wurde abgeschlossen.";
                 }
+                var snapshotResponse = GeneralAgentResponseParser.Parse(content, string.Empty);
+                content = snapshotResponse.Message;
                 await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Completed, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                await chats.SetMessageContextSummaryAsync(assistant.Id, snapshotResponse.ContextSummary, CancellationToken.None).ConfigureAwait(false);
                 await runs.UpdateAsync(localRun.Id, snapshot.RunId, snapshot.LastEventId, "completed", snapshot.SelectedModel, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 var final = (await chats.ListMessagesAsync(assistant.SessionId, CancellationToken.None).ConfigureAwait(false)).Single(value => value.Id == assistant.Id);
                 await update(new(GoAiAssistantUpdateKind.Completed, final, collectedArtifacts.ToArray(), await chats.GetSessionAsync(assistant.SessionId, CancellationToken.None), "Fertig", snapshot.SelectedModel)).ConfigureAwait(false);
@@ -1118,7 +1133,9 @@ public sealed class GoAiAssistantService(
         CancellationToken cancellationToken,
         IReadOnlyList<ChatArtifact>? resultArtifacts = null)
     {
+        var contextSummary = GeneralAgentResponseParser.CreateContextSummary(null, content);
         await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Completed, cancellationToken: cancellationToken).ConfigureAwait(false);
+        await chats.SetMessageContextSummaryAsync(assistant.Id, contextSummary, cancellationToken).ConfigureAwait(false);
         var final = (await chats.ListMessagesAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false)).Single(item => item.Id == assistant.Id);
         var session = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
         await recentActivity.RecordAsync($"AI-Sitzung „{session?.Title ?? "Neue Sitzung"}“ bearbeitet", CancellationToken.None).ConfigureAwait(false);

@@ -77,6 +77,7 @@ public sealed class ChatAndContextTests
             root.GetProperty("responseContract").GetProperty("schema").GetString());
         Assert.True(root.GetProperty("responseContract").GetProperty("sessionTitle").GetProperty("refreshOnEveryRun").GetBoolean());
         Assert.Equal(6, root.GetProperty("responseContract").GetProperty("sessionTitle").GetProperty("maximumWords").GetInt32());
+        Assert.True(root.GetProperty("responseContract").GetProperty("contextSummary").GetProperty("mustNotContainMarkdown").GetBoolean());
         Assert.Equal("TGA-Fachplanung", root.GetProperty("domainProfile").GetProperty("name").GetString());
         Assert.True(root.GetProperty("domainProfile").GetProperty("applicationNameIsNotProgrammingLanguage").GetBoolean());
         Assert.Collection(
@@ -110,6 +111,31 @@ public sealed class ChatAndContextTests
         Assert.True(response.IsStructured);
         Assert.Equal("## Heizlast\n\nDie Berechnung ist vorbereitet.", response.Message);
         Assert.Equal("Heizlast Bestand fachlich prüfen", response.SessionTitle);
+        Assert.Equal("Heizlast Die Berechnung ist vorbereitet.", response.ContextSummary);
+    }
+
+    [Fact]
+    public void LegacySessionTitleMarkerIsRemovedFromTheVisibleAnswer()
+    {
+        const string raw = "GO_SESSION_TITLE: Projektstart BricsCAD CATS\n\n## Projektstart\n\nRäume werden in BricsCAD vorbereitet.";
+
+        var response = GeneralAgentResponseParser.Parse(raw, "Projekt starten");
+
+        Assert.DoesNotContain("GO_SESSION_TITLE", response.Message, StringComparison.Ordinal);
+        Assert.Equal("Projektstart BricsCAD CATS", response.SessionTitle);
+        Assert.Equal("Projektstart Räume werden in BricsCAD vorbereitet.", response.ContextSummary);
+    }
+
+    [Fact]
+    public void WorkflowMetadataConvertsMarkdownToShortPlainText()
+    {
+        const string markdown = "**Projektstart mit BricsCAD & C.A.T.S. – Raum-Erstellung**\n\n---\n\n## 1 Projektvorbereitung in BricsCAD\n\n| Schritt | Aktion | Hinweis |";
+
+        Assert.Equal("Projektstart mit BricsCAD & C.A.T.S. – Raum-Erstellung", GeneralAgentResponseParser.CreateWorkflowTitle(markdown));
+        var summary = GeneralAgentResponseParser.CreateContextSummary(null, markdown);
+        Assert.DoesNotContain("**", summary, StringComparison.Ordinal);
+        Assert.DoesNotContain("|", summary, StringComparison.Ordinal);
+        Assert.True(summary.Length <= 320);
     }
 
     [Fact]

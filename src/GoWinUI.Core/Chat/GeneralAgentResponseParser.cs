@@ -5,6 +5,7 @@ namespace GoWinUI.Core.Chat;
 public sealed record GeneralAgentResponse(
     string Message,
     string SessionTitle,
+    string ContextSummary,
     bool IsStructured);
 
 public static class GeneralAgentResponseParser
@@ -39,13 +40,16 @@ public static class GeneralAgentResponseParser
             var suggestedTitle = GetSuggestedTitle(root);
             var title = NormalizeTitle(suggestedTitle)
                 ?? CreateFallbackTitle(userPrompt, message);
-            return new(message.Trim(), title, true);
+            var summary = GetSuggestedContextSummary(root);
+            return new(CleanVisibleMessage(message), title, CreateContextSummary(summary, message), true);
         }
 
-        var visibleMessage = StripOuterCodeFence(raw).Trim();
+        var visibleMessage = CleanVisibleMessage(StripOuterCodeFence(raw));
+        var legacyTitle = ExtractLegacySessionTitle(raw);
         return new(
             visibleMessage,
-            CreateFallbackTitle(userPrompt, visibleMessage),
+            NormalizeTitle(legacyTitle) ?? CreateFallbackTitle(userPrompt, visibleMessage),
+            CreateContextSummary(null, visibleMessage),
             false);
     }
 
@@ -65,7 +69,49 @@ public static class GeneralAgentResponseParser
 
         return LooksLikeStructuredEnvelope(raw)
             ? string.Empty
-            : StripOuterCodeFence(raw).Trim();
+            : CleanVisibleMessage(StripOuterCodeFence(raw));
+    }
+
+    public static string CreateContextSummary(string? suggestedSummary, string message)
+    {
+        var source = string.IsNullOrWhiteSpace(suggestedSummary) ? message : suggestedSummary;
+        var lines = new List<string>(2);
+        foreach (var rawLine in (source ?? string.Empty).ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = rawLine.Trim();
+            if (trimmed.Length == 0
+                || trimmed == "---"
+                || trimmed.Contains('|', StringComparison.Ordinal)
+                || trimmed.StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase)
+                || lines.Count > 0 && trimmed.StartsWith('#'))
+            {
+                continue;
+            }
+            var plain = PlainText(trimmed);
+            if (plain.Length == 0 || plain.All(static character => character is '-' or ':' or ' ')) continue;
+            lines.Add(plain);
+            if (lines.Count == 2) break;
+        }
+        var value = string.Join(' ', lines);
+        value = string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (value.Length > 320)
+        {
+            value = value[..320].TrimEnd();
+            var boundary = value.LastIndexOfAny(['.', '!', '?', ';']);
+            if (boundary >= 100) value = value[..(boundary + 1)];
+            else value = value.TrimEnd(',', ':', '-', ' ') + "…";
+        }
+        return value.Length == 0 ? "AI-gestützter Arbeitsablauf aus der zugehörigen Sitzung." : value;
+    }
+
+    public static string CreateWorkflowTitle(string message)
+    {
+        var first = (message ?? string.Empty).ReplaceLineEndings("\n")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => PlainText(line))
+            .FirstOrDefault(static line => line.Length > 0 && line != "---")
+            ?? "Workflow aus Chat";
+        return first.Length <= 100 ? first : first[..97].TrimEnd() + "…";
     }
 
     public static string? NormalizeTitle(string? title)
@@ -173,6 +219,41 @@ public static class GeneralAgentResponseParser
         }
 
         return string.Empty;
+    }
+
+    private static string GetSuggestedContextSummary(JsonElement root)
+    {
+        foreach (var name in new[] { "contextSummary", "workflowContextSummary", "summary" })
+        {
+            if (TryGetString(root, name, out var summary) && !string.IsNullOrWhiteSpace(summary)) return summary;
+        }
+        return string.Empty;
+    }
+
+    private static string CleanVisibleMessage(string content) => string.Join('\n',
+        (content ?? string.Empty).ReplaceLineEndings("\n")
+            .Split('\n')
+            .Where(static line => !line.TrimStart().StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase)))
+        .Trim();
+
+    private static string? ExtractLegacySessionTitle(string content)
+    {
+        var line = (content ?? string.Empty).ReplaceLineEndings("\n")
+            .Split('\n')
+            .Select(static line => line.Trim())
+            .FirstOrDefault(static line => line.StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase));
+        return line is null ? null : line["GO_SESSION_TITLE:".Length..].Trim();
+    }
+
+    private static string PlainText(string line)
+    {
+        var value = line.Trim().TrimStart('#').Trim();
+        value = value.Replace("**", string.Empty, StringComparison.Ordinal)
+            .Replace("__", string.Empty, StringComparison.Ordinal)
+            .Replace("`", string.Empty, StringComparison.Ordinal)
+            .Replace("|", " ", StringComparison.Ordinal)
+            .Replace("*", string.Empty, StringComparison.Ordinal);
+        return string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
     }
 
     private static bool TryGetString(JsonElement element, string name, out string value)

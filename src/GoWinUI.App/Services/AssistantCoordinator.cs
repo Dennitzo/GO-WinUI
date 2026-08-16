@@ -1,4 +1,5 @@
 using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Chat;
 using GoWinUI.Core.Models;
 using System.Globalization;
 using System.Text;
@@ -1078,8 +1079,10 @@ public sealed class AssistantCoordinator(
         var message = (await chats.ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false))
             .FirstOrDefault(item => item.Id == messageId)
             ?? throw new InvalidOperationException("Die Nachricht wurde nicht gefunden.");
-        var titleSeed = message.Content.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? "Workflow aus Chat";
-        var title = titleSeed.Length <= 100 ? titleSeed : string.Concat(titleSeed.AsSpan(0, 97), "…");
+        var title = GeneralAgentResponseParser.CreateWorkflowTitle(message.Content);
+        var contextSummary = string.IsNullOrWhiteSpace(message.ContextSummary)
+            ? GeneralAgentResponseParser.CreateContextSummary(null, message.Content)
+            : GeneralAgentResponseParser.CreateContextSummary(message.ContextSummary, message.Content);
         var contentJson = JsonSerializer.Serialize(new
         {
             schema = "go.general.workflow.v1",
@@ -1094,7 +1097,7 @@ public sealed class AssistantCoordinator(
                 title,
                 description = "Aus einer AI-Nachricht erstellt.",
                 domain = "Allgemein",
-                contextSummary = message.Content,
+                contextSummary,
                 contentJson,
                 isBuiltIn = false,
                 tags = Array.Empty<string>(),
@@ -1125,6 +1128,7 @@ public sealed class AssistantCoordinator(
         message.CreatedAt,
         message.UpdatedAt,
         message.Error,
+        message.ContextSummary,
         tool = message.ToolExecution,
         artifacts = (messageArtifacts ?? []).Select(ToArtifactDto),
     };

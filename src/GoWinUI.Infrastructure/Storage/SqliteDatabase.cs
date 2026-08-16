@@ -9,6 +9,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
+    public const int CurrentSchemaVersion = 12;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -58,6 +59,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationNineAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTenAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationElevenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwelveAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -409,6 +411,22 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
                 WHERE action IN ('video' || 'Generation', 'gif' || 'Generation');
                 INSERT INTO schema_migrations(version, applied_at) VALUES(11, $now);
                 """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwelveAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=12;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = "ALTER TABLE chat_messages ADD COLUMN context_summary TEXT NULL; INSERT INTO schema_migrations(version, applied_at) VALUES(12, $now);";
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }

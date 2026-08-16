@@ -95,11 +95,12 @@ public sealed partial class ChatOrchestrator(
             }
 
             await chats.UpdateMessageAsync(assistant.Id, finalContent, MessageStatus.Completed, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            await chats.SetMessageContextSummaryAsync(assistant.Id, parsedResponse.ContextSummary, CancellationToken.None).ConfigureAwait(false);
             await chats.RenameSessionAsync(sessionId, parsedResponse.SessionTitle, CancellationToken.None).ConfigureAwait(false);
             await SaveRunFinishedAsync(database, runId, MessageStatus.Completed, null).ConfigureAwait(false);
             RunCompleted(_logger, sessionId);
             StreamUpdated?.Invoke(this, new(sessionId, assistant.Id, string.Empty, finalContent, MessageStatus.Completed));
-            return assistant with { Content = finalContent, Status = MessageStatus.Completed, UpdatedAt = DateTimeOffset.UtcNow };
+            return assistant with { Content = finalContent, Status = MessageStatus.Completed, UpdatedAt = DateTimeOffset.UtcNow, ContextSummary = parsedResponse.ContextSummary };
         }
         catch (OperationCanceledException) when (assistant is not null)
         {

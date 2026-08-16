@@ -28,6 +28,7 @@ public interface IChatRepository
     Task<IReadOnlyList<ChatMessage>> ListMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<ChatMessage> AddMessageAsync(Guid sessionId, ChatRole role, string content, MessageStatus status, CancellationToken cancellationToken = default);
     Task UpdateMessageAsync(Guid messageId, string content, MessageStatus status, string? errorMessage = null, CancellationToken cancellationToken = default);
+    Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default);
     Task SetToolExecutionAsync(Guid messageId, ToolExecutionInfo execution, CancellationToken cancellationToken = default);
     Task<int> MarkStreamingMessagesInterruptedAsync(CancellationToken cancellationToken = default);
 }
