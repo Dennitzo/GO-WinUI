@@ -11,6 +11,7 @@ public static class RunRequestValidator
         "process",
         "bricscad",
         "screenCapture",
+        "documents",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
@@ -28,6 +29,15 @@ public static class RunRequestValidator
         if (!Enum.IsDefined(request.Mode))
         {
             throw new ArgumentException("Run mode is invalid.");
+        }
+        if (request.ConversationProfile is { } conversationProfile && !Enum.IsDefined(conversationProfile))
+        {
+            throw new ArgumentException("Conversation profile is invalid.");
+        }
+        if (request.ConversationProfile == ConversationProfile.Audiobook
+            && (request.Mode != RunMode.General || request.AllowedServerTools is not { Count: 0 }))
+        {
+            throw new ArgumentException("Audiobook runs require general mode and an explicit empty server-tool allow-list.");
         }
         if (request.Workload is not null)
         {
@@ -96,11 +106,18 @@ public static class RunRequestValidator
 
         ValidateIds(request.UploadIds, "upload-");
         ValidateIds(request.ArtifactIds, "artifact-");
-        if (request.ClientCapabilities is { Count: > 16 }
-            || request.ClientCapabilities?.Any(capability =>
-                string.IsNullOrWhiteSpace(capability) || !ClientCapabilities.Contains(capability)) == true)
+        if (request.ClientCapabilities is { Count: > 16 })
         {
-            throw new ArgumentException("The run contains unknown or excessive client capabilities.");
+            throw new ArgumentException("The run contains more than 16 client capabilities.");
+        }
+        var unknownCapability = request.ClientCapabilities?.FirstOrDefault(capability =>
+            string.IsNullOrWhiteSpace(capability) || !ClientCapabilities.Contains(capability));
+        if (unknownCapability is not null)
+        {
+            throw new ArgumentException(
+                string.IsNullOrWhiteSpace(unknownCapability)
+                    ? "The run contains an empty client capability."
+                    : $"The run contains the unknown client capability '{unknownCapability}'.");
         }
         if (request.AllowedServerTools is { Count: > 32 }
             || request.AllowedServerTools?.Any(tool =>
@@ -131,6 +148,50 @@ public static class RunRequestValidator
             {
                 throw new ArgumentException("Workspace fingerprints must be lowercase SHA-256 values.");
             }
+        }
+        if (request.DocumentContext is { } documentContext)
+        {
+            if (!Enum.IsDefined(documentContext.Mode)
+                || documentContext.CorpusRevision is null
+                || documentContext.CorpusRevision.Length != 64
+                || !IsLowerHex(documentContext.CorpusRevision)
+                || documentContext.DocumentCount is < 1 or > 10_000
+                || documentContext.PageCount is < 1 or > 1_000_000
+                || documentContext.EstimatedTokens is < 1 or > 20_000_000
+                || documentContext.IncludedPageCount < 1
+                || documentContext.IncludedPageCount > documentContext.PageCount
+                || documentContext.Mode == DocumentContextMode.Full
+                    && (documentContext.IncludedPageCount != documentContext.PageCount
+                        || documentContext.PreparedByAi)
+                || documentContext.Mode == DocumentContextMode.Prepared
+                    && !documentContext.PreparedByAi)
+            {
+                throw new ArgumentException("The document context descriptor is invalid.");
+            }
+            if (request.ClientCapabilities?.Contains("documents", StringComparer.OrdinalIgnoreCase) != true
+                && documentContext.Mode == DocumentContextMode.Prepared)
+            {
+                throw new ArgumentException("Prepared document context requires the documents client capability.");
+            }
+        }
+        if (request.SessionContext is { } sessionContext
+            && (sessionContext.HistoryRevision is null
+                || sessionContext.HistoryRevision.Length != 64
+                || !IsLowerHex(sessionContext.HistoryRevision)
+                || sessionContext.OriginalMessageCount is < 0 or > 500
+                || sessionContext.IncludedMessageCount is < 0 or > 500
+                || sessionContext.IncludedMessageCount > sessionContext.OriginalMessageCount
+                || sessionContext.EstimatedTokens is < 0 or > 20_000_000
+                || sessionContext.PreparedByAi && sessionContext.OriginalMessageCount == 0))
+        {
+            throw new ArgumentException("The session context descriptor is invalid.");
+        }
+        if (request.PreferredGeneralModelId is { } preferredModel
+            && (string.IsNullOrWhiteSpace(preferredModel)
+                || preferredModel.Length > 512
+                || preferredModel.Any(char.IsControl)))
+        {
+            throw new ArgumentException("preferredGeneralModelId must contain a bounded model ID.");
         }
         if (request.Limits?.MaximumOutputTokens is { } maximumOutputTokens
             && maximumOutputTokens is < 1 or > 65_536)

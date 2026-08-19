@@ -92,6 +92,8 @@ public partial class App : Application
                 services.AddSingleton<MainWindow>();
                 services.AddSingleton<ToolConfirmationService>();
                 services.AddSingleton<WorkspaceRepositoryIndex>();
+                services.AddSingleton<DocumentContextPreparationService>();
+                services.AddSingleton<SessionContextPreparationService>();
                 services.AddSingleton<LocalToolBroker>();
                 services.AddSingleton<GoAiAssistantService>();
             })

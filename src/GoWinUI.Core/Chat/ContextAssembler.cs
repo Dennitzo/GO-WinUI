@@ -311,11 +311,11 @@ public sealed class ContextAssembler : IContextAssembler
         IReadOnlyList<DocumentPage> pages,
         (int Start, int End)? selection)
     {
-        var selected = selection is null
-            ? pages.OrderBy(static page => page.PageNumber)
+        var filtered = selection is null
+            ? pages
             : pages.Where(page => page.PageNumber >= selection.Value.Start
-                    && page.PageNumber <= selection.Value.End)
-                .OrderBy(static page => page.PageNumber);
+                    && page.PageNumber <= selection.Value.End).ToArray();
+        var selected = RoundRobinDocuments(filtered);
 
         var result = new StringBuilder();
         var wasTruncated = false;
@@ -349,6 +349,21 @@ public sealed class ContextAssembler : IContextAssembler
         }
 
         return (result.ToString(), wasTruncated);
+    }
+
+    private static IEnumerable<DocumentPage> RoundRobinDocuments(IEnumerable<DocumentPage> pages)
+    {
+        var groups = pages.GroupBy(static page => page.DocumentId)
+            .Select(static group => group.OrderBy(static page => page.PageNumber).ToArray())
+            .ToArray();
+        var maximum = groups.Length == 0 ? 0 : groups.Max(static group => group.Length);
+        for (var pageIndex = 0; pageIndex < maximum; pageIndex++)
+        {
+            foreach (var group in groups)
+            {
+                if (pageIndex < group.Length) yield return group[pageIndex];
+            }
+        }
     }
 
     private static string TruncateContext(string value, int maximumCharacters)

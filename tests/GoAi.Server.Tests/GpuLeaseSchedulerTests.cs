@@ -66,7 +66,7 @@ public sealed class GpuLeaseSchedulerTests
     [InlineData("llm-general", "gpt-oss-20b", "LM Studio")]
     [InlineData("llm-code", "Laguna-S-2.1", "LM Studio")]
     [InlineData("live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT")]
-    [InlineData("text-to-speech", "Antwort wird vorgelesen", "Docker · Piper MLS weiblich")]
+    [InlineData("text-to-speech", "Antwort wird vorgelesen", "Docker · Supertonic F5 Ultra · GPU 1")]
     [InlineData("image-generation", "Bild wird erstellt", "Docker · Image")]
     public void GpuStatusMapsWorkloadsToFooterLabels(
         string workload,

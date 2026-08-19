@@ -120,6 +120,7 @@ public sealed partial class PromptTriggerEditorItem : ObservableObject
         PromptTriggerAction.VoiceInput => "Sprachsteuerung",
         PromptTriggerAction.LiveCaptions => "Live-Untertitel",
         PromptTriggerAction.LiveTranslation => "Live-Übersetzung",
+        PromptTriggerAction.Audiobook => "Hörbuch erstellen",
         _ => value.ToString(),
     };
 }

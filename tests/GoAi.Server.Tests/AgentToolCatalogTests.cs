@@ -17,6 +17,12 @@ public sealed class AgentToolCatalogTests
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.FileSystemReadText);
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.ProcessRunPreset);
         Assert.DoesNotContain(withCode, static tool => tool.Name == ClientToolNames.BricsCadMove);
+
+        var withDocuments = catalog.GetAvailableTools(CreateRequest(["documents"]));
+        Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsList);
+        Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsSearch);
+        Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsReadPages);
+        Assert.DoesNotContain(withDocuments, static tool => tool.Name == ClientToolNames.FileSystemWriteText);
     }
 
     [Fact]

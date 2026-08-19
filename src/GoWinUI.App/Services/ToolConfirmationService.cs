@@ -78,6 +78,9 @@ public sealed class ToolConfirmationService(MainWindow window) : IDisposable
     private static bool IsClientVerifiedReadOnly(ToolProposal proposal) =>
         proposal.RiskClass == ToolRiskClass.ReadOnly
         && proposal.Name is ClientToolNames.WorkspaceMap
+            or ClientToolNames.DocumentsList
+            or ClientToolNames.DocumentsSearch
+            or ClientToolNames.DocumentsReadPages
             or ClientToolNames.FileSystemList
             or ClientToolNames.FileSystemStat
             or ClientToolNames.FileSystemFindFiles

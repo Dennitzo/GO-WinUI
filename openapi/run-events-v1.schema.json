@@ -30,5 +30,49 @@
     },
     "createdAt": { "type": "string", "format": "date-time" },
     "data": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "type": { "const": "context.changed" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "data": { "$ref": "#/$defs/contextChanged" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "contextChanged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "estimatedInputTokens",
+        "contextLimit",
+        "loadedFiles",
+        "wasCompacted",
+        "contextMode",
+        "documentTokens",
+        "documentPages",
+        "preparationCompleted",
+        "historyTokens",
+        "historyWasCompacted"
+      ],
+      "properties": {
+        "estimatedInputTokens": { "type": "integer", "minimum": 0 },
+        "contextLimit": { "type": "integer", "minimum": 1024 },
+        "loadedFiles": { "type": "integer", "minimum": 0 },
+        "wasCompacted": { "type": "boolean" },
+        "detail": { "type": ["string", "null"] },
+        "contextMode": { "enum": ["none", "full", "prepared"] },
+        "documentTokens": { "type": "integer", "minimum": 0 },
+        "documentPages": { "type": "integer", "minimum": 0 },
+        "preparationCompleted": { "type": "boolean" },
+        "historyTokens": { "type": "integer", "minimum": 0 },
+        "historyWasCompacted": { "type": "boolean" }
+      }
+    }
   }
 }

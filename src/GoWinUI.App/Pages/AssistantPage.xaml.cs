@@ -18,9 +18,25 @@ using WinRT.Interop;
 
 namespace GoWinUI.App.Pages;
 
+internal enum VoicePlaybackControl
+{
+    None,
+    Pause,
+    Resume,
+    Cancel,
+}
+
 public sealed partial class AssistantPage : Page, IDisposable
 {
+    internal const double PdfA4WidthInches = 210d / 25.4d;
+    internal const double PdfA4HeightInches = 297d / 25.4d;
+    internal const double PdfBookMarginTopInches = 20d / 25.4d;
+    internal const double PdfBookMarginRightInches = 20d / 25.4d;
+    internal const double PdfBookMarginBottomInches = 24d / 25.4d;
+    internal const double PdfBookMarginLeftInches = 24d / 25.4d;
+
     private readonly AssistantCoordinator _coordinator;
+    private readonly GoAiAssistantService _goAi;
     private readonly SettingsCoordinator _settings;
     private readonly ShellViewModel _shell;
     private readonly IChatArtifactRepository _artifacts;
@@ -54,6 +70,7 @@ public sealed partial class AssistantPage : Page, IDisposable
     {
         InitializeComponent();
         _coordinator = App.Current.GetService<AssistantCoordinator>();
+        _goAi = App.Current.GetService<GoAiAssistantService>();
         _settings = App.Current.GetService<SettingsCoordinator>();
         _shell = App.Current.GetService<ShellViewModel>();
         _artifacts = App.Current.GetService<IChatArtifactRepository>();
@@ -278,9 +295,10 @@ public sealed partial class AssistantPage : Page, IDisposable
 
             if (args.Envelope.Type == "chat.send")
             {
-                if (_chatBridgeGate.CurrentCount == 0)
+                if (_chatBridgeGate.CurrentCount == 0 || _goAi.IsRunning || _microphone.Current.IsSpeaking)
                 {
                     await _coordinator.CancelCurrentAsync().ConfigureAwait(false);
+                    await _microphone.StopSpeechAsync(CancellationToken.None).ConfigureAwait(false);
                 }
                 await _chatBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
                 chatMessageLocked = true;
@@ -401,11 +419,29 @@ public sealed partial class AssistantPage : Page, IDisposable
                     await bridge.PostAsync("microphone.changed", _microphone.Current, args.Envelope.RequestId);
                     break;
                 case "microphone.speak":
-                    _ = SpeakWithoutBlockingBridgeAsync(
-                        ReadRequiredText(args.Envelope.Payload, "text", 100_000));
+                    var speechText = ReadRequiredText(args.Envelope.Payload, "text", 100_000);
+                    if (TryReadGuid(args.Envelope.Payload, "sessionId", out var speechSessionId)
+                        && TryReadGuid(args.Envelope.Payload, "messageId", out var speechMessageId))
+                    {
+                        _ = SpeakWithoutBlockingBridgeAsync(
+                            speechSessionId,
+                            speechMessageId,
+                            speechText,
+                            bridge,
+                            args.Envelope.RequestId);
+                    }
+                    else
+                    {
+                        _ = SpeakFeedbackWithoutBlockingBridgeAsync(speechText);
+                    }
                     break;
                 case "microphone.stopSpeech":
                     await _microphone.StopSpeechAsync(CancellationToken.None);
+                    break;
+                case "microphone.toggleSpeechPause":
+                    var playback = await _microphone.ToggleSpeechPauseAsync(
+                        _lifetime?.Token ?? CancellationToken.None);
+                    await bridge.PostAsync("microphone.changed", playback, args.Envelope.RequestId);
                     break;
                 case "microphone.cancel":
                     await _microphone.CancelAsync(CancellationToken.None);
@@ -465,7 +501,46 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
     }
 
-    private async Task SpeakWithoutBlockingBridgeAsync(string text)
+    private async Task SpeakWithoutBlockingBridgeAsync(
+        Guid sessionId,
+        Guid messageId,
+        string text,
+        AssistantWebBridge bridge,
+        string requestId)
+    {
+        try
+        {
+            await _goAi.SpeakAsync(
+                sessionId,
+                text,
+                messageId,
+                update => bridge.PostAsync("speech.status", new
+                {
+                    active = update.IsActive,
+                    status = update.Status,
+                    detail = update.Detail,
+                    model = update.Model,
+                    directionModel = update.DirectionModel,
+                    error = update.Error,
+                    cacheHit = update.CacheHit,
+                }, requestId),
+                playback => bridge.PostAsync(
+                    "speech.progress",
+                    SpeechPlaybackProgressBridge.ToPayload(playback),
+                    requestId),
+                _lifetime?.Token ?? CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // A voice command or replacement prompt intentionally stopped playback.
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "microphone.speak");
+        }
+    }
+
+    private async Task SpeakFeedbackWithoutBlockingBridgeAsync(string text)
     {
         try
         {
@@ -577,7 +652,7 @@ public sealed partial class AssistantPage : Page, IDisposable
             "microphone-tts",
             snapshot.IsSpeaking,
             "Antwort wird vorgelesen",
-            "Docker · Piper MLS weiblich");
+            "Docker · Supertonic F5 Ultra · GPU 1");
         var bridge = _bridge;
         if (bridge is null)
         {
@@ -604,7 +679,71 @@ public sealed partial class AssistantPage : Page, IDisposable
         {
             if (!snapshot.IsFinal)
             {
-                await bridge.PostAsync("microphone.transcript", snapshot);
+                // Während der Wiedergabe bleibt Chromium nur für lokale
+                // Sprachsteuerbefehle offen. Partielle Rückkopplungen der
+                // Lautsprecherausgabe werden nicht im Chat eingeblendet.
+                if (!_microphone.Current.IsSpeaking)
+                {
+                    await bridge.PostAsync("microphone.transcript", snapshot);
+                }
+                return;
+            }
+
+            var voiceCancellation = _lifetime?.Token ?? CancellationToken.None;
+            var audiobookContext = await _coordinator.HasAudiobookVoiceContextAsync(
+                voiceCancellation).ConfigureAwait(false);
+            var normalizedText = NormalizeAudiobookVoiceCommand(snapshot.Text, audiobookContext);
+            if (!string.Equals(normalizedText, snapshot.Text, StringComparison.Ordinal))
+            {
+                snapshot = snapshot with { Text = normalizedText };
+            }
+
+            var microphoneState = _microphone.Current;
+            var playbackControl = ResolveVoicePlaybackControl(
+                snapshot.Text,
+                microphoneState,
+                _goAi.IsRunning);
+            if (playbackControl != VoicePlaybackControl.None)
+            {
+                if (playbackControl is VoicePlaybackControl.Pause or VoicePlaybackControl.Resume)
+                {
+                    _ = await _microphone.ToggleSpeechPauseAsync(voiceCancellation).ConfigureAwait(false);
+                }
+                else
+                {
+                    await _microphone.StopSpeechAsync(voiceCancellation).ConfigureAwait(false);
+                    await _coordinator.CancelCurrentAsync().ConfigureAwait(false);
+                }
+
+                await bridge.PostAsync("microphone.transcript", new
+                {
+                    snapshot.TurnId,
+                    snapshot.Text,
+                    snapshot.IsFinal,
+                    snapshot.Provider,
+                    Execute = false,
+                    Cancel = playbackControl == VoicePlaybackControl.Cancel,
+                    Noise = true,
+                    Control = playbackControl.ToString().ToLowerInvariant(),
+                });
+                return;
+            }
+
+            // Während die Vorlesestimme läuft, werden ausschließlich die lokalen
+            // Pause-/Fortsetzen-/Abbruchbefehle ausgewertet. So kann die Ausgabe
+            // nicht über das Mikrofon selbst als neuer Prompt zurückgekoppelt werden.
+            if (microphoneState.IsSpeaking)
+            {
+                await bridge.PostAsync("microphone.transcript", new
+                {
+                    snapshot.TurnId,
+                    snapshot.Text,
+                    snapshot.IsFinal,
+                    snapshot.Provider,
+                    Execute = false,
+                    Cancel = false,
+                    Noise = true,
+                });
                 return;
             }
 
@@ -668,6 +807,61 @@ public sealed partial class AssistantPage : Page, IDisposable
             .Trim()
             .ToLowerInvariant();
         return normalized is "beenden" or "aufnahme beenden" or "abschließen" or "aufnahme abschließen";
+    }
+
+    internal static string NormalizeAudiobookVoiceCommand(string? text, bool audiobookActive)
+    {
+        var original = (text ?? string.Empty).Trim();
+        if (!audiobookActive || original.Length == 0)
+        {
+            return original;
+        }
+
+        var command = NormalizeSpokenCommand(original);
+        return command is "rlt fazit" or "rtl fazit" or "r l t fazit" or "hörbuch fazit"
+            or "hoerbuch fazit" or "hörbuchfortsetzen" or "hoerbuchfortsetzen"
+            ? "Hörbuch fortsetzen"
+            : original;
+    }
+
+    internal static VoicePlaybackControl ResolveVoicePlaybackControl(
+        string? text,
+        MicrophoneSnapshot state,
+        bool speechOperationActive)
+    {
+        var command = NormalizeSpokenCommand(text);
+        if ((state.IsSpeaking || speechOperationActive)
+            && command is "abbrechen" or "abbruch" or "stopp" or "stop"
+                or "vorlesen abbrechen" or "vorlesen stoppen")
+        {
+            return VoicePlaybackControl.Cancel;
+        }
+        if (state.IsSpeaking && state.CanPauseSpeech && !state.IsSpeechPaused
+            && command is "pausieren" or "pause" or "vorlesen pausieren" or "wiedergabe pausieren")
+        {
+            return VoicePlaybackControl.Pause;
+        }
+        if (state.IsSpeaking && state.CanPauseSpeech && state.IsSpeechPaused
+            && command is "fortsetzen" or "weiter" or "weiterlesen"
+                or "vorlesen fortsetzen" or "wiedergabe fortsetzen")
+        {
+            return VoicePlaybackControl.Resume;
+        }
+        return VoicePlaybackControl.None;
+    }
+
+    private static string NormalizeSpokenCommand(string? text)
+    {
+        var value = (text ?? string.Empty)
+            .Trim()
+            .TrimEnd('.', '!', '?', ',', ';', ':')
+            .ToLowerInvariant()
+            .Replace('-', ' ')
+            .Replace('–', ' ')
+            .Replace('—', ' ');
+        return string.Join(' ', value.Split(
+            [' ', '\t', '\r', '\n'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
     }
 
     private async Task StopMicrophoneAfterUnloadAsync()
@@ -810,27 +1004,38 @@ public sealed partial class AssistantPage : Page, IDisposable
             return;
         }
 
-        foreach (var file in files)
+        var pendingNames = files.Select(static file => file.Name).ToList();
+        await bridge.PostAsync("document.import.started", new { files = pendingNames }, envelope.RequestId);
+        try
         {
-            var extension = Path.GetExtension(file.Name);
-            await using var stream = await file.OpenStreamForReadAsync();
-            if (_coordinator.SupportedDocumentExtensions.Contains(extension))
+            foreach (var file in files)
             {
-                await _coordinator.ImportDocumentAsync(
-                    sessionId,
-                    file.Name,
-                    stream,
-                    _lifetime?.Token ?? CancellationToken.None);
+                var extension = Path.GetExtension(file.Name);
+                await using var stream = await file.OpenStreamForReadAsync();
+                if (_coordinator.SupportedDocumentExtensions.Contains(extension))
+                {
+                    await _coordinator.ImportDocumentAsync(
+                        sessionId,
+                        file.Name,
+                        stream,
+                        _lifetime?.Token ?? CancellationToken.None);
+                }
+                else
+                {
+                    await _coordinator.ImportAttachmentAsync(
+                        sessionId,
+                        file.Name,
+                        ResolveAttachmentContentType(file.Name, file.ContentType),
+                        stream,
+                        _lifetime?.Token ?? CancellationToken.None);
+                }
+                pendingNames.Remove(file.Name);
+                await bridge.PostAsync("document.import.progress", new { remaining = pendingNames }, envelope.RequestId);
             }
-            else
-            {
-                await _coordinator.ImportAttachmentAsync(
-                    sessionId,
-                    file.Name,
-                    ResolveAttachmentContentType(file.Name, file.ContentType),
-                    stream,
-                    _lifetime?.Token ?? CancellationToken.None);
-            }
+        }
+        finally
+        {
+            await bridge.PostAsync("document.import.completed", new { }, envelope.RequestId);
         }
         await bridge.PostAsync(
             "document.changed",
@@ -1241,7 +1446,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
 
         CoreWebView2? core = null;
-        var messagePrepared = false;
+        var bookPrepared = false;
         try
         {
             var picker = new FileSavePicker
@@ -1262,24 +1467,27 @@ public sealed partial class AssistantPage : Page, IDisposable
 
             core = _assistantWebView?.CoreWebView2
                 ?? throw new InvalidOperationException("Die Chat-Oberfläche ist nicht bereit.");
+            string? messageId = null;
             if (selectedMessageOnly)
             {
-                var messageId = ReadRequiredText(envelope.Payload, "messageId", 128);
-                var scriptArgument = JsonSerializer.Serialize(messageId);
-                var result = await core.ExecuteScriptAsync(
-                    $"globalThis.goPrepareMessagePdf?.({scriptArgument}) ?? false");
-                if (!string.Equals(result, "true", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException("Die ausgewählte Nachricht wurde nicht gefunden.");
-                }
-
-                messagePrepared = true;
-                await Task.Delay(50);
+                messageId = ReadRequiredText(envelope.Payload, "messageId", 128);
             }
 
+            var scriptArgument = JsonSerializer.Serialize(messageId);
+            var result = await core.ExecuteScriptAsync(
+                $"globalThis.goPrepareBookPdf?.({scriptArgument}) ?? false");
+            if (!string.Equals(result, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(selectedMessageOnly
+                    ? "Die ausgewählte Nachricht wurde nicht gefunden."
+                    : "Der Chat enthält keine exportierbaren Nachrichten.");
+            }
+
+            bookPrepared = true;
+            await WaitForBookPdfAssetsAsync(core);
+
             var printSettings = core.Environment.CreatePrintSettings();
-            printSettings.ShouldPrintBackgrounds = true;
-            printSettings.ShouldPrintHeaderAndFooter = false;
+            ConfigureBookPdfPrintSettings(printSettings);
             var success = await core.PrintToPdfAsync(file.Path, printSettings);
             if (!success)
             {
@@ -1290,11 +1498,11 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
         finally
         {
-            if (messagePrepared && core is not null)
+            if (bookPrepared && core is not null)
             {
                 try
                 {
-                    await core.ExecuteScriptAsync("globalThis.goFinishMessagePdf?.()");
+                    await core.ExecuteScriptAsync("globalThis.goFinishBookPdf?.()");
                 }
                 catch (Exception exception) when (exception is not OutOfMemoryException)
                 {
@@ -1303,6 +1511,36 @@ public sealed partial class AssistantPage : Page, IDisposable
             }
 
             _exportGate.Release();
+        }
+    }
+
+    private static void ConfigureBookPdfPrintSettings(CoreWebView2PrintSettings printSettings)
+    {
+        printSettings.Orientation = CoreWebView2PrintOrientation.Portrait;
+        printSettings.PageWidth = PdfA4WidthInches;
+        printSettings.PageHeight = PdfA4HeightInches;
+        printSettings.MarginTop = PdfBookMarginTopInches;
+        printSettings.MarginRight = PdfBookMarginRightInches;
+        printSettings.MarginBottom = PdfBookMarginBottomInches;
+        printSettings.MarginLeft = PdfBookMarginLeftInches;
+        printSettings.ScaleFactor = 1d;
+        printSettings.ShouldPrintBackgrounds = true;
+        printSettings.ShouldPrintHeaderAndFooter = false;
+        printSettings.ShouldPrintSelectionOnly = false;
+    }
+
+    private static async Task WaitForBookPdfAssetsAsync(CoreWebView2 core)
+    {
+        const int maximumAttempts = 40;
+        for (var attempt = 0; attempt < maximumAttempts; attempt++)
+        {
+            var ready = await core.ExecuteScriptAsync("globalThis.goPdfBookReady?.() ?? true");
+            if (string.Equals(ready, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            await Task.Delay(50);
         }
     }
 

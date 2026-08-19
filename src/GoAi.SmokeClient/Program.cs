@@ -169,7 +169,7 @@ async Task<object> RunLiveSmokeAsync()
         "Live-caption session did not preserve the confirmed transcript.");
 
     var speech = await client.SynthesizeSpeechAsync(new SpeechRequest("GO AI Sprachtest für die technische Gebäudeausrüstung."));
-    Ensure(!speech.IsFallback, $"Primary Piper TTS failed; provider was {speech.Provider}.");
+    Ensure(!speech.IsFallback, $"Primary Supertonic TTS failed; provider was {speech.Provider}.");
     Ensure(speech.Artifact.MediaType == "audio/wav", "TTS did not create WAV audio.");
     await AssertArtifactRangeAsync(speech.Artifact);
 

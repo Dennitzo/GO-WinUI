@@ -20,18 +20,20 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void SessionModeIsAcceptedByNativeAndWebBridgeContracts()
+    public void PersistentSessionToolIsAcceptedAndLegacySessionModeRemainsCompatible()
     {
         Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.mode"));
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.tool"));
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
         Assert.Contains("\"session.mode\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("\"session.tool\"", bridge, StringComparison.Ordinal);
 
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.Contains("bridge.js?v=20260814-7", html, StringComparison.Ordinal);
+        Assert.Contains("bridge.js?v=20260819-1", html, StringComparison.Ordinal);
 
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("post(\"session.mode\"", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"session.tool\"", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -52,11 +54,43 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("class=\"pdf-chip\"", html, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
+
+        Assert.InRange(AssistantPage.PdfA4WidthInches, 8.267, 8.268);
+        Assert.InRange(AssistantPage.PdfA4HeightInches, 11.692, 11.693);
+        Assert.InRange(AssistantPage.PdfBookMarginLeftInches, .944, .946);
+        Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
+        Assert.Contains("styles.css?v=20260819-3", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260819-2", html, StringComparison.Ordinal);
+        Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
+        Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
+        Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
+        Assert.Contains("pdf-book--message", app, StringComparison.Ordinal);
+        Assert.Contains("pdf-book--chat", app, StringComparison.Ordinal);
+        Assert.Contains("size: A4 portrait", styles, StringComparison.Ordinal);
+        Assert.Contains("background: #fff", styles, StringComparison.Ordinal);
+        Assert.Contains("color-scheme: only light !important", styles, StringComparison.Ordinal);
+        Assert.Contains("font: 10.75pt/1.58 Georgia", styles, StringComparison.Ordinal);
+        Assert.Contains("hyphens: auto", styles, StringComparison.Ordinal);
+        Assert.Contains("orphans: 3", styles, StringComparison.Ordinal);
+        Assert.Contains("widows: 3", styles, StringComparison.Ordinal);
+        Assert.Contains(".pdf-book thead { display: table-header-group; }", styles, StringComparison.Ordinal);
+        Assert.Contains("white-space: pre-wrap !important", styles, StringComparison.Ordinal);
+        Assert.DoesNotContain("pdf-exporting-message", styles, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("microphone.start")]
     [InlineData("microphone.audio")]
     [InlineData("microphone.speak")]
     [InlineData("microphone.stopSpeech")]
+    [InlineData("microphone.toggleSpeechPause")]
     [InlineData("microphone.stop")]
     [InlineData("microphone.cancel")]
     public void MicrophoneMessagesAreAcceptedByTheWebBridge(string messageType)
@@ -73,6 +107,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("\"microphone.audio\"", bridge, StringComparison.Ordinal);
         Assert.Contains("\"microphone.speak\"", bridge, StringComparison.Ordinal);
         Assert.Contains("\"microphone.stopSpeech\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("\"microphone.toggleSpeechPause\"", bridge, StringComparison.Ordinal);
         Assert.Contains("\"microphone.stop\"", bridge, StringComparison.Ordinal);
         Assert.Contains("\"microphone.cancel\"", bridge, StringComparison.Ordinal);
         Assert.Contains("\"microphone.changed\"", bridge, StringComparison.Ordinal);
@@ -97,6 +132,11 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("createMediaStreamDestination", voice, StringComparison.Ordinal);
         Assert.Contains("getUserMedia({ audio: true, video: false })", voice, StringComparison.Ordinal);
         Assert.Contains("beginTurn(values)", voice, StringComparison.Ordinal);
+        Assert.Contains("const windowSamples = 32000;", voice, StringComparison.Ordinal);
+        Assert.Contains("const overlapSamples = 8000;", voice, StringComparison.Ordinal);
+        Assert.Contains("const windowStepSamples = windowSamples - overlapSamples;", voice, StringComparison.Ordinal);
+        Assert.Contains("sendWindow(turn, [], true);", voice, StringComparison.Ordinal);
+        Assert.DoesNotContain("for (const value of values) samples.push(value);", voice, StringComparison.Ordinal);
         Assert.DoesNotContain("MediaRecorder", voice, StringComparison.Ordinal);
 
         Assert.Contains("microphone-frequency", html, StringComparison.Ordinal);
@@ -142,6 +182,7 @@ public sealed class AssistantWorkflowTests
     [InlineData("youTubeSearch", PromptTriggerAction.YouTubeSearch)]
     [InlineData("bricsCad", PromptTriggerAction.BricsCad)]
     [InlineData("code", PromptTriggerAction.Code)]
+    [InlineData("audiobook", PromptTriggerAction.Audiobook)]
     public void ExplicitComposerToolCreatesOneShotTrigger(string tool, PromptTriggerAction expected)
     {
         var match = AssistantCoordinator.CreateToolMatch(tool, "Aufgabe ohne Präfix");
@@ -240,6 +281,59 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public void AudiobookVoiceCorrectionOnlyRewritesTheKnownWhisperMisrecognitionInAudiobookMode()
+    {
+        Assert.Equal(
+            "Hörbuch fortsetzen",
+            AssistantPage.NormalizeAudiobookVoiceCommand("RLT-Fazit.", audiobookActive: true));
+        Assert.Equal(
+            "RLT-Fazit.",
+            AssistantPage.NormalizeAudiobookVoiceCommand("RLT-Fazit.", audiobookActive: false));
+        Assert.Equal(
+            "Volumenstrom prüfen",
+            AssistantPage.NormalizeAudiobookVoiceCommand("Volumenstrom prüfen", audiobookActive: true));
+    }
+
+    [Theory]
+    [InlineData("Pausieren", false, "Pause")]
+    [InlineData("Vorlesen pausieren.", false, "Pause")]
+    [InlineData("Fortsetzen", true, "Resume")]
+    [InlineData("Weiterlesen!", true, "Resume")]
+    [InlineData("Abbrechen", false, "Cancel")]
+    public void VoicePlaybackCommandsAreHandledLocallyWhileSpeechIsActive(
+        string command,
+        bool paused,
+        string expected)
+    {
+        var state = new MicrophoneSnapshot(
+            IsRecording: true,
+            IsBusy: true,
+            IsSpeaking: true,
+            CanPauseSpeech: true,
+            IsSpeechPaused: paused,
+            Status: "AI-Antwort wird vorgelesen",
+            StartedAt: DateTimeOffset.UtcNow,
+            Error: null,
+            PartialTranscript: string.Empty,
+            Provider: "supertonic-3-F5-cuda",
+            DeviceLabel: "Test");
+
+        Assert.Equal(
+            expected,
+            AssistantPage.ResolveVoicePlaybackControl(command, state, speechOperationActive: true).ToString());
+    }
+
+    [Fact]
+    public void SpeechStatusHidesHardwareAndSelectedMessageDetails()
+    {
+        var app = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Assets", "Web", "app.js"));
+
+        Assert.Equal("Supertonic F5 Ultra", GoAiAssistantService.DisplaySpeechProvider("supertonic-3-F5-cuda"));
+        Assert.Contains("setSuspended(!state.microphone?.isRecording)", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("Boolean(state.microphone?.isSpeaking)\n      || state.voicePlaybackPending", app, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AutomaticVoiceOutputRemovesMarkdownNoise()
     {
         var value = MicrophoneTranscriptionService.PrepareSpeechText(
@@ -332,6 +426,302 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public void SpeechSourceUnitsPreserveMarkdownStructureAndStableOrder()
+    {
+        const string markdown = """
+            # Heading
+
+            First sentence. Second sentence!
+
+            - List item.
+
+            | Name | Value |
+            | --- | --- |
+            | Air | 42 |
+
+            > Quoted sentence.
+
+            $$x^2$$
+
+            ```csharp
+            Console.WriteLine(42);
+            ```
+            """;
+
+        var units = SpeechSourceSegmentation.CreateUnits(markdown);
+
+        Assert.NotEmpty(units);
+        Assert.Equal(
+            Enumerable.Range(1, units.Count).Select(index => $"u{index:0000}"),
+            units.Select(static unit => unit.Id));
+        Assert.Contains(units, static unit => unit.Kind == "heading");
+        Assert.Equal(2, units.Count(static unit => unit.Kind == "paragraph"));
+        Assert.Contains(units, static unit => unit.Kind == "listItem");
+        Assert.Equal(2, units.Count(static unit => unit.Kind == "tableRow"));
+        Assert.Contains(units, static unit => unit.Kind == "quote");
+        Assert.Contains(units, static unit => unit.Kind == "math");
+        Assert.Contains(units, static unit => unit.Kind == "code");
+    }
+
+    [Fact]
+    public void DirectSpeechSegmentsKeepSourceMappingAndStayBelowPlaybackLimit()
+    {
+        var source = string.Join(' ', Enumerable.Repeat("A deliberately long clause,", 40)) + " complete.";
+        var units = SpeechSourceSegmentation.CreateUnits(source);
+
+        var segments = SpeechSourceSegmentation.CreateDirectSegments(units);
+
+        Assert.True(segments.Count > 1);
+        Assert.All(segments, segment =>
+        {
+            Assert.InRange(segment.Text.Length, 1, SpeechSourceSegmentation.MaximumSegmentCharacters);
+            Assert.Single(segment.SourceUnitIds);
+            Assert.Contains(segment.SourceUnitIds[0], units.Select(static unit => unit.Id));
+        });
+    }
+
+    [Fact]
+    public void PlaybackBatchesFollowParagraphsAndPreloadMixedDialogueTogether()
+    {
+        const string source = "Narration before dialogue. \"We continue together.\" Narration after dialogue.\n\nSecond paragraph starts here. \"Ready.\"";
+        var units = SpeechSourceSegmentation.CreateUnits(source);
+        var segments = SpeechSourceSegmentation.CreateDirectSegments(units);
+
+        var batches = SpeechSourceSegmentation.CreatePlaybackBatches(segments);
+
+        Assert.Equal(2, batches.Count);
+        Assert.Equal(Enumerable.Range(0, segments.Count), batches.SelectMany(static batch => batch.SegmentIndexes));
+        Assert.Contains(
+            batches[0].SegmentIndexes.Select(index => segments[index].Delivery),
+            static delivery => delivery == SpeechDelivery.Dialogue);
+        Assert.Contains(
+            batches[0].SegmentIndexes.Select(index => segments[index].Delivery),
+            static delivery => delivery == SpeechDelivery.Narration);
+        Assert.All(
+            batches[0].SegmentIndexes,
+            index => Assert.Equal(units[0].BlockId, segments[index].PlaybackBatchId));
+        Assert.NotEqual(batches[0].Id, batches[1].Id);
+    }
+
+    [Fact]
+    public void PlaybackNormalizationPreservesBatchAcrossLongSegmentSplits()
+    {
+        var longText = string.Join(' ', Enumerable.Repeat("A long sentence fragment,", 40)) + ".";
+        var normalized = SpeechSourceSegmentation.NormalizePreparedSegments([
+            new PreparedSpeechSegment(
+                "source",
+                longText,
+                ["u0001"],
+                PlaybackBatchId: "paragraph-1"),
+        ]);
+
+        Assert.True(normalized.Count > 1);
+        Assert.All(normalized, static segment => Assert.Equal("paragraph-1", segment.PlaybackBatchId));
+        var batch = Assert.Single(SpeechSourceSegmentation.CreatePlaybackBatches(normalized));
+        Assert.Equal(Enumerable.Range(0, normalized.Count), batch.SegmentIndexes);
+    }
+
+    [Fact]
+    public void StructuredSpeechPreparationRejectsUnknownOrIncompleteSourceMappings()
+    {
+        var units = SpeechSourceSegmentation.CreateUnits("First sentence. Second sentence.");
+        var valid = $$"""{"segments":[{"text":"A fluent first sentence.","sourceUnitIds":["{{units[0].Id}}"]},{"text":"A fluent second sentence.","sourceUnitIds":["{{units[1].Id}}"]}]}""";
+        const string unknown = """{"segments":[{"text":"Wrong mapping.","sourceUnitIds":["u9999"]}]}""";
+        var incomplete = $$"""{"segments":[{"text":"Only one source.","sourceUnitIds":["{{units[0].Id}}"]}]}""";
+
+        Assert.Equal(2, GoAiAssistantService.ParseMappedSpeechSegments(valid, units)?.Count);
+        Assert.Null(GoAiAssistantService.ParseMappedSpeechSegments(unknown, units));
+        Assert.Null(GoAiAssistantService.ParseMappedSpeechSegments(incomplete, units));
+    }
+
+    [Fact]
+    public void SpeechPreparationKeepsNarrationNeutral()
+    {
+        var unit = Assert.Single(SpeechSourceSegmentation.CreateUnits("Eine ruhige Erzählerzeile."));
+        var valid = $$"""{"segments":[{"text":"Eine ruhige Erzählerzeile.","sourceUnitIds":["{{unit.Id}}"],"delivery":"narration","mood":"mysterious","intensity":0.6,"speed":0.91,"pauseAfterMilliseconds":320,"expressionBefore":"breath","expressionAfter":null}]}""";
+        var unknownExpression = $$"""{"segments":[{"text":"Eine ruhige Erzählerzeile.","sourceUnitIds":["{{unit.Id}}"],"delivery":"narration","mood":"mysterious","intensity":0.6,"speed":0.91,"pauseAfterMilliseconds":320,"expressionBefore":"shout","expressionAfter":null}]}""";
+
+        var prepared = Assert.Single(GoAiAssistantService.ParseMappedSpeechSegments(valid, [unit])!);
+
+        Assert.Equal(SpeechDelivery.Narration, prepared.Delivery);
+        Assert.Equal(SpeechMood.Neutral, prepared.Mood);
+        Assert.Equal(0, prepared.Intensity);
+        Assert.Equal(1.0, prepared.Speed);
+        Assert.Equal(0, prepared.PauseAfterMilliseconds);
+        Assert.Null(prepared.ExpressionBefore);
+        Assert.Equal("Eine ruhige Erzählerzeile.", SpeechSourceSegmentation.PrepareForSynthesis(prepared));
+        Assert.Null(GoAiAssistantService.ParseMappedSpeechSegments(unknownExpression, [unit]));
+    }
+
+    [Fact]
+    public void DialogueDirectionAcceptsOnlyPunctuationChangesAndUsesStrongMoodProfile()
+    {
+        var source = Assert.Single(SpeechSourceSegmentation.CreateDirectSegments(
+            SpeechSourceSegmentation.CreateUnits("„Komm sofort zurück.“")));
+        var valid = $$"""{"segments":[{"id":"{{source.Id}}","synthesisText":"„Komm sofort zurück! …“","mood":"angry","intensity":1.0,"expressionBefore":"breath","expressionAfter":null}]}""";
+        var changedWords = $$"""{"segments":[{"id":"{{source.Id}}","synthesisText":"„Komm jetzt zurück!“","mood":"angry","intensity":1.0,"expressionBefore":null,"expressionAfter":null}]}""";
+
+        var prepared = Assert.Single(GoAiAssistantService.ParseDialogueDirectionBatch(valid, [source], [0])!);
+
+        Assert.Equal(0, prepared.Key);
+        Assert.Equal(source.Text, prepared.Value.Text);
+        Assert.Equal("„Komm sofort zurück! …“", prepared.Value.SynthesisText);
+        Assert.Equal(SpeechMood.Angry, prepared.Value.Mood);
+        Assert.Equal(1.32, prepared.Value.Speed);
+        Assert.Equal(800, prepared.Value.PauseAfterMilliseconds);
+        Assert.True(prepared.Value.DirectionResolved);
+        Assert.Null(GoAiAssistantService.ParseDialogueDirectionBatch(changedWords, [source], [0]));
+    }
+
+    [Fact]
+    public void DialogueDirectionBatchesExcludeNarrationAndRespectRealtimeLimits()
+    {
+        var source = string.Join(' ', Enumerable.Range(1, 14).Select(index =>
+            index % 2 == 0
+                ? $"„Dialogzeile {index} bleibt im Wortlaut.“"
+                : $"Erzählerabschnitt {index} beschreibt die Szene."));
+        var units = SpeechSourceSegmentation.CreateUnits(source);
+        var segments = SpeechSourceSegmentation.CreateDirectSegments(units);
+
+        var batches = GoAiAssistantService.BuildDialogueDirectionBatches(units, segments);
+
+        Assert.NotEmpty(batches);
+        Assert.All(batches, batch =>
+        {
+            Assert.InRange(batch.SegmentIndexes.Count, 1, 6);
+            Assert.InRange(batch.SegmentIndexes.Sum(index => segments[index].Text.Length), 1, 1_500);
+            Assert.All(batch.SegmentIndexes, index => Assert.Equal(SpeechDelivery.Dialogue, segments[index].Delivery));
+        });
+        Assert.Equal(
+            segments.Count(static segment => segment.Delivery == SpeechDelivery.Dialogue),
+            batches.Sum(static batch => batch.SegmentIndexes.Count));
+    }
+
+    [Fact]
+    public void CachedDialoguePunctuationSurvivesPlaybackNormalization()
+    {
+        var source = Assert.Single(SpeechSourceSegmentation.CreateDirectSegments(
+            SpeechSourceSegmentation.CreateUnits("„Wir gehen gemeinsam weiter.“")));
+        var directed = source with
+        {
+            SynthesisText = "„Wir gehen gemeinsam weiter! …“",
+            DirectionResolved = true,
+            Mood = SpeechMood.Joyful,
+            Intensity = 0.9,
+            Speed = SpeechSourceSegmentation.ResolveDialogueSpeed(SpeechMood.Joyful, 0.9),
+        };
+
+        var normalized = Assert.Single(SpeechSourceSegmentation.NormalizePreparedSegments([directed]));
+
+        Assert.Equal(directed.SynthesisText, normalized.SynthesisText);
+        Assert.True(normalized.DirectionResolved);
+        Assert.Equal("„Wir gehen gemeinsam weiter! …“", SpeechSourceSegmentation.PrepareForSynthesis(normalized));
+    }
+
+    [Fact]
+    public void AudiobookDirectionKeepsOriginalTextExactly()
+    {
+        var unit = Assert.Single(SpeechSourceSegmentation.CreateUnits("Der Maschinenraum vibrierte leise."));
+        var exact = $$"""{"segments":[{"text":"{{unit.SpeechText}}","sourceUnitIds":["{{unit.Id}}"],"delivery":"narration","mood":"tense","intensity":0.5,"speed":0.94,"pauseAfterMilliseconds":180,"expressionBefore":null,"expressionAfter":null}]}""";
+        var rewritten = $$"""{"segments":[{"text":"Leise vibrierte der Maschinenraum.","sourceUnitIds":["{{unit.Id}}"],"delivery":"narration","mood":"tense","intensity":0.5,"speed":0.94,"pauseAfterMilliseconds":180,"expressionBefore":null,"expressionAfter":null}]}""";
+
+        Assert.Single(GoAiAssistantService.ParseMappedSpeechSegments(exact, [unit], preserveOriginalText: true)!);
+        Assert.Null(GoAiAssistantService.ParseMappedSpeechSegments(rewritten, [unit], preserveOriginalText: true));
+    }
+
+    [Fact]
+    public void GermanDialogueAndNarratorTextBecomeSeparateSpeechSegments()
+    {
+        const string source = "„Wir haben noch viel zu entdecken“, sagte Natascha leise, während sie das Steuer nach vorne drückte. „Und wir werden es gemeinsam tun.“ Das Summen des Triebwerks wurde lauter.";
+
+        var units = SpeechSourceSegmentation.CreateUnits(source);
+
+        Assert.Equal(4, units.Count);
+        Assert.Equal(
+            [SpeechDelivery.Dialogue, SpeechDelivery.Narration, SpeechDelivery.Dialogue, SpeechDelivery.Narration],
+            units.Select(static unit => unit.Delivery));
+        Assert.StartsWith("„Wir haben", units[0].Text, StringComparison.Ordinal);
+        Assert.StartsWith("sagte Natascha", units[1].Text, StringComparison.Ordinal);
+        Assert.StartsWith("„Und wir", units[2].Text, StringComparison.Ordinal);
+        Assert.StartsWith("Das Summen", units[3].Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SegmentSplittingKeepsOuterExpressionAndPauseDirection()
+    {
+        var longText = string.Join(' ', Enumerable.Repeat("Ein langer emotionaler Satzteil,", 30)) + ".";
+        var normalized = SpeechSourceSegmentation.NormalizePreparedSegments([
+            new PreparedSpeechSegment(
+                "source",
+                longText,
+                ["u0001"],
+                SpeechDelivery.Dialogue,
+                SpeechMood.Joyful,
+                0.8,
+                1.08,
+                400,
+                SpeechExpression.Laugh,
+                SpeechExpression.Breath),
+        ]);
+
+        Assert.True(normalized.Count > 1);
+        Assert.Equal(SpeechExpression.Laugh, normalized[0].ExpressionBefore);
+        Assert.All(normalized.Skip(1), static segment => Assert.Null(segment.ExpressionBefore));
+        Assert.All(normalized.Take(normalized.Count - 1), static segment =>
+        {
+            Assert.Null(segment.ExpressionAfter);
+            Assert.Equal(0, segment.PauseAfterMilliseconds);
+        });
+        Assert.Equal(SpeechExpression.Breath, normalized[^1].ExpressionAfter);
+        Assert.Equal(400, normalized[^1].PauseAfterMilliseconds);
+    }
+
+    [Fact]
+    public void SpeechProgressBridgeCarriesVisibleSourceMappingWithoutSpokenRewrite()
+    {
+        var sessionId = Guid.NewGuid();
+        var messageId = Guid.NewGuid();
+        var unit = Assert.Single(SpeechSourceSegmentation.CreateUnits("Visible original sentence."));
+        var payload = SpeechPlaybackProgressBridge.ToPayload(new(
+            sessionId,
+            messageId,
+            "AI-Nachricht",
+            0,
+            1,
+            [unit.Id],
+            SpeechPlaybackState.Playing,
+            [unit]));
+
+        var json = JsonSerializer.Serialize(payload, JsonSerializerOptions.Web);
+
+        Assert.Contains($"\"sessionId\":\"{sessionId:D}\"", json, StringComparison.Ordinal);
+        Assert.Contains($"\"sourceMessageId\":\"{messageId:D}\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"state\":\"playing\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"sourceUnitIds\":[\"u0001\"]", json, StringComparison.Ordinal);
+        Assert.Contains("Visible original sentence.", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("speechText", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void WebSpeechProgressHighlightsSourcesWithoutAutomaticScrolling()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
+        var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
+
+        Assert.Contains("case \"speech.progress\":", app, StringComparison.Ordinal);
+        Assert.Contains("updateSpeechProgress(payload)", app, StringComparison.Ordinal);
+        Assert.Contains("CSS.highlights.set", app, StringComparison.Ordinal);
+        Assert.Contains("previousScrollTop", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("scrollIntoView", app, StringComparison.Ordinal);
+        Assert.Contains("::highlight(go-speech-current)", styles, StringComparison.Ordinal);
+        Assert.Contains("background-color: Highlight", styles, StringComparison.Ordinal);
+        Assert.Contains("\"speech.progress\"", bridge, StringComparison.Ordinal);
+        Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("speech.progress"));
+    }
+
+    [Fact]
     public void ArtifactImagePreviewUsesAnEmbeddedPngDataUrl()
     {
         byte[] png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -400,6 +790,17 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public void DocumentAnswersKeepInlineCitationsButRemoveTheEvidenceFooter()
+    {
+        const string response = "Die XREF-Vorlage wird im Projekt geladen [Anleitung_C.A.T.S.pdf, S. 12].\n\n"
+            + "**Verwendete Dokumentbelege:** [Anleitung_C.A.T.S.pdf, S. 1]; [Anleitung_C.A.T.S.pdf, S. 12]";
+
+        var cleaned = GoAiAssistantService.RemoveDocumentEvidenceFooter(response);
+
+        Assert.Equal("Die XREF-Vorlage wird im Projekt geladen [Anleitung_C.A.T.S.pdf, S. 12].", cleaned);
+    }
+
+    [Fact]
     public void ToolOnlyAssistantCardsAreExcludedFromTheNextServerRunHistory()
     {
         var sessionId = Guid.NewGuid();
@@ -433,12 +834,12 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void ComposerClearsOneShotToolsButKeepsCodingAndBricsCadAfterEveryTerminalRunState()
+    public void ComposerClearsOneShotToolsButKeepsEveryPersistentSessionToolAfterTerminalRunState()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("new Set([\"code\", \"bricsCad\"])", app, StringComparison.Ordinal);
+        Assert.Contains("new Set([\"code\", \"bricsCad\", \"audiobook\"])", app, StringComparison.Ordinal);
         Assert.Contains("!persistentToolActions.has(state.selectedToolAction)", app, StringComparison.Ordinal);
         Assert.Contains("clearCompletedOneShotToolAction();", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.completed\":", app, StringComparison.Ordinal);
@@ -458,6 +859,10 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("menu.className = \"attachment-menu\"", app, StringComparison.Ordinal);
         Assert.Contains("removeAll.className = \"attachment-summary__remove active-tool-chip__remove\"", app, StringComparison.Ordinal);
         Assert.Contains("Alle Dateianhänge entfernen", app, StringComparison.Ordinal);
+        Assert.Contains("document-preparation-status", app, StringComparison.Ordinal);
+        Assert.Contains("document.import.started", app, StringComparison.Ordinal);
+        Assert.Contains("wird verarbeitet", app, StringComparison.Ordinal);
+        Assert.Contains("@keyframes document-status-spin", css, StringComparison.Ordinal);
         Assert.Contains("bottom: calc(100% + 8px)", css, StringComparison.Ordinal);
         Assert.Contains("position: absolute", css, StringComparison.Ordinal);
     }
@@ -469,8 +874,146 @@ public sealed class AssistantWorkflowTests
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
         Assert.Contains("runStatusText(liveStatus)", app, StringComparison.Ordinal);
-        Assert.Contains("parts.push(`Modell: ${model}`)", app, StringComparison.Ordinal);
+        Assert.Contains("uniqueStatusParts(status, model ? `Modell: ${model}` : null, detail)", app, StringComparison.Ordinal);
+        Assert.Contains("cleanStatusMetadata", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("Kontexttoken", app, StringComparison.Ordinal);
         Assert.Contains("if (Number.isFinite(payload.contextUsed))", app, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SpeechUsesComposerStatusWithoutRetryOrChatRendering()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
+
+        Assert.Contains("id=\"composer-speech-status\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"composer-speech-pause\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("composer-speech-pause-label", html, StringComparison.Ordinal);
+        Assert.True(
+            html.IndexOf("id=\"composer-speech-status\"", StringComparison.Ordinal)
+            < html.IndexOf("<div class=\"composer\">", StringComparison.Ordinal));
+        Assert.Contains("case \"speech.status\":", app, StringComparison.Ordinal);
+        Assert.Contains("renderSpeechStatus();", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"microphone.toggleSpeechPause\"", app, StringComparison.Ordinal);
+        Assert.Contains("isPaused ? \"Fortsetzen\" : \"Pausieren\"", app, StringComparison.Ordinal);
+        Assert.Contains("messageId: payload.message.id", app, StringComparison.Ordinal);
+        Assert.Contains("sessionId: payload.message.sessionId", app, StringComparison.Ordinal);
+        Assert.Contains("\"speech.status\"", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("Erneut senden", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("retryMessage", app, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AudiobookToolIsPersistentAndItsMessagesSkipGeneralSpeechPreparation()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+
+        Assert.Contains("data-tool-action=\"audiobook\"", html, StringComparison.Ordinal);
+        Assert.Contains("Hörbuch erstellen", html, StringComparison.Ordinal);
+        Assert.Contains("audiobook: [\"Hörbuch erstellen\"", app, StringComparison.Ordinal);
+        Assert.Contains("payload.message?.contentProfile !== \"audiobook\"", app, StringComparison.Ordinal);
+        Assert.False(GoAiAssistantService.RequiresSpeechPreparation(MessageContentProfile.Audiobook));
+        Assert.True(GoAiAssistantService.RequiresSpeechPreparation(MessageContentProfile.General));
+    }
+
+    [Fact]
+    public void AudiobookContextIncludesInterruptedStoryTextButExcludesEarlierGeneralConversation()
+    {
+        var sessionId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var generalUser = new ChatMessage(Guid.NewGuid(), sessionId, ChatRole.User, "Allgemeine Frage", MessageStatus.Completed, now, now);
+        var generalAnswer = new ChatMessage(Guid.NewGuid(), sessionId, ChatRole.Assistant, "Allgemeine Antwort", MessageStatus.Completed, now, now);
+        var storyPrompt = new ChatMessage(Guid.NewGuid(), sessionId, ChatRole.User, "Eine Geschichte im Maschinenraum", MessageStatus.Completed, now.AddSeconds(1), now.AddSeconds(1));
+        var firstChapter = new ChatMessage(
+            Guid.NewGuid(), sessionId, ChatRole.Assistant, "Im Maschinenraum begann die Reise.", MessageStatus.Completed,
+            now.AddSeconds(2), now.AddSeconds(2), ContentProfile: MessageContentProfile.Audiobook);
+        var direction = new ChatMessage(Guid.NewGuid(), sessionId, ChatRole.User, "Fortsetzen: Ein Alarm ertönt.", MessageStatus.Completed, now.AddSeconds(3), now.AddSeconds(3));
+        var interrupted = new ChatMessage(
+            Guid.NewGuid(), sessionId, ChatRole.Assistant, "Plötzlich heulte die Sirene", MessageStatus.Interrupted,
+            now.AddSeconds(4), now.AddSeconds(4), ContentProfile: MessageContentProfile.Audiobook);
+
+        var eligible = SessionContextPreparationService.SelectEligibleHistory(
+            [generalUser, generalAnswer, storyPrompt, firstChapter, direction, interrupted],
+            SessionContextProfile.Audiobook);
+
+        Assert.Equal([storyPrompt.Id, firstChapter.Id, direction.Id, interrupted.Id], eligible.Select(static item => item.Id));
+    }
+
+    [Fact]
+    public void AudiobookPromptCreatesOneChapterAndContinuationStartsAtTheLatestScene()
+    {
+        var first = AssistantCoordinator.CreateToolMatch(
+            "audiobook",
+            "Eine Ingenieurin entdeckt unter Berlin einen verlassenen Maschinenraum.");
+        var continuation = AssistantCoordinator.CreateToolMatch(
+            "audiobook",
+            "Fortsetzen: Der Generator springt unerwartet an.");
+
+        var firstPrompt = GoAiAssistantService.BuildAudiobookPrompt(first, first.OriginalPrompt, hasAudiobookHistory: false);
+        var nextPrompt = GoAiAssistantService.BuildAudiobookPrompt(continuation, continuation.OriginalPrompt, hasAudiobookHistory: true);
+
+        Assert.Contains("erste Kapitel", firstPrompt, StringComparison.Ordinal);
+        Assert.Contains("# Kapitel eins – Titel", firstPrompt, StringComparison.Ordinal);
+        Assert.Contains("eintausendfünfhundert bis zweitausendfünfhundert Wörter", firstPrompt, StringComparison.Ordinal);
+        Assert.Contains("zwei Prozent", firstPrompt, StringComparison.Ordinal);
+        Assert.Contains("Hauptfigur", firstPrompt, StringComparison.Ordinal);
+        Assert.Contains("langfristigen Leitfaden", firstPrompt, StringComparison.Ordinal);
+        Assert.Contains("zukünftige Handlungsfäden", firstPrompt, StringComparison.Ordinal);
+        Assert.Contains("unmittelbar letzte Szene", nextPrompt, StringComparison.Ordinal);
+        Assert.Contains("langfristigen Serienleitfaden", nextPrompt, StringComparison.Ordinal);
+        Assert.Contains("Perspektive der Hauptfigur", nextPrompt, StringComparison.Ordinal);
+        Assert.Contains("neuer AI-Lauf ist ausdrücklich keine Kapitelgrenze", nextPrompt, StringComparison.Ordinal);
+        Assert.Contains("ohne neue Kapitelüberschrift", nextPrompt, StringComparison.Ordinal);
+        Assert.Contains("tatsächlich ein neues Kapitel beginnt", nextPrompt, StringComparison.Ordinal);
+        Assert.Contains("zwei Prozent", nextPrompt, StringComparison.Ordinal);
+        Assert.Contains("Der Generator springt unerwartet an.", nextPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Fortsetzen:", nextPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LegacySpeechToolMessagesAreExcludedFromPersistentSessionContext()
+    {
+        var sessionId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var speechCommand = new ChatMessage(
+            Guid.NewGuid(), sessionId, ChatRole.User, "Lies die ausgewählte Nachricht vor",
+            MessageStatus.Completed, now, now);
+        var legacySpeechCard = new ChatMessage(
+            Guid.NewGuid(), sessionId, ChatRole.Assistant, string.Empty,
+            MessageStatus.Completed, now.AddSeconds(1), now.AddSeconds(1),
+            ToolExecution: new ToolExecutionInfo("Vorlesen", "AI-Nachricht", "Abgeschlossen"));
+        var normalUser = new ChatMessage(
+            Guid.NewGuid(), sessionId, ChatRole.User, "Wie hoch ist der Volumenstrom?",
+            MessageStatus.Completed, now.AddSeconds(2), now.AddSeconds(2));
+        var normalAssistant = new ChatMessage(
+            Guid.NewGuid(), sessionId, ChatRole.Assistant, "4.200 m³/h.",
+            MessageStatus.Completed, now.AddSeconds(3), now.AddSeconds(3));
+
+        var eligible = SessionContextPreparationService.SelectEligibleHistory(
+            [speechCommand, legacySpeechCard, normalUser, normalAssistant]);
+
+        Assert.Equal([normalUser.Id, normalAssistant.Id], eligible.Select(static item => item.Id));
+    }
+
+    [Fact]
+    public void DocumentHistoryReserveAndBlockTargetsScaleWithAvailableHistory()
+    {
+        var sessionId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var longMessage = new ChatMessage(
+            Guid.NewGuid(), sessionId, ChatRole.Assistant, new string('x', 60_000),
+            MessageStatus.Completed, now, now);
+
+        Assert.Equal(1_024, GoAiAssistantService.CalculateDocumentHistoryReserveTokens([]));
+        Assert.InRange(
+            GoAiAssistantService.CalculateDocumentHistoryReserveTokens([longMessage]),
+            4_096,
+            16_384);
+        Assert.True(SessionContextPreparationService.CalculateBlockSummaryTarget(4_000, 4) < 4_000);
     }
 
     private static ChatMessage Message(Guid sessionId, string content) => new(

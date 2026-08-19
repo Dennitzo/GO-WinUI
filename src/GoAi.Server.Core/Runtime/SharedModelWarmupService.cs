@@ -31,7 +31,7 @@ public sealed class SharedModelWarmupService : BackgroundService
                 _runtime.WriteLog(
                     "Information",
                     "models.startup.warm.completed",
-                    "Alle Standardmodelle und AI-Dienste außer Laguna sind vorgeladen; Leerlaufzeit 600 Sekunden.");
+                    "General AI, Whisper und Sprachausgabe sind dauerhaft vorgeladen; weitere Modelle werden bedarfsgesteuert geladen.");
                 return;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

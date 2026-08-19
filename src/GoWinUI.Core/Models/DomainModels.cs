@@ -5,8 +5,11 @@ namespace GoWinUI.Core.Models;
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
 public enum AssistantMode { General, Code }
+public enum PersistentToolAction { Code, BricsCad, Audiobook }
+public enum MessageContentProfile { General, Audiobook }
+public enum SessionContextProfile { General, Code, Audiobook }
 public enum ProjectStatus { Active, Archived }
-public enum AssetCategory { Pdf, Drawing, Image, Meeting, Other }
+public enum AssetCategory { Pdf, Drawing, Image, Meeting, Other, Cpdb, Ifc }
 public enum AppTheme { System, Light, Dark }
 public enum WindowDisplayState { Normal, Maximized }
 
@@ -21,7 +24,8 @@ public sealed record ChatSession(
     string? WorkspacePath = null,
     string? WorkspaceFingerprint = null,
     bool IsPinned = false,
-    DateTimeOffset? PinnedAt = null);
+    DateTimeOffset? PinnedAt = null,
+    PersistentToolAction? PersistentToolAction = null);
 
 public sealed record ChatMessage(
     Guid Id,
@@ -33,7 +37,32 @@ public sealed record ChatMessage(
     DateTimeOffset UpdatedAt,
     string? Error = null,
     ToolExecutionInfo? ToolExecution = null,
-    string? ContextSummary = null);
+    string? ContextSummary = null,
+    MessageContentProfile ContentProfile = MessageContentProfile.General);
+
+public sealed record SessionContextPreparation(
+    string CacheKey,
+    Guid SessionId,
+    string HistoryRevision,
+    string ModelId,
+    int ContextBudget,
+    Guid ThroughMessageId,
+    int MessageCount,
+    string PreparedText,
+    DateTimeOffset CreatedAt,
+    SessionContextProfile Profile = SessionContextProfile.General);
+
+public sealed record SpeechPreparation(
+    string CacheKey,
+    Guid SessionId,
+    Guid? SourceMessageId,
+    string SourceKind,
+    string SourceHash,
+    string ModelId,
+    string PreparedText,
+    DateTimeOffset CreatedAt,
+    string SourceUnitsJson = "[]",
+    string SegmentsJson = "[]");
 
 public sealed record ToolExecutionInfo(
     string Tool,
@@ -121,6 +150,52 @@ public sealed record StoredDocument(
     string Sha256,
     long Length,
     int PageCount,
+    DateTimeOffset CreatedAt,
+    DocumentPreparationStatus PreparationStatus = DocumentPreparationStatus.Ready,
+    int PreparationProgress = 100,
+    bool WasReused = false,
+    string? PreparationError = null);
+
+public enum DocumentPreparationStatus
+{
+    Extracting,
+    Preparing,
+    Ready,
+    Failed,
+}
+
+public sealed record DocumentContextHit(
+    Guid DocumentId,
+    string Sha256,
+    string FileName,
+    int PageNumber,
+    string Text,
+    double Score,
+    string? ChunkId = null);
+
+public sealed record DocumentIndexChunk(
+    string Id,
+    Guid DocumentId,
+    string Sha256,
+    string FileName,
+    int PageNumber,
+    string Text,
+    IReadOnlyList<double>? Embedding = null);
+
+public sealed record DocumentChunkEmbedding(
+    string ChunkId,
+    string ModelId,
+    IReadOnlyList<double> Values);
+
+public sealed record DocumentContextPreparation(
+    string CacheKey,
+    Guid SessionId,
+    string CorpusRevision,
+    string PromptFingerprint,
+    string ModelId,
+    int ContextBudget,
+    string PreparedText,
+    IReadOnlyList<DocumentContextHit> Evidence,
     DateTimeOffset CreatedAt);
 
 public sealed record DocumentPage(Guid DocumentId, int PageNumber, string Text, string? FileName = null);

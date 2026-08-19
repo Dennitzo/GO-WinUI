@@ -39,6 +39,7 @@ public static class GoAiServerHostExtensions
         services.AddSingleton<RunRepository>();
         services.AddSingleton<RunWorkChannel>();
         services.AddSingleton<ModelRouter>();
+        services.AddSingleton<GeneralModelSelectionService>();
         services.AddSingleton<AgentToolCatalog>();
         services.AddSingleton<AgentToolExecutor>();
         services.AddSingleton<GpuLeaseScheduler>();

@@ -14,11 +14,24 @@ using Windows.Storage.Pickers;
 using Windows.Storage.Streams;
 using Windows.System;
 using WinRT.Interop;
+using System.Diagnostics;
 
 namespace GoWinUI.App.Pages;
 
 public sealed partial class ProjectsPage : Page
 {
+    private void OnProjectCardPointerEntered(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Border border)
+            border.BorderBrush = (Brush)Application.Current.Resources["GoAccentBrush"];
+    }
+
+    private void OnProjectCardPointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is Border border)
+            border.ClearValue(Border.BorderBrushProperty);
+    }
+
     private readonly ILogger<ProjectsPage> _logger;
     private readonly IProjectAssetWorkingCopyService _workingCopies;
     private readonly RecentActivityService _recentActivity;
@@ -361,9 +374,7 @@ public sealed partial class ProjectsPage : Page
                 ViewMode = category == AssetCategory.Image ? PickerViewMode.Thumbnail : PickerViewMode.List,
             };
             foreach (var extension in FileTypeFilters(category))
-            {
                 picker.FileTypeFilter.Add(extension);
-            }
             InitializePicker(picker);
             var files = await picker.PickMultipleFilesAsync();
             if (files.Count == 0)
@@ -373,13 +384,13 @@ public sealed partial class ProjectsPage : Page
 
             foreach (var file in files)
             {
-                await using var content = await file.OpenStreamForReadAsync();
+                if (!IsAllowedForCategory(file.Name, category))
+                    throw new InvalidOperationException($"„{file.Name}“ gehört nicht zur Dateigruppe {category}.");
                 await ViewModel.ImportAssetAsync(
                     file.Name,
                     string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType,
                     file.Path,
-                    category,
-                    content);
+                    category);
             }
 
             var activity = files.Count == 1
@@ -428,6 +439,46 @@ public sealed partial class ProjectsPage : Page
         }
     }
 
+    private async void OnOpenAssetFolder(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: ProjectAsset asset })
+            return;
+        await RunUiActionAsync(async () =>
+        {
+            var path = !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath)
+                ? Path.GetFullPath(asset.SourcePath)
+                : (await ViewModel.MaterializeAssetForOpenAsync(asset)).Path;
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
+            {
+                UseShellExecute = true,
+            });
+        });
+    }
+
+    private void OnChecklistTextClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { DataContext: ChecklistItem item, Parent: Grid host } button
+            && host.Children.OfType<TextBox>().FirstOrDefault() is { } editor)
+        {
+            editor.Text = item.Text;
+            button.Visibility = Visibility.Collapsed;
+            editor.Visibility = Visibility.Visible;
+            _ = editor.Focus(FocusState.Programmatic);
+            editor.SelectAll();
+        }
+    }
+
+    private async void OnChecklistTextLostFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is TextBox { DataContext: ChecklistItem item } editor)
+        {
+            await RunUiActionAsync(() => ViewModel.SaveChecklistTextAsync(item, editor.Text));
+            editor.Visibility = Visibility.Collapsed;
+            if (editor.Parent is Grid host && host.Children.OfType<Button>().FirstOrDefault() is { } display)
+                display.Visibility = Visibility.Visible;
+        }
+    }
+
     private async void OnDeleteAsset(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { DataContext: ProjectAsset asset })
@@ -439,7 +490,9 @@ public sealed partial class ProjectsPage : Page
         {
             XamlRoot = XamlRoot,
             Title = "Projektdatei löschen?",
-            Content = $"„{asset.FileName}“ und eine eventuell geänderte Arbeitskopie werden entfernt.",
+            Content = string.IsNullOrWhiteSpace(asset.SourcePath)
+                ? $"„{asset.FileName}“ und eine eventuell geänderte Arbeitskopie werden entfernt."
+                : $"Die Verknüpfung zu „{asset.FileName}“ wird aus GO entfernt. Die Originaldatei bleibt erhalten.",
             PrimaryButtonText = "Löschen",
             CloseButtonText = "Abbrechen",
             DefaultButton = ContentDialogButton.Close,
@@ -767,11 +820,17 @@ public sealed partial class ProjectsPage : Page
     private static IReadOnlyList<string> FileTypeFilters(AssetCategory category) => category switch
     {
         AssetCategory.Pdf => [".pdf"],
-        AssetCategory.Drawing => [".dwg", ".dxf", ".dwt", ".rvt", ".rfa", ".ifc"],
+        AssetCategory.Drawing => [".dwg", ".dxf", ".dwt", ".rvt", ".rfa"],
         AssetCategory.Image => [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"],
         AssetCategory.Meeting => [".doc", ".docx", ".odt", ".pdf", ".txt", ".md", ".rtf", ".xlsx", ".csv"],
         _ => ["*"],
     };
+
+    private static bool IsAllowedForCategory(string fileName, AssetCategory category)
+    {
+        return category == AssetCategory.Other
+            || FileTypeFilters(category).Contains(Path.GetExtension(fileName), StringComparer.OrdinalIgnoreCase);
+    }
 
     private static string GetAssetFormatLabel(ProjectAsset asset)
     {

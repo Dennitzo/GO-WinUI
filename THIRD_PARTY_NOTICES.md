@@ -14,8 +14,13 @@ GO includes or depends on the following third-party components. Exact versions a
 | SQLitePCLRaw.bundle_e_sqlite3 | 3.0.4 | Apache-2.0 |
 | SQLite | bundled transitively by SQLitePCLRaw | Public domain |
 | KaTeX | 0.16.10 | MIT |
+| ONNX Runtime GPU | 1.23.2 | MIT |
+| Supertonic Python SDK | 1.3.1 | MIT |
+| Supertone/supertonic-3 | `3cadd1ee6394adea1bd021217a0e650ede09a323` | OpenRAIL-M |
 | xUnit.net and test runner | 2.9.3 / 3.1.5 | Apache-2.0 |
 
 KaTeX is bundled locally under `src/GoWinUI.App/Assets/Web/vendor/katex/0.16.10`; its unmodified MIT license text is retained beside the distribution. The assistant web UI does not load libraries from a CDN.
+
+The pinned Supertonic-3 license is downloaded with the offline model assets to `Models/supertonic-3/LICENSE`. No model files are fetched while the speech worker is running.
 
 Release and source redistributors must preserve this notice, the bundled KaTeX license, and the license/notices shipped by the corresponding NuGet packages.

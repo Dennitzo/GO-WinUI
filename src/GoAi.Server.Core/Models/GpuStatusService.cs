@@ -91,7 +91,7 @@ public sealed class GpuStatusService
         "live-caption" => ("Sprache wird live transkribiert", "Docker · Whisper STT"),
         "live-caption-warmup" => ("Sprachmodell wird vorbereitet", "Docker · Whisper STT"),
         "caption-translation" => ("Live-Untertitel werden übersetzt", "LM Studio · gpt-oss-20b"),
-        "text-to-speech" => ("Antwort wird vorgelesen", "Docker · Piper MLS weiblich"),
+        "text-to-speech" => ("Antwort wird vorgelesen", "Docker · Supertonic F5 Ultra · GPU 1"),
         "image-generation" => ("Bild wird erstellt", "Docker · Image"),
         "media-analysis" => ("Medien werden analysiert", "Docker · Media"),
         "vision" => ("Bild wird analysiert", "LM Studio · Vision"),

@@ -69,4 +69,45 @@ public sealed class DatabaseAndWorkflowTests
         var stored = Assert.Single(await repository.ListMessagesAsync(session.Id));
         Assert.Equal("Kurzer Projektstart für die Raum-Erstellung.", stored.ContextSummary);
     }
+
+    [Fact]
+    public async Task SchemaNineteenPersistsAudiobookToolMessagesChroniclesAndTriggers()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Hörbuch");
+        await chats.SetPersistentToolActionAsync(session.Id, PersistentToolAction.Audiobook);
+        var message = await chats.AddMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            "Der Regen strich über die Dächer.",
+            MessageStatus.Completed,
+            MessageContentProfile.Audiobook);
+        var revision = new string('a', 64);
+        var cacheKey = new string('b', 64);
+        await chats.SaveSessionContextPreparationAsync(new(
+            cacheKey,
+            session.Id,
+            revision,
+            "openai/gpt-oss-20b",
+            12_000,
+            message.Id,
+            1,
+            "STORY_CHRONICLE\nCONTINUATION_ANCHOR: Der Regen strich über die Dächer.",
+            DateTimeOffset.UtcNow,
+            SessionContextProfile.Audiobook));
+
+        Assert.Equal(19, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
+        var storedSession = await chats.GetSessionAsync(session.Id);
+        Assert.Equal(PersistentToolAction.Audiobook, storedSession?.PersistentToolAction);
+        Assert.Equal(AssistantMode.General, storedSession?.AssistantMode);
+        Assert.Equal(MessageContentProfile.Audiobook, Assert.Single(await chats.ListMessagesAsync(session.Id)).ContentProfile);
+        Assert.Equal(SessionContextProfile.Audiobook, (await chats.GetSessionContextPreparationAsync(cacheKey))?.Profile);
+        var triggers = await environment.Get<IPromptTriggerRepository>().ListAsync();
+        Assert.Contains(triggers, item => item.Action == PromptTriggerAction.Audiobook && item.Phrase == "Hörbuch erstellen");
+        Assert.Contains(triggers, item => item.Action == PromptTriggerAction.Audiobook && item.Phrase == "Hörbuch fortsetzen");
+
+        await chats.SetPersistentToolActionAsync(session.Id, PersistentToolAction.BricsCad);
+        Assert.Equal(PersistentToolAction.BricsCad, (await chats.GetSessionAsync(session.Id))?.PersistentToolAction);
+    }
 }

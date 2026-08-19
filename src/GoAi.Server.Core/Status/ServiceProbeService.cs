@@ -113,7 +113,8 @@ public sealed class ServiceProbeService
         if (workerName == "speech")
         {
             if (ReadBoolean(status, "sttLoaded")) result.Add("Whisper large-v3");
-            if (ReadBoolean(status, "ttsLoaded")) result.Add("Piper Kerstin");
+            if (ReadBoolean(status, "ttsLoaded")) result.Add("Supertonic F5 Ultra · GPU 1");
+            if (ReadBoolean(status, "ttsFallbackLoaded")) result.Add("Piper Kerstin · Fallback");
             if (ReadBoolean(status, "speakerLoaded")) result.Add("ECAPA Sprecherkennung");
         }
         else if (workerName == "image" && ReadBoolean(status, "modelLoaded"))

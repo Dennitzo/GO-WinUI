@@ -69,7 +69,7 @@ public sealed class SettingsLoggingAndBackupTests
 
         var restored = await settings.LoadAsync();
         Assert.Equal(6, restored.Version);
-        Assert.Equal("openai/gpt-oss-20b", restored.SelectedModel);
+        Assert.Equal("openai/gpt-oss-120b", restored.SelectedModel);
     }
 
     [Fact]

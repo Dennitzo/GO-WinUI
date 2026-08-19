@@ -21,6 +21,7 @@ public enum PromptTriggerAction
     VoiceInput,
     LiveCaptions,
     LiveTranslation,
+    Audiobook,
 }
 
 public enum PromptTriggerMatchMode

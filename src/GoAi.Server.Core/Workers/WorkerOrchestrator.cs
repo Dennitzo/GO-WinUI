@@ -163,8 +163,8 @@ public sealed class WorkerOrchestrator : IDisposable
     public Task ReleaseLiveCaptionResourcesAsync()
     {
         Interlocked.Exchange(ref _liveCaptionResourcesHeld, 0);
-        // Whisper and Piper TTS intentionally remain warm beside gpt-oss-20b. Laguna
-        // still obtains an exclusive lease and releases every worker before loading.
+        // Whisper, ECAPA and Supertonic intentionally remain warm beside
+        // gpt-oss-20b and survive speech-worker release transitions.
         return Task.CompletedTask;
     }
 
@@ -175,7 +175,7 @@ public sealed class WorkerOrchestrator : IDisposable
         _ = await _workers.LoadSpeechComponentAsync("stt", cancellationToken).ConfigureAwait(false);
         _ = await _workers.LoadSpeechComponentAsync("tts", cancellationToken).ConfigureAwait(false);
         _ = await _workers.LoadSpeechComponentAsync("speaker", cancellationToken).ConfigureAwait(false);
-        _runtime.WriteLog("Information", "speech.warm", "Whisper, Piper-TTS und ECAPA wurden für Sprachdienste vorgewärmt.");
+        _runtime.WriteLog("Information", "speech.warm", "Whisper und ECAPA auf GPU 0 sowie Supertonic F5 Ultra (CUDA-Hybrid) auf GPU 1 wurden für Sprachdienste vorgewärmt.");
     }
 
     public async Task WarmSharedLmModelsAsync(CancellationToken cancellationToken = default)
@@ -192,7 +192,7 @@ public sealed class WorkerOrchestrator : IDisposable
         _runtime.WriteLog(
             "Information",
             "models.shared.warm",
-            "General-, Vision- und Embeddingmodell wurden für die gemeinsame GPU-Lane vorgewärmt.");
+            "Das Generalmodell wurde dauerhaft für die gemeinsame GPU-Lane vorgeladen.");
     }
 
     public async Task WarmAuxiliaryWorkersAsync(CancellationToken cancellationToken = default)
@@ -215,7 +215,8 @@ public sealed class WorkerOrchestrator : IDisposable
     {
         await WarmSharedLmModelsAsync(cancellationToken).ConfigureAwait(false);
         await WarmSpeechResourcesAsync(cancellationToken).ConfigureAwait(false);
-        await WarmAuxiliaryWorkersAsync(cancellationToken).ConfigureAwait(false);
+        // Media-, Vision-, Bild- und Embeddingmodelle werden nur auf Anforderung
+        // geladen; Whisper und TTS bleiben gemeinsam mit General resident.
     }
 
     public async Task<SpeechResponse> SynthesizeAsync(
@@ -237,11 +238,11 @@ public sealed class WorkerOrchestrator : IDisposable
         catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
         {
             result = await _windowsSpeech.SynthesizeAsync(request, cancellationToken).ConfigureAwait(false);
-            _runtime.WriteLog("Warning", "provider.fallback", "Piper-TTS nicht erreichbar; sichtbarer Windows-TTS-Fallback verwendet.");
+            _runtime.WriteLog("Warning", "provider.fallback", "Supertonic/Piper-TTS nicht erreichbar; sichtbarer Windows-TTS-Fallback verwendet.");
         }
         finally
         {
-            // Whisper und Piper-TTS bleiben neben dem gemeinsamen Generalmodell resident.
+            // Supertonic bleibt neben dem gemeinsamen Generalmodell resident.
         }
 
         var artifact = await ImportAsync(
@@ -325,17 +326,11 @@ public sealed class WorkerOrchestrator : IDisposable
         {
             if (sharedModel)
             {
-                var instances = await EnsureSharedLmModelsLoadedAsync(cancellationToken).ConfigureAwait(false);
+                var instance = string.Equals(modelId, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase)
+                    ? (await EnsureSharedLmModelsLoadedAsync(cancellationToken).ConfigureAwait(false)).General
+                    : await _lmStudio.EnsureModelLoadedAsync(modelId, contextLength, cancellationToken).ConfigureAwait(false);
                 Volatile.Write(ref _sharedRuntimeReady, 1);
-                if (string.Equals(modelId, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase))
-                {
-                    return instances.General;
-                }
-                if (string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase))
-                {
-                    return instances.Vision;
-                }
-                return instances.Embedding;
+                return instance;
             }
 
             Volatile.Write(ref _sharedRuntimeReady, 0);
@@ -344,6 +339,24 @@ public sealed class WorkerOrchestrator : IDisposable
                 modelId,
                 contextLength,
                 cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _resourceTransitionGate.Release();
+        }
+    }
+
+    public async Task RestoreGeneralModelAsync(CancellationToken cancellationToken = default)
+    {
+        await _resourceTransitionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _lmStudio.UnloadModelsExceptAsync([_options.GeneralModelId], cancellationToken).ConfigureAwait(false);
+            _ = await _lmStudio.EnsureModelLoadedAsync(
+                _options.GeneralModelId,
+                _options.GeneralContextLength,
+                cancellationToken).ConfigureAwait(false);
+            Volatile.Write(ref _sharedRuntimeReady, 1);
         }
         finally
         {
@@ -404,9 +417,9 @@ public sealed class WorkerOrchestrator : IDisposable
     }
 
     private bool IsSharedLmModel(string modelId) =>
-        string.Equals(modelId, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase);
+        !string.Equals(modelId, _options.CodeModelId, StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase);
 
     private async Task<(string General, string Vision, string Embedding)> EnsureSharedLmModelsLoadedAsync(
         CancellationToken cancellationToken)
@@ -415,15 +428,7 @@ public sealed class WorkerOrchestrator : IDisposable
             _options.GeneralModelId,
             _options.GeneralContextLength,
             cancellationToken).ConfigureAwait(false);
-        var vision = await _lmStudio.EnsureModelLoadedAsync(
-            _options.VisionModelId,
-            65_536,
-            cancellationToken).ConfigureAwait(false);
-        var embedding = await _lmStudio.EnsureModelLoadedAsync(
-            _options.EmbeddingModelId,
-            8_192,
-            cancellationToken).ConfigureAwait(false);
-        return (general, vision, embedding);
+        return (general, string.Empty, string.Empty);
     }
 
     public void Dispose() => _resourceTransitionGate.Dispose();

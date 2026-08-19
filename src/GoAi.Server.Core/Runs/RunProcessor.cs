@@ -137,7 +137,7 @@ public sealed class RunProcessor : BackgroundService
         RunRequest request,
         CancellationToken cancellationToken)
     {
-        var selection = _router.Select(request);
+        var selection = await _router.SelectAsync(request, cancellationToken).ConfigureAwait(false);
         var contextLength = Math.Min(
             selection.ContextLength,
             request.Limits?.MaximumContextTokens ?? selection.ContextLength);
@@ -323,22 +323,72 @@ public sealed class RunProcessor : BackgroundService
                 await SaveCheckpointAsync().ConfigureAwait(false);
             }
 
-            IReadOnlyList<LmChatMessage> modelMessages = messages;
-            if (codingRun)
+            IReadOnlyList<LmChatMessage> modelMessages;
+            CodingContextPlan contextPlan;
+            try
             {
-                var contextPlan = CodingContextPlanner.Prepare(messages, contextLength, maximumOutputTokens);
-                modelMessages = contextPlan.Messages;
-                await _repository.AppendEventAsync(
-                    runId,
-                    RunEventTypes.ContextChanged,
-                    new ContextChangedEvent(
-                        contextPlan.EstimatedInputTokens,
-                        contextPlan.InputTokenBudget,
-                        evidencePaths.Count,
-                        contextPlan.WasCompacted,
-                        contextPlan.Notice),
-                    cancellationToken).ConfigureAwait(false);
+                contextPlan = CodingContextPlanner.Prepare(messages, contextLength, maximumOutputTokens);
             }
+            catch (CodingContextBudgetException exception) when (request.DocumentContext is not null)
+            {
+                throw new DocumentContextBudgetException(
+                    exception.EstimatedTokens,
+                    exception.BudgetTokens,
+                    request.DocumentContext.Mode);
+            }
+            catch (CodingContextBudgetException exception) when (request.SessionContext is not null)
+            {
+                throw new SessionContextBudgetException(exception.EstimatedTokens, exception.BudgetTokens);
+            }
+            catch (CodingContextBudgetException exception) when (!codingRun)
+            {
+                throw new GeneralContextBudgetException(exception.EstimatedTokens, exception.BudgetTokens);
+            }
+            if (roundCount == 0
+                && request.SessionContext is not null
+                && contextPlan.WasCompacted)
+            {
+                throw new SessionContextBudgetException(
+                    contextPlan.EstimatedInputTokens,
+                    contextPlan.InputTokenBudget);
+            }
+            modelMessages = contextPlan.Messages;
+            var documentContext = request.DocumentContext;
+            var documentPrepared = documentContext?.Mode == DocumentContextMode.Prepared;
+            var documentDetail = documentContext switch
+            {
+                { Mode: DocumentContextMode.Full } when contextPlan.WasCompacted =>
+                    "Alle Dokumentseiten sind vollständig enthalten; ausschließlich ältere Chatdaten wurden verdichtet.",
+                { Mode: DocumentContextMode.Full } =>
+                    "Alle Dokumentseiten sind vollständig im Modellkontext enthalten.",
+                { Mode: DocumentContextMode.Prepared } =>
+                    "Der zu große Dokumentbestand wurde promptbezogen durch General AI aufbereitet.",
+                _ => contextPlan.Notice,
+            };
+            var sessionDetail = request.SessionContext?.PreparedByAi == true
+                ? "Ein älterer Teil des Sitzungsverlaufs wurde clientseitig durch AI aufbereitet und persistent wiederverwendet."
+                : null;
+            var contextDetail = string.Join(
+                " ",
+                new[] { documentDetail, sessionDetail }.Where(static detail => !string.IsNullOrWhiteSpace(detail)));
+            await _repository.AppendEventAsync(
+                runId,
+                RunEventTypes.ContextChanged,
+                new ContextChangedEvent(
+                    contextPlan.EstimatedInputTokens,
+                    contextPlan.InputTokenBudget,
+                    documentContext?.DocumentCount ?? evidencePaths.Count,
+                    documentPrepared
+                        || request.SessionContext?.PreparedByAi == true
+                        || contextPlan.WasCompacted,
+                    contextDetail,
+                    documentContext?.Mode.ToString().ToLowerInvariant() ?? "none",
+                    documentContext?.EstimatedTokens ?? 0,
+                    documentContext?.IncludedPageCount ?? 0,
+                    PreparationCompleted: true,
+                    HistoryTokens: request.SessionContext?.EstimatedTokens ?? 0,
+                    HistoryWasCompacted: request.SessionContext?.PreparedByAi == true),
+                cancellationToken).ConfigureAwait(false);
 
             var modelTools = finalSynthesisRequested
                 ? Array.Empty<LmToolDefinition>()
@@ -970,6 +1020,18 @@ public sealed class RunProcessor : BackgroundService
     {
         var failure = exception switch
         {
+            DocumentContextBudgetException context => (
+                Code: "document.context_preparation_failed",
+                Message: $"Der vorbereitete Dokumentkontext ({context.EstimatedTokens:N0} Token) überschreitet das sichere Modellbudget ({context.BudgetTokens:N0} Token).",
+                Retryable: true),
+            SessionContextBudgetException context => (
+                Code: "session.context_preparation_failed",
+                Message: $"Der vorbereitete Sitzungsverlauf ({context.EstimatedTokens:N0} Token) überschreitet das sichere Modellbudget ({context.BudgetTokens:N0} Token).",
+                Retryable: true),
+            GeneralContextBudgetException context => (
+                Code: "general.context_budget",
+                Message: $"Der vorbereitete General-AI-Kontext ({context.EstimatedTokens:N0} Token) überschreitet das sichere Modellbudget ({context.BudgetTokens:N0} Token).",
+                Retryable: true),
             CodingContextBudgetException context => (
                 Code: "coding.context_budget",
                 Message: $"Der vorbereitete Repositorykontext ({context.EstimatedTokens:N0} Token) Ã¼berschreitet das sichere Laguna-Budget ({context.BudgetTokens:N0} Token).",

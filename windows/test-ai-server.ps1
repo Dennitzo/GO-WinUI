@@ -28,7 +28,7 @@ $eventSchema = Resolve-GoRepositoryPath -RelativePath 'openapi\run-events-v1.sch
 $openApi = Resolve-GoRepositoryPath -RelativePath 'openapi\go-ai-v1.yaml'
 Get-Content -LiteralPath $eventSchema -Raw -Encoding utf8 | ConvertFrom-Json | Out-Null
 $openApiText = Get-Content -LiteralPath $openApi -Raw -Encoding utf8
-foreach ($required in @('openapi: 3.1.0', '/v1/runs:', '/v1/audio/transcriptions:', '/v1/images/generations:', 'X-GO-AI-Key')) {
+foreach ($required in @('openapi: 3.1.0', '/v1/runs:', '/v1/context/embeddings:', '/v1/context/embeddings/release:', '/v1/audio/transcriptions:', '/v1/images/generations:', 'X-GO-AI-Key')) {
     if ($openApiText.IndexOf($required, [StringComparison]::Ordinal) -lt 0) {
         throw "OpenAPI validation failed; missing token: $required"
     }

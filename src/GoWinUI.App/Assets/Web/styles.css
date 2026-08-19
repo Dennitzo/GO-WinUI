@@ -215,6 +215,52 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .message-content blockquote { margin: 12px 0; padding: 4px 14px; border-left: 3px solid var(--accent); color: var(--muted); }
 .message-content a { color: var(--accent); }
 .message-content code { padding: 2px 5px; border-radius: 5px; background: var(--surface-hover); font-family: "Cascadia Mono", Consolas, monospace; }
+::highlight(go-speech-current) {
+  background-color: color-mix(in srgb, var(--accent) 23%, transparent);
+  color: inherit;
+  text-decoration-line: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+[data-speech-source-active] { border-radius: 5px; }
+.speech-source-active--block {
+  background: color-mix(in srgb, var(--accent) 23%, transparent) !important;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+tr.speech-source-active--block > th,
+tr.speech-source-active--block > td {
+  background: color-mix(in srgb, var(--accent) 23%, var(--surface-raised)) !important;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.math-selectable.speech-source-active--block,
+.code-block.speech-source-active--block { outline: 1px solid var(--accent); outline-offset: 1px; }
+html[data-theme="high-contrast"] ::highlight(go-speech-current) {
+  background-color: Highlight;
+  color: HighlightText;
+  text-decoration-color: HighlightText;
+}
+html[data-theme="high-contrast"] .speech-source-active--block,
+html[data-theme="high-contrast"] tr.speech-source-active--block > th,
+html[data-theme="high-contrast"] tr.speech-source-active--block > td {
+  background: Highlight !important;
+  color: HighlightText !important;
+  box-shadow: inset 3px 0 0 HighlightText;
+}
+@media (forced-colors: active) {
+  ::highlight(go-speech-current) {
+    background-color: Highlight;
+    color: HighlightText;
+    text-decoration-color: HighlightText;
+  }
+  .speech-source-active--block,
+  tr.speech-source-active--block > th,
+  tr.speech-source-active--block > td {
+    background: Highlight !important;
+    color: HighlightText !important;
+    box-shadow: inset 3px 0 0 HighlightText;
+  }
+}
 .message-artifacts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 420px)); gap: 10px; margin-top: 12px; }
 .message-artifacts--captures { grid-template-columns: minmax(220px, min(520px, 72vw)); width: fit-content; max-width: 100%; }
 .artifact-card { overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-strong); }
@@ -288,6 +334,11 @@ tr:last-child td { border-bottom: 0; }
 .context-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .context-chip button { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: transparent; }
 .context-chip button:hover { background: var(--surface-hover); }
+.document-preparation-status { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 17px; height: 17px; border: 1px solid color-mix(in srgb, var(--accent) 65%, var(--border)); border-radius: 50%; color: var(--accent); font-size: 11px; font-weight: 800; line-height: 1; }
+.document-preparation-status.extracting, .document-preparation-status.preparing, .document-preparation-status.processing { border-right-color: transparent; animation: document-status-spin .9s linear infinite; }
+.document-preparation-status.failed { border-color: color-mix(in srgb, var(--danger) 70%, var(--border)); color: var(--danger); }
+.document-preparation-status.group { margin-left: 1px; }
+@keyframes document-status-spin { to { transform: rotate(360deg); } }
 .attachment-menu-anchor { position: relative; }
 .attachment-summary { gap: 0; padding: 0 6px 0 0; color: var(--text); }
 .attachment-summary__toggle { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 4px 0 10px; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
@@ -301,6 +352,17 @@ tr:last-child td { border-bottom: 0; }
 .attachment-menu .attachment-menu__item > span:nth-child(2) { flex: 1 1 auto; text-align: left; }
 .composer { width: min(820px, 100%); margin: 0 auto; padding: 14px; border: 1px solid var(--border); border-radius: 30px; background: var(--composer); box-shadow: 0 9px 28px color-mix(in srgb, var(--background-accent) 10%, rgba(0, 0, 0, .16)); transition: border-color .15s ease, box-shadow .15s ease; }
 .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 72%, var(--border)); box-shadow: 0 9px 30px color-mix(in srgb, var(--accent) 14%, transparent); }
+.composer-speech-status { display: inline-flex; align-items: center; flex: 0 1 auto; gap: 7px; width: fit-content; max-width: 100%; min-height: 36px; padding: 0 7px 0 10px; border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border)); border-radius: 999px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-size: 13px; line-height: 1.35; }
+.composer-speech-status[hidden] { display: none; }
+.composer-speech-status strong { flex: 0 0 auto; font-size: inherit; }
+.composer-speech-status #composer-speech-detail { min-width: 0; overflow: hidden; color: color-mix(in srgb, var(--accent) 82%, var(--text)); text-overflow: ellipsis; white-space: nowrap; }
+.composer-speech-status__spinner { flex: 0 0 auto; width: 13px; height: 13px; border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: message-status-spin .9s linear infinite; }
+.composer-speech-status.paused .composer-speech-status__spinner { animation-play-state: paused; }
+.composer-speech-status__pause { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 1px solid color-mix(in srgb, var(--accent) 64%, var(--border)); border-radius: 50%; background: transparent; color: var(--accent); cursor: pointer; }
+.composer-speech-status__pause:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.composer-speech-status__pause:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent); outline-offset: 2px; }
+.composer-speech-status__pause:disabled { opacity: .45; cursor: default; }
+.composer-speech-status__pause svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .composer textarea { display: block; width: 100%; height: 58px; min-height: 58px; max-height: 58px; padding: 2px 6px 11px; overflow-y: auto; resize: none; border: 0; outline: 0; background: transparent; font-size: 16px; line-height: 1.45; }
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .composer-tools { position: relative; flex-wrap: wrap; gap: 8px; }
@@ -423,36 +485,14 @@ tr:last-child td { border-bottom: 0; }
 .toast.error { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); }
 .mobile-only { display: none; }
 
-html.pdf-exporting-message,
-body.pdf-exporting-message { height: auto !important; min-height: 100% !important; overflow: visible !important; background: #fff !important; color: #111 !important; }
-html.pdf-exporting-message *,
-body.pdf-exporting-message * { visibility: hidden !important; }
-html.pdf-exporting-message .pdf-export-target,
-html.pdf-exporting-message .pdf-export-target *,
-body.pdf-exporting-message .pdf-export-target,
-body.pdf-exporting-message .pdf-export-target * { visibility: visible !important; }
-html.pdf-exporting-message .pdf-export-target,
-body.pdf-exporting-message .pdf-export-target { position: absolute !important; inset: 0 auto auto 0 !important; width: calc(100vw - 48px) !important; margin: 24px !important; background: #fff !important; color: #111 !important; box-shadow: none !important; }
-html.pdf-exporting-message .pdf-export-target .message-body,
-body.pdf-exporting-message .pdf-export-target .message-body { grid-column: 1 / -1 !important; width: 100% !important; max-width: none !important; align-items: flex-start !important; }
-html.pdf-exporting-message .pdf-export-target,
-html.pdf-exporting-message .pdf-export-target .message-content,
-html.pdf-exporting-message .pdf-export-target .message-body,
-html.pdf-exporting-message .pdf-export-target table,
-html.pdf-exporting-message .pdf-export-target th,
-html.pdf-exporting-message .pdf-export-target td,
-body.pdf-exporting-message .pdf-export-target,
-body.pdf-exporting-message .pdf-export-target .message-content,
-body.pdf-exporting-message .pdf-export-target .message-body,
-body.pdf-exporting-message .pdf-export-target table,
-body.pdf-exporting-message .pdf-export-target th,
-body.pdf-exporting-message .pdf-export-target td { border-color: #d0d7de !important; background: #fff !important; color: #111 !important; }
-html.pdf-exporting-message .pdf-export-target .avatar,
-html.pdf-exporting-message .pdf-export-target .message-meta,
-html.pdf-exporting-message .pdf-export-target .message-footer,
-body.pdf-exporting-message .pdf-export-target .avatar,
-body.pdf-exporting-message .pdf-export-target .message-meta,
-body.pdf-exporting-message .pdf-export-target .message-footer { display: none !important; }
+.pdf-book {
+  position: fixed;
+  top: 0;
+  left: -200vw;
+  width: 166mm;
+  visibility: hidden;
+  pointer-events: none;
+}
 
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -487,10 +527,312 @@ body.pdf-exporting-message .pdf-export-target .message-footer { display: none !i
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
 
+@page {
+  size: A4 portrait;
+  background: #fff;
+}
+
 @media print {
-  .session-pane, .chat-header, .composer-region, .toast-region, .message-footer { display: none !important; }
-  html, body, .app-shell, .chat-pane, .message-scroll { width: auto; height: auto; overflow: visible; background: #fff; color: #000; }
-  .app-shell { display: block; }
-  .message-scroll { padding: 0; }
-  .message.user .message-content { border: 1px solid #ccc; background: #f5f5f5; }
+  :root,
+  html[data-theme="light"],
+  html[data-theme="dark"],
+  html[data-theme="high-contrast"] {
+    color-scheme: only light !important;
+    background: #fff !important;
+    forced-color-adjust: none;
+  }
+  html, body {
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #171717 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  body > :not(.pdf-book) { display: none !important; }
+  .pdf-book {
+    position: static !important;
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+    visibility: visible !important;
+    background: #fff !important;
+    color: #171717 !important;
+    font: 10.75pt/1.58 Georgia, "Times New Roman", "Noto Serif", serif !important;
+    font-feature-settings: "kern" 1, "liga" 1;
+    hyphens: auto;
+    overflow-wrap: break-word;
+    pointer-events: auto;
+    text-rendering: optimizeLegibility;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .pdf-book *, .pdf-book *::before, .pdf-book *::after {
+    visibility: visible !important;
+    max-width: 100%;
+    box-shadow: none !important;
+  }
+  .pdf-book__header {
+    margin: 0 0 11mm;
+    padding: 0 0 5mm;
+    border-bottom: .6pt solid #a9a9a9;
+    break-after: avoid-page;
+  }
+  .pdf-book__eyebrow {
+    margin-bottom: 3mm;
+    color: #555 !important;
+    font: 700 8pt/1.2 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    letter-spacing: .13em;
+  }
+  .pdf-book__header h1 {
+    margin: 0;
+    color: #111 !important;
+    font: 700 22pt/1.18 Georgia, "Times New Roman", serif !important;
+    hyphens: auto;
+    overflow-wrap: anywhere;
+  }
+  .pdf-book__header p {
+    margin: 3mm 0 0;
+    color: #5b5b5b !important;
+    font: 9pt/1.35 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    text-align: left;
+  }
+  .pdf-book__content { width: 100%; }
+  .pdf-book .message {
+    display: block !important;
+    width: 100% !important;
+    margin: 0 0 7mm !important;
+    color: #171717 !important;
+    font: inherit !important;
+    break-inside: auto;
+  }
+  .pdf-book .message-body,
+  .pdf-book .message.assistant .message-body,
+  .pdf-book .message.user .message-body {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+  }
+  .pdf-book__message-heading {
+    margin: 0 0 2.6mm;
+    color: #555 !important;
+    font: 700 8.5pt/1.25 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    letter-spacing: .035em;
+    break-after: avoid-page;
+  }
+  .pdf-book .message-content,
+  .pdf-book .message.assistant .message-content,
+  .pdf-book .message.user .message-content {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    color: #171717 !important;
+    font: inherit !important;
+    line-height: inherit !important;
+    overflow: visible !important;
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+  .pdf-book .message.user .message-content {
+    padding: 3mm 4mm !important;
+    border-left: 2pt solid #777 !important;
+    background: #f3f3f3 !important;
+  }
+  .pdf-book .message-content p,
+  .pdf-book .message-content li,
+  .pdf-book .message-content blockquote {
+    orphans: 3;
+    widows: 3;
+  }
+  .pdf-book .message-content p {
+    margin: 0 0 3.4mm;
+    text-align: justify;
+    text-wrap: pretty;
+  }
+  .pdf-book .message-content p:last-child { margin-bottom: 0; }
+  .pdf-book .message-content h1,
+  .pdf-book .message-content h2,
+  .pdf-book .message-content h3,
+  .pdf-book .message-content h4 {
+    margin: 6mm 0 2.5mm;
+    color: #111 !important;
+    font-family: Georgia, "Times New Roman", serif !important;
+    font-weight: 700 !important;
+    line-height: 1.25 !important;
+    break-after: avoid-page;
+    page-break-after: avoid;
+  }
+  .pdf-book .message-content h1 { font-size: 17pt !important; }
+  .pdf-book .message-content h2 { font-size: 14.5pt !important; }
+  .pdf-book .message-content h3 { font-size: 12.5pt !important; }
+  .pdf-book .message-content h4 { font-size: 11.25pt !important; }
+  .pdf-book .message-content > :first-child { margin-top: 0; }
+  .pdf-book .message-content ul,
+  .pdf-book .message-content ol {
+    margin: 0 0 3.4mm;
+    padding-left: 7mm;
+  }
+  .pdf-book .message-content li { margin: 0 0 1.2mm; padding-left: 1mm; }
+  .pdf-book .message-content blockquote {
+    margin: 4mm 0;
+    padding: 1mm 0 1mm 5mm;
+    border-left: 2pt solid #777;
+    color: #333 !important;
+    font-style: italic;
+  }
+  .pdf-book .message-content a {
+    color: #171717 !important;
+    text-decoration: underline;
+    text-decoration-thickness: .5pt;
+    text-underline-offset: 1.5pt;
+  }
+  .pdf-book .message-content code {
+    padding: .2mm 1mm;
+    border: .5pt solid #d5d5d5;
+    border-radius: 1mm;
+    background: #f4f4f4 !important;
+    color: #111 !important;
+    font: 8.5pt/1.45 "Cascadia Mono", Consolas, monospace !important;
+    overflow-wrap: anywhere;
+  }
+  .pdf-book .code-block {
+    margin: 4mm 0;
+    overflow: visible !important;
+    border: .6pt solid #bcbcbc !important;
+    border-radius: 1.5mm;
+    background: #f7f7f7 !important;
+    color: #111 !important;
+    break-inside: auto;
+  }
+  .pdf-book .code-header {
+    padding: 2mm 3mm;
+    border-bottom: .5pt solid #c8c8c8;
+    background: #ececec !important;
+    color: #333 !important;
+    font: 7.75pt/1.3 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    break-after: avoid-page;
+  }
+  .pdf-book .code-block pre {
+    margin: 0;
+    padding: 3mm;
+    overflow: visible !important;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .pdf-book .code-block pre code {
+    padding: 0;
+    border: 0;
+    background: transparent !important;
+  }
+  .pdf-book .table-wrap {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 4mm 0 !important;
+    overflow: visible !important;
+    border: .6pt solid #999 !important;
+    border-radius: 0 !important;
+    break-inside: auto;
+  }
+  .pdf-book table,
+  .pdf-book .table-wrap table {
+    width: 100% !important;
+    max-width: 100% !important;
+    border-collapse: collapse !important;
+    table-layout: fixed;
+    font: 8.5pt/1.4 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+  }
+  .pdf-book thead { display: table-header-group; }
+  .pdf-book tr { break-inside: avoid-page; page-break-inside: avoid; }
+  .pdf-book th,
+  .pdf-book td {
+    padding: 2.2mm 2.5mm !important;
+    border: .5pt solid #aaa !important;
+    background: #fff !important;
+    color: #171717 !important;
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+    word-break: normal;
+  }
+  .pdf-book th {
+    background: #e7e7e7 !important;
+    color: #111 !important;
+    font-weight: 700 !important;
+  }
+  .pdf-book tbody tr:nth-child(even) td { background: #f6f6f6 !important; }
+  .pdf-book .math-selectable,
+  .pdf-book .math-selectable.display {
+    width: auto !important;
+    max-width: 100% !important;
+    margin: 3mm auto !important;
+    padding: 1.5mm 0 !important;
+    overflow: visible !important;
+    color: #111 !important;
+    font-size: .9em !important;
+    break-inside: avoid-page;
+  }
+  .pdf-book .message-artifacts {
+    display: block !important;
+    width: 100% !important;
+    margin: 4mm 0 0;
+  }
+  .pdf-book .artifact-card {
+    width: 100% !important;
+    margin: 0 0 4mm;
+    overflow: visible !important;
+    border: .6pt solid #b5b5b5 !important;
+    border-radius: 1.5mm;
+    background: #fff !important;
+    break-inside: avoid-page;
+  }
+  .pdf-book .artifact-card img,
+  .pdf-book__video-poster {
+    display: block;
+    width: auto !important;
+    max-width: 100% !important;
+    max-height: 190mm !important;
+    margin: 0 auto;
+    object-fit: contain;
+    background: #fff !important;
+  }
+  .pdf-book .artifact-card__footer {
+    padding: 2mm 3mm;
+    border-top: .5pt solid #d0d0d0;
+    color: #444 !important;
+    font: 8pt/1.35 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+  }
+  .pdf-book__media-placeholder {
+    min-height: 18mm;
+    padding: 6mm;
+    background: #f3f3f3 !important;
+    color: #444 !important;
+    font: 9pt/1.35 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    text-align: center;
+  }
+  .pdf-book .message-tool-box {
+    margin: 3mm 0 0;
+    padding: 2.5mm 3mm;
+    border: .6pt solid #aaa !important;
+    border-radius: 1.5mm;
+    background: #f3f3f3 !important;
+    color: #333 !important;
+    font: 8.5pt/1.4 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    break-inside: avoid-page;
+  }
+  .pdf-book__end-mark {
+    margin-top: 11mm;
+    color: #777 !important;
+    font-size: 8pt;
+    text-align: center;
+    break-before: avoid-page;
+  }
 }

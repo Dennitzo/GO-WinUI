@@ -64,4 +64,68 @@ public sealed class RunRequestValidatorTests
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
             request with { Limits = request.Limits! with { TimeoutSeconds = 14_401 } }));
     }
+
+    [Fact]
+    public void DocumentCapabilityAndPreparedContextAreAccepted()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.General,
+            [new RunMessage("user", [new ContentPart("document", "Dokument: Planung.pdf, Seite 1")])],
+            ClientCapabilities: ["documents", "documents"],
+            DocumentContext: new DocumentContextDescriptor(
+                DocumentContextMode.Prepared,
+                new string('a', 64),
+                2,
+                20,
+                12_000,
+                6,
+                PreparedByAi: true),
+            SessionContext: new SessionContextDescriptor(
+                new string('b', 64),
+                8,
+                8,
+                4_000,
+                PreparedByAi: true));
+
+        RunRequestValidator.Validate(request);
+
+        var missingCapability = request with { ClientCapabilities = [] };
+        var error = Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(missingCapability));
+        Assert.Contains("documents", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void UnknownCapabilityErrorNamesTheRejectedCapability()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.General,
+            [new RunMessage("user", [new ContentPart("text", "Test")])],
+            ClientCapabilities: ["shell"]);
+
+        var error = Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request));
+
+        Assert.Contains("shell", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AudiobookConversationProfileIsAcceptedAndUnknownProfilesAreRejected()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.General,
+            [new RunMessage("user", [new ContentPart("text", "Setze die Geschichte fort.")])],
+            AllowedServerTools: [],
+            ConversationProfile: ConversationProfile.Audiobook);
+
+        RunRequestValidator.Validate(request);
+
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
+            request with { ConversationProfile = (ConversationProfile)999 }));
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
+            request with { Mode = RunMode.Code }));
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
+            request with { AllowedServerTools = null }));
+    }
 }

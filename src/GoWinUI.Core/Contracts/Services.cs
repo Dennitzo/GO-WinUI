@@ -24,11 +24,31 @@ public interface IChatRepository
         string? workspacePath,
         string? workspaceFingerprint,
         CancellationToken cancellationToken = default);
+    Task SetPersistentToolActionAsync(
+        Guid id,
+        PersistentToolAction? action,
+        CancellationToken cancellationToken = default);
     Task SetPinnedAsync(Guid id, bool isPinned, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ChatMessage>> ListMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default);
-    Task<ChatMessage> AddMessageAsync(Guid sessionId, ChatRole role, string content, MessageStatus status, CancellationToken cancellationToken = default);
+    Task<ChatMessage> AddMessageAsync(
+        Guid sessionId,
+        ChatRole role,
+        string content,
+        MessageStatus status,
+        MessageContentProfile contentProfile = MessageContentProfile.General,
+        CancellationToken cancellationToken = default);
     Task UpdateMessageAsync(Guid messageId, string content, MessageStatus status, string? errorMessage = null, CancellationToken cancellationToken = default);
     Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default);
+    Task<SessionContextPreparation?> GetSessionContextPreparationAsync(string cacheKey, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<SessionContextPreparation>> ListSessionContextPreparationsAsync(
+        Guid sessionId,
+        string modelId,
+        int maximumMessageCount,
+        SessionContextProfile profile = SessionContextProfile.General,
+        CancellationToken cancellationToken = default);
+    Task SaveSessionContextPreparationAsync(SessionContextPreparation preparation, CancellationToken cancellationToken = default);
+    Task<SpeechPreparation?> GetSpeechPreparationAsync(string cacheKey, CancellationToken cancellationToken = default);
+    Task SaveSpeechPreparationAsync(SpeechPreparation preparation, CancellationToken cancellationToken = default);
     Task SetToolExecutionAsync(Guid messageId, ToolExecutionInfo execution, CancellationToken cancellationToken = default);
     Task<int> MarkStreamingMessagesInterruptedAsync(CancellationToken cancellationToken = default);
 }
@@ -148,6 +168,15 @@ public interface IDocumentIngestor
     Task<DocumentIngestResult> ImportAsync(Guid sessionId, string fileName, Stream content, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<StoredDocument>> ListAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<DocumentPage>> ReadPagesAsync(Guid documentId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DocumentContextHit>> SearchAsync(Guid sessionId, string query, int maximumCharacters = 160_000, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DocumentContextHit>> SearchHybridAsync(Guid sessionId, string query, string embeddingModelId, IReadOnlyList<double> queryEmbedding, int maximumCharacters = 160_000, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<DocumentIndexChunk>> ListIndexChunksAsync(Guid sessionId, string embeddingModelId, CancellationToken cancellationToken = default);
+    Task SaveEmbeddingsAsync(IReadOnlyList<DocumentChunkEmbedding> embeddings, CancellationToken cancellationToken = default);
+    Task<DocumentContextPreparation?> GetContextPreparationAsync(string cacheKey, CancellationToken cancellationToken = default);
+    Task SaveContextPreparationAsync(DocumentContextPreparation preparation, CancellationToken cancellationToken = default);
+    Task SetContextPreparationStateAsync(Guid sessionId, Guid messageId, DocumentPreparationStatus? status, int progress = 100, string? errorMessage = null, CancellationToken cancellationToken = default);
+    Task SaveEvidenceAsync(Guid messageId, IReadOnlyList<DocumentContextHit> evidence, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<string>> GetEvidenceCitationsAsync(Guid messageId, CancellationToken cancellationToken = default);
     Task RemoveAsync(Guid documentId, CancellationToken cancellationToken = default);
 }
 

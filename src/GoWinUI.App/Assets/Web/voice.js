@@ -2,8 +2,9 @@
   "use strict";
 
   const targetSampleRate = 16000;
-  const chunkStepSamples = 24000;
-  const overlapSamples = 0;
+  const windowSamples = 32000;
+  const overlapSamples = 8000;
+  const windowStepSamples = windowSamples - overlapSamples;
   const preRollSamples = 4000;
   const minimumTurnSamples = 3200;
   // Zwei Sekunden Sprechpause bestätigen eine vollständige Äußerung.
@@ -120,15 +121,17 @@
   }
 
   function emitAvailableWindows(turn) {
-    while (turn.samples.length - turn.sentThrough >= chunkStepSamples) {
-      const start = Math.max(0, turn.sentThrough - overlapSamples);
-      const end = turn.sentThrough + chunkStepSamples;
+    while (turn.samples.length - turn.nextWindowStart >= windowSamples) {
+      const start = turn.nextWindowStart;
+      const end = start + windowSamples;
       sendWindow(turn, turn.samples.slice(start, end), false);
-      turn.sentThrough = end;
-      if (turn.sentThrough > overlapSamples * 2) {
-        const remove = turn.sentThrough - overlapSamples;
+      turn.lastWindowEnd = end;
+      turn.nextWindowStart += windowStepSamples;
+      if (turn.nextWindowStart > windowSamples * 2) {
+        const remove = turn.nextWindowStart - overlapSamples;
         turn.samples.splice(0, remove);
-        turn.sentThrough -= remove;
+        turn.nextWindowStart -= remove;
+        turn.lastWindowEnd -= remove;
       }
     }
   }
@@ -139,21 +142,31 @@
     capture.loudFrames = 0;
     capture.preRoll.length = 0;
     if (!turn || turn.speechSamples < minimumTurnSamples) return;
-    const start = Math.max(0, turn.sentThrough - overlapSamples);
-    sendWindow(turn, turn.samples.slice(start), true);
+    if (turn.lastWindowEnd === 0) {
+      sendWindow(turn, turn.samples.slice(), true);
+      return;
+    }
+    if (turn.samples.length > turn.lastWindowEnd) {
+      const start = Math.max(0, turn.lastWindowEnd - overlapSamples);
+      sendWindow(turn, turn.samples.slice(start), true);
+    } else {
+      // Always close the server-side turn, even when the last full window
+      // happened to end exactly at the local buffer boundary.
+      sendWindow(turn, [], true);
+    }
   }
 
   function beginTurn(values) {
     const samples = capture.preRoll.slice();
-    for (const value of values) samples.push(value);
     capture.preRoll.length = 0;
     capture.turn = {
       id: newTurnId(),
       chunkIndex: 0,
       samples,
-      sentThrough: 0,
+      nextWindowStart: 0,
+      lastWindowEnd: 0,
       silenceSamples: 0,
-      speechSamples: values.length
+      speechSamples: Math.min(samples.length, values.length * capture.loudFrames)
     };
   }
 

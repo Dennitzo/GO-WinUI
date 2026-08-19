@@ -35,7 +35,7 @@ public static class GeneralChatPolicies
 
     private const string DocumentPolicy = """
         Dokument-Policy:
-        Wenn Dokumentkontext vorhanden ist und die Nutzeranfrage PDF-, Word- oder Textinhalte betrifft, antworte ausschließlich aus den im Request enthaltenen Auszügen. Erfinde keine Inhalte außerhalb dieses Dokumentkontexts. Verweise auf Dokumentnamen und Seiten, wenn sie im Kontext vorhanden sind. Wenn der benötigte Bereich nicht enthalten ist, sage das klar und frage nach einem engeren oder anderen Bereich. Dokumentfragen verwenden keine CAD-Tools.
+        Wenn Dokumentkontext vorhanden ist und die Nutzeranfrage PDF-, Word- oder Textinhalte betrifft, antworte ausschließlich aus den im Request enthaltenen Auszügen. Erfinde keine Inhalte außerhalb dieses Dokumentkontexts. Jede dokumentbasierte Aussage nennt ihren Beleg mit Dokumentname und Seite im Format [Dateiname, S. 12]. Eine Quellenangabe ohne Dokumentname wie [Quelle Seite 12] ist unzulässig. Bei mehreren Belegen verwende [Datei A.pdf, S. 12; Datei B.docx, S. 3]. Wenn der benötigte Bereich nicht enthalten ist, sage das klar und nenne das fehlende Dokument oder den benötigten Seitenbereich. Dokumentfragen verwenden keine CAD-Tools.
         """;
 
     public static string Compose(string applicationInstruction, bool hasDocumentContext)

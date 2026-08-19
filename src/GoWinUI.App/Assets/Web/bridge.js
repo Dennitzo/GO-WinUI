@@ -11,13 +11,13 @@
     "attachment.remove",
     "artifact.save", "artifact.preview", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
     "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
-    "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.stop", "microphone.cancel",
-    "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "ui.sessionPane", "external.open"
+    "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.toggleSpeechPause", "microphone.stop", "microphone.cancel",
+    "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "session.tool", "ui.sessionPane", "external.open"
   ]);
   const allowedInbound = new Set([
     "state.snapshot", "chat.started", "chat.delta", "chat.completed",
     "chat.cancelled", "chat.failed", "session.changed", "workflow.snapshot",
-    "workflow.changed", "workflow.draft", "document.changed", "status.changed", "theme.changed",
+    "workflow.changed", "workflow.draft", "document.changed", "status.changed", "speech.status", "speech.progress", "theme.changed",
     "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
     "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady",
     "host.error"

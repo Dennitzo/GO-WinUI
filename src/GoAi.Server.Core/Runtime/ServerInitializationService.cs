@@ -17,6 +17,7 @@ public sealed class ServerInitializationService : IHostedService
     private readonly ServerRuntimeState _runtime;
     private readonly GoAiServerOptions _options;
     private readonly GpuLeaseScheduler _gpuScheduler;
+    private readonly GeneralModelSelectionService _generalModels;
 
     public ServerInitializationService(
         GoAiDatabase database,
@@ -25,7 +26,8 @@ public sealed class ServerInitializationService : IHostedService
         ReadinessService readiness,
         ServerRuntimeState runtime,
         GpuLeaseScheduler gpuScheduler,
-        IOptions<GoAiServerOptions> options)
+        IOptions<GoAiServerOptions> options,
+        GeneralModelSelectionService generalModels)
     {
         _database = database;
         _apiKeys = apiKeys;
@@ -34,11 +36,13 @@ public sealed class ServerInitializationService : IHostedService
         _runtime = runtime;
         _gpuScheduler = gpuScheduler;
         _options = options.Value;
+        _generalModels = generalModels;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         await _database.InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await _generalModels.RestoreAsync(cancellationToken).ConfigureAwait(false);
         await _gpuScheduler.RecoverInterruptedLeasesAsync(cancellationToken).ConfigureAwait(false);
         await _workerKeys.EnsureKeysAsync(cancellationToken).ConfigureAwait(false);
         var bootstrap = await _apiKeys.EnsureBootstrapKeyAsync(cancellationToken).ConfigureAwait(false);

@@ -113,8 +113,6 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
                         : settings.LiveCaptionLanguage.Trim(),
             LmStudioBaseUrl = baseUrl.TrimEnd('/'),
             SelectedModel = string.IsNullOrWhiteSpace(settings.SelectedModel)
-                || (settings.Version < 4
-                    && string.Equals(settings.SelectedModel.Trim(), "openai/gpt-oss-120b", StringComparison.OrdinalIgnoreCase))
                 ? AppSettings.DefaultSelectedModel
                 : settings.SelectedModel.Trim(),
             AccentColor = accentColor,

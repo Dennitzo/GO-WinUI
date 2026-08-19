@@ -26,8 +26,11 @@ internal static class GatewayEndpoints
         endpoints.MapGet("/v1/health/ready", WriteReadyHealthAsync);
         endpoints.MapGet("/v1/capabilities", WriteCapabilitiesAsync);
         endpoints.MapGet("/v1/models/status", WriteModelStatusAsync);
+        endpoints.MapPost("/v1/models/general", SelectGeneralModelAsync);
         endpoints.MapGet("/v1/gpu/status", WriteGpuStatusAsync);
         endpoints.MapGet("/v1/services/status", WriteServiceStatusAsync);
+        endpoints.MapPost("/v1/context/embeddings", CreateEmbeddingsAsync);
+        endpoints.MapPost("/v1/context/embeddings/release", ReleaseEmbeddingsAsync);
 
         endpoints.MapPost("/v1/runs", CreateRunAsync);
         endpoints.MapGet("/v1/runs/{runId}", GetRunAsync);
@@ -85,6 +88,15 @@ internal static class GatewayEndpoints
         await WriteJsonAsync(context, await lmStudio.GetStatusAsync(context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
     }
 
+    private static async Task SelectGeneralModelAsync(HttpContext context)
+    {
+        var request = await ReadJsonAsync<GeneralModelSelection>(context).ConfigureAwait(false);
+        var selection = context.RequestServices.GetRequiredService<GeneralModelSelectionService>();
+        await WriteJsonAsync(
+            context,
+            await selection.SelectAsync(request.ModelId, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
     private static async Task WriteGpuStatusAsync(HttpContext context)
     {
         var gpu = context.RequestServices.GetRequiredService<GpuStatusService>();
@@ -95,6 +107,48 @@ internal static class GatewayEndpoints
     {
         var probes = context.RequestServices.GetRequiredService<ServiceProbeService>();
         await WriteJsonAsync(context, await probes.GetStatusesAsync(context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    private static async Task CreateEmbeddingsAsync(HttpContext context)
+    {
+        var request = await ReadJsonAsync<EmbeddingBatchRequest>(context).ConfigureAwait(false);
+        if (request.Inputs is null || request.Inputs.Count is < 1 or > 64)
+        {
+            throw new ArgumentException("Embedding batches require between 1 and 64 inputs.");
+        }
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        long totalCharacters = 0;
+        foreach (var input in request.Inputs)
+        {
+            if (input is null
+                || string.IsNullOrWhiteSpace(input.Id)
+                || input.Id.Length > 128
+                || !ids.Add(input.Id)
+                || string.IsNullOrWhiteSpace(input.Text)
+                || input.Text.Length > 32_768)
+            {
+                throw new ArgumentException("Embedding inputs require unique bounded IDs and text up to 32768 characters.");
+            }
+            totalCharacters += input.Text.Length;
+        }
+        if (totalCharacters > 512_000)
+        {
+            throw new ArgumentException("The embedding batch exceeds 512000 characters.");
+        }
+
+        var executor = context.RequestServices.GetRequiredService<AgentToolExecutor>();
+        var result = await executor.CreateEmbeddingBatchAsync(
+            request,
+            $"embedding-{Guid.NewGuid():N}",
+            context.RequestAborted).ConfigureAwait(false);
+        await WriteJsonAsync(context, result).ConfigureAwait(false);
+    }
+
+    private static async Task ReleaseEmbeddingsAsync(HttpContext context)
+    {
+        var executor = context.RequestServices.GetRequiredService<AgentToolExecutor>();
+        await executor.ReleaseEmbeddingModelAsync(context.RequestAborted).ConfigureAwait(false);
+        context.Response.StatusCode = StatusCodes.Status204NoContent;
     }
 
     private static async Task CreateRunAsync(HttpContext context)

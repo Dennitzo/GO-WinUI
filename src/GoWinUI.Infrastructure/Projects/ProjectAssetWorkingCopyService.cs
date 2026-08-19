@@ -30,7 +30,7 @@ public sealed class ProjectAssetWorkingCopyService(
         ProjectAsset asset,
         CancellationToken cancellationToken = default)
     {
-        var path = GetExpectedPath(asset);
+        var path = ResolvePath(asset);
         if (!File.Exists(path))
         {
             return new(asset.Id, path, AssetWorkingCopyState.Missing, null, 0);
@@ -55,6 +55,10 @@ public sealed class ProjectAssetWorkingCopyService(
         try
         {
             var existing = await InspectAsync(asset, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(asset.SourcePath))
+            {
+                return existing;
+            }
             if (existing.State != AssetWorkingCopyState.Missing)
             {
                 return existing;
@@ -117,24 +121,35 @@ public sealed class ProjectAssetWorkingCopyService(
                 FileShare.Read,
                 BufferSize,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            var blob = await binaryObjects.ImportAsync(source, asset.ContentType, cancellationToken).ConfigureAwait(false);
-            try
+            if (string.IsNullOrWhiteSpace(asset.SourcePath))
             {
-                var updated = await projects.UpdateAssetAsync(asset with
+                var blob = await binaryObjects.ImportAsync(source, asset.ContentType, cancellationToken).ConfigureAwait(false);
+                try
                 {
-                    BlobId = blob.Id,
-                    Sha256 = blob.Sha256,
-                    Length = blob.Length,
-                }, expectedRevision, cancellationToken).ConfigureAwait(false);
-                await binaryObjects.DeleteIfUnreferencedAsync(asset.BlobId, CancellationToken.None).ConfigureAwait(false);
-                UpdateWatchedAsset(updated);
-                return updated;
+                    var blobUpdated = await projects.UpdateAssetAsync(asset with
+                    {
+                        BlobId = blob.Id,
+                        Sha256 = blob.Sha256,
+                        Length = blob.Length,
+                    }, expectedRevision, cancellationToken).ConfigureAwait(false);
+                    await binaryObjects.DeleteIfUnreferencedAsync(asset.BlobId, CancellationToken.None).ConfigureAwait(false);
+                    UpdateWatchedAsset(blobUpdated);
+                    return blobUpdated;
+                }
+                catch
+                {
+                    await binaryObjects.DeleteIfUnreferencedAsync(blob.Id, CancellationToken.None).ConfigureAwait(false);
+                    throw;
+                }
             }
-            catch
+            var (sha256, length) = await HashFileAsync(workingCopy.Path, cancellationToken).ConfigureAwait(false);
+            var updated = await projects.UpdateAssetAsync(asset with
             {
-                await binaryObjects.DeleteIfUnreferencedAsync(blob.Id, CancellationToken.None).ConfigureAwait(false);
-                throw;
-            }
+                Sha256 = sha256,
+                Length = length,
+            }, expectedRevision, cancellationToken).ConfigureAwait(false);
+            UpdateWatchedAsset(updated);
+            return updated;
         }
         finally
         {
@@ -244,6 +259,11 @@ public sealed class ProjectAssetWorkingCopyService(
 
     private string GetExpectedPath(ProjectAsset asset) =>
         Path.Combine(GetAssetDirectory(asset.Id), ProjectAssetFileName.Normalize(asset.FileName));
+
+    private string ResolvePath(ProjectAsset asset) =>
+        string.IsNullOrWhiteSpace(asset.SourcePath)
+            ? GetExpectedPath(asset)
+            : Path.GetFullPath(asset.SourcePath);
 
     private string GetAssetDirectory(Guid assetId)
     {

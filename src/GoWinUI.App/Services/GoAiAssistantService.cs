@@ -5,6 +5,7 @@ using GoWinUI.Core.Chat;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -16,6 +17,7 @@ public enum GoAiAssistantUpdateKind
     Delta,
     Status,
     ArtifactsChanged,
+    DocumentsChanged,
     Completed,
     Cancelled,
     Failed,
@@ -34,6 +36,15 @@ public sealed record GoAiAssistantUpdate(
     int? ContextLimit = null,
     int? LoadedFiles = null,
     bool ContextWasCompacted = false);
+
+public sealed record GoAiSpeechUpdate(
+    bool IsActive,
+    string Status,
+    string? Detail = null,
+    string? Model = null,
+    string? Error = null,
+    bool CacheHit = false,
+    string? DirectionModel = null);
 
 public sealed class GoAiStreamDetachedException : OperationCanceledException
 {
@@ -58,6 +69,8 @@ public sealed class GoAiAssistantService(
     IClientToolExecutionRepository toolExecutions,
     IBinaryObjectStore blobs,
     IDocumentIngestor documents,
+    DocumentContextPreparationService documentContexts,
+    SessionContextPreparationService sessionContexts,
     LocalToolBroker toolBroker,
     WorkspaceRepositoryIndex repositoryIndex,
     SystemAudioCaptionService liveCaptions,
@@ -66,6 +79,7 @@ public sealed class GoAiAssistantService(
     RecentActivityService recentActivity,
     ILogger<GoAiAssistantService> logger) : IDisposable
 {
+    private const int SpeechPreparationSchemaVersion = 5;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
     private static readonly Action<ILogger, string, string, Exception?> RunDiagnostic = LoggerMessage.Define<string, string>(
         LogLevel.Information,
@@ -87,6 +101,10 @@ public sealed class GoAiAssistantService(
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (trigger?.Trigger.Action == PromptTriggerAction.TextToSpeech)
+        {
+            throw new InvalidOperationException("Vorlesen muss als nachrichtenlose Sprachausgabe gestartet werden.");
+        }
         if (!await _gate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
         {
             throw new InvalidOperationException("Es läuft bereits ein GO-AI-Auftrag.");
@@ -105,31 +123,38 @@ public sealed class GoAiAssistantService(
             }
             var historyBeforePrompt = await chats.ListMessagesAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
             var sessionAttachments = await attachments.ListAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
-            var sessionDocuments = await documents.ListAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
+            var action = trigger?.Trigger.Action;
+            var contentProfile = action == PromptTriggerAction.Audiobook
+                ? MessageContentProfile.Audiobook
+                : MessageContentProfile.General;
             var user = await chats.AddMessageAsync(
-                sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed, _activeCancellation.Token).ConfigureAwait(false);
+                sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed,
+                cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
             sessionAttachments = await BindCapturedMediaToMessageAsync(
                 user,
                 sessionAttachments,
                 _activeCancellation.Token).ConfigureAwait(false);
             var assistant = await chats.AddMessageAsync(
-                sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming, _activeCancellation.Token).ConfigureAwait(false);
-            var contextLimit = trigger?.Trigger.Action == PromptTriggerAction.Code ? 262_144 : 131_072;
+                sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
+                contentProfile,
+                cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+            var contextLimit = action == PromptTriggerAction.Code ? 262_144 : 131_072;
             await update(new(
                 GoAiAssistantUpdateKind.Started,
                 assistant,
                 Status: "Denkt nach",
-                Detail: trigger?.Trigger.Action == PromptTriggerAction.Code
-                    ? "Laguna bereitet den Workspace vor."
-                    : "GO AI Server verarbeitet die Anfrage.",
+                Detail: action switch
+                {
+                    PromptTriggerAction.Code => "Laguna bereitet den Workspace vor.",
+                    PromptTriggerAction.Audiobook => "Der Buchautor bereitet das nächste Kapitel vor.",
+                    _ => "GO AI Server verarbeitet die Anfrage.",
+                },
                 ContextLimit: contextLimit)).ConfigureAwait(false);
 
-            var action = trigger?.Trigger.Action;
             try
             {
                 return action switch
                 {
-                    PromptTriggerAction.TextToSpeech => await CompleteSpeechAsync(assistant, trigger!, historyBeforePrompt, sessionDocuments, update, _activeCancellation.Token).ConfigureAwait(false),
                     PromptTriggerAction.Transcription => await CompleteTranscriptionAsync(assistant, trigger!, update, _activeCancellation.Token).ConfigureAwait(false),
                     PromptTriggerAction.VoiceInput => await CompleteVoiceInputAsync(assistant, update, _activeCancellation.Token).ConfigureAwait(false),
                     PromptTriggerAction.LiveCaptions or PromptTriggerAction.LiveTranslation =>
@@ -139,6 +164,7 @@ public sealed class GoAiAssistantService(
                         prompt,
                         trigger,
                         sessionAttachments,
+                        historyBeforePrompt,
                         update,
                         _activeCancellation.Token).ConfigureAwait(false),
                 };
@@ -149,10 +175,6 @@ public sealed class GoAiAssistantService(
             }
             catch (OperationCanceledException)
             {
-                if (trigger?.Trigger.Action == PromptTriggerAction.TextToSpeech)
-                {
-                    await chats.SetToolExecutionAsync(assistant.Id, new ToolExecutionInfo("Vorlesen", "Dokument aus Anhang", "Abgebrochen"), CancellationToken.None).ConfigureAwait(false);
-                }
                 var current = (await chats.ListMessagesAsync(sessionId, CancellationToken.None).ConfigureAwait(false))
                     .Single(item => item.Id == assistant.Id);
                 await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Cancelled, cancellationToken: CancellationToken.None).ConfigureAwait(false);
@@ -162,10 +184,6 @@ public sealed class GoAiAssistantService(
             }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
-                if (trigger?.Trigger.Action == PromptTriggerAction.TextToSpeech)
-                {
-                    await chats.SetToolExecutionAsync(assistant.Id, new ToolExecutionInfo("Vorlesen", "Dokument aus Anhang", "Fehlgeschlagen", exception.Message), CancellationToken.None).ConfigureAwait(false);
-                }
                 var current = (await chats.ListMessagesAsync(sessionId, CancellationToken.None).ConfigureAwait(false))
                     .Single(item => item.Id == assistant.Id);
                 var visible = string.IsNullOrWhiteSpace(current.Content)
@@ -247,6 +265,415 @@ public sealed class GoAiAssistantService(
         _activeCancellation?.Cancel();
     }
 
+    public async Task CancelCurrentAndWaitAsync(CancellationToken cancellationToken = default)
+    {
+        await CancelCurrentAsync(CancellationToken.None).ConfigureAwait(false);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        _gate.Release();
+    }
+
+    public async Task SpeakAsync(
+        Guid sessionId,
+        string? explicitText,
+        Guid? sourceMessageId,
+        Func<GoAiSpeechUpdate, Task> update,
+        Func<SpeechPlaybackProgress, Task>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(update);
+
+        // Automatic voice playback can arrive while the just-completed chat callback still
+        // owns the gate. Waiting here preserves ordering without creating a prompt queue.
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        Interlocked.Exchange(ref _explicitCancellation, 0);
+        _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try
+        {
+            await update(new(
+                true,
+                "Vorlesen wird vorbereitet",
+                "Der Vorlesekontext wird ermittelt.")).ConfigureAwait(false);
+
+            var source = await ResolveSpeechSourceAsync(
+                sessionId,
+                explicitText,
+                sourceMessageId,
+                _activeCancellation.Token).ConfigureAwait(false);
+            var speechStatusDetail = VisibleSpeechSourceDetail(source.Detail);
+            var cleanedSource = MicrophoneTranscriptionService.PrepareSpeechText(source.Text);
+            if (string.IsNullOrWhiteSpace(cleanedSource))
+            {
+                throw new InvalidOperationException("Es ist kein vorlesbarer Text vorhanden.");
+            }
+
+            var sourceUnits = SpeechSourceSegmentation.CreateUnits(source.Text);
+            if (sourceUnits.Count == 0)
+            {
+                sourceUnits = SpeechSourceSegmentation.CreateUnits(cleanedSource);
+            }
+            var selectedGeneral = settings.Current.SelectedModel?.Trim() ?? string.Empty;
+            SpeechPreparation? cached = null;
+            var rewriteText = RequiresSpeechPreparation(source.ContentProfile);
+            var sourceHash = HashSpeechValue(source.Text.ReplaceLineEndings("\n"));
+            var cacheKey = HashSpeechValue(string.Join('|',
+                SpeechPreparationSchemaVersion,
+                sessionId.ToString("D"),
+                source.MessageId?.ToString("D") ?? "none",
+                source.Kind,
+                source.ContentProfile,
+                sourceHash,
+                selectedGeneral.ToLowerInvariant()));
+            cached = await chats.GetSpeechPreparationAsync(
+                cacheKey,
+                _activeCancellation.Token).ConfigureAwait(false);
+            var speechSegments = ReadCachedSpeechSegments(cached, sourceUnits);
+            DialogueDirectionSession? dialogueDirection = null;
+            if (speechSegments.Count > 0)
+            {
+                await update(new(
+                    true,
+                    rewriteText ? "Vorlesefassung geladen" : "Sprechregie geladen",
+                    CombineSpeechDetail(
+                        speechStatusDetail,
+                        rewriteText
+                            ? "Bereits in dieser Sitzung aufbereitet."
+                            : "Originaltext und Sprechregie wurden aus dieser Sitzung geladen."),
+                    rewriteText ? selectedGeneral : "Supertonic F5 Ultra",
+                    CacheHit: true)).ConfigureAwait(false);
+            }
+            else if (rewriteText)
+            {
+                cached = null;
+                speechSegments = await PrepareSpeechWithGeneralAiAsync(
+                    sourceUnits,
+                    selectedGeneral,
+                    update,
+                    preserveOriginalText: false,
+                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false) ?? [];
+                if (speechSegments.Count > 0)
+                {
+                    await SaveSpeechPreparationAsync(
+                        cacheKey,
+                        sessionId,
+                        source,
+                        sourceHash,
+                        selectedGeneral,
+                        sourceUnits,
+                        speechSegments,
+                        _activeCancellation.Token).ConfigureAwait(false);
+                }
+                else
+                {
+                    speechSegments = SpeechSourceSegmentation.CreateDirectSegments(sourceUnits, cleanedSource);
+                }
+            }
+            else
+            {
+                cached = null;
+                speechSegments = SpeechSourceSegmentation.CreateDirectSegments(sourceUnits, cleanedSource);
+                await update(new(
+                    true,
+                    "Sprachausgabe wird erzeugt",
+                    CombineSpeechDetail(speechStatusDetail, "Erzählertext wird direkt vorbereitet."),
+                    "Supertonic F5 Ultra")).ConfigureAwait(false);
+                dialogueDirection = StartDialogueDirection(
+                    sourceUnits,
+                    speechSegments,
+                    selectedGeneral,
+                    speechStatusDetail,
+                    update,
+                    _activeCancellation.Token);
+                if (dialogueDirection is null)
+                {
+                    await SaveSpeechPreparationAsync(
+                        cacheKey,
+                        sessionId,
+                        source,
+                        sourceHash,
+                        selectedGeneral,
+                        sourceUnits,
+                        speechSegments,
+                        _activeCancellation.Token).ConfigureAwait(false);
+                }
+            }
+
+            if (speechSegments.Count == 0)
+            {
+                throw new InvalidOperationException("Es konnten keine vorlesbaren Sprachsegmente erstellt werden.");
+            }
+
+            await update(new(
+                true,
+                "Sprachausgabe wird erzeugt",
+                speechStatusDetail,
+                "Supertonic F5 Ultra",
+                CacheHit: cached is not null,
+                DirectionModel: dialogueDirection is null ? null : selectedGeneral)).ConfigureAwait(false);
+            if (progress is not null)
+            {
+                await progress(new(
+                    sessionId,
+                    source.MessageId,
+                    source.Kind,
+                    0,
+                    speechSegments.Count,
+                    [],
+                    SpeechPlaybackState.Buffering,
+                    source.MessageId is null ? null : sourceUnits)).ConfigureAwait(false);
+            }
+            string? speechProvider;
+            var playbackStarted = 0;
+            try
+            {
+                speechProvider = await microphone.PlaySegmentsAsync(
+                    speechSegments,
+                    progress: async playback =>
+                    {
+                        if (playback.State == SpeechPlaybackState.Playing
+                            && Interlocked.CompareExchange(ref playbackStarted, 1, 0) == 0)
+                        {
+                            dialogueDirection?.MarkPlaybackStarted();
+                            await update(new(
+                                true,
+                                "Sprachausgabe wird wiedergegeben",
+                                speechStatusDetail,
+                                DisplaySpeechProvider(playback.Provider),
+                                CacheHit: cached is not null,
+                                DirectionModel: dialogueDirection is { IsCompleted: false }
+                                    ? selectedGeneral
+                                    : null)).ConfigureAwait(false);
+                        }
+                        if (progress is null) return;
+                        var segmentIndex = Math.Clamp(playback.SegmentIndex, 0, speechSegments.Count - 1);
+                        var segment = speechSegments[segmentIndex];
+                        await progress(new(
+                            sessionId,
+                            source.MessageId,
+                            source.Kind,
+                            segmentIndex,
+                            speechSegments.Count,
+                            segment.SourceUnitIds,
+                            playback.State)).ConfigureAwait(false);
+                    },
+                    segmentResolver: dialogueDirection is null ? null : dialogueDirection.ResolveAsync,
+                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (dialogueDirection is not null && exception is not OutOfMemoryException)
+            {
+                _activeCancellation.Cancel();
+                try
+                {
+                    await dialogueDirection.Completion.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Playback and its parallel dialogue analysis share the same cancellation.
+                }
+                throw;
+            }
+            if (dialogueDirection is not null)
+            {
+                var directionResult = await dialogueDirection.Completion.ConfigureAwait(false);
+                if (directionResult.Cacheable)
+                {
+                    await SaveSpeechPreparationAsync(
+                        cacheKey,
+                        sessionId,
+                        source,
+                        sourceHash,
+                        selectedGeneral,
+                        sourceUnits,
+                        directionResult.Segments,
+                        _activeCancellation.Token).ConfigureAwait(false);
+                }
+            }
+            if (progress is not null)
+            {
+                await progress(new(
+                    sessionId,
+                    source.MessageId,
+                    source.Kind,
+                    speechSegments.Count,
+                    speechSegments.Count,
+                    [],
+                    SpeechPlaybackState.Completed)).ConfigureAwait(false);
+            }
+            await update(new(
+                false,
+                "Abgeschlossen",
+                speechStatusDetail,
+                DisplaySpeechProvider(speechProvider),
+                CacheHit: cached is not null)).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            if (progress is not null)
+            {
+                await progress(new(
+                    sessionId,
+                    sourceMessageId,
+                    "Vorlesen",
+                    0,
+                    0,
+                    [],
+                    SpeechPlaybackState.Cancelled)).ConfigureAwait(false);
+            }
+            await update(new(false, "Abgebrochen")).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            if (progress is not null)
+            {
+                await progress(new(
+                    sessionId,
+                    sourceMessageId,
+                    "Vorlesen",
+                    0,
+                    0,
+                    [],
+                    SpeechPlaybackState.Cancelled)).ConfigureAwait(false);
+            }
+            await update(new(false, "Fehlgeschlagen", Error: exception.Message)).ConfigureAwait(false);
+            throw;
+        }
+        finally
+        {
+            _activeServerRunId = null;
+            _activeCancellation?.Dispose();
+            _activeCancellation = null;
+            _gate.Release();
+        }
+    }
+
+    private async Task<SpeechSource> ResolveSpeechSourceAsync(
+        Guid sessionId,
+        string? explicitText,
+        Guid? sourceMessageId,
+        CancellationToken cancellationToken)
+    {
+        var history = await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        if (sourceMessageId is { } requestedMessageId)
+        {
+            var selected = history.FirstOrDefault(message => message.Id == requestedMessageId
+                && message.Role == ChatRole.Assistant
+                && message.Status == MessageStatus.Completed)
+                ?? throw new InvalidOperationException("Die ausgewählte abgeschlossene AI-Nachricht wurde nicht gefunden.");
+            return new(
+                selected.Content,
+                "AI-Nachricht",
+                null,
+                selected.Id,
+                selected.ContentProfile);
+        }
+
+        var sessionDocuments = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        var documentSpeech = await ResolveDocumentSpeechTextAsync(
+            explicitText,
+            sessionDocuments,
+            cancellationToken).ConfigureAwait(false);
+        if (documentSpeech is not null)
+        {
+            if (string.IsNullOrWhiteSpace(documentSpeech.Text))
+            {
+                throw new InvalidOperationException(documentSpeech.Error
+                    ?? "Die angehängten Dokumente enthalten keinen vorlesbaren Text.");
+            }
+            return new(
+                documentSpeech.Text,
+                "Dokument aus Anhang",
+                documentSpeech.Detail ?? "Dokument aus Anhang",
+                null,
+                MessageContentProfile.General);
+        }
+
+        var requested = explicitText?.Trim().TrimStart(':').Trim();
+        if (!string.IsNullOrWhiteSpace(requested)
+            && !requested.Equals("die letzte Nachricht vor", StringComparison.OrdinalIgnoreCase))
+        {
+            return new(requested, "Vorgegebener Text", "Vorgegebener Text", null, MessageContentProfile.General);
+        }
+
+        var lastAssistant = history
+            .Reverse()
+            .FirstOrDefault(static message => message.Role == ChatRole.Assistant
+                && message.Status == MessageStatus.Completed
+                && !string.IsNullOrWhiteSpace(message.Content)
+                && !string.Equals(message.Content.Trim(), "Der Text wurde vorgelesen.", StringComparison.OrdinalIgnoreCase)
+                && !message.Content.StartsWith("Die Sprachausgabe wurde", StringComparison.OrdinalIgnoreCase)
+                && !message.Content.StartsWith("Der Auftrag wurde abgeschlossen", StringComparison.OrdinalIgnoreCase));
+        if (lastAssistant is null)
+        {
+            throw new InvalidOperationException("Es ist keine geeignete abgeschlossene AI-Antwort zum Vorlesen vorhanden.");
+        }
+        return new(
+            lastAssistant.Content,
+            "AI-Nachricht",
+            "Letzte AI-Nachricht",
+            lastAssistant.Id,
+            lastAssistant.ContentProfile);
+    }
+
+    private static string HashSpeechValue(string value) => Convert.ToHexString(
+        SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    private Task SaveSpeechPreparationAsync(
+        string cacheKey,
+        Guid sessionId,
+        SpeechSource source,
+        string sourceHash,
+        string selectedGeneral,
+        IReadOnlyList<SpeechSourceUnit> sourceUnits,
+        IReadOnlyList<PreparedSpeechSegment> speechSegments,
+        CancellationToken cancellationToken)
+    {
+        var preparedText = string.Join(' ', speechSegments.Select(static segment => segment.Text));
+        return chats.SaveSpeechPreparationAsync(
+            new SpeechPreparation(
+                cacheKey,
+                sessionId,
+                source.MessageId,
+                source.Kind,
+                sourceHash,
+                selectedGeneral,
+                preparedText,
+                DateTimeOffset.UtcNow,
+                JsonSerializer.Serialize(sourceUnits, JsonOptions),
+                JsonSerializer.Serialize(speechSegments, JsonOptions)),
+            cancellationToken);
+    }
+
+    private static IReadOnlyList<PreparedSpeechSegment> ReadCachedSpeechSegments(
+        SpeechPreparation? preparation,
+        IReadOnlyList<SpeechSourceUnit> currentUnits)
+    {
+        if (preparation is null || string.IsNullOrWhiteSpace(preparation.SegmentsJson))
+        {
+            return [];
+        }
+        try
+        {
+            var segments = JsonSerializer.Deserialize<PreparedSpeechSegment[]>(
+                preparation.SegmentsJson,
+                JsonOptions) ?? [];
+            var validIds = currentUnits.Select(static unit => unit.Id).ToHashSet(StringComparer.Ordinal);
+            if (segments.Length == 0
+                || segments.Any(segment => string.IsNullOrWhiteSpace(segment.Text)
+                    || segment.SourceUnitIds.Any(id => !validIds.Contains(id))))
+            {
+                return [];
+            }
+            return SpeechSourceSegmentation.NormalizePreparedSegments(segments);
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    internal static bool RequiresSpeechPreparation(MessageContentProfile contentProfile) =>
+        contentProfile != MessageContentProfile.Audiobook;
+
     private async Task<IReadOnlyList<AssistantAttachment>> BindCapturedMediaToMessageAsync(
         ChatMessage userMessage,
         IReadOnlyList<AssistantAttachment> sessionAttachments,
@@ -314,6 +741,7 @@ public sealed class GoAiAssistantService(
         string originalPrompt,
         PromptTriggerMatch? trigger,
         IReadOnlyList<AssistantAttachment> sessionAttachments,
+        IReadOnlyList<ChatMessage> historyBeforePrompt,
         Func<GoAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken)
     {
@@ -381,10 +809,12 @@ public sealed class GoAiAssistantService(
             else
             {
                 var request = await BuildRunRequestAsync(
+                    client,
                     assistant.SessionId,
                     originalPrompt,
                     trigger,
                     sessionAttachments,
+                    historyBeforePrompt,
                     uploaded,
                     assistant,
                     update,
@@ -512,7 +942,6 @@ public sealed class GoAiAssistantService(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: selected?.IsFallback == true ? "Fallback-Modell" : "Modell gewählt",
-                            Detail: selected?.ModelId,
                             Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ModelLoading:
@@ -522,9 +951,9 @@ public sealed class GoAiAssistantService(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: loading?.State == "loaded" ? "Denkt nach" : "Modell wird geladen",
-                            Detail: loading is null
-                                ? model
-                                : $"{loading.ModelId} · {loading.EffectiveContextLength:N0} Kontexttoken",
+                            Detail: loading?.State == "loaded"
+                                ? null
+                                : "Ausgewähltes Modell wird geladen.",
                             Model: model,
                             ContextLimit: loading?.EffectiveContextLength)).ConfigureAwait(false);
                         break;
@@ -597,7 +1026,7 @@ public sealed class GoAiAssistantService(
                                 : "Der GO-AI-Auftrag wurde abgeschlossen.";
                         }
                         var parsedResponse = GeneralAgentResponseParser.Parse(content, completed?.SessionTitle ?? string.Empty);
-                        content = parsedResponse.Message;
+                        content = RemoveDocumentEvidenceFooter(parsedResponse.Message);
                         await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Completed, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                         await chats.SetMessageContextSummaryAsync(assistant.Id, parsedResponse.ContextSummary, CancellationToken.None).ConfigureAwait(false);
                         if (!string.IsNullOrWhiteSpace(completed?.SessionTitle))
@@ -651,7 +1080,7 @@ public sealed class GoAiAssistantService(
                     content = "Der GO-AI-Auftrag wurde abgeschlossen.";
                 }
                 var snapshotResponse = GeneralAgentResponseParser.Parse(content, string.Empty);
-                content = snapshotResponse.Message;
+                content = RemoveDocumentEvidenceFooter(snapshotResponse.Message);
                 await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Completed, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 await chats.SetMessageContextSummaryAsync(assistant.Id, snapshotResponse.ContextSummary, CancellationToken.None).ConfigureAwait(false);
                 await runs.UpdateAsync(localRun.Id, snapshot.RunId, snapshot.LastEventId, "completed", snapshot.SelectedModel, cancellationToken: CancellationToken.None).ConfigureAwait(false);
@@ -727,6 +1156,7 @@ public sealed class GoAiAssistantService(
             var result = await toolBroker.ExecuteAsync(
                 proposal,
                 session.WorkspacePath,
+                localRun.SessionId,
                 cancellationToken).ConfigureAwait(false);
             var json = JsonSerializer.Serialize(result, JsonOptions);
             _ = await toolExecutions.CompleteAsync(proposal.ProposalId, json, CancellationToken.None).ConfigureAwait(false);
@@ -778,150 +1208,780 @@ public sealed class GoAiAssistantService(
         return await CompleteImmediateAsync(assistant, markdown, update, result.IsFallback ? "Fallback" : result.Provider, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<ChatMessage> CompleteSpeechAsync(
-        ChatMessage assistant,
-        PromptTriggerMatch trigger,
-        IReadOnlyList<ChatMessage> historyBeforePrompt,
-        IReadOnlyList<StoredDocument> sessionDocuments,
-        Func<GoAiAssistantUpdate, Task> update,
-        CancellationToken cancellationToken)
+    internal static string DisplaySpeechProvider(string? provider)
     {
-        var selectedMessageSpeech = trigger.OriginalPrompt.Equals("Lies die ausgewählte Nachricht vor", StringComparison.OrdinalIgnoreCase);
-        var documentSpeech = selectedMessageSpeech
-            ? null
-            : await ResolveDocumentSpeechTextAsync(trigger.RemainingPrompt, sessionDocuments, cancellationToken).ConfigureAwait(false);
-        var text = documentSpeech?.Text ?? ResolveSpeechText(trigger.RemainingPrompt, historyBeforePrompt);
-        if (documentSpeech is not null)
+        if (string.IsNullOrWhiteSpace(provider))
         {
-            text = MicrophoneTranscriptionService.PrepareSpeechText(text!);
+            return "Supertonic F5 Ultra";
         }
-        var execution = new ToolExecutionInfo(
-            "Vorlesen",
-            documentSpeech is not null
-                ? "Dokument aus Anhang"
-                : selectedMessageSpeech
-                    ? "AI-Nachricht"
-                    : (!string.IsNullOrWhiteSpace(trigger.RemainingPrompt) ? "Vorgegebener Text" : "Letzte AI-Nachricht"),
-            "Läuft",
-            documentSpeech?.Detail ?? "Audio wird erzeugt.",
-            "Piper Kerstin");
-        await chats.SetToolExecutionAsync(assistant.Id, execution, cancellationToken).ConfigureAwait(false);
-        assistant = assistant with { ToolExecution = execution };
-        if (string.IsNullOrWhiteSpace(text))
+
+        if (provider.Contains("supertonic", StringComparison.OrdinalIgnoreCase))
         {
-            var failedExecution = execution with { Status = "Fehlgeschlagen", Detail = documentSpeech?.Error ?? "Kein vorlesbarer Text gefunden." };
-            await chats.SetToolExecutionAsync(assistant.Id, failedExecution, CancellationToken.None).ConfigureAwait(false);
-            throw new InvalidOperationException(documentSpeech?.Error
-                ?? "Es ist keine geeignete abgeschlossene AI-Antwort zum Vorlesen vorhanden.");
+            return "Supertonic F5 Ultra";
         }
-        var preparation = await PrepareSpeechWithGeneralAiAsync(text!, update, assistant, cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrWhiteSpace(preparation))
+
+        if (provider.Contains("piper", StringComparison.OrdinalIgnoreCase))
         {
-            text = preparation;
+            return "Piper Kerstin";
         }
-        execution = execution with
+
+        if (provider.Contains("windows", StringComparison.OrdinalIgnoreCase)
+            || provider.Contains("katja", StringComparison.OrdinalIgnoreCase))
         {
-            Detail = string.IsNullOrWhiteSpace(preparation)
-                ? "Lokale Textbereinigung · Audio wird erzeugt."
-                : "General AI aufbereitet · Audio wird erzeugt."
-        };
-        await chats.SetToolExecutionAsync(assistant.Id, execution, cancellationToken).ConfigureAwait(false);
-        assistant = assistant with { ToolExecution = execution };
-        await update(new(
-            GoAiAssistantUpdateKind.Status,
-            assistant,
-            Status: "Sprachausgabe",
-            Detail: documentSpeech?.Detail ?? "Audio wird erzeugt.")).ConfigureAwait(false);
-        await microphone.PlayTextAsync(text, cancellationToken: cancellationToken).ConfigureAwait(false);
-        var completedExecution = execution with { Status = "Abgeschlossen" };
-        await chats.SetToolExecutionAsync(assistant.Id, completedExecution, CancellationToken.None).ConfigureAwait(false);
-        assistant = assistant with { ToolExecution = completedExecution };
-        return await CompleteImmediateAsync(assistant, string.Empty, update, "Piper Kerstin", cancellationToken).ConfigureAwait(false);
+            return "Windows Katja";
+        }
+
+        return provider;
     }
 
-    private async Task<string?> PrepareSpeechWithGeneralAiAsync(
-        string source,
-        Func<GoAiAssistantUpdate, Task> update,
-        ChatMessage assistant,
+    private static string CombineSpeechDetail(string? sourceDetail, string detail) =>
+        string.IsNullOrWhiteSpace(sourceDetail) ? detail : $"{sourceDetail} · {detail}";
+
+    private static string? VisibleSpeechSourceDetail(string? sourceDetail) =>
+        string.IsNullOrWhiteSpace(sourceDetail)
+        || sourceDetail.Contains("AI-Nachricht", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : sourceDetail;
+
+    private DialogueDirectionSession? StartDialogueDirection(
+        IReadOnlyList<SpeechSourceUnit> sourceUnits,
+        IReadOnlyList<PreparedSpeechSegment> segments,
+        string selectedGeneral,
+        string? sourceDetail,
+        Func<GoAiSpeechUpdate, Task> update,
+        CancellationToken cancellationToken)
+    {
+        if (!segments.Any(static segment => segment.Delivery == SpeechDelivery.Dialogue))
+        {
+            return null;
+        }
+
+        var session = new DialogueDirectionSession(segments);
+        session.Completion = RunDialogueDirectionSessionAsync(
+            session,
+            sourceUnits,
+            selectedGeneral,
+            sourceDetail,
+            update,
+            cancellationToken);
+        return session;
+    }
+
+    private async Task<DialogueDirectionResult> RunDialogueDirectionSessionAsync(
+        DialogueDirectionSession session,
+        IReadOnlyList<SpeechSourceUnit> sourceUnits,
+        string selectedGeneral,
+        string? sourceDetail,
+        Func<GoAiSpeechUpdate, Task> update,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await update(new(
+                true,
+                "Sprachausgabe wird erzeugt",
+                sourceDetail,
+                "Supertonic F5 Ultra",
+                DirectionModel: selectedGeneral)).ConfigureAwait(false);
+
+            using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
+            var modelStatus = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
+            var selectedModel = modelStatus.Models.FirstOrDefault(model => model.Loaded
+                && string.Equals(model.Id, selectedGeneral, StringComparison.OrdinalIgnoreCase));
+            if (selectedModel is null)
+            {
+                session.ResolveAllNeutral(cacheable: false);
+                return session.CreateResult();
+            }
+
+            foreach (var batch in BuildDialogueDirectionBatches(sourceUnits, session.SourceSegments))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                IReadOnlyDictionary<int, PreparedSpeechSegment>? prepared = null;
+                for (var attempt = 0; attempt < 2 && prepared is null; attempt++)
+                {
+                    var prompt = CreateDialogueDirectionPrompt(
+                        session.SourceSegments,
+                        batch,
+                        correction: attempt > 0);
+                    var raw = await RunDialogueDirectionBatchAsync(
+                        client,
+                        prompt,
+                        selectedGeneral,
+                        cancellationToken).ConfigureAwait(false);
+                    prepared = ParseDialogueDirectionBatch(raw, session.SourceSegments, batch.SegmentIndexes);
+                }
+
+                if (prepared is null)
+                {
+                    session.ResolveNeutral(batch.SegmentIndexes, cacheable: false);
+                    continue;
+                }
+                foreach (var pair in prepared)
+                {
+                    session.Resolve(pair.Key, pair.Value, cacheable: true);
+                }
+            }
+            session.ResolveAllNeutral(cacheable: false);
+            return session.CreateResult();
+        }
+        catch (OperationCanceledException)
+        {
+            session.Cancel(cancellationToken);
+            throw;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            _activeServerRunId = null;
+            RunDiagnostic(logger, "dialogue-direction", "dialogue direction fallback", exception);
+            session.ResolveAllNeutral(cacheable: false);
+            return session.CreateResult();
+        }
+        finally
+        {
+            await update(new(
+                true,
+                session.PlaybackStarted
+                    ? "Sprachausgabe wird wiedergegeben"
+                    : "Sprachausgabe wird erzeugt",
+                sourceDetail,
+                "Supertonic F5 Ultra")).ConfigureAwait(false);
+        }
+    }
+
+    internal static IReadOnlyList<DialogueDirectionBatch> BuildDialogueDirectionBatches(
+        IReadOnlyList<SpeechSourceUnit> sourceUnits,
+        IReadOnlyList<PreparedSpeechSegment> segments)
+    {
+        var dialogueIndexes = segments
+            .Select((segment, index) => (segment, index))
+            .Where(static item => item.segment.Delivery == SpeechDelivery.Dialogue)
+            .Select(static item => item.index)
+            .ToArray();
+        if (dialogueIndexes.Length == 0)
+        {
+            return [];
+        }
+
+        var batches = new List<DialogueDirectionBatch>();
+        var current = new List<int>();
+        var characters = 0;
+        foreach (var index in dialogueIndexes)
+        {
+            var next = segments[index].Text.Length;
+            if (current.Count > 0 && (current.Count >= 6 || characters + next > 1_500))
+            {
+                batches.Add(CreateDialogueDirectionBatch(sourceUnits, segments, current));
+                current.Clear();
+                characters = 0;
+            }
+            current.Add(index);
+            characters += next;
+        }
+        if (current.Count > 0)
+        {
+            batches.Add(CreateDialogueDirectionBatch(sourceUnits, segments, current));
+        }
+        return batches;
+    }
+
+    private static DialogueDirectionBatch CreateDialogueDirectionBatch(
+        IReadOnlyList<SpeechSourceUnit> sourceUnits,
+        IReadOnlyList<PreparedSpeechSegment> segments,
+        IReadOnlyList<int> indexes)
+    {
+        var sourceOrder = sourceUnits
+            .Select((unit, index) => (unit.Id, index))
+            .ToDictionary(static item => item.Id, static item => item.index, StringComparer.Ordinal);
+        var positions = indexes
+            .SelectMany(index => segments[index].SourceUnitIds)
+            .Where(sourceOrder.ContainsKey)
+            .Select(id => sourceOrder[id])
+            .Distinct()
+            .Order()
+            .ToArray();
+        var context = positions.Length == 0
+            ? Array.Empty<SpeechSourceUnit>()
+            : sourceUnits
+                .Skip(Math.Max(0, positions[0] - 2))
+                .Take(Math.Min(sourceUnits.Count - Math.Max(0, positions[0] - 2), positions[^1] - positions[0] + 5))
+                .ToArray();
+        return new(indexes.ToArray(), context);
+    }
+
+    private static string CreateDialogueDirectionPrompt(
+        PreparedSpeechSegment[] segments,
+        DialogueDirectionBatch batch,
+        bool correction)
+    {
+        var targets = batch.SegmentIndexes.Select(index => new
+        {
+            id = segments[index].Id,
+            text = segments[index].Text,
+        }).ToArray();
+        var targetIds = batch.SegmentIndexes
+            .SelectMany(index => segments[index].SourceUnitIds)
+            .ToHashSet(StringComparer.Ordinal);
+        var context = batch.ContextUnits.Select(unit => new
+        {
+            role = targetIds.Contains(unit.Id) ? "target" : "context",
+            text = unit.SpeechText.Length <= 350 ? unit.SpeechText : unit.SpeechText[..350],
+        }).ToList();
+        string BuildPrompt() => $$"""
+            {{(correction ? "Die vorige Antwort war ungültig. " : string.Empty)}}Bestimme eine deutlich hörbare, aber inhaltlich passende Sprechregie ausschließlich für die direkten Redezeilen in targets. context dient nur zur Einordnung und darf nicht ausgegeben werden.
+            Antworte nur als JSON: {"segments":[{"id":"s0001","synthesisText":"unveränderter Wortlaut mit anderer Interpunktion","mood":"warm","intensity":0.8,"expressionBefore":null,"expressionAfter":null}]}
+            Regeln: Jede target-ID exakt einmal und in Reihenfolge. synthesisText muss exakt dieselben Unicode-Wörter in derselben Reihenfolge enthalten; erlaubt sind nur andere Satzzeichen, Leerzeichen und Sprechpausen. Keine Wörter ergänzen, entfernen oder ersetzen. mood ist neutral, warm, joyful, tense, sad, relieved, angry, mysterious, fearful oder tender. intensity liegt zwischen 0 und 1. Nutze starke, klar wahrnehmbare Intensitäten. expressionBefore/After ist null, laugh, breath oder sigh und nur bei semantischer Eindeutigkeit. Kein Markdown.
+            targets={{JsonSerializer.Serialize(targets, JsonOptions)}}
+            context={{JsonSerializer.Serialize(context, JsonOptions)}}
+            """;
+
+        var prompt = BuildPrompt();
+        while (prompt.Length > 4_000 && context.Count > 0)
+        {
+            var removeIndex = context.FindIndex(static item => item.role == "context");
+            if (removeIndex < 0) removeIndex = 0;
+            context.RemoveAt(removeIndex);
+            prompt = BuildPrompt();
+        }
+        if (prompt.Length <= 4_000)
+        {
+            return prompt;
+        }
+        var compact = $"Nur JSON mit segments ausgeben. Jede ID exakt einmal. synthesisText behält alle Unicode-Wörter und Symbole exakt in Reihenfolge; nur Satzzeichen und Leerzeichen ändern. mood: neutral|warm|joyful|tense|sad|relieved|angry|mysterious|fearful|tender. intensity: 0..1. expressionBefore/After: null|laugh|breath|sigh. targets={JsonSerializer.Serialize(targets, JsonOptions)}";
+        return compact.Length <= 4_000
+            ? compact
+            : throw new InvalidDataException("Das Dialogpaket überschreitet das sichere Regie-Kontextlimit.");
+    }
+
+    private async Task<string> RunDialogueDirectionBatchAsync(
+        GoAiClient client,
+        string prompt,
+        string selectedGeneral,
+        CancellationToken cancellationToken)
+    {
+        var accepted = await client.CreateRunAsync(new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.General,
+            [new RunMessage("user", [new ContentPart("text", prompt)])],
+            Limits: new RunLimits(
+                MaximumOutputTokens: 1_024,
+                MaximumContextTokens: 8_192,
+                TimeoutSeconds: 180),
+            AllowedServerTools: [],
+            PreferredGeneralModelId: selectedGeneral),
+            $"go-dialogue-direction-{Guid.NewGuid():N}", cancellationToken).ConfigureAwait(false);
+        _activeServerRunId = accepted.RunId;
+        var output = new StringBuilder();
+        try
+        {
+            await foreach (var item in client.StreamRunEventsAsync(
+                accepted.RunId,
+                cancellationToken: cancellationToken).ConfigureAwait(false))
+            {
+                switch (item.Type)
+                {
+                    case RunEventTypes.ModelSelected:
+                    case RunEventTypes.ModelFallback:
+                        var selected = item.Data.Deserialize<ModelSelectedEvent>(JsonOptions)?.ModelId;
+                        if (!string.IsNullOrWhiteSpace(selected)
+                            && !string.Equals(selected, selectedGeneral, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException("Die Dialogregie hat ein unerwartetes Modell ausgewählt.");
+                        }
+                        break;
+                    case RunEventTypes.TextDelta:
+                        var delta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions);
+                        if (!string.IsNullOrEmpty(delta?.Delta)) output.Append(delta.Delta);
+                        break;
+                    case RunEventTypes.RunFailed:
+                        var failure = item.Data.Deserialize<RunFailedEvent>(JsonOptions);
+                        throw new InvalidOperationException(failure?.Message ?? "Die Dialogregie ist fehlgeschlagen.");
+                    case RunEventTypes.RunCancelled:
+                        throw new OperationCanceledException("Die Dialogregie wurde abgebrochen.", cancellationToken);
+                }
+            }
+            return output.ToString().Trim();
+        }
+        finally
+        {
+            _activeServerRunId = null;
+        }
+    }
+
+    internal static IReadOnlyDictionary<int, PreparedSpeechSegment>? ParseDialogueDirectionBatch(
+        string raw,
+        IReadOnlyList<PreparedSpeechSegment> segments,
+        IReadOnlyList<int> targetIndexes)
+    {
+        try
+        {
+            var json = StripOuterJsonFence(raw);
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("message", out var message)
+                && message.ValueKind == JsonValueKind.String)
+            {
+                json = StripOuterJsonFence(message.GetString() ?? string.Empty);
+            }
+            var response = JsonSerializer.Deserialize<DialogueDirectionResponse>(json, JsonOptions);
+            if (response?.Segments is null || response.Segments.Count != targetIndexes.Count)
+            {
+                return null;
+            }
+
+            var output = new Dictionary<int, PreparedSpeechSegment>();
+            for (var itemIndex = 0; itemIndex < targetIndexes.Count; itemIndex++)
+            {
+                var segmentIndex = targetIndexes[itemIndex];
+                var source = segments[segmentIndex];
+                var candidate = response.Segments[itemIndex];
+                if (!string.Equals(candidate.Id, source.Id, StringComparison.Ordinal)
+                    || string.IsNullOrWhiteSpace(candidate.SynthesisText)
+                    || !SpeechSourceSegmentation.HasSameSpokenWords(source.Text, candidate.SynthesisText)
+                    || !TryParseSpeechMood(candidate.Mood, out var mood)
+                    || !TryParseSpeechExpression(candidate.ExpressionBefore, out var before)
+                    || !TryParseSpeechExpression(candidate.ExpressionAfter, out var after))
+                {
+                    return null;
+                }
+                var intensity = candidate.Intensity ?? 0;
+                if (!double.IsFinite(intensity) || intensity is < 0 or > 1)
+                {
+                    return null;
+                }
+                output[segmentIndex] = source with
+                {
+                    Mood = mood,
+                    Intensity = intensity,
+                    Speed = SpeechSourceSegmentation.ResolveDialogueSpeed(mood, intensity),
+                    PauseAfterMilliseconds = SpeechSourceSegmentation.ResolveDialoguePause(intensity),
+                    ExpressionBefore = before,
+                    ExpressionAfter = after,
+                    SynthesisText = candidate.SynthesisText.Trim(),
+                    DirectionResolved = true,
+                };
+            }
+            return output;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<IReadOnlyList<PreparedSpeechSegment>?> PrepareSpeechWithGeneralAiAsync(
+        IReadOnlyList<SpeechSourceUnit> sourceUnits,
+        string selectedGeneral,
+        Func<GoAiSpeechUpdate, Task> update,
+        bool preserveOriginalText,
         CancellationToken cancellationToken)
     {
         try
         {
             using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
-            var chunks = SplitSpeechPreparationChunks(source, 12_000);
-            var output = new StringBuilder();
-            foreach (var chunk in chunks)
+            var modelStatus = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
+            var selectedModel = modelStatus.Models.FirstOrDefault(model => model.Loaded
+                && string.Equals(model.Id, selectedGeneral, StringComparison.OrdinalIgnoreCase));
+            if (selectedModel is null)
             {
-                var prompt = "Schreibe den folgenden Text stark in flüssige, natürliche deutsche Vorlesesprache um, als hätte ein Buchautor ihn für eine professionelle Lesung verfasst. Schaffe angenehme Übergänge und vollständige, gut sprechbare Sätze. Entferne Layoutreste, Tabellenmarker, Kopf- und Fußzeilen, technische Artefakte sowie unnötige Meta- und Bedienhinweise. Bewahre die Bedeutung, alle fachlich relevanten Aussagen, Zahlen, Einheiten und die logische Reihenfolge. Erfinde keine neuen Fakten. Gib ausschließlich den fertigen Vorlesetext ohne Überschrift, Markdown, Quellenhinweise oder Erklärung deiner Bearbeitung aus.\n\n" + chunk;
-                var accepted = await client.CreateRunAsync(new RunRequest(
-                    GoAiProtocol.Version,
-                    RunMode.General,
-                    [new RunMessage("user", [new ContentPart("text", prompt)])],
-                    Limits: new RunLimits(MaximumOutputTokens: 4_096, MaximumContextTokens: 131_072, TimeoutSeconds: 600),
-                    AllowedServerTools: []),
-                    $"go-speech-prep-{Guid.NewGuid():N}", cancellationToken).ConfigureAwait(false);
-                string? activeModel = null;
-                await foreach (var item in client.StreamRunEventsAsync(accepted.RunId, cancellationToken: cancellationToken).ConfigureAwait(false))
-                {
-                    switch (item.Type)
-                    {
-                        case RunEventTypes.ModelSelected:
-                        case RunEventTypes.ModelFallback:
-                            activeModel = item.Data.Deserialize<ModelSelectedEvent>(JsonOptions)?.ModelId ?? activeModel;
-                            await update(new(
-                                GoAiAssistantUpdateKind.Status,
-                                assistant,
-                                Status: "Text wird für Sprachausgabe aufbereitet",
-                                Detail: "Das Sprachmodell formuliert den Text für natürliches Vorlesen um.",
-                                Model: activeModel)).ConfigureAwait(false);
-                            break;
-                        case RunEventTypes.ModelLoading:
-                            var loading = item.Data.Deserialize<ModelLoadingEvent>(JsonOptions);
-                            activeModel = loading?.ModelId ?? activeModel;
-                            await update(new(
-                                GoAiAssistantUpdateKind.Status,
-                                assistant,
-                                Status: loading?.State == "loaded"
-                                    ? "Text wird für Sprachausgabe aufbereitet"
-                                    : "Modell wird geladen",
-                                Detail: loading is null
-                                    ? "Sprachausgabe wird vorbereitet."
-                                    : $"{loading.ModelId} · {loading.EffectiveContextLength:N0} Kontexttoken",
-                                Model: activeModel,
-                                ContextLimit: loading?.EffectiveContextLength)).ConfigureAwait(false);
-                            break;
-                        case RunEventTypes.ContextChanged:
-                            var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
-                            if (context is not null)
-                            {
-                                await update(new(
-                                    GoAiAssistantUpdateKind.Status,
-                                    assistant,
-                                    Status: "Text wird für Sprachausgabe aufbereitet",
-                                    Detail: "Das Sprachmodell formuliert den Text für natürliches Vorlesen um.",
-                                    Model: activeModel,
-                                    ContextUsed: context.EstimatedInputTokens,
-                                    ContextLimit: context.ContextLimit,
-                                    ContextWasCompacted: context.WasCompacted)).ConfigureAwait(false);
-                            }
-                            break;
-                        case RunEventTypes.TextDelta:
-                            var delta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions);
-                            if (!string.IsNullOrEmpty(delta?.Delta)) output.Append(delta.Delta);
-                            break;
-                    }
-                }
-                if (output.Length > 0 && !char.IsWhiteSpace(output[^1])) output.AppendLine();
+                return null;
             }
-            return MicrophoneTranscriptionService.PrepareSpeechText(output.ToString());
+            await update(new(
+                true,
+                preserveOriginalText
+                    ? "Sprechregie wird analysiert"
+                    : "Text wird für Sprachausgabe aufbereitet",
+                preserveOriginalText
+                    ? "Direkte Rede, Erzählertext, Stimmung, Tempo und Pausen werden einmalig bestimmt."
+                    : "Vorlesefassung und Sprechregie werden einmalig bestimmt.",
+                selectedGeneral)).ConfigureAwait(false);
+            var output = new List<PreparedSpeechSegment>();
+            foreach (var chunk in ChunkSpeechUnits(sourceUnits, 9_000))
+            {
+                IReadOnlyList<PreparedSpeechSegment>? prepared = null;
+                for (var attempt = 0; attempt < 2 && prepared is null; attempt++)
+                {
+                    var prompt = CreateMappedSpeechPreparationPrompt(
+                        chunk,
+                        correction: attempt > 0,
+                        preserveOriginalText);
+                    var raw = await RunSpeechPreparationAsync(
+                        client,
+                        prompt,
+                        selectedGeneral,
+                        selectedModel.ContextTokens,
+                        update,
+                        preserveOriginalText,
+                        cancellationToken).ConfigureAwait(false);
+                    prepared = ParseMappedSpeechSegments(raw, chunk, preserveOriginalText);
+                }
+                if (prepared is null)
+                {
+                    throw new InvalidDataException("Die AI-Vorlesefassung enthielt keine gültige Zuordnung zum Originaltext.");
+                }
+                output.AddRange(prepared);
+            }
+            return SpeechSourceSegmentation.NormalizePreparedSegments(output);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            RunDiagnostic(logger, assistant.Id.ToString("D"), "speech preparation fallback", exception);
-            await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Sprachausgabe", Detail: "Lokale Textbereinigung verwendet.")).ConfigureAwait(false);
+            _activeServerRunId = null;
+            RunDiagnostic(logger, "speech-preparation", "speech preparation fallback", exception);
+            await update(new(true, "Sprachausgabe", "Lokale Textbereinigung wird verwendet.")).ConfigureAwait(false);
             return null;
         }
     }
+
+    private async Task<string> RunSpeechPreparationAsync(
+        GoAiClient client,
+        string prompt,
+        string selectedGeneral,
+        int contextTokens,
+        Func<GoAiSpeechUpdate, Task> update,
+        bool preserveOriginalText,
+        CancellationToken cancellationToken)
+    {
+        var status = preserveOriginalText
+            ? "Sprechregie wird analysiert"
+            : "Text wird für Sprachausgabe aufbereitet";
+        var detail = preserveOriginalText
+            ? "Direkte Rede erhält eine deutlich ausgeprägte Sprechregie."
+            : "Das Sprachmodell ordnet die Vorlesefassung dem sichtbaren Originaltext zu.";
+        var accepted = await client.CreateRunAsync(new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.General,
+            [new RunMessage("user", [new ContentPart("text", prompt)])],
+            Limits: new RunLimits(
+                MaximumOutputTokens: 8_192,
+                MaximumContextTokens: Math.Clamp(contextTokens, 8_192, 262_144),
+                TimeoutSeconds: 600),
+            AllowedServerTools: [],
+            PreferredGeneralModelId: selectedGeneral),
+            $"go-speech-prep-{Guid.NewGuid():N}", cancellationToken).ConfigureAwait(false);
+        _activeServerRunId = accepted.RunId;
+        var output = new StringBuilder();
+        string? activeModel = selectedGeneral;
+        await foreach (var item in client.StreamRunEventsAsync(accepted.RunId, cancellationToken: cancellationToken).ConfigureAwait(false))
+        {
+            switch (item.Type)
+            {
+                case RunEventTypes.ModelSelected:
+                case RunEventTypes.ModelFallback:
+                    activeModel = item.Data.Deserialize<ModelSelectedEvent>(JsonOptions)?.ModelId ?? activeModel;
+                    await update(new(
+                        true,
+                        Status: status,
+                        Detail: detail,
+                        Model: activeModel)).ConfigureAwait(false);
+                    break;
+                case RunEventTypes.ModelLoading:
+                    var loading = item.Data.Deserialize<ModelLoadingEvent>(JsonOptions);
+                    activeModel = loading?.ModelId ?? activeModel;
+                    await update(new(
+                        true,
+                        Status: loading?.State == "loaded"
+                            ? status
+                            : "Modell wird geladen",
+                        Detail: loading?.State == "loaded"
+                            ? detail
+                            : "Ausgewähltes Modell wird geladen.",
+                        Model: activeModel)).ConfigureAwait(false);
+                    break;
+                case RunEventTypes.ContextChanged:
+                    await update(new(
+                        true,
+                        Status: status,
+                        Detail: detail,
+                        Model: activeModel)).ConfigureAwait(false);
+                    break;
+                case RunEventTypes.TextDelta:
+                    var delta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions);
+                    if (!string.IsNullOrEmpty(delta?.Delta)) output.Append(delta.Delta);
+                    break;
+                case RunEventTypes.RunFailed:
+                    var failure = item.Data.Deserialize<RunFailedEvent>(JsonOptions);
+                    throw new InvalidOperationException(
+                        failure?.Message ?? "Die AI-Aufbereitung für die Sprachausgabe ist fehlgeschlagen.");
+                case RunEventTypes.RunCancelled:
+                    throw new OperationCanceledException(
+                        "Die AI-Aufbereitung für die Sprachausgabe wurde abgebrochen.",
+                        cancellationToken);
+            }
+        }
+        _activeServerRunId = null;
+        return output.ToString().Trim();
+    }
+
+    private static string CreateMappedSpeechPreparationPrompt(
+        IReadOnlyList<SpeechSourceUnit> units,
+        bool correction,
+        bool preserveOriginalText)
+    {
+        var source = JsonSerializer.Serialize(
+            units.Select(static unit => new
+            {
+                id = unit.Id,
+                text = unit.SpeechText,
+                delivery = unit.Delivery.ToString().ToLowerInvariant(),
+            }),
+            JsonOptions);
+        var correctionRule = correction
+            ? "Deine vorherige Ausgabe war ungültig. Halte dieses Mal das JSON-Schema und alle Quell-IDs ausnahmslos ein. "
+            : string.Empty;
+        var textRule = preserveOriginalText
+            ? "Der Text jeder Quelleneinheit muss zeichengetreu und unverändert ausgegeben werden. Erlaubt ist ausschließlich das Ergänzen der Sprechregie in den separaten JSON-Feldern."
+            : "Schreibe die Quelleneinheiten stark in flüssige, natürliche deutsche Vorlesesprache um, als hätte ein Buchautor sie für eine professionelle Lesung verfasst. Schaffe angenehme Übergänge und vollständige, gut sprechbare Sätze. Entferne Layoutreste, Tabellenmarker, technische Artefakte sowie unnötige Meta- und Bedienhinweise. Bewahre Bedeutung, fachlich relevante Aussagen, Zahlen, Einheiten und Reihenfolge. Erfinde keine Fakten.";
+        var preservationRules = preserveOriginalText
+            ? "- Gib exakt ein Segment je Quelleneinheit aus, verwende genau deren eine sourceUnitId und kopiere text unverändert.\n- Fasse keine Einheiten zusammen und teile keine Einheit auf."
+            : "- Ein Segment darf mehrere direkt zusammengehörige Quell-IDs desselben delivery-Typs verbinden.\n- Eine Quell-ID darf für mehrere aufeinanderfolgende Sätze wiederholt werden.";
+        return $$"""
+            {{correctionRule}}{{textRule}}
+
+            Direkte Rede und Erzählertext wurden bereits getrennt. Vermische beide Typen nicht. Bestimme eine
+            deutlich hörbare, inhaltlich passende Sprechregie ausschließlich für delivery=dialogue. Erzählertext
+            bleibt ausnahmslos neutral, ohne Ausdruckstags, Tempoänderung oder künstliche Pause.
+
+            Antworte ausschließlich mit genau diesem JSON-Format, ohne Markdown oder zusätzlichen Text:
+            {"segments":[{"text":"Vorlesesatz","sourceUnitIds":["u0001"],"delivery":"dialogue","mood":"warm","intensity":0.45,"speed":0.96,"pauseAfterMilliseconds":220,"expressionBefore":null,"expressionAfter":null}]}
+
+            Regeln:
+            - Jede ausgegebene Einheit enthält nicht leeren Vorlesetext und mindestens eine vorhandene sourceUnitId.
+            - Verwende jede unten gelieferte Quell-ID mindestens einmal.
+            - IDs und Segmente bleiben in der Reihenfolge der Quelle; unbekannte IDs sind verboten.
+            {{preservationRules}}
+            - delivery ist exakt narration oder dialogue und muss dem gelieferten Typ entsprechen.
+            - mood ist exakt neutral, warm, joyful, tense, sad, relieved, angry, mysterious, fearful oder tender.
+            - intensity liegt zwischen 0.0 und 1.0. Verwende bei emotional eindeutiger direkter Rede kräftige Werte.
+            - speed liegt zwischen 0.82 und 1.32; für narration ist speed exakt 1.0.
+            - pauseAfterMilliseconds ist eine ganze Zahl zwischen 0 und 1500.
+            - expressionBefore und expressionAfter sind null oder exakt laugh, breath oder sigh.
+            - Ausdruckstags sparsam und nur bei semantisch eindeutigem Lachen, Atemholen oder Seufzen einsetzen.
+            - Redeankündigungen wie „sagte Natascha leise“ bleiben narration; nur der Inhalt in Anführungszeichen ist dialogue.
+            - Gib keine Überschrift, Quellenhinweise oder Erklärung der Bearbeitung aus.
+
+            Quelleneinheiten:
+            {{source}}
+            """;
+    }
+
+    internal static IReadOnlyList<PreparedSpeechSegment>? ParseMappedSpeechSegments(
+        string raw,
+        IReadOnlyList<SpeechSourceUnit> units,
+        bool preserveOriginalText = false)
+    {
+        var json = StripOuterJsonFence(raw);
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("message", out var message)
+                && message.ValueKind == JsonValueKind.String)
+            {
+                json = StripOuterJsonFence(message.GetString() ?? string.Empty);
+            }
+            var response = JsonSerializer.Deserialize<MappedSpeechPreparationResponse>(json, JsonOptions);
+            if (response?.Segments is null || response.Segments.Count == 0)
+            {
+                return null;
+            }
+
+            var order = units.Select((unit, index) => (unit.Id, index))
+                .ToDictionary(static item => item.Id, static item => item.index, StringComparer.Ordinal);
+            var covered = new HashSet<string>(StringComparer.Ordinal);
+            var output = new List<PreparedSpeechSegment>();
+            var previousMaximum = -1;
+            foreach (var candidate in response.Segments)
+            {
+                if (string.IsNullOrWhiteSpace(candidate.Text)
+                    || candidate.SourceUnitIds is null
+                    || candidate.SourceUnitIds.Count == 0)
+                {
+                    return null;
+                }
+                var ids = candidate.SourceUnitIds
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+                if (ids.Any(id => !order.ContainsKey(id)))
+                {
+                    return null;
+                }
+                var sourceDeliveries = ids
+                    .Select(id => units[order[id]].Delivery)
+                    .Distinct()
+                    .ToArray();
+                if (sourceDeliveries.Length != 1
+                    || !TryParseSpeechDelivery(candidate.Delivery, sourceDeliveries[0], out var delivery)
+                    || delivery != sourceDeliveries[0]
+                    || !TryParseSpeechMood(candidate.Mood, out var mood)
+                    || !TryParseSpeechExpression(candidate.ExpressionBefore, out var expressionBefore)
+                    || !TryParseSpeechExpression(candidate.ExpressionAfter, out var expressionAfter))
+                {
+                    return null;
+                }
+                var intensity = candidate.Intensity ?? 0;
+                var speed = candidate.Speed ?? 1.0;
+                var pause = candidate.PauseAfterMilliseconds ?? 0;
+                if (!double.IsFinite(intensity) || intensity is < 0 or > 1
+                    || !double.IsFinite(speed) || speed is < 0.82 or > 1.32
+                    || pause is < 0 or > 1_500)
+                {
+                    return null;
+                }
+                if (preserveOriginalText)
+                {
+                    if (ids.Length != 1
+                        || covered.Contains(ids[0])
+                        || !string.Equals(
+                            candidate.Text.Trim(),
+                            units[order[ids[0]]].SpeechText.Trim(),
+                            StringComparison.Ordinal))
+                    {
+                        return null;
+                    }
+                }
+                var positions = ids.Select(id => order[id]).ToArray();
+                if (!positions.SequenceEqual(positions.Order()))
+                {
+                    return null;
+                }
+                var minimum = positions[0];
+                if (minimum < previousMaximum && positions.Any(position => position != previousMaximum))
+                {
+                    return null;
+                }
+                previousMaximum = Math.Max(previousMaximum, positions[^1]);
+                covered.UnionWith(ids);
+                if (delivery == SpeechDelivery.Narration)
+                {
+                    mood = SpeechMood.Neutral;
+                    intensity = 0;
+                    speed = 1.0;
+                    pause = 0;
+                    expressionBefore = null;
+                    expressionAfter = null;
+                }
+                else
+                {
+                    speed = SpeechSourceSegmentation.ResolveDialogueSpeed(mood, intensity);
+                    pause = SpeechSourceSegmentation.ResolveDialoguePause(intensity);
+                }
+                output.Add(new(
+                    $"s{output.Count + 1:0000}",
+                    candidate.Text.Trim(),
+                    ids,
+                    delivery,
+                    mood,
+                    intensity,
+                    speed,
+                    pause,
+                    expressionBefore,
+                    expressionAfter,
+                    PlaybackBatchId: units[minimum].BlockId));
+            }
+            if (covered.Count != units.Count || units.Any(unit => !covered.Contains(unit.Id)))
+            {
+                return null;
+            }
+            return SpeechSourceSegmentation.NormalizePreparedSegments(output);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryParseSpeechDelivery(
+        string? value,
+        SpeechDelivery fallback,
+        out SpeechDelivery delivery)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            delivery = fallback;
+            return true;
+        }
+        return Enum.TryParse(value, ignoreCase: true, out delivery)
+            && Enum.IsDefined(delivery);
+    }
+
+    private static bool TryParseSpeechMood(string? value, out SpeechMood mood)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            mood = SpeechMood.Neutral;
+            return true;
+        }
+        return Enum.TryParse(value, ignoreCase: true, out mood)
+            && Enum.IsDefined(mood);
+    }
+
+    private static bool TryParseSpeechExpression(
+        string? value,
+        out SpeechExpression? expression)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            expression = null;
+            return true;
+        }
+        if (Enum.TryParse<SpeechExpression>(value, ignoreCase: true, out var parsed)
+            && Enum.IsDefined(parsed))
+        {
+            expression = parsed;
+            return true;
+        }
+        expression = null;
+        return false;
+    }
+
+    private static string StripOuterJsonFence(string value)
+    {
+        var trimmed = value.Trim();
+        if (!trimmed.StartsWith("```", StringComparison.Ordinal)) return trimmed;
+        var firstLine = trimmed.IndexOf('\n');
+        if (firstLine < 0) return trimmed;
+        trimmed = trimmed[(firstLine + 1)..];
+        var closing = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+        return closing >= 0 ? trimmed[..closing].Trim() : trimmed.Trim();
+    }
+
+    private static List<IReadOnlyList<SpeechSourceUnit>> ChunkSpeechUnits(
+        IReadOnlyList<SpeechSourceUnit> units,
+        int maximumCharacters)
+    {
+        var output = new List<IReadOnlyList<SpeechSourceUnit>>();
+        var current = new List<SpeechSourceUnit>();
+        var characters = 0;
+        foreach (var unit in units)
+        {
+            var next = unit.SpeechText.Length + unit.Id.Length + 32;
+            if (current.Count > 0 && characters + next > maximumCharacters)
+            {
+                output.Add(current.ToArray());
+                current.Clear();
+                characters = 0;
+            }
+            current.Add(unit);
+            characters += next;
+        }
+        if (current.Count > 0) output.Add(current.ToArray());
+        return output;
+    }
+
+    private sealed record MappedSpeechPreparationResponse(
+        IReadOnlyList<MappedSpeechPreparationSegment>? Segments);
+
+    private sealed record MappedSpeechPreparationSegment(
+        string Text,
+        IReadOnlyList<string>? SourceUnitIds,
+        string? Delivery = null,
+        string? Mood = null,
+        double? Intensity = null,
+        double? Speed = null,
+        int? PauseAfterMilliseconds = null,
+        string? ExpressionBefore = null,
+        string? ExpressionAfter = null);
 
     internal static IReadOnlyList<string> SplitSpeechPreparationChunks(string source, int maximumCharacters)
     {
@@ -1144,10 +2204,12 @@ public sealed class GoAiAssistantService(
     }
 
     private async Task<RunRequest> BuildRunRequestAsync(
+        GoAiClient client,
         Guid sessionId,
         string originalPrompt,
         PromptTriggerMatch? trigger,
         IReadOnlyList<AssistantAttachment> sessionAttachments,
+        IReadOnlyList<ChatMessage> historyBeforePrompt,
         IReadOnlyList<UploadedAttachment> uploaded,
         ChatMessage assistant,
         Func<GoAiAssistantUpdate, Task> update,
@@ -1158,16 +2220,73 @@ public sealed class GoAiAssistantService(
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
         var action = trigger?.Trigger.Action;
         var coding = action == PromptTriggerAction.Code;
-        var history = await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false);
-        var historyBudget = coding ? 120_000 : 400_000;
-        var messages = BuildHistoryMessages(history, historyBudget).ToList();
-        if (messages.Count == 0 || messages[^1].Role != "user")
+        var audiobook = action == PromptTriggerAction.Audiobook;
+        var contextProfile = coding
+            ? SessionContextProfile.Code
+            : audiobook
+                ? SessionContextProfile.Audiobook
+                : SessionContextProfile.General;
+        var preferredGeneralModel = settings.Current.SelectedModel;
+        if (string.IsNullOrWhiteSpace(preferredGeneralModel))
         {
-            messages.Add(new RunMessage("user", [new ContentPart("text", Text: originalPrompt)]));
+            throw new InvalidOperationException("In den Einstellungen ist kein General-AI-Modell ausgewählt.");
         }
 
-        var documentText = await BuildDocumentContextAsync(sessionId, cancellationToken).ConfigureAwait(false);
-        var transformed = TransformPrompt(originalPrompt, trigger, !string.IsNullOrWhiteSpace(documentText));
+        DocumentRunContext? documentContext = null;
+        if (!coding)
+        {
+            var minimumHistoryReserveTokens = CalculateDocumentHistoryReserveTokens(historyBeforePrompt, contextProfile);
+            documentContext = await documentContexts.PrepareAsync(
+                client,
+                sessionId,
+                assistant.Id,
+                originalPrompt,
+                preferredGeneralModel,
+                minimumHistoryReserveTokens,
+                async progress =>
+                {
+                    await update(new(
+                        GoAiAssistantUpdateKind.Status,
+                        assistant,
+                        Status: progress.Status,
+                        Detail: progress.Detail,
+                        Model: progress.Model)).ConfigureAwait(false);
+                    await update(new(GoAiAssistantUpdateKind.DocumentsChanged, assistant)).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        var sessionContext = await sessionContexts.PrepareAsync(
+            client,
+            sessionId,
+            historyBeforePrompt,
+            originalPrompt,
+            preferredGeneralModel,
+            coding,
+            contextProfile,
+            knownContextLength: coding ? 262_144 : documentContext?.ContextLength,
+            knownHistoryBudgetCharacters: coding ? 120_000 : documentContext?.HistoryBudgetCharacters,
+            async progress => await update(new(
+                GoAiAssistantUpdateKind.Status,
+                assistant,
+                Status: progress.Status,
+                Detail: progress.Detail,
+                Model: coding ? "Laguna-S-2.1" : preferredGeneralModel,
+                ContextLimit: coding ? 262_144 : documentContext?.ContextLength,
+                ContextWasCompacted: true)).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+        var messages = sessionContext.Messages.ToList();
+
+        var hasAudiobookHistory = historyBeforePrompt.Any(static message =>
+            message.Role == ChatRole.Assistant
+            && message.ContentProfile == MessageContentProfile.Audiobook
+            && !string.IsNullOrWhiteSpace(message.Content)
+            && message.Status is MessageStatus.Completed or MessageStatus.Cancelled or MessageStatus.Interrupted);
+        var transformed = TransformPrompt(
+            originalPrompt,
+            trigger,
+            documentContext is not null,
+            hasAudiobookHistory);
         var latestParts = new List<ContentPart> { new("text", Text: transformed) };
         foreach (var item in uploaded)
         {
@@ -1177,9 +2296,9 @@ public sealed class GoAiAssistantService(
                 MediaType: item.Attachment.ContentType,
                 FileName: item.Attachment.FileName));
         }
-        if (!string.IsNullOrWhiteSpace(documentText))
+        if (documentContext is not null)
         {
-            latestParts.Add(new ContentPart("text", Text: documentText));
+            latestParts.AddRange(documentContext.ContentParts);
         }
         WorkspaceDescriptor? workspaceDescriptor = null;
         if (coding)
@@ -1219,9 +2338,10 @@ public sealed class GoAiAssistantService(
                 ContextLimit: 262_144,
                 LoadedFiles: 0)).ConfigureAwait(false);
         }
-        messages[^1] = new RunMessage("user", latestParts);
+        messages.Add(new RunMessage("user", latestParts));
 
         var mode = coding ? RunMode.Code
+            : audiobook ? RunMode.General
             : action is PromptTriggerAction.Translation
                 or PromptTriggerAction.BricsCad
                 or PromptTriggerAction.WebSearch
@@ -1232,11 +2352,22 @@ public sealed class GoAiAssistantService(
         {
             throw new InvalidOperationException("Das GO-BricsCAD-Plugin ist nicht verbunden. Öffne BricsCAD und stelle die GO-Bridge-Verbindung her.");
         }
-        IReadOnlyList<string> clientCapabilities = coding
-            ? toolBroker.GetAvailableCapabilities(session.WorkspacePath)
-            : action == PromptTriggerAction.BricsCad && toolBroker.IsBricsCadAvailable
-                ? ["bricscad"]
-                : [];
+        var capabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (coding)
+        {
+            capabilities.UnionWith(toolBroker.GetAvailableCapabilities(session.WorkspacePath));
+        }
+        if (action == PromptTriggerAction.BricsCad && toolBroker.IsBricsCadAvailable)
+        {
+            capabilities.Add("bricscad");
+        }
+        if (documentContext is not null)
+        {
+            capabilities.Add("documents");
+        }
+        var clientCapabilities = capabilities
+            .OrderBy(static capability => capability, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         return new RunRequest(
             GoAiProtocol.Version,
             mode,
@@ -1245,11 +2376,30 @@ public sealed class GoAiAssistantService(
             ClientCapabilities: clientCapabilities,
             Limits: new RunLimits(
                 MaximumOutputTokens: 8_192,
-                MaximumContextTokens: coding ? 262_144 : null,
+                MaximumContextTokens: Math.Clamp(sessionContext.ContextLength, 1_024, 262_144),
                 TimeoutSeconds: coding ? 14_400 : 3_600),
             SessionId: sessionId.ToString("D"),
             AllowedServerTools: GetAllowedServerTools(action),
-            Workspace: workspaceDescriptor);
+            Workspace: workspaceDescriptor,
+            PreferredGeneralModelId: coding ? null : preferredGeneralModel,
+            DocumentContext: documentContext?.Descriptor,
+            SessionContext: sessionContext.Descriptor,
+            ConversationProfile: audiobook ? ConversationProfile.Audiobook : ConversationProfile.General);
+    }
+
+    internal static int CalculateDocumentHistoryReserveTokens(
+        IReadOnlyList<ChatMessage> history,
+        SessionContextProfile profile = SessionContextProfile.General)
+    {
+        var eligible = SessionContextPreparationService.SelectEligibleHistory(history, profile);
+        if (eligible.Length == 0)
+        {
+            return 1_024;
+        }
+
+        var characters = eligible.Sum(static message => message.Content.Length + 96L);
+        var estimatedTokens = (characters + 2L) / 3L;
+        return (int)Math.Clamp(estimatedTokens, 4_096L, 16_384L);
     }
 
     internal static IReadOnlyList<RunMessage> BuildHistoryMessages(
@@ -1267,23 +2417,32 @@ public sealed class GoAiAssistantService(
         for (var index = eligibleHistory.Length - 1; index >= 0; index--)
         {
             var remaining = historyBudget - selectedCharacters;
-            if (remaining <= 0)
+            var candidate = eligibleHistory[index];
+            if (remaining <= 0 || candidate.Content.Length > remaining)
             {
                 break;
             }
-            var candidate = eligibleHistory[index];
-            var bounded = candidate with { Content = BoundText(candidate.Content, remaining) };
-            selectedHistory.Push(bounded);
-            selectedCharacters += bounded.Content.Length;
+            selectedHistory.Push(candidate);
+            selectedCharacters += candidate.Content.Length;
         }
         foreach (var message in selectedHistory)
         {
-            var text = BoundText(message.Content, 240_000);
-            if (!string.IsNullOrWhiteSpace(text))
+            if (!string.IsNullOrWhiteSpace(message.Content))
             {
+                var parts = new List<ContentPart>();
+                for (var offset = 0; offset < message.Content.Length;)
+                {
+                    var length = Math.Min(240_000, message.Content.Length - offset);
+                    if (offset + length < message.Content.Length && char.IsHighSurrogate(message.Content[offset + length - 1]))
+                    {
+                        length--;
+                    }
+                    parts.Add(new ContentPart("text", Text: message.Content.Substring(offset, length)));
+                    offset += length;
+                }
                 messages.Add(new RunMessage(
                     message.Role == ChatRole.Assistant ? "assistant" : "user",
-                    [new ContentPart("text", Text: text)]));
+                    parts));
             }
         }
         return messages;
@@ -1294,30 +2453,31 @@ public sealed class GoAiAssistantService(
         PromptTriggerAction.WebSearch => ["web.search", "web.fetch"],
         PromptTriggerAction.YouTubeSearch => ["youtube.search", "web.fetch"],
         PromptTriggerAction.Code => ["math.evaluate"],
+        PromptTriggerAction.Audiobook => [],
         _ => ["math.evaluate", "context.embed", "context.retrieve"],
     };
 
-    private async Task<string> BuildDocumentContextAsync(Guid sessionId, CancellationToken cancellationToken)
+    internal static string RemoveDocumentEvidenceFooter(string content)
     {
-        var builder = new StringBuilder();
-        foreach (var document in await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false))
+        const string marker = "Verwendete Dokumentbelege:";
+        var markerIndex = content.LastIndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (markerIndex < 0)
         {
-            foreach (var page in await documents.ReadPagesAsync(document.Id, cancellationToken).ConfigureAwait(false))
-            {
-                if (string.IsNullOrWhiteSpace(page.Text))
-                {
-                    continue;
-                }
-                builder.AppendLine(CultureInfo.InvariantCulture, $"[Lokales Dokument: {document.FileName}, Seite {page.PageNumber}]");
-                builder.AppendLine(page.Text);
-                if (builder.Length >= 220_000)
-                {
-                    builder.AppendLine("[Dokumentkontext lokal gekürzt]");
-                    return builder.ToString()[..Math.Min(builder.Length, 240_000)];
-                }
-            }
+            return content;
         }
-        return builder.ToString();
+
+        var footerStart = markerIndex >= 2 && content.AsSpan(markerIndex - 2, 2).SequenceEqual("**")
+            ? markerIndex - 2
+            : markerIndex;
+        var prefix = content[..footerStart];
+        if (prefix.Length > 0
+            && !prefix.EndsWith("\n\n", StringComparison.Ordinal)
+            && !prefix.EndsWith("\r\n\r\n", StringComparison.Ordinal))
+        {
+            return content;
+        }
+
+        return prefix.TrimEnd();
     }
 
     private async Task<IReadOnlyList<UploadedAttachment>> UploadAttachmentsAsync(
@@ -1463,7 +2623,8 @@ public sealed class GoAiAssistantService(
     private static string TransformPrompt(
         string original,
         PromptTriggerMatch? trigger,
-        bool hasDocumentContext = false)
+        bool hasDocumentContext = false,
+        bool hasAudiobookHistory = false)
     {
         if (trigger is null)
         {
@@ -1498,8 +2659,83 @@ public sealed class GoAiAssistantService(
                 + " Nenne relevante Befunde, Unsicherheiten und erforderliche fachliche Prüfungen.\n\nAnalyseauftrag:\n"
                 + AnalysisRequest(trigger, original),
             PromptTriggerAction.Code => RequireRemaining(trigger, "Beschreibe nach der Triggerphrase die Codeaufgabe."),
+            PromptTriggerAction.Audiobook => BuildAudiobookPrompt(trigger, original, hasAudiobookHistory),
             _ => original,
         };
+    }
+
+    internal static string BuildAudiobookPrompt(
+        PromptTriggerMatch trigger,
+        string original,
+        bool hasAudiobookHistory)
+    {
+        var direction = trigger.RemainingPrompt.Trim();
+        if (string.Equals(direction, original.Trim(), StringComparison.Ordinal))
+        {
+            direction = StripAudiobookCommand(direction);
+        }
+
+        if (!hasAudiobookHistory)
+        {
+            if (IsContinuationCommand(original))
+            {
+                throw new InvalidOperationException(
+                    "In dieser Sitzung ist noch keine Hörbuchgeschichte vorhanden. Starte zuerst mit „Hörbuch erstellen“.");
+            }
+            if (string.IsNullOrWhiteSpace(direction))
+            {
+                throw new InvalidOperationException(
+                    "Beschreibe nach „Hörbuch erstellen“ das Szenario, die Handlung oder die gewünschten Figuren.");
+            }
+            return "Verfasse das erste Kapitel einer neuen, fortlaufenden Hörbuchgeschichte. "
+                + "Das Kapitel soll etwa eintausendfünfhundert bis zweitausendfünfhundert Wörter umfassen und unmittelbar "
+                + "mit einer prägnanten, inhaltlich passenden Kapitelüberschrift im Format „# Kapitel eins – Titel“ beginnen. "
+                + "Schreibe danach fließende Prosa. Schreibe sämtliche Zahlenwerte natürlich als deutsche Wörter aus; "
+                + "verwende im Kapitel keine Ziffern oder Prozentzeichen, sondern beispielsweise „zwei Prozent“. "
+                + "Erschaffe mindestens eine Hauptfigur und erzähle konsequent aus ihrer Wahrnehmung. "
+                + "Behandle alle genannten Handlungen als langfristigen Leitfaden einer potenziell unbegrenzten Serie: "
+                + "Verwende jetzt nur den organisch passenden Anfang und bewahre spätere Ereignisse als zukünftige Handlungsfäden.\n\n"
+                + "Langfristige Vorgabe für die Geschichte:\n" + direction;
+        }
+
+        var steering = string.IsNullOrWhiteSpace(direction)
+            ? "Setze die unmittelbar letzte Szene schlüssig fort, ohne den bisherigen Verlauf zusammenzufassen."
+            : "Setze die unmittelbar letzte Szene schlüssig fort. Behandle die folgende Richtungsangabe als langfristigen "
+                + "Serienleitfaden und verwende in diesem Kapitel nur den Teil, der organisch an die aktuelle Szene anschließt:\n"
+                + direction;
+        return steering
+            + "\n\nSchreibe den nächsten zusammenhängenden Hörbuchabschnitt mit etwa eintausendfünfhundert bis "
+            + "zweitausendfünfhundert Wörtern. Ein neuer AI-Lauf ist ausdrücklich keine Kapitelgrenze. Solange Szene und "
+            + "Kapitelbogen offen sind, setze ohne neue Kapitelüberschrift fort. Nur wenn das bisherige Kapitel narrativ "
+            + "abgeschlossen ist und jetzt tatsächlich ein neues Kapitel beginnt, setze direkt vor dessen ersten Absatz "
+            + "eine prägnante passende Überschrift im Format „# Kapitel ausgeschriebene Nummer – Titel“. Setze niemals eine "
+            + "Kapitelüberschrift ans Antwortende, ohne das neue Kapitel danach zu beginnen. Schreibe sämtliche Zahlenwerte "
+            + "natürlich als deutsche Wörter aus; "
+            + "verwende im Kapitel keine Ziffern oder Prozentzeichen, sondern beispielsweise „zwei Prozent“. "
+            + "Beginne direkt nach dem letzten Szenenanker, bleibe in der Perspektive der Hauptfigur und wiederhole bereits "
+            + "erzählte Passagen nicht. Bewahre noch nicht umgesetzte Vorgaben ausdrücklich für spätere Kapitel.";
+    }
+
+    private static string StripAudiobookCommand(string value)
+    {
+        string[] commands = ["Hörbuch erstellen", "Hoerbuch erstellen", "Hörbuch fortsetzen", "Hoerbuch fortsetzen", "Fortsetzen"];
+        foreach (var command in commands)
+        {
+            if (value.StartsWith(command, StringComparison.OrdinalIgnoreCase))
+            {
+                return value[command.Length..].TrimStart(' ', ':', '-', '–', '—').Trim();
+            }
+        }
+        return value.Trim();
+    }
+
+    private static bool IsContinuationCommand(string value)
+    {
+        var normalized = value.Trim();
+        return normalized.StartsWith("Hörbuch fortsetzen", StringComparison.OrdinalIgnoreCase)
+            || normalized.StartsWith("Hoerbuch fortsetzen", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("Fortsetzen", StringComparison.OrdinalIgnoreCase)
+            || normalized.StartsWith("Fortsetzen:", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string AnalysisRequest(PromptTriggerMatch trigger, string original) =>
@@ -1649,6 +2885,148 @@ public sealed class GoAiAssistantService(
         _activeCancellation?.Dispose();
         _gate.Dispose();
     }
+
+    internal sealed record DialogueDirectionBatch(
+        IReadOnlyList<int> SegmentIndexes,
+        IReadOnlyList<SpeechSourceUnit> ContextUnits);
+
+    private sealed record DialogueDirectionResponse(
+        IReadOnlyList<DialogueDirectionItem>? Segments);
+
+    private sealed record DialogueDirectionItem(
+        string Id,
+        string SynthesisText,
+        string? Mood = null,
+        double? Intensity = null,
+        string? ExpressionBefore = null,
+        string? ExpressionAfter = null);
+
+    private sealed record DialogueDirectionResult(
+        IReadOnlyList<PreparedSpeechSegment> Segments,
+        bool Cacheable);
+
+    private sealed class DialogueDirectionSession
+    {
+        private readonly object _gate = new();
+        private readonly Dictionary<int, TaskCompletionSource<PreparedSpeechSegment>> _pending = [];
+        private readonly PreparedSpeechSegment[] _resolved;
+        private bool _cacheable = true;
+        private int _playbackStarted;
+
+        public DialogueDirectionSession(IReadOnlyList<PreparedSpeechSegment> segments)
+        {
+            SourceSegments = segments.ToArray();
+            _resolved = SourceSegments.ToArray();
+            for (var index = 0; index < SourceSegments.Length; index++)
+            {
+                if (SourceSegments[index].Delivery == SpeechDelivery.Dialogue)
+                {
+                    _pending[index] = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+            }
+        }
+
+        public PreparedSpeechSegment[] SourceSegments { get; }
+
+        public Task<DialogueDirectionResult> Completion { get; set; } =
+            Task.FromResult(new DialogueDirectionResult([], false));
+
+        public bool IsCompleted => Completion.IsCompleted;
+
+        public bool PlaybackStarted => Volatile.Read(ref _playbackStarted) != 0;
+
+        public void MarkPlaybackStarted() => Interlocked.Exchange(ref _playbackStarted, 1);
+
+        public ValueTask<PreparedSpeechSegment> ResolveAsync(
+            int index,
+            PreparedSpeechSegment source,
+            CancellationToken cancellationToken)
+        {
+            if (!_pending.TryGetValue(index, out var completion))
+            {
+                return ValueTask.FromResult(source);
+            }
+            return new(completion.Task.WaitAsync(cancellationToken));
+        }
+
+        public void Resolve(int index, PreparedSpeechSegment segment, bool cacheable)
+        {
+            TaskCompletionSource<PreparedSpeechSegment>? completion;
+            lock (_gate)
+            {
+                if (!_pending.TryGetValue(index, out completion) || completion.Task.IsCompleted)
+                {
+                    return;
+                }
+                _resolved[index] = segment;
+                if (!cacheable) _cacheable = false;
+            }
+            completion.TrySetResult(segment);
+        }
+
+        public void ResolveNeutral(IEnumerable<int> indexes, bool cacheable)
+        {
+            foreach (var index in indexes)
+            {
+                if (index < 0 || index >= SourceSegments.Length) continue;
+                var source = SourceSegments[index];
+                Resolve(index, source with
+                {
+                    Mood = SpeechMood.Neutral,
+                    Intensity = 0,
+                    Speed = 1.0,
+                    PauseAfterMilliseconds = 0,
+                    ExpressionBefore = null,
+                    ExpressionAfter = null,
+                    SynthesisText = source.Text,
+                    DirectionResolved = false,
+                }, cacheable);
+            }
+        }
+
+        public void ResolveAllNeutral(bool cacheable)
+        {
+            int[] unresolved;
+            lock (_gate)
+            {
+                unresolved = _pending
+                    .Where(static pair => !pair.Value.Task.IsCompleted)
+                    .Select(static pair => pair.Key)
+                    .ToArray();
+            }
+            if (unresolved.Length > 0)
+            {
+                ResolveNeutral(unresolved, cacheable);
+            }
+        }
+
+        public void Cancel(CancellationToken cancellationToken)
+        {
+            lock (_gate)
+            {
+                _cacheable = false;
+                foreach (var completion in _pending.Values)
+                {
+                    completion.TrySetCanceled(cancellationToken);
+                }
+            }
+        }
+
+        public DialogueDirectionResult CreateResult()
+        {
+            lock (_gate)
+            {
+                return new(_resolved.ToArray(), _cacheable);
+            }
+        }
+    }
+
+    private sealed record SpeechSource(
+        string Text,
+        string Kind,
+        string? Detail,
+        Guid? MessageId,
+        MessageContentProfile ContentProfile);
 
     private sealed record UploadedAttachment(AssistantAttachment Attachment, UploadCompleted Upload);
 }

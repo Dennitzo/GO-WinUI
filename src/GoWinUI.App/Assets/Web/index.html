@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://go-preview.local data: blob:; media-src 'self' https://go-preview.local; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
   <title>GO AI Assistent</title>
   <link rel="stylesheet" href="vendor/katex/0.16.10/katex.min.css">
-  <link rel="stylesheet" href="styles.css?v=20260816-2">
+  <link rel="stylesheet" href="styles.css?v=20260819-3">
 </head>
 <body>
   <div id="app-shell" class="app-shell">
@@ -70,6 +70,14 @@
         <div id="context-strip" class="context-strip" hidden>
           <div id="active-tool-chips" class="active-tool-chips"></div>
           <div id="document-chips" class="document-chips"></div>
+          <div id="composer-speech-status" class="composer-speech-status" role="status" aria-live="polite" hidden>
+            <span class="composer-speech-status__spinner" aria-hidden="true"></span>
+            <strong>Denkt nach</strong>
+            <span id="composer-speech-detail"></span>
+            <button id="composer-speech-pause" class="composer-speech-status__pause" type="button" title="Pausieren" aria-label="Pausieren" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path id="composer-speech-pause-icon" d="M8 5v14M16 5v14"/></svg>
+            </button>
+          </div>
         </div>
 
         <div class="composer">
@@ -96,6 +104,7 @@
                   <button class="service-option" type="button" role="menuitem" data-tool-action="imageGeneration"><span>Bild erstellen</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="bricsCad"><span>BricsCAD</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="code"><span>Coding</span></button>
+                  <button class="service-option" type="button" role="menuitem" data-tool-action="audiobook"><span>Hörbuch erstellen</span></button>
                   <button id="start-live-captions" class="service-option" type="button" role="menuitem" data-tool-immediate="liveCaption.start"><span>Live-Untertitel</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="translation"><span>Übersetzen</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="videoAnalysis"><span>Video analysieren</span></button>
@@ -232,9 +241,9 @@
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
   <script src="vendor/katex/0.16.10/katex.min.js?v=20260814-3"></script>
-  <script src="bridge.js?v=20260814-7"></script>
-  <script src="voice.js?v=20260815-2"></script>
+  <script src="bridge.js?v=20260819-1"></script>
+  <script src="voice.js?v=20260819-1"></script>
   <script src="markdown.js?v=20260814-3"></script>
-  <script src="app.js?v=20260816-3"></script>
+  <script src="app.js?v=20260819-2"></script>
 </body>
 </html>

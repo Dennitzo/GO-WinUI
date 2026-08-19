@@ -119,11 +119,30 @@ services:
       GO_AI_WORKER_KEY_FILE: /run/secrets/worker_key
       GO_AI_WHISPER_MODEL: /models/faster-whisper-large-v3
       GO_AI_SPEAKER_MODEL: /models/spkrec-ecapa-voxceleb
-      GO_AI_PRELOAD_STT: "0"
+      GO_AI_WHISPER_CUDA_DEVICE: "0"
+      GO_AI_SPEAKER_CUDA_DEVICE: "0"
+      GO_AI_WHISPER_FILE_BEAM_SIZE: "10"
+      GO_AI_WHISPER_LIVE_BEAM_SIZE: "8"
+      GO_AI_WHISPER_BEST_OF: "8"
+      GO_AI_WHISPER_FILE_PATIENCE: "2.0"
+      GO_AI_WHISPER_LIVE_PATIENCE: "1.5"
+      GO_AI_WHISPER_LANGUAGE_DETECTION_SEGMENTS: "3"
+      GO_AI_WHISPER_RECENT_CONTEXT_CHARACTERS: "800"
+      GO_AI_PRELOAD_STT: "1"
       GO_AI_MODEL_TTL_SECONDS: "600"
-      GO_AI_TTS_MODEL: /models/piper/de_DE-kerstin-low/de_DE-kerstin-low.onnx
-      GO_AI_TTS_CONFIG: /models/piper/de_DE-kerstin-low/de_DE-kerstin-low.onnx.json
-      CUDA_VISIBLE_DEVICES: "0"
+      GO_AI_SUPERTONIC_MODEL_ROOT: /models/supertonic-3
+      GO_AI_SUPERTONIC_VOICE: F5
+      GO_AI_SUPERTONIC_LANGUAGE: de
+      GO_AI_SUPERTONIC_STEPS: "15"
+      GO_AI_SUPERTONIC_CUDA_DEVICE: "1"
+      GO_AI_SUPERTONIC_INTRA_OP_THREADS: "4"
+      GO_AI_PIPER_MODEL: /models/piper/de_DE-kerstin-low/de_DE-kerstin-low.onnx
+      GO_AI_PIPER_CONFIG: /models/piper/de_DE-kerstin-low/de_DE-kerstin-low.onnx.json
+      CUDA_VISIBLE_DEVICES: "0,1"
+      OMP_NUM_THREADS: "4"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
       NUMBA_CACHE_DIR: /tmp/numba-cache
       XDG_CACHE_HOME: /tmp/cache
       TORCH_HOME: /tmp/torch

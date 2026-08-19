@@ -179,6 +179,9 @@ public sealed partial class SettingsViewModel(
             GoAiServerUrl = goAiUri.ToString().TrimEnd('/'),
             LocalToolWorkspacePath = workspace,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
+            SelectedModel = string.IsNullOrWhiteSpace(SelectedModel)
+                ? AppSettings.DefaultSelectedModel
+                : SelectedModel.Trim(),
             ReasoningEffort = ReasoningEffort,
             Theme = Theme,
             AccentColor = AccentColor,
@@ -186,6 +189,11 @@ public sealed partial class SettingsViewModel(
             Language = Language,
         }, cancellationToken);
         await App.Current.ApplyAiConnectionModeAsync(IsAiConnectionEnabled);
+        if (IsAiConnectionEnabled && !string.IsNullOrWhiteSpace(SelectedModel))
+        {
+            using var client = await goAi.CreateClientAsync(cancellationToken);
+            _ = await client.SelectGeneralModelAsync(SelectedModel, cancellationToken);
+        }
         await SaveTriggersAsync(cancellationToken);
         App.Current.ApplyTheme(Theme);
         App.Current.ApplyAccentColor(AccentColor);
@@ -218,9 +226,12 @@ public sealed partial class SettingsViewModel(
             {
                 throw new InvalidOperationException(status.Message);
             }
-            items = status.Capabilities?.Models
+            using var client = await goAi.CreateClientAsync(cancellationToken);
+            var modelStatus = await client.GetModelStatusAsync(cancellationToken);
+            items = modelStatus.Models
+                .Where(model => model.Downloaded && model.Role == "general")
                 .Select(model => new LmModel(model.Id, string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.Role, model.ContextTokens), model.ContextTokens))
-                .ToArray() ?? [];
+                .ToArray();
             ConnectionStatus = status.Message;
 
             Models.Clear();

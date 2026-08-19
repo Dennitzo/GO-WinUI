@@ -16,6 +16,16 @@ public sealed class ProtocolTests
         Assert.Contains("höchstens sechs Wörtern", TgaAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
         Assert.DoesNotContain("Ã", TgaAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
         Assert.DoesNotContain("Ã", TgaAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
+        Assert.Contains("eintausendfünfhundert bis", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("jede Zahl als natürlich ausgeschriebenes deutsches Wort", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("zwei Prozent", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("CONTINUATION_ANCHOR", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("unbegrenzt fortlaufende Serie", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("mindestens eine klar ausgearbeitete Hauptfigur", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("noch nicht eingetretenen Serienhandlungen", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("Der Beginn eines neuen AI-Laufs ist", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("tatsächlich ein neues Kapitel beginnt", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("# Kapitel eins – Titel", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -24,12 +34,14 @@ public sealed class ProtocolTests
         var request = new RunRequest(
             GoAiProtocol.Version,
             RunMode.Code,
-            [new RunMessage("user", [new ContentPart("text", "Build prüfen")])]);
+            [new RunMessage("user", [new ContentPart("text", "Build prüfen")])],
+            ConversationProfile: ConversationProfile.General);
 
         var json = JsonSerializer.Serialize(request, GoAiProtocol.CreateJsonOptions());
 
         Assert.Contains("\"protocolVersion\":\"1.0\"", json, StringComparison.Ordinal);
         Assert.Contains("\"mode\":\"code\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"conversationProfile\":\"general\"", json, StringComparison.Ordinal);
         Assert.DoesNotContain("ProtocolVersion", json, StringComparison.Ordinal);
     }
 

@@ -65,6 +65,34 @@ public sealed class AgentToolExecutor
         };
     }
 
+    public async Task<EmbeddingBatchResponse> CreateEmbeddingBatchAsync(
+        EmbeddingBatchRequest request,
+        string operationId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        using var activity = _serviceActivities.Begin("embedding", operationId);
+        var vectors = await CreateEmbeddingsWithLeaseAsync(
+            request.Inputs.Select(static item => item.Text).ToArray(),
+            operationId,
+            restoreGeneralAfter: !request.KeepModelLoaded,
+            cancellationToken).ConfigureAwait(false);
+        if (vectors.Count != request.Inputs.Count
+            || vectors.Count == 0
+            || vectors.Any(vector => vector.Count == 0 || vector.Count != vectors[0].Count))
+        {
+            throw new InvalidDataException("Der Embedding-Anbieter lieferte eine inkonsistente Batch-Antwort.");
+        }
+        var dimensions = vectors.Count == 0 ? 0 : vectors[0].Count;
+        return new EmbeddingBatchResponse(
+            _options.EmbeddingModelId,
+            dimensions,
+            request.Inputs.Select((item, index) => new EmbeddingVector(item.Id, vectors[index])).ToArray());
+    }
+
+    public Task ReleaseEmbeddingModelAsync(CancellationToken cancellationToken = default) =>
+        _workers.RestoreGeneralModelAsync(cancellationToken);
+
     private async Task<AgentToolExecutionResult> SearchAsync(
         JsonElement arguments,
         string runId,
@@ -438,7 +466,11 @@ public sealed class AgentToolExecutor
         CancellationToken cancellationToken)
     {
         var inputs = arguments.GetProperty("inputs").EnumerateArray().Select(static item => item.GetString()!).ToArray();
-        var vectors = await CreateEmbeddingsWithLeaseAsync(inputs, runId, cancellationToken).ConfigureAwait(false);
+        var vectors = await CreateEmbeddingsWithLeaseAsync(
+            inputs,
+            runId,
+            restoreGeneralAfter: true,
+            cancellationToken).ConfigureAwait(false);
         return Result(new
         {
             model = _options.EmbeddingModelId,
@@ -455,7 +487,11 @@ public sealed class AgentToolExecutor
         var query = arguments.GetProperty("query").GetString()!;
         var documents = arguments.GetProperty("documents").EnumerateArray().Select(static item => item.GetString()!).ToArray();
         var topK = Math.Min(GetInt(arguments, "topK", 5), documents.Length);
-        var vectors = await CreateEmbeddingsWithLeaseAsync([query, .. documents], runId, cancellationToken).ConfigureAwait(false);
+        var vectors = await CreateEmbeddingsWithLeaseAsync(
+            [query, .. documents],
+            runId,
+            restoreGeneralAfter: true,
+            cancellationToken).ConfigureAwait(false);
         var queryVector = vectors[0];
         var matches = documents.Select((document, index) => new
         {
@@ -472,6 +508,7 @@ public sealed class AgentToolExecutor
     private async Task<IReadOnlyList<IReadOnlyList<double>>> CreateEmbeddingsWithLeaseAsync(
         IReadOnlyList<string> inputs,
         string runId,
+        bool restoreGeneralAfter,
         CancellationToken cancellationToken)
     {
         await using var lease = await _scheduler.AcquireAsync(
@@ -479,11 +516,34 @@ public sealed class AgentToolExecutor
             runId,
             GpuLeaseMode.Shared,
             cancellationToken).ConfigureAwait(false);
-        _ = await _workers.PrepareLmModelAsync(
-            _options.EmbeddingModelId,
-            8192,
-            cancellationToken).ConfigureAwait(false);
-        return await _lmStudio.CreateEmbeddingsAsync(_options.EmbeddingModelId, inputs, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _ = await _workers.PrepareLmModelAsync(
+                _options.EmbeddingModelId,
+                8192,
+                cancellationToken).ConfigureAwait(false);
+            var vectors = await _lmStudio.CreateEmbeddingsAsync(
+                _options.EmbeddingModelId,
+                inputs,
+                cancellationToken).ConfigureAwait(false);
+            if (restoreGeneralAfter)
+            {
+                await _workers.RestoreGeneralModelAsync(cancellationToken).ConfigureAwait(false);
+            }
+            return vectors;
+        }
+        catch
+        {
+            try
+            {
+                await _workers.RestoreGeneralModelAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                _ = exception;
+            }
+            throw;
+        }
     }
 
     private AgentToolExecutionResult EvaluateMath(JsonElement arguments)

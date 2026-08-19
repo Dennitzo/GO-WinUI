@@ -25,7 +25,7 @@ public sealed partial class ShellViewModel : ObservableObject
         AiServices.Add(new(GeneralService, "General AI", "gpt-oss-20b · LM Studio", "\uE950", "General AI - gpt-oss-20b", false, false, "Wird geprüft"));
         AiServices.Add(new(CodingService, "Coding", "Laguna-S-2.1 · LM Studio", "\uE943", "Coding - Laguna-S-2.1", false, false, "Wird geprüft"));
         AiServices.Add(new(SpeechToTextService, "Spracherkennung", "Whisper large-v3 · Docker", "\uE720", "Spracherkennung - Whisper large-v3", false, false, "Wird geprüft"));
-        AiServices.Add(new(TextToSpeechService, "Sprachausgabe", "Piper MLS weiblich · Docker", "\uE767", "Sprachausgabe - Piper MLS weiblich", false, false, "Wird geprüft"));
+        AiServices.Add(new(TextToSpeechService, "Sprachausgabe", "Supertonic F5 Ultra · GPU 1", "\uE767", "Sprachausgabe - Supertonic F5 Ultra", false, false, "Wird geprüft"));
         AiServices.Add(new(VisionMediaService, "Vision / Medien", "Qwen3-VL + Media Worker", "\uE722", "Vision / Medien - Qwen3-VL", false, false, "Wird geprüft"));
         AiServices.Add(new(ImageService, "Bildgenerierung", "Z-Image-Turbo · Docker", "\uE8B9", "Bildgenerierung - Z-Image-Turbo", false, false, "Wird geprüft"));
         AiServices.Add(new(ResearchService, "Web / YouTube", "SearXNG / YouTube API", "\uE721", "Web / YouTube - SearXNG / YouTube API", false, false, "Wird geprüft"));

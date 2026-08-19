@@ -233,12 +233,19 @@ public sealed partial class ProjectsViewModel(
         string contentType,
         string? sourcePath,
         AssetCategory category,
-        Stream content,
         CancellationToken cancellationToken = default)
     {
         var project = SelectedProject ?? throw new InvalidOperationException("Kein Projekt ausgewählt.");
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("Die ausgewählte Originaldatei ist nicht mehr verfügbar.", sourcePath);
+        }
         fileName = ProjectAssetFileName.Normalize(fileName);
-        var blob = await binaryObjects.ImportAsync(content, contentType, cancellationToken);
+        await using var marker = new MemoryStream([]);
+        var blob = await binaryObjects.ImportAsync(marker, "application/x-go-file-reference", cancellationToken);
+        await using var original = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1024 * 1024, true);
+        var sha256 = Convert.ToHexString(await System.Security.Cryptography.SHA256.HashDataAsync(original, cancellationToken)).ToLowerInvariant();
+        var length = original.Length;
         var now = DateTimeOffset.UtcNow;
         ProjectAsset created;
         try
@@ -251,8 +258,8 @@ public sealed partial class ProjectsViewModel(
                 contentType,
                 category,
                 sourcePath,
-                blob.Sha256,
-                blob.Length,
+                sha256,
+                length,
                 Assets.Count,
                 0,
                 now,
@@ -285,7 +292,9 @@ public sealed partial class ProjectsViewModel(
 
         // Match Barebone-Qt's fallback: a usable original image is preferable to
         // a generic icon when thumbnail generation is unavailable for a format.
-        return await binaryObjects.OpenReadAsync(asset.BlobId, cancellationToken);
+        return !string.IsNullOrWhiteSpace(asset.SourcePath) && File.Exists(asset.SourcePath)
+            ? new FileStream(asset.SourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)
+            : await binaryObjects.OpenReadAsync(asset.BlobId, cancellationToken);
     }
 
     public async Task ApplySynchronizedAssetAsync(
@@ -321,6 +330,17 @@ public sealed partial class ProjectsViewModel(
             ReplaceAssets(await projects.ListAssetsAsync(project.Id, cancellationToken));
         }
 
+    }
+
+    public async Task SaveChecklistTextAsync(ChecklistItem item, string text, CancellationToken cancellationToken = default)
+    {
+        text = text.Trim();
+        if (text.Length == 0 || string.Equals(text, item.Text, StringComparison.Ordinal))
+        {
+            return;
+        }
+        await projects.SaveChecklistItemAsync(item with { Text = text }, item.Revision, cancellationToken);
+        Replace(Checklist, await projects.ListChecklistAsync(item.ProjectId, cancellationToken));
     }
 
     public async Task SaveAssetTitleAsync(
@@ -403,7 +423,7 @@ public sealed partial class ProjectsViewModel(
         Replace(ConstructionPlans, snapshot.Where(static asset => asset.Category == AssetCategory.Pdf));
         Replace(ConstructionDrawings, snapshot.Where(static asset => asset.Category == AssetCategory.Drawing));
         Replace(MeetingFiles, snapshot.Where(static asset => asset.Category == AssetCategory.Meeting));
-        Replace(OtherFiles, snapshot.Where(static asset => asset.Category == AssetCategory.Other));
+        Replace(OtherFiles, snapshot.Where(static asset => asset.Category is AssetCategory.Other or AssetCategory.Cpdb or AssetCategory.Ifc));
         Replace(Images, snapshot.Where(static asset => asset.Category == AssetCategory.Image));
     }
 

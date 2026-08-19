@@ -164,3 +164,35 @@ public sealed class CodingContextBudgetException(int estimatedTokens, int budget
 
     public int BudgetTokens { get; } = budgetTokens;
 }
+
+public sealed class DocumentContextBudgetException(
+    int estimatedTokens,
+    int budgetTokens,
+    GoAi.Contracts.DocumentContextMode mode)
+    : InvalidOperationException(
+        $"Der Dokumentkontext im Modus {mode} benötigt geschätzt {estimatedTokens:N0} Token und überschreitet das sichere Budget von {budgetTokens:N0} Token.")
+{
+    public int EstimatedTokens { get; } = estimatedTokens;
+
+    public int BudgetTokens { get; } = budgetTokens;
+
+    public GoAi.Contracts.DocumentContextMode Mode { get; } = mode;
+}
+
+public sealed class SessionContextBudgetException(int estimatedTokens, int budgetTokens)
+    : InvalidOperationException(
+        $"Der aufbereitete Sitzungsverlauf benötigt geschätzt {estimatedTokens:N0} Token und überschreitet das sichere Budget von {budgetTokens:N0} Token.")
+{
+    public int EstimatedTokens { get; } = estimatedTokens;
+
+    public int BudgetTokens { get; } = budgetTokens;
+}
+
+public sealed class GeneralContextBudgetException(int estimatedTokens, int budgetTokens)
+    : InvalidOperationException(
+        $"Der vorbereitete General-AI-Kontext benötigt geschätzt {estimatedTokens:N0} Token und überschreitet das sichere Budget von {budgetTokens:N0} Token.")
+{
+    public int EstimatedTokens { get; } = estimatedTokens;
+
+    public int BudgetTokens { get; } = budgetTokens;
+}

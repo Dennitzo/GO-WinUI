@@ -35,6 +35,22 @@ public sealed class ModelRouterTests
         Assert.Equal(context.Options.CodeModelId, selection.ModelId);
     }
 
+    [Fact]
+    public void ExplicitGeneralModeHonorsThePersistedClientSelection()
+    {
+        using var context = new TestServerContext();
+        var router = new ModelRouter(context.WrappedOptions);
+        var request = CreateRequest(RunMode.General, "TGA erklären") with
+        {
+            PreferredGeneralModelId = "openai/gpt-oss-120b",
+        };
+
+        var selection = router.Select(request);
+
+        Assert.Equal("general", selection.Role);
+        Assert.Equal("openai/gpt-oss-120b", selection.ModelId);
+    }
+
     private static RunRequest CreateRequest(RunMode mode, string text) => new(
         GoAiProtocol.Version,
         mode,

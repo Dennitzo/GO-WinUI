@@ -7,6 +7,8 @@
     workflows: [],
     documents: [],
     attachments: [],
+    documentGroupStatus: { total: 0, ready: 0, processing: 0, failed: 0, status: "ready" },
+    pendingDocumentImports: [],
     activeSessionId: null,
     selectedWorkflowEditorId: null,
     isWorkflowEditing: false,
@@ -19,10 +21,20 @@
     contextNotice: null,
     runStatus: null,
     runDetail: null,
+    speechStatus: { active: false, status: null, detail: null, model: null, directionModel: null, error: null, cacheHit: false },
+    speechProgress: {
+      sessionId: null,
+      sourceMessageId: null,
+      sourceKind: null,
+      sourceUnits: [],
+      activeSourceUnitIds: [],
+      state: null
+    },
     messageRunStatus: new Map(),
     artifactPreviewUrls: new Map(),
     artifactPreviewPending: new Set(),
     selectedToolAction: null,
+    persistentToolAction: null,
     pendingCaptureRequest: null,
     waitingForCapture: false,
     captureStopRequested: false,
@@ -74,13 +86,14 @@
   };
 
   const byId = id => document.getElementById(id);
-  const persistentToolActions = new Set(["code", "bricsCad"]);
+  const persistentToolActions = new Set(["code", "bricsCad", "audiobook"]);
   const toolVisuals = Object.freeze({
     audioAnalysis: ["Audio analysieren", "M4 12h2m2-5 4 10 3-7 2 4h3"],
     imageAnalysis: ["Bild analysieren", "M4 5h16v14H4zM7 15l3-3 3 3 2-2 2 2"],
     imageGeneration: ["Bild erstellen", "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
     bricsCad: ["BricsCAD", "M4 18V6l8-3 8 3v12l-8 3zM12 3v18M4 6l8 4 8-4"],
     code: ["Coding", "M9 18l-6-6 6-6M15 6l6 6-6 6"],
+    audiobook: ["Hörbuch erstellen", "M4 5c3-1 5-1 8 1v14c-3-2-5-2-8-1zM20 5c-3-1-5-1-8 1v14c3-2 5-2 8-1z"],
     translation: ["Übersetzen", "M4 5h10M9 3v2c0 5-2 8-5 10M6 9c2 3 4 5 8 7M15 9l5 12M18 9l-5 12M14 18h7"],
     videoAnalysis: ["Video analysieren", "M3 6h13v12H3zM16 10l5-3v10l-5-3z"],
     textToSpeech: ["Vorlesen", "M5 9v6h4l5 4V5L9 9zM17 9c1 1 1 5 0 6M19 6c3 3 3 9 0 12"],
@@ -112,6 +125,10 @@
     messageList: byId("message-list"),
     messageScroll: byId("message-scroll"),
     prompt: byId("prompt"),
+    composerSpeechStatus: byId("composer-speech-status"),
+    composerSpeechDetail: byId("composer-speech-detail"),
+    composerSpeechPause: byId("composer-speech-pause"),
+    composerSpeechPauseIcon: byId("composer-speech-pause-icon"),
     send: byId("send"),
     stop: byId("stop"),
     reasoning: byId("reasoning"),
@@ -311,6 +328,10 @@
   }
 
   function renderMessages(scrollToEnd) {
+    const previousScrollTop = elements.messageScroll.scrollTop;
+    const previousScrollLeft = elements.messageScroll.scrollLeft;
+    const preserveForSpeech = Boolean(state.speechStatus?.active)
+      || ["buffering", "playing", "paused"].includes(String(state.speechProgress?.state || ""));
     elements.messageList.replaceChildren();
     const intro = introMessage();
     if (intro) elements.messageList.append(createMessage(intro));
@@ -350,9 +371,198 @@
         isVoicePreview: true
       }));
     }
-    if (scrollToEnd) {
+    applySpeechHighlight();
+    if (scrollToEnd && !preserveForSpeech) {
       requestAnimationFrame(() => { elements.messageScroll.scrollTop = elements.messageScroll.scrollHeight; });
+    } else {
+      elements.messageScroll.scrollTop = previousScrollTop;
+      elements.messageScroll.scrollLeft = previousScrollLeft;
     }
+  }
+
+  const speechHighlightName = "go-speech-current";
+
+  function clearSpeechHighlight() {
+    if (globalThis.CSS?.highlights) globalThis.CSS.highlights.delete(speechHighlightName);
+    for (const node of elements.messageList.querySelectorAll("[data-speech-source-active]")) {
+      node.removeAttribute("data-speech-source-active");
+      node.removeAttribute("aria-current");
+      node.classList.remove("speech-source-active--block");
+    }
+  }
+
+  function speechBlockCandidates(content, kind) {
+    const selectors = {
+      heading: ":scope > h1, :scope > h2, :scope > h3, :scope > h4",
+      paragraph: ":scope > p",
+      listItem: ":scope > ul > li, :scope > ol > li",
+      tableRow: ":scope > .table-wrap tr",
+      quote: ":scope > blockquote",
+      math: ":scope > .math-selectable.display",
+      code: ":scope > .code-block"
+    };
+    const selector = selectors[String(kind || "")];
+    return selector ? Array.from(content.querySelectorAll(selector)) : [];
+  }
+
+  function isSpeechTextNode(node) {
+    const parent = node.parentElement;
+    if (!parent || !node.nodeValue) return false;
+    return !parent.closest("button, [aria-hidden='true'], .math-render, .code-header");
+  }
+
+  function searchableSpeechText(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: node => isSpeechTextNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+    });
+    const positions = [];
+    let text = "";
+    let node = walker.nextNode();
+    while (node) {
+      const value = node.nodeValue || "";
+      for (let offset = 0; offset < value.length; offset += 1) {
+        const character = /\s/u.test(value[offset]) ? " " : value[offset];
+        if (character === " " && (!text.length || text.endsWith(" "))) continue;
+        text += character;
+        positions.push({ node, offset });
+      }
+      node = walker.nextNode();
+    }
+    return { text: text.trimEnd(), positions };
+  }
+
+  function normalizedSpeechNeedle(value) {
+    return String(value || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+  }
+
+  function findSpeechText(text, needle, start) {
+    let found = text.indexOf(needle, start);
+    if (found >= 0) return found;
+    found = text.toLocaleLowerCase("de-DE").indexOf(needle.toLocaleLowerCase("de-DE"), start);
+    if (found >= 0) return found;
+    found = text.indexOf(needle);
+    if (found >= 0) return found;
+    return text.toLocaleLowerCase("de-DE").indexOf(needle.toLocaleLowerCase("de-DE"));
+  }
+
+  function rangeForSpeechUnit(searchable, unit, startAt) {
+    const needle = normalizedSpeechNeedle(unit?.text);
+    if (!needle || !searchable.positions.length) return null;
+    const index = findSpeechText(searchable.text, needle, startAt);
+    if (index < 0 || index + needle.length > searchable.positions.length) return null;
+    const first = searchable.positions[index];
+    const last = searchable.positions[index + needle.length - 1];
+    if (!first || !last) return null;
+    const range = document.createRange();
+    range.setStart(first.node, first.offset);
+    range.setEnd(last.node, last.offset + 1);
+    return { range, next: index + needle.length };
+  }
+
+  function activeSpeechArticle(messageId) {
+    if (!messageId) return null;
+    return Array.from(elements.messageList.querySelectorAll("article[data-message-id]"))
+      .find(article => article.dataset.messageId === String(messageId)) || null;
+  }
+
+  function applySpeechHighlight() {
+    clearSpeechHighlight();
+    const progress = state.speechProgress || {};
+    if (String(progress.sessionId || "") !== String(state.activeSessionId || "")) return;
+    if (!Array.isArray(progress.activeSourceUnitIds) || progress.activeSourceUnitIds.length === 0) return;
+    const article = activeSpeechArticle(progress.sourceMessageId);
+    const content = article?.querySelector(":scope > .message-body > .message-content");
+    if (!content) return;
+
+    const activeIds = new Set(progress.activeSourceUnitIds.map(String));
+    const units = (Array.isArray(progress.sourceUnits) ? progress.sourceUnits : [])
+      .filter(unit => activeIds.has(String(unit.id)));
+    const ranges = [];
+    const blockCache = new Map();
+    for (const unit of units) {
+      const candidates = speechBlockCandidates(content, unit.kind);
+      const block = candidates[Number(unit.blockIndex) || 0];
+      if (!block) continue;
+      block.dataset.speechSourceActive = "true";
+      block.setAttribute("aria-current", "true");
+
+      if (["tableRow", "math", "code"].includes(String(unit.kind))) {
+        block.classList.add("speech-source-active--block");
+        continue;
+      }
+
+      const key = `${unit.kind}:${Number(unit.blockIndex) || 0}`;
+      let cached = blockCache.get(key);
+      if (!cached) {
+        cached = { searchable: searchableSpeechText(block), cursor: 0 };
+        blockCache.set(key, cached);
+      }
+      const match = rangeForSpeechUnit(cached.searchable, unit, cached.cursor);
+      if (match) {
+        cached.cursor = match.next;
+        ranges.push(match.range);
+      } else {
+        block.classList.add("speech-source-active--block");
+      }
+    }
+
+    let customHighlightApplied = false;
+    if (ranges.length && globalThis.CSS?.highlights && typeof globalThis.Highlight === "function") {
+      try {
+        globalThis.CSS.highlights.set(speechHighlightName, new globalThis.Highlight(...ranges));
+        customHighlightApplied = true;
+      } catch {
+        customHighlightApplied = false;
+      }
+    }
+    if (ranges.length && !customHighlightApplied) {
+      for (const range of ranges) {
+        const fallback = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+          ? range.commonAncestorContainer
+          : range.commonAncestorContainer.parentElement;
+        if (fallback instanceof HTMLElement) {
+          fallback.dataset.speechSourceActive = "true";
+          fallback.setAttribute("aria-current", "true");
+          fallback.classList.add("speech-source-active--block");
+        }
+      }
+    }
+  }
+
+  function updateSpeechProgress(payload) {
+    const playbackState = String(payload?.state || "").toLowerCase();
+    if (["completed", "cancelled"].includes(playbackState)) {
+      state.speechProgress = {
+        sessionId: null,
+        sourceMessageId: null,
+        sourceKind: null,
+        sourceUnits: [],
+        activeSourceUnitIds: [],
+        state: playbackState
+      };
+      clearSpeechHighlight();
+      return;
+    }
+
+    const current = state.speechProgress || {};
+    const sourceChanged = String(current.sourceMessageId || "") !== String(payload?.sourceMessageId || "")
+      || String(current.sessionId || "") !== String(payload?.sessionId || "");
+    const incomingUnits = Array.isArray(payload?.sourceUnits) ? payload.sourceUnits : null;
+    const shouldAdvanceHighlight = playbackState === "playing" || playbackState === "paused";
+    state.speechProgress = {
+      sessionId: payload?.sessionId || current.sessionId || null,
+      sourceMessageId: payload?.sourceMessageId || current.sourceMessageId || null,
+      sourceKind: payload?.sourceKind || current.sourceKind || null,
+      sourceUnits: incomingUnits || (sourceChanged ? [] : current.sourceUnits || []),
+      activeSourceUnitIds: shouldAdvanceHighlight
+        ? (Array.isArray(payload?.sourceUnitIds) ? payload.sourceUnitIds : [])
+        : (sourceChanged ? [] : current.activeSourceUnitIds || []),
+      state: playbackState || current.state || null
+    };
+    applySpeechHighlight();
   }
 
   const messageCopyIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
@@ -439,7 +649,6 @@
 
     if (String(message.role).toLowerCase() === "assistant"
       && ["failed", "interrupted", "cancelled"].includes(String(message.status).toLowerCase())) {
-      footer.append(createMessageFooterLink("Erneut senden", () => retryMessage(message)));
       if (messageText) footer.append(createMessageFooterLink("Fortsetzen", continueMessage));
     }
 
@@ -605,14 +814,35 @@
 
   function runStatusText(liveStatus) {
     const status = String(liveStatus?.status || "").trim();
-    const detail = String(liveStatus?.detail || "").trim();
+    const detail = cleanStatusMetadata(liveStatus?.detail);
     const model = String(liveStatus?.model || state.model || "").trim();
-    const parts = [status];
-    if (model && !detail.toLocaleLowerCase().includes(model.toLocaleLowerCase())) {
-      parts.push(`Modell: ${model}`);
-    }
-    if (detail) parts.push(detail);
-    return parts.filter(Boolean).join(" · ");
+    return uniqueStatusParts(status, model ? `Modell: ${model}` : null, detail).join(" · ");
+  }
+
+  function cleanStatusMetadata(value) {
+    return String(value || "")
+      .split("·")
+      .map(part => part.trim())
+      .filter(part => part && !/^(?:[\d.,]+)\s*kontexttoken(?:s)?$/i.test(part))
+      .join(" · ");
+  }
+
+  function uniqueStatusParts(...values) {
+    const output = [];
+    const normalized = [];
+    values
+      .flatMap(value => cleanStatusMetadata(value).split("·"))
+      .map(part => part.trim())
+      .filter(Boolean)
+      .forEach(part => {
+        const key = part.toLocaleLowerCase();
+        if (normalized.some(existing => existing === key
+          || existing.endsWith(`: ${key}`)
+          || key.endsWith(`: ${existing}`))) return;
+        normalized.push(key);
+        output.push(part);
+      });
+    return output;
   }
 
   function hasMediaAnalysisContext(action) {
@@ -784,20 +1014,36 @@
       const name = document.createElement("span");
       name.textContent = file.item.fileName;
       name.title = file.item.fileName;
+      const preparation = file.kind === "pending" ? "preparing" : file.kind === "document" ? String(file.item.preparationStatus || "ready") : "ready";
+      const status = document.createElement("span");
+      status.className = `document-preparation-status ${preparation}`;
+      status.setAttribute("aria-hidden", "true");
+      status.textContent = preparation === "failed" ? "!" : preparation === "ready" ? "✓" : "";
+      if (preparation === "failed") {
+        chip.title = file.item.preparationError || `${file.item.fileName} konnte nicht aufbereitet werden`;
+      } else if (preparation !== "ready") {
+        chip.title = `${file.item.fileName} wird aufbereitet`;
+      } else if (file.item.cacheHit) {
+        chip.title = `${file.item.fileName} wurde aus dem lokalen Dokumentindex geladen`;
+      } else {
+        chip.title = `${file.item.fileName} ist vollständig lokal indiziert`;
+      }
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "×";
       remove.setAttribute("aria-label", `${file.item.fileName} entfernen`);
+      remove.hidden = file.kind === "pending";
       remove.addEventListener("click", () => post(
         file.kind === "document" ? "document.remove" : "attachment.remove",
         file.kind === "document" ? { documentId: file.item.id } : { attachmentId: file.item.id }
       ));
-      chip.append(icon, name, remove);
+      chip.append(icon, name, status, remove);
       return chip;
     };
     const attachedFiles = [
       ...state.documents.map(item => ({ kind: "document", item })),
-      ...state.attachments.map(item => ({ kind: "attachment", item }))
+      ...state.attachments.map(item => ({ kind: "attachment", item })),
+      ...state.pendingDocumentImports.map(item => ({ kind: "pending", item: { fileName: item } }))
     ];
     if (attachedFiles.length < 2) {
       for (const file of attachedFiles) elements.documents.append(createFileChip(file));
@@ -815,13 +1061,23 @@
       icon.textContent = "◇";
       const label = document.createElement("span");
       label.textContent = `${attachedFiles.length} Dateien`;
+      const group = state.documentGroupStatus || {};
+      const pendingCount = state.pendingDocumentImports.length;
+      const groupState = pendingCount > 0 ? "processing" : String(group.status || "ready");
+      const groupStatus = document.createElement("span");
+      groupStatus.className = `document-preparation-status group ${groupState}`;
+      groupStatus.setAttribute("aria-hidden", "true");
+      groupStatus.textContent = groupState === "failed" ? "!" : groupState === "ready" ? "✓" : "";
+      const distribution = `${Number(group.ready) || 0} bereit · ${(Number(group.processing) || 0) + pendingCount} wird verarbeitet · ${Number(group.failed) || 0} fehlgeschlagen`;
+      summaryToggle.title = `${distribution}. Haken bedeutet: vollständig lokal indiziert.`;
+      summaryToggle.setAttribute("aria-label", `${attachedFiles.length} Dateien. ${distribution}. Haken bedeutet vollständig lokal indiziert.`);
       const removeAll = document.createElement("button");
       removeAll.type = "button";
       removeAll.className = "attachment-summary__remove active-tool-chip__remove";
       removeAll.textContent = "×";
       removeAll.title = "Alle Dateianhänge entfernen";
       removeAll.setAttribute("aria-label", "Alle Dateianhänge entfernen");
-      summaryToggle.append(icon, label);
+      summaryToggle.append(icon, label, groupStatus);
       summary.append(summaryToggle, removeAll);
 
       const menu = document.createElement("div");
@@ -859,15 +1115,20 @@
       anchor.append(summary, menu);
       elements.documents.append(anchor);
     }
+    updateContextStripVisibility();
+  }
+
+  function updateContextStripVisibility() {
     elements.contextStrip.hidden = state.documents.length === 0
       && state.attachments.length === 0
       && !state.selectedToolAction
       && !isAudioCaptureActive()
-      && !isScreenClipActive();
+      && !isScreenClipActive()
+      && !state.speechStatus?.active;
   }
 
   function renderStatus() {
-    const canStop = state.isRunning || Boolean(state.microphone?.isSpeaking);
+    const canStop = state.isRunning || Boolean(state.microphone?.isSpeaking) || Boolean(state.speechStatus?.active);
     elements.send.hidden = canStop;
     elements.stop.hidden = !canStop;
     elements.prompt.disabled = false;
@@ -886,6 +1147,44 @@
     const limit = limitValue.toLocaleString("de-DE");
     elements.context.title = state.contextNotice || `Kontext: ${used} von ${limit} Tokens`;
     elements.context.setAttribute("aria-label", `Kontext zu ${percentage} Prozent belegt`);
+  }
+
+  function renderSpeechStatus() {
+    const speech = state.speechStatus || {};
+    const canPause = Boolean(speech.active && state.microphone?.canPauseSpeech);
+    const isPaused = Boolean(canPause && state.microphone?.isSpeechPaused);
+    elements.composerSpeechStatus.hidden = !speech.active;
+    elements.composerSpeechStatus.classList.toggle("paused", isPaused);
+    if (!speech.active) {
+      elements.composerSpeechDetail.textContent = "";
+      elements.composerSpeechPause.disabled = true;
+      updateContextStripVisibility();
+      return;
+    }
+    const liveStatus = isPaused
+      ? "Pausiert"
+      : canPause
+        ? "Sprachausgabe wird wiedergegeben"
+        : speech.status;
+    const directionModel = String(speech.directionModel || "").trim();
+    const speechModel = String(speech.model || "").trim();
+    const speechModelLabel = /supertonic|piper|katja|windows/i.test(speechModel)
+      ? `Sprachausgabe: ${speechModel}`
+      : speechModel
+        ? `Modell: ${speechModel}`
+        : null;
+    elements.composerSpeechDetail.textContent = uniqueStatusParts(
+      liveStatus,
+      cleanStatusMetadata(speech.detail),
+      directionModel ? `Dialogregie: ${directionModel}` : null,
+      speechModelLabel).join(" · ");
+    const controlLabel = isPaused ? "Fortsetzen" : "Pausieren";
+    elements.composerSpeechPause.disabled = !canPause;
+    elements.composerSpeechPause.title = controlLabel;
+    elements.composerSpeechPause.setAttribute("aria-label", controlLabel);
+    elements.composerSpeechPause.setAttribute("aria-pressed", String(isPaused));
+    elements.composerSpeechPauseIcon.setAttribute("d", isPaused ? "M8 5l11 7-11 7z" : "M8 5v14M16 5v14");
+    updateContextStripVisibility();
   }
 
   function renderWorkspace() {
@@ -943,10 +1242,10 @@
 
   function syncVoiceCaptureSuspension() {
     if (!globalThis.goVoiceCapture?.isActive) return;
-    globalThis.goVoiceCapture.setSuspended(
-      !state.microphone?.isRecording
-      || Boolean(state.microphone?.isSpeaking)
-      || state.voicePlaybackPending);
+    // Keep Chromium microphone capture active while speech is played. The native
+    // side accepts only pause/resume/cancel commands during playback and discards
+    // every other transcript, preventing the AI voice from feeding itself back.
+    globalThis.goVoiceCapture.setSuspended(!state.microphone?.isRecording);
   }
 
   function microphoneErrorMessage(error) {
@@ -1295,37 +1594,36 @@
 
   function selectToolAction(action, persist = true) {
     const previous = state.selectedToolAction;
-    state.selectedToolAction = action || null;
+    const requested = action || null;
+    state.selectedToolAction = !requested
+      && previous
+      && !persistentToolActions.has(previous)
+      && state.persistentToolAction
+        ? state.persistentToolAction
+        : requested;
     for (const option of document.querySelectorAll(".service-option[data-tool-action]")) {
       option.classList.toggle("active", option.dataset.toolAction === state.selectedToolAction);
     }
     const selected = document.querySelector(`.service-option[data-tool-action="${state.selectedToolAction || ""}"] span`);
     elements.toolsButton.title = selected ? `Aktiv: ${selected.textContent}` : "Tools";
     renderContext();
-    if (persist && state.activeSessionId && (previous === "code" || state.selectedToolAction === "code")) {
-      post("session.mode", {
-        sessionId: state.activeSessionId,
-        mode: state.selectedToolAction === "code" ? "code" : "general"
-      });
+    if (persist && state.activeSessionId) {
+      const selectedIsPersistent = persistentToolActions.has(state.selectedToolAction);
+      const explicitlyClearedPersistent = !state.selectedToolAction && persistentToolActions.has(previous);
+      if (selectedIsPersistent || explicitlyClearedPersistent) {
+        state.persistentToolAction = selectedIsPersistent ? state.selectedToolAction : null;
+        post("session.tool", {
+          sessionId: state.activeSessionId,
+          action: state.persistentToolAction
+        });
+      }
     }
   }
 
   function clearCompletedOneShotToolAction() {
     if (state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction)) {
-      selectToolAction(null, false);
+      selectToolAction(state.persistentToolAction, false);
     }
-  }
-
-  function retryMessage(message) {
-    const index = state.messages.findIndex(item => item.id === message.id);
-    const source = state.messages.slice(0, index).reverse().find(item => String(item.role).toLowerCase() === "user");
-    if (!source?.content || state.isRunning) return;
-    post("chat.send", {
-      sessionId: state.activeSessionId,
-      prompt: source.content,
-      documentIds: state.documents.map(item => item.id),
-      reasoningEffort: elements.reasoning.value
-    });
   }
 
   function continueMessage() {
@@ -1348,6 +1646,7 @@
     state.workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
     state.documents = Array.isArray(payload.documents) ? payload.documents : [];
     state.attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+    state.documentGroupStatus = payload.documentGroupStatus || { total: 0, ready: 0, processing: 0, failed: 0, status: "ready" };
     state.activeSessionId = payload.activeSessionId || null;
     state.isRunning = Boolean(payload.isRunning);
     state.model = payload.model || null;
@@ -1358,9 +1657,9 @@
     state.workspacePath = payload.workspacePath || null;
     state.workspaceName = payload.workspaceName || null;
     const serverToolAction = payload.selectedToolAction || null;
-    if (serverToolAction === "code"
-      || previousSessionId !== state.activeSessionId
-      || state.selectedToolAction === "code") {
+    state.persistentToolAction = serverToolAction;
+    const activeOneShotTool = state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction);
+    if (previousSessionId !== state.activeSessionId || !activeOneShotTool) {
       selectToolAction(serverToolAction, false);
     } else {
       selectToolAction(state.selectedToolAction, false);
@@ -1474,6 +1773,12 @@
           const sessionIndex = state.sessions.findIndex(item => item.id === payload.session.id);
           if (sessionIndex >= 0) state.sessions[sessionIndex] = payload.session;
           else state.sessions.push(payload.session);
+          if (payload.session.id === state.activeSessionId) {
+            state.persistentToolAction = payload.session.persistentToolAction || null;
+            if (!state.selectedToolAction || persistentToolActions.has(state.selectedToolAction)) {
+              selectToolAction(state.persistentToolAction, false);
+            }
+          }
         }
         if (payload.message && payload.message.sessionId === state.activeSessionId) {
           const index = state.messages.findIndex(item => item.id === payload.message.id);
@@ -1486,10 +1791,15 @@
         if (type === "chat.completed"
           && state.microphone?.isRecording
           && payload.message?.content
+          && payload.message?.contentProfile !== "audiobook"
           && payload.message.content.trim() !== "Der Text wurde vorgelesen.") {
           state.voicePlaybackPending = true;
           syncVoiceCaptureSuspension();
-          post("microphone.speak", { text: payload.message.content, messageId: payload.message.id });
+          post("microphone.speak", {
+            text: payload.message.content,
+            messageId: payload.message.id,
+            sessionId: payload.message.sessionId
+          });
         } else {
           state.voicePlaybackPending = false;
           syncVoiceCaptureSuspension();
@@ -1510,6 +1820,18 @@
       case "document.changed":
         applySnapshot(payload);
         resumePendingCaptureRequest();
+        break;
+      case "document.import.started":
+        state.pendingDocumentImports = Array.isArray(payload?.files) ? payload.files.map(String) : [];
+        renderContext();
+        break;
+      case "document.import.progress":
+        state.pendingDocumentImports = Array.isArray(payload?.remaining) ? payload.remaining.map(String) : [];
+        renderContext();
+        break;
+      case "document.import.completed":
+        state.pendingDocumentImports = [];
+        renderContext();
         break;
       case "capture.required": {
         const action = String(payload?.action || "");
@@ -1561,6 +1883,37 @@
         renderMessages(false);
         renderStatus();
         break;
+      case "speech.status":
+        state.speechStatus = {
+          active: Boolean(payload?.active),
+          status: payload?.status || null,
+          detail: payload?.detail || null,
+          model: payload?.model || null,
+          directionModel: payload?.directionModel || null,
+          error: payload?.error || null,
+          cacheHit: Boolean(payload?.cacheHit)
+        };
+        if (!state.speechStatus.active) {
+          state.speechProgress = {
+            sessionId: null,
+            sourceMessageId: null,
+            sourceKind: null,
+            sourceUnits: [],
+            activeSourceUnitIds: [],
+            state: null
+          };
+          clearSpeechHighlight();
+          clearCompletedOneShotToolAction();
+          state.voicePlaybackPending = false;
+          syncVoiceCaptureSuspension();
+        }
+        renderSpeechStatus();
+        renderStatus();
+        if (state.speechStatus.error) showToast(state.speechStatus.error, true);
+        break;
+      case "speech.progress":
+        updateSpeechProgress(payload);
+        break;
       case "caption.changed":
         state.liveCaption = payload || state.liveCaption;
         renderLiveCaption();
@@ -1583,6 +1936,7 @@
           state.voicePlaybackPending = false;
         }
         renderMicrophone();
+        renderSpeechStatus();
         renderStatus();
         syncVoiceCaptureSuspension();
         renderMessages(false);
@@ -1740,6 +2094,9 @@
   elements.stop.addEventListener("click", () => {
     post("chat.cancel", {});
     post("microphone.stopSpeech", {});
+  });
+  elements.composerSpeechPause.addEventListener("click", () => {
+    if (!elements.composerSpeechPause.disabled) post("microphone.toggleSpeechPause", {});
   });
   byId("pick-document").addEventListener("click", () => post("document.pick", { sessionId: state.activeSessionId }));
   elements.microphone.addEventListener("click", async () => {
@@ -1908,25 +2265,142 @@
   });
   globalThis.goCaptureDraft = () => ({ sessionId: state.activeSessionId, draft: elements.prompt.value });
   globalThis.goFlushDraft = flushDraft;
-  let preparedPdfMessage = null;
-  globalThis.goPrepareMessagePdf = messageId => {
-    globalThis.goFinishMessagePdf();
+  let preparedPdfBook = null;
+
+  function pdfExportDate(value) {
+    const date = value instanceof Date ? value : new Date(value || Date.now());
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat("de-DE", {
+      dateStyle: "long",
+      timeStyle: "short"
+    }).format(date);
+  }
+
+  function finishBookPdf() {
+    preparedPdfBook?.remove();
+    preparedPdfBook = null;
+    document.documentElement.classList.remove("pdf-exporting");
+    document.body.classList.remove("pdf-exporting");
+  }
+
+  function preparePdfMedia(source, clone) {
+    const sourceImages = [...source.querySelectorAll("img")];
+    [...clone.querySelectorAll("img")].forEach((image, index) => {
+      const original = sourceImages[index];
+      const resolvedSource = original?.currentSrc || original?.getAttribute("src") || image.getAttribute("src");
+      if (resolvedSource) image.setAttribute("src", resolvedSource);
+      image.setAttribute("loading", "eager");
+      image.removeAttribute("decoding");
+    });
+
+    const sourceVideos = [...source.querySelectorAll("video")];
+    [...clone.querySelectorAll("video")].forEach((video, index) => {
+      const original = sourceVideos[index];
+      const poster = original?.poster || original?.getAttribute("poster") || video.getAttribute("poster");
+      const label = video.closest(".artifact-card")?.querySelector(".artifact-card__footer span")?.textContent
+        || "Videoanhang";
+      if (poster) {
+        const image = document.createElement("img");
+        image.className = "pdf-book__video-poster";
+        image.src = poster;
+        image.alt = label;
+        video.replaceWith(image);
+      } else {
+        const placeholder = document.createElement("div");
+        placeholder.className = "pdf-book__media-placeholder";
+        placeholder.textContent = label;
+        video.replaceWith(placeholder);
+      }
+    });
+
+    [...clone.querySelectorAll("audio")].forEach(audio => {
+      const label = audio.closest(".artifact-card")?.querySelector(".artifact-card__footer span")?.textContent
+        || "Audioanhang";
+      const placeholder = document.createElement("div");
+      placeholder.className = "pdf-book__media-placeholder";
+      placeholder.textContent = label;
+      audio.replaceWith(placeholder);
+    });
+  }
+
+  function preparePdfMessage(source) {
+    const clone = source.cloneNode(true);
+    clone.classList.add("pdf-book__message");
+    clone.classList.remove("voice-preview", "screen-clip-progress-message");
+    clone.querySelector(".avatar")?.remove();
+    clone.querySelector(".message-meta")?.remove();
+    clone.querySelector(".message-footer")?.remove();
+    clone.querySelectorAll("button").forEach(button => button.remove());
+    clone.querySelectorAll(".message-status-spinner").forEach(spinner => spinner.remove());
+    clone.querySelectorAll(".stream-cursor").forEach(content => content.classList.remove("stream-cursor"));
+    clone.querySelectorAll("[data-speech-source-active]").forEach(node => {
+      node.removeAttribute("data-speech-source-active");
+      node.removeAttribute("aria-current");
+      node.classList.remove("speech-source-active--block");
+    });
+    preparePdfMedia(source, clone);
+
+    const messageId = String(source.dataset.messageId || "");
+    const message = state.messages.find(item => String(item.id) === messageId);
+    const role = source.classList.contains("user") ? "user" : "assistant";
+    const heading = document.createElement("div");
+    heading.className = "pdf-book__message-heading";
+    const timestamp = message ? timeLabel(message.createdAt || message.updatedAt) : "";
+    heading.textContent = `${role === "user" ? "Du" : "GO AI"}${timestamp ? ` · ${timestamp}` : ""}`;
+    clone.querySelector(".message-body")?.prepend(heading);
+    return clone;
+  }
+
+  globalThis.goPrepareBookPdf = messageId => {
+    finishBookPdf();
     const normalizedId = String(messageId || "");
-    const target = [...elements.messageList.querySelectorAll(".message")]
-      .find(message => message.dataset.messageId === normalizedId);
-    if (!target) return false;
-    preparedPdfMessage = target;
-    document.documentElement.classList.add("pdf-exporting-message");
-    document.body.classList.add("pdf-exporting-message");
-    target.classList.add("pdf-export-target");
+    const sources = [...elements.messageList.querySelectorAll(":scope > .message")]
+      .filter(message => !message.classList.contains("voice-preview")
+        && !message.classList.contains("screen-clip-progress-message"))
+      .filter(message => !normalizedId || message.dataset.messageId === normalizedId);
+    if (sources.length === 0) return false;
+
+    const session = state.sessions.find(item => item.id === state.activeSessionId);
+    const sessionTitle = String(session?.title || "Neue Sitzung").trim() || "Neue Sitzung";
+    const book = document.createElement("article");
+    book.className = `pdf-book ${normalizedId ? "pdf-book--message" : "pdf-book--chat"}`;
+    book.lang = "de";
+    book.setAttribute("aria-hidden", "true");
+
+    const header = document.createElement("header");
+    header.className = "pdf-book__header";
+    const eyebrow = document.createElement("div");
+    eyebrow.className = "pdf-book__eyebrow";
+    eyebrow.textContent = "GO · AI ASSISTENT";
+    const title = document.createElement("h1");
+    title.textContent = normalizedId ? `Nachricht aus „${sessionTitle}“` : sessionTitle;
+    const subtitle = document.createElement("p");
+    subtitle.textContent = `${normalizedId ? "Einzelne Nachricht" : "Chatprotokoll"} · Exportiert am ${pdfExportDate(new Date())}`;
+    header.append(eyebrow, title, subtitle);
+
+    const content = document.createElement("section");
+    content.className = "pdf-book__content";
+    sources.forEach(source => content.append(preparePdfMessage(source)));
+
+    const endMark = document.createElement("footer");
+    endMark.className = "pdf-book__end-mark";
+    endMark.textContent = "◆";
+    book.append(header, content, endMark);
+    document.body.append(book);
+    preparedPdfBook = book;
+    document.documentElement.classList.add("pdf-exporting");
+    document.body.classList.add("pdf-exporting");
     return true;
   };
-  globalThis.goFinishMessagePdf = () => {
-    preparedPdfMessage?.classList.remove("pdf-export-target");
-    preparedPdfMessage = null;
-    document.documentElement.classList.remove("pdf-exporting-message");
-    document.body.classList.remove("pdf-exporting-message");
+  globalThis.goPdfBookReady = () => {
+    if (!preparedPdfBook) return true;
+    const fontsReady = !document.fonts || document.fonts.status === "loaded";
+    const imagesReady = [...preparedPdfBook.querySelectorAll("img")].every(image => image.complete);
+    return fontsReady && imagesReady;
   };
+  globalThis.goFinishBookPdf = finishBookPdf;
+  globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf;
+  globalThis.goFinishMessagePdf = finishBookPdf;
   globalThis.addEventListener("pagehide", flushDraft);
   globalThis.addEventListener("beforeunload", flushDraft);
   post("app.ready", {});

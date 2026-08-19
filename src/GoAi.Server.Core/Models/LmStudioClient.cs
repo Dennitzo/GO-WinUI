@@ -555,7 +555,8 @@ public sealed partial class LmStudioClient : IDisposable
 
     private void EndModelOperation()
     {
-        ScheduleIdleUnload();
+        // Model residency is coordinated explicitly by WorkerOrchestrator. The
+        // permanent General/STT/TTS set must never disappear because of idleness.
         _modelOperationGate.Release();
     }
 
@@ -912,7 +913,7 @@ public sealed partial class LmStudioClient : IDisposable
             (_options.VisionModelId, "vision", 65536),
             (_options.EmbeddingModelId, "embedding", 8192),
         };
-        return definitions.Select(definition =>
+        var configured = definitions.Select(definition =>
         {
             var raw = rawModels.FirstOrDefault(model => string.Equals(model.Key, definition.Item1, StringComparison.OrdinalIgnoreCase));
             var loaded = raw?.LoadedInstances is { Count: > 0 };
@@ -923,7 +924,20 @@ public sealed partial class LmStudioClient : IDisposable
                 loaded,
                 raw is null ? "Fehlt" : loaded ? "Geladen" : "Bereit zum Laden",
                 raw?.MaximumContextLength ?? definition.Item3);
-        }).ToArray();
+        }).ToList();
+        foreach (var raw in rawModels.Where(raw => configured.All(item =>
+                     !string.Equals(item.Id, raw.Key, StringComparison.OrdinalIgnoreCase))))
+        {
+            var loaded = raw.LoadedInstances is { Count: > 0 };
+            configured.Add(new ModelRuntimeStatus(
+                raw.Key,
+                string.Equals(raw.Type, "embedding", StringComparison.OrdinalIgnoreCase) ? "embedding" : "general",
+                true,
+                loaded,
+                loaded ? "Geladen" : "Bereit zum Laden",
+                raw.MaximumContextLength));
+        }
+        return configured.ToArray();
     }
 
     private async Task<HttpRequestMessage> CreateRequestAsync(

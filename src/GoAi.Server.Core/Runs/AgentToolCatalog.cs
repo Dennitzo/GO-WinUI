@@ -27,6 +27,10 @@ public sealed class AgentToolCatalog
             names.Add(name);
         }
         var capabilities = request.ClientCapabilities ?? [];
+        if (HasCapability(capabilities, "documents"))
+        {
+            names.UnionWith([ClientToolNames.DocumentsList, ClientToolNames.DocumentsSearch, ClientToolNames.DocumentsReadPages]);
+        }
         if (HasCapability(capabilities, "filesystem") || HasCapability(capabilities, "code"))
         {
             names.UnionWith(
@@ -110,6 +114,17 @@ public sealed class AgentToolCatalog
     {
         switch (name)
         {
+            case ClientToolNames.DocumentsList:
+                break;
+            case ClientToolNames.DocumentsSearch:
+                RequireString(value, "query", 1, 20_000);
+                OptionalInteger(value, "maximumCharacters", 1_000, 200_000);
+                break;
+            case ClientToolNames.DocumentsReadPages:
+                RequireString(value, "documentId", 36, 36);
+                OptionalInteger(value, "startPage", 1, 1_000_000);
+                OptionalInteger(value, "endPage", 1, 1_000_000);
+                break;
             case "web.search":
             case "youtube.search":
                 RequireString(value, "query", 1, 500);
@@ -250,6 +265,9 @@ public sealed class AgentToolCatalog
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
             Server("context.retrieve", "Ordne Dokumenttexte über BGE-M3 semantisch zu einer Anfrage.", ToolRiskClass.ReadOnly, RetrieveSchema()),
             Client(ClientToolNames.WorkspaceMap, "Erzeuge eine kompakte Karte des freigegebenen Repositorys mit Projekten, Sprachen und relativen Dateipfaden.", ToolRiskClass.ReadOnly, WorkspaceMapSchema()),
+            Client(ClientToolNames.DocumentsList, "Liste alle fertig aufbereiteten Dokumente der aktuellen GO-Sitzung mit Dateiname und Seitenzahl.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{},"required":[],"additionalProperties":false}""")),
+            Client(ClientToolNames.DocumentsSearch, "Durchsuche den persistenten lokalen Dokumentindex promptbezogen und liefere Originalbelege mit Dateiname und Seite.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"query":{"type":"string"},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":200000}},"required":["query"],"additionalProperties":false}""")),
+            Client(ClientToolNames.DocumentsReadPages, "Lese einen konkreten Seitenbereich eines Sitzungsdokuments als zitierfähigen Originalbeleg.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"documentId":{"type":"string"},"startPage":{"type":"integer","minimum":1},"endPage":{"type":"integer","minimum":1}},"required":["documentId","startPage","endPage"],"additionalProperties":false}""")),
             Client(ClientToolNames.FileSystemList, "Liste Einträge innerhalb des freigegebenen Client-Workspace.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
             Client(ClientToolNames.FileSystemStat, "Lese Dateimetadaten innerhalb des freigegebenen Client-Workspace.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
             Client(ClientToolNames.FileSystemFindFiles, "Finde mehrere Dateien per Glob oder Dateiname im indexierten Workspace.", ToolRiskClass.ReadOnly, FindFilesSchema()),

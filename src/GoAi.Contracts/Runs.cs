@@ -9,6 +9,12 @@ public enum RunMode
     Code,
 }
 
+public enum ConversationProfile
+{
+    General,
+    Audiobook,
+}
+
 public enum RunState
 {
     Queued,
@@ -27,6 +33,12 @@ public enum RunWorkloadKind
     MediaAnalysis,
 }
 
+public enum DocumentContextMode
+{
+    Full,
+    Prepared,
+}
+
 public sealed record RunRequest(
     string ProtocolVersion,
     RunMode Mode,
@@ -38,7 +50,27 @@ public sealed record RunRequest(
     string? SessionId = null,
     RunWorkload? Workload = null,
     IReadOnlyList<string>? AllowedServerTools = null,
-    WorkspaceDescriptor? Workspace = null);
+    WorkspaceDescriptor? Workspace = null,
+    string? PreferredGeneralModelId = null,
+    DocumentContextDescriptor? DocumentContext = null,
+    SessionContextDescriptor? SessionContext = null,
+    ConversationProfile? ConversationProfile = null);
+
+public sealed record DocumentContextDescriptor(
+    DocumentContextMode Mode,
+    string CorpusRevision,
+    int DocumentCount,
+    int PageCount,
+    int EstimatedTokens,
+    int IncludedPageCount,
+    bool PreparedByAi = false);
+
+public sealed record SessionContextDescriptor(
+    string HistoryRevision,
+    int OriginalMessageCount,
+    int IncludedMessageCount,
+    int EstimatedTokens,
+    bool PreparedByAi = false);
 
 public sealed record WorkspaceDescriptor(
     string Name,
@@ -140,7 +172,13 @@ public sealed record ContextChangedEvent(
     int ContextLimit,
     int LoadedFiles,
     bool WasCompacted,
-    string? Detail = null);
+    string? Detail = null,
+    string ContextMode = "none",
+    int DocumentTokens = 0,
+    int DocumentPages = 0,
+    bool PreparationCompleted = true,
+    int HistoryTokens = 0,
+    bool HistoryWasCompacted = false);
 
 public sealed record QueueChangedEvent(int Position, int Waiting, string Lane = "gpu");
 

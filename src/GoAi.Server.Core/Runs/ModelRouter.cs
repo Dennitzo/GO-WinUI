@@ -1,5 +1,6 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
+using GoAi.Server.Core.Models;
 using Microsoft.Extensions.Options;
 
 namespace GoAi.Server.Core.Runs;
@@ -12,17 +13,41 @@ public sealed class ModelRouter
         ".cpp", ".h", ".hpp", ".java", ".go", ".rs", ".sql", ".json", ".yaml", ".yml", ".toml",
     };
     private readonly GoAiServerOptions _options;
+    private readonly LmStudioClient? _lmStudio;
 
-    public ModelRouter(IOptions<GoAiServerOptions> options)
+    public ModelRouter(IOptions<GoAiServerOptions> options, LmStudioClient? lmStudio = null)
     {
         _options = options.Value;
+        _lmStudio = lmStudio;
+    }
+
+    public async Task<ModelSelection> SelectAsync(
+        RunRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var selected = Select(request);
+        if (!string.Equals(selected.Role, "general", StringComparison.Ordinal) || _lmStudio is null)
+        {
+            return selected;
+        }
+
+        var status = await _lmStudio.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        if (!status.ProviderReachable)
+        {
+            throw new HttpRequestException("LM Studio model status is unavailable.");
+        }
+        var model = status.Models.FirstOrDefault(candidate =>
+            candidate.Downloaded
+            && string.Equals(candidate.Id, selected.ModelId, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"The selected general model '{selected.ModelId}' is not available.");
+        return selected with { ContextLength = Math.Max(2_048, model.ContextTokens) };
     }
 
     public ModelSelection Select(RunRequest request)
     {
         if (request.Mode == RunMode.General)
         {
-            return new ModelSelection(_options.GeneralModelId, "general", _options.GeneralContextLength);
+            return SelectGeneral(request);
         }
 
         if (request.Mode == RunMode.Code)
@@ -41,7 +66,15 @@ public sealed class ModelRouter
         var explicitlyCode = latestText is not null && ContainsCodeIntent(latestText);
         return codeAttachment || (codeCapability && explicitlyCode)
             ? new ModelSelection(_options.CodeModelId, "code", _options.CodeContextLength)
-            : new ModelSelection(_options.GeneralModelId, "general", _options.GeneralContextLength);
+            : SelectGeneral(request);
+    }
+
+    private ModelSelection SelectGeneral(RunRequest request)
+    {
+        var modelId = string.IsNullOrWhiteSpace(request.PreferredGeneralModelId)
+            ? _options.GeneralModelId
+            : request.PreferredGeneralModelId.Trim();
+        return new ModelSelection(modelId, "general", _options.GeneralContextLength);
     }
 
     private static bool ContainsCodeIntent(string text)

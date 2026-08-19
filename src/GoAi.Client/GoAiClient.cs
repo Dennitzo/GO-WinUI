@@ -41,8 +41,34 @@ public sealed class GoAiClient : IDisposable
     public Task<ModelStatusSnapshot> GetModelStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<ModelStatusSnapshot>("v1/models/status", cancellationToken);
 
+    public Task<GeneralModelSelection> SelectGeneralModelAsync(
+        string modelId,
+        CancellationToken cancellationToken = default) =>
+        PostAsync<GeneralModelSelection, GeneralModelSelection>(
+            "v1/models/general",
+            new GeneralModelSelection(modelId, 0, false),
+            cancellationToken);
+
     public Task<GpuStatusSnapshot> GetGpuStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<GpuStatusSnapshot>("v1/gpu/status", cancellationToken);
+
+    public Task<EmbeddingBatchResponse> CreateEmbeddingsAsync(
+        EmbeddingBatchRequest request,
+        CancellationToken cancellationToken = default) =>
+        PostAsync<EmbeddingBatchRequest, EmbeddingBatchResponse>(
+            "v1/context/embeddings",
+            request,
+            cancellationToken);
+
+    public async Task ReleaseEmbeddingModelAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        using var response = await _httpClient.PostAsync(
+            "v1/context/embeddings/release",
+            content: null,
+            cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+    }
 
     public Task<IReadOnlyList<ServiceStatusSnapshot>> GetServiceStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<IReadOnlyList<ServiceStatusSnapshot>>("v1/services/status", cancellationToken);

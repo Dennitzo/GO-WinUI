@@ -7,19 +7,23 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using GoWinUI.Core.Contracts;
 
 namespace GoWinUI.App.Services;
 
 public sealed class LocalToolBroker(
+    GoAiConnectionService connection,
     SettingsCoordinator settings,
     ToolConfirmationService confirmation,
     IBricsCadBridgeHost bricsCad,
-    WorkspaceRepositoryIndex repositoryIndex)
+    WorkspaceRepositoryIndex repositoryIndex,
+    IDocumentIngestor documents)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private const int MaximumProcessStreamCharacters = 1_900_000;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
     private readonly AsyncLocal<string?> _executionWorkspace = new();
+    private readonly AsyncLocal<Guid?> _executionSession = new();
 
     public bool IsBricsCadAvailable => bricsCad.IsConnected;
 
@@ -42,17 +46,20 @@ public sealed class LocalToolBroker(
     }
 
     public Task<ClientToolResult> ExecuteAsync(ToolProposal proposal, CancellationToken cancellationToken = default) =>
-        ExecuteAsync(proposal, null, cancellationToken);
+        ExecuteAsync(proposal, null, null, cancellationToken);
 
     public async Task<ClientToolResult> ExecuteAsync(
         ToolProposal proposal,
         string? workspacePath,
+        Guid? sessionId = null,
         CancellationToken cancellationToken = default)
     {
         var previousWorkspace = _executionWorkspace.Value;
         try
         {
-            _executionWorkspace.Value = ResolveWorkspace(workspacePath);
+            var documentTool = proposal.Name.StartsWith("documents.", StringComparison.Ordinal);
+            _executionWorkspace.Value = documentTool ? null : ResolveWorkspace(workspacePath);
+            _executionSession.Value = sessionId;
             ValidateProposal(proposal);
             if (!await confirmation.ConfirmAsync(proposal, cancellationToken).ConfigureAwait(false))
             {
@@ -61,6 +68,9 @@ public sealed class LocalToolBroker(
 
             var payload = proposal.Name switch
             {
+                ClientToolNames.DocumentsList => await ListDocumentsAsync(cancellationToken).ConfigureAwait(false),
+                ClientToolNames.DocumentsSearch => await SearchDocumentsAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
+                ClientToolNames.DocumentsReadPages => await ReadDocumentPagesAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.WorkspaceMap => await MapWorkspaceAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemList => await ListAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemStat => await StatAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
@@ -98,6 +108,7 @@ public sealed class LocalToolBroker(
         finally
         {
             _executionWorkspace.Value = previousWorkspace;
+            _executionSession.Value = null;
         }
     }
 
@@ -124,7 +135,8 @@ public sealed class LocalToolBroker(
 
         var expectedRisk = proposal.Name switch
         {
-            ClientToolNames.WorkspaceMap or ClientToolNames.FileSystemList or ClientToolNames.FileSystemStat
+            ClientToolNames.DocumentsList or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages
+                or ClientToolNames.WorkspaceMap or ClientToolNames.FileSystemList or ClientToolNames.FileSystemStat
                 or ClientToolNames.FileSystemFindFiles or ClientToolNames.FileSystemReadText
                 or ClientToolNames.FileSystemReadMany or ClientToolNames.FileSystemSearch
                 or ClientToolNames.BricsCadGeometryQuery or ClientToolNames.BricsCadMeasure => ToolRiskClass.ReadOnly,
@@ -143,6 +155,20 @@ public sealed class LocalToolBroker(
         var arguments = proposal.Arguments;
         switch (proposal.Name)
         {
+            case ClientToolNames.DocumentsList:
+                ValidateProperties(arguments, [], []);
+                break;
+            case ClientToolNames.DocumentsSearch:
+                ValidateProperties(arguments, ["query"], ["query", "maximumCharacters"]);
+                ValidateString(arguments, "query", 1, 20_000);
+                ValidateOptionalInteger(arguments, "maximumCharacters", 1_000, 200_000);
+                break;
+            case ClientToolNames.DocumentsReadPages:
+                ValidateProperties(arguments, ["documentId", "startPage", "endPage"], ["documentId", "startPage", "endPage"]);
+                ValidateString(arguments, "documentId", 36, 36);
+                ValidateOptionalInteger(arguments, "startPage", 1, 1_000_000);
+                ValidateOptionalInteger(arguments, "endPage", 1, 1_000_000);
+                break;
             case ClientToolNames.WorkspaceMap:
                 ValidateProperties(arguments, [], ["maximumDepth", "maximumEntries"]);
                 ValidateOptionalInteger(arguments, "maximumDepth", 1, 32);
@@ -990,6 +1016,91 @@ public sealed class LocalToolBroker(
         return normalized.StartsWith(relativeAlias, StringComparison.OrdinalIgnoreCase)
             ? normalized[relativeAlias.Length..]
             : target.Trim();
+    }
+
+    private async Task<object> ListDocumentsAsync(CancellationToken cancellationToken)
+    {
+        var sessionId = _executionSession.Value ?? throw new InvalidOperationException("Die Dokument-Sitzung fehlt.");
+        var items = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        return new
+        {
+            documents = items.Where(static item => item.PreparationStatus == GoWinUI.Core.Models.DocumentPreparationStatus.Ready)
+                .Select(static item => new { documentId = item.Id, item.FileName, item.PageCount, item.Sha256 }),
+        };
+    }
+
+    private async Task<object> SearchDocumentsAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var sessionId = _executionSession.Value ?? throw new InvalidOperationException("Die Dokument-Sitzung fehlt.");
+        var query = arguments.GetProperty("query").GetString()!;
+        var maximum = arguments.TryGetProperty("maximumCharacters", out var value) ? value.GetInt32() : 120_000;
+        IReadOnlyList<GoWinUI.Core.Models.DocumentContextHit> hits;
+        var searchMode = "fulltext";
+        try
+        {
+            using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
+            var modelStatus = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
+            var embeddingModel = modelStatus.Models.FirstOrDefault(static item => item.Downloaded && item.Role == "embedding");
+            var indexed = embeddingModel is null
+                ? []
+                : await documents.ListIndexChunksAsync(sessionId, embeddingModel.Id, cancellationToken).ConfigureAwait(false);
+            if (embeddingModel is not null
+                && indexed.Count > 0
+                && indexed.All(static item => item.Embedding is not null))
+            {
+                var response = await client.CreateEmbeddingsAsync(
+                    new EmbeddingBatchRequest([new EmbeddingInput("query", query)]),
+                    cancellationToken).ConfigureAwait(false);
+                var vector = response.Vectors.Single(static item => item.Id == "query").Values;
+                hits = await documents.SearchHybridAsync(
+                    sessionId,
+                    query,
+                    embeddingModel.Id,
+                    vector,
+                    maximum,
+                    cancellationToken).ConfigureAwait(false);
+                searchMode = "hybrid";
+            }
+            else
+            {
+                hits = await documents.SearchAsync(sessionId, query, maximum, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        {
+            hits = await documents.SearchAsync(sessionId, query, maximum, cancellationToken).ConfigureAwait(false);
+            searchMode = $"fulltext (semantisch nicht verfügbar: {exception.GetType().Name})";
+        }
+        return new
+        {
+            searchMode,
+            evidence = hits.Select(static hit => new
+            {
+                hit.DocumentId,
+                hit.FileName,
+                hit.PageNumber,
+                hit.Score,
+                hit.Text,
+                citation = $"[{hit.FileName}, S. {hit.PageNumber}]",
+            }),
+        };
+    }
+
+    private async Task<object> ReadDocumentPagesAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var sessionId = _executionSession.Value ?? throw new InvalidOperationException("Die Dokument-Sitzung fehlt.");
+        var documentId = Guid.Parse(arguments.GetProperty("documentId").GetString()!);
+        var start = arguments.GetProperty("startPage").GetInt32();
+        var end = arguments.GetProperty("endPage").GetInt32();
+        if (end < start || end - start > 100) throw new InvalidDataException("Der angeforderte Seitenbereich ist ungültig oder zu groß.");
+        var document = (await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false))
+            .SingleOrDefault(item => item.Id == documentId && item.PreparationStatus == GoWinUI.Core.Models.DocumentPreparationStatus.Ready)
+            ?? throw new FileNotFoundException("Das Dokument ist in dieser Sitzung nicht fertig aufbereitet.");
+        var pages = (await documents.ReadPagesAsync(documentId, cancellationToken).ConfigureAwait(false))
+            .Where(page => page.PageNumber >= start && page.PageNumber <= end)
+            .Select(page => new { documentId, document.FileName, page.PageNumber, page.Text, citation = $"[{document.FileName}, S. {page.PageNumber}]" })
+            .ToArray();
+        return new { pages };
     }
 
     private async Task<object> RunBricsCadAsync(string toolName, JsonElement arguments, CancellationToken cancellationToken)

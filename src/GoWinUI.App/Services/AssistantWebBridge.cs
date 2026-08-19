@@ -23,14 +23,14 @@ public sealed class AssistantWebBridge : IDisposable
         "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
         "artifact.save", "artifact.preview", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
         "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
-        "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.stop", "microphone.cancel",
-        "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "ui.sessionPane", "external.open",
+        "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.toggleSpeechPause", "microphone.stop", "microphone.cancel",
+        "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "session.tool", "ui.sessionPane", "external.open",
     };
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
         "state.snapshot", "chat.started", "chat.delta", "chat.completed",
         "chat.cancelled", "chat.failed", "session.changed", "workflow.snapshot",
-        "workflow.changed", "workflow.draft", "document.changed", "status.changed", "theme.changed",
+        "workflow.changed", "workflow.draft", "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
         "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
         "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady", "host.error",
     };
@@ -54,6 +54,8 @@ public sealed class AssistantWebBridge : IDisposable
     public event EventHandler<WebBridgeMessageEventArgs>? MessageReceived;
 
     internal static bool IsIncomingTypeAllowed(string type) => AllowedIncomingTypes.Contains(type);
+
+    internal static bool IsOutgoingTypeAllowed(string type) => AllowedOutgoingTypes.Contains(type);
 
     public async Task InitializeAsync(string webRoot, string userDataFolder, string? previewRoot = null)
     {

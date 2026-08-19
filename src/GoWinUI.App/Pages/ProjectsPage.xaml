@@ -28,6 +28,7 @@
           <ColumnDefinition Width="280" />
           <ColumnDefinition Width="104" />
           <ColumnDefinition Width="56" />
+          <ColumnDefinition Width="56" />
         </Grid.ColumnDefinitions>
         <Border
           Width="46"
@@ -113,8 +114,17 @@
           Text="{Binding Length, Converter={StaticResource ProjectAssetLengthConverter}}"
           TextAlignment="Right" />
         <Button
-          x:Name="AssetDeleteButton"
           Grid.Column="4"
+          HorizontalAlignment="Left"
+          VerticalAlignment="Center"
+          AutomationProperties.Name="Dateiordner öffnen"
+          Click="OnOpenAssetFolder"
+          ToolTipService.ToolTip="Im Explorer anzeigen">
+          <FontIcon FontSize="13" Glyph="&#xE8B7;" />
+        </Button>
+        <Button
+          x:Name="AssetDeleteButton"
+          Grid.Column="5"
           HorizontalAlignment="Left"
           VerticalAlignment="Center"
           AutomationProperties.Name="Datei löschen"
@@ -287,7 +297,7 @@
             </GridView.ItemsPanel>
             <GridView.ItemTemplate>
               <DataTemplate x:DataType="models:Project">
-                <Border Padding="18" Style="{StaticResource GoCardStyle}">
+                <Border Padding="18" Style="{StaticResource GoCardStyle}" PointerEntered="OnProjectCardPointerEntered" PointerExited="OnProjectCardPointerExited">
                   <Grid RowSpacing="10">
                     <Grid.RowDefinitions>
                       <RowDefinition Height="Auto" />
@@ -449,7 +459,21 @@
                           <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <CheckBox IsChecked="{x:Bind IsCompleted}" Click="OnChecklistClicked" />
-                        <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{x:Bind Text}" TextWrapping="Wrap" />
+                        <Grid Grid.Column="1">
+                          <Button
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Left"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Click="OnChecklistTextClick"
+                            Padding="0">
+                            <TextBlock VerticalAlignment="Center" Text="{Binding Text}" TextWrapping="Wrap" />
+                          </Button>
+                          <TextBox
+                            Visibility="Collapsed"
+                            LostFocus="OnChecklistTextLostFocus"
+                            PlaceholderText="Checklistenpunkt eingeben" />
+                        </Grid>
                         <Button Grid.Column="2" Click="OnMoveChecklistItemUp" ToolTipService.ToolTip="Nach oben">
                           <FontIcon FontSize="13" Glyph="&#xE70E;" />
                         </Button>
@@ -482,7 +506,7 @@
               </Grid>
               <ListView
                 x:Name="ConstructionPlanList"
-                MaxHeight="230"
+                ScrollViewer.VerticalScrollMode="Disabled"
                 IsItemClickEnabled="True"
                 ItemContainerStyle="{StaticResource ProjectFileListItemStyle}"
                 ItemTemplate="{StaticResource ProjectFileItemTemplate}"
@@ -507,7 +531,7 @@
               </Grid>
               <ListView
                 x:Name="ConstructionDrawingList"
-                MaxHeight="230"
+                ScrollViewer.VerticalScrollMode="Disabled"
                 IsItemClickEnabled="True"
                 ItemContainerStyle="{StaticResource ProjectFileListItemStyle}"
                 ItemTemplate="{StaticResource ProjectFileItemTemplate}"
@@ -532,7 +556,7 @@
               </Grid>
               <ListView
                 x:Name="MeetingFileList"
-                MaxHeight="230"
+                ScrollViewer.VerticalScrollMode="Disabled"
                 IsItemClickEnabled="True"
                 ItemContainerStyle="{StaticResource ProjectFileListItemStyle}"
                 ItemTemplate="{StaticResource ProjectFileItemTemplate}"
@@ -557,7 +581,7 @@
               </Grid>
               <ListView
                 x:Name="OtherFileList"
-                MaxHeight="230"
+                ScrollViewer.VerticalScrollMode="Disabled"
                 IsItemClickEnabled="True"
                 ItemContainerStyle="{StaticResource ProjectFileListItemStyle}"
                 ItemTemplate="{StaticResource ProjectFileItemTemplate}"
@@ -582,6 +606,7 @@
               </Grid>
               <GridView
                 x:Name="ImageAssetList"
+                ScrollViewer.VerticalScrollMode="Disabled"
                 HorizontalAlignment="Stretch"
                 IsItemClickEnabled="True"
                 ItemTemplate="{StaticResource ProjectImageItemTemplate}"

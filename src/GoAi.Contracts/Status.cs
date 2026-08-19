@@ -51,6 +51,8 @@ public sealed record ModelRuntimeStatus(
     string State,
     int ContextTokens);
 
+public sealed record GeneralModelSelection(string ModelId, int ContextTokens, bool Loaded);
+
 public sealed record GpuStatusSnapshot(
     bool Available,
     int QueueLength,

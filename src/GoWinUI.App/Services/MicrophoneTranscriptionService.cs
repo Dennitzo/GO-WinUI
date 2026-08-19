@@ -2,8 +2,11 @@ using GoAi.Client;
 using GoAi.Contracts;
 using Microsoft.Extensions.Logging;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text.RegularExpressions;
+using System.Threading.Channels;
 
 namespace GoWinUI.App.Services;
 
@@ -11,6 +14,8 @@ public sealed record MicrophoneSnapshot(
     bool IsRecording,
     bool IsBusy,
     bool IsSpeaking,
+    bool CanPauseSpeech,
+    bool IsSpeechPaused,
     string Status,
     DateTimeOffset? StartedAt,
     string? Error,
@@ -31,7 +36,7 @@ public sealed partial class MicrophoneTranscriptionService(
 {
     private const int SampleRate = GoAiProtocol.LiveCaptionSampleRate;
     private const int WindowMilliseconds = 2_000;
-    private const int OverlapMilliseconds = 0;
+    private const int OverlapMilliseconds = 500;
     private const int MinimumPcmBytes = SampleRate * sizeof(short) / 5;
     private const int MaximumPcmBytes = SampleRate * sizeof(short) * 3;
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(30);
@@ -54,10 +59,14 @@ public sealed partial class MicrophoneTranscriptionService(
     private string? _deviceLabel;
     private DateTimeOffset? _startedAt;
     private WaveOutEvent? _activeOutput;
+    private Func<SpeechSegmentPlaybackUpdate, Task>? _playbackProgress;
+    private int _activePlaybackSegmentIndex = -1;
     private bool _active;
     private bool _starting;
     private bool _stopping;
     private bool _speaking;
+    private bool _canPauseSpeech;
+    private bool _speechPaused;
     private bool _recognizing;
     private bool _disposed;
 
@@ -69,6 +78,8 @@ public sealed partial class MicrophoneTranscriptionService(
         _active,
         _starting || _stopping || _speaking || _recognizing,
         _speaking,
+        _canPauseSpeech,
+        _speechPaused,
         _status,
         _startedAt,
         _error,
@@ -276,7 +287,7 @@ public sealed partial class MicrophoneTranscriptionService(
     public Task SpeakAsync(string markdown, CancellationToken cancellationToken = default) =>
         PlayTextAsync(markdown, requireActiveVoiceMode: true, cancellationToken);
 
-    public async Task PlayTextAsync(
+    public Task<string?> PlayTextAsync(
         string markdown,
         bool requireActiveVoiceMode = false,
         CancellationToken cancellationToken = default)
@@ -285,15 +296,37 @@ public sealed partial class MicrophoneTranscriptionService(
         var text = PrepareSpeechText(markdown);
         if (string.IsNullOrWhiteSpace(text) || (requireActiveVoiceMode && !_active))
         {
-            return;
+            return Task.FromResult<string?>(null);
+        }
+        var units = SpeechSourceSegmentation.CreateUnits(text);
+        var segments = SpeechSourceSegmentation.CreateDirectSegments(units, text);
+        return PlaySegmentsAsync(segments, requireActiveVoiceMode: requireActiveVoiceMode, cancellationToken: cancellationToken);
+    }
+
+    internal async Task<string?> PlaySegmentsAsync(
+        IReadOnlyList<PreparedSpeechSegment> segments,
+        Func<SpeechSegmentPlaybackUpdate, Task>? progress = null,
+        Func<int, PreparedSpeechSegment, CancellationToken, ValueTask<PreparedSpeechSegment>>? segmentResolver = null,
+        bool requireActiveVoiceMode = false,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var playable = SpeechSourceSegmentation.NormalizePreparedSegments(segments);
+        if (playable.Count == 0 || (requireActiveVoiceMode && !_active))
+        {
+            return null;
         }
 
         await _speechGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        string? speechProvider = null;
+        Task producer = Task.CompletedTask;
+        CancellationTokenSource? playbackCancellation = null;
+        var temporaryFiles = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         try
         {
             if (requireActiveVoiceMode && !_active)
             {
-                return;
+                return null;
             }
             using var standaloneClient = _client is null
                 ? await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false)
@@ -301,45 +334,70 @@ public sealed partial class MicrophoneTranscriptionService(
             var client = _client ?? standaloneClient!;
             _playbackCancellation?.Cancel();
             _playbackCancellation?.Dispose();
-            _playbackCancellation = new CancellationTokenSource();
+            playbackCancellation = new CancellationTokenSource();
+            _playbackCancellation = playbackCancellation;
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken,
                 requireActiveVoiceMode ? _sessionCancellation?.Token ?? CancellationToken.None : CancellationToken.None,
-                _playbackCancellation.Token);
+                playbackCancellation.Token);
             _speaking = true;
             _status = "Sprachausgabe wird erzeugt";
             _error = null;
+            lock (_playbackGate)
+            {
+                _playbackProgress = progress;
+                _activePlaybackSegmentIndex = -1;
+            }
             RaiseChanged();
 
-            foreach (var part in SplitSpeechText(text))
+            var playbackBatches = SpeechSourceSegmentation.CreatePlaybackBatches(playable);
+            var channel = Channel.CreateBounded<PreparedAudioBatch>(new BoundedChannelOptions(2)
+            {
+                SingleReader = true,
+                SingleWriter = true,
+                FullMode = BoundedChannelFullMode.Wait,
+            });
+            producer = ProduceSpeechAudioBatchesAsync(
+                client,
+                playable,
+                playbackBatches,
+                channel.Writer,
+                temporaryFiles,
+                segmentResolver,
+                linked.Token);
+
+            await NotifyPlaybackProgressAsync(progress, new(0, SpeechPlaybackState.Buffering)).ConfigureAwait(false);
+            for (var batchIndex = 0; batchIndex < playbackBatches.Count; batchIndex++)
             {
                 linked.Token.ThrowIfCancellationRequested();
-                var speech = await client.SynthesizeSpeechAsync(
-                    new SpeechRequest(part),
-                    linked.Token).ConfigureAwait(false);
-                var directory = Path.Combine(Path.GetTempPath(), "GO", "Voice");
-                Directory.CreateDirectory(directory);
-                var path = Path.Combine(directory, $"{Guid.NewGuid():N}.wav");
+                PreparedAudioBatch preparedBatch;
                 try
                 {
-                    await client.DownloadArtifactAsync(
-                        speech.Artifact.ArtifactId,
-                        path,
-                        cancellationToken: linked.Token).ConfigureAwait(false);
-                    _provider = speech.Provider;
-                    _status = "AI-Antwort wird vorgelesen";
-                    RaiseChanged();
-                    await PlayWaveAsync(path, linked.Token).ConfigureAwait(false);
+                    preparedBatch = await channel.Reader.ReadAsync(linked.Token).ConfigureAwait(false);
                 }
-                finally
+                catch (ChannelClosedException)
                 {
-                    TryDelete(path);
+                    await producer.ConfigureAwait(false);
+                    throw;
+                }
+                var expectedBatch = playbackBatches[batchIndex];
+                if (preparedBatch.Index != batchIndex
+                    || !preparedBatch.Parts.Select(static part => part.Index).SequenceEqual(expectedBatch.SegmentIndexes))
+                {
+                    throw new InvalidDataException("Die vorbereiteten Sprachabschnitte sind nicht in der erwarteten Reihenfolge eingetroffen.");
+                }
+
+                speechProvider = await PlayPreparedAudioBatchAsync(
+                    preparedBatch,
+                    progress,
+                    linked.Token).ConfigureAwait(false) ?? speechProvider;
+                foreach (var prepared in preparedBatch.Parts)
+                {
+                    temporaryFiles.TryRemove(prepared.Path, out _);
+                    TryDelete(prepared.Path);
                 }
             }
-        }
-        catch (OperationCanceledException) when (_sessionCancellation?.IsCancellationRequested == true)
-        {
-            // Voice mode was explicitly stopped while synthesis or playback was active.
+            await producer.ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
@@ -351,8 +409,29 @@ public sealed partial class MicrophoneTranscriptionService(
         }
         finally
         {
-            _playbackCancellation?.Dispose();
-            _playbackCancellation = null;
+            playbackCancellation?.Cancel();
+            try
+            {
+                await producer.ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                // The producer failure was already observed by the consumer or cancellation path.
+            }
+            foreach (var path in temporaryFiles.Keys)
+            {
+                TryDelete(path);
+            }
+            lock (_playbackGate)
+            {
+                _playbackProgress = null;
+                _activePlaybackSegmentIndex = -1;
+            }
+            if (ReferenceEquals(_playbackCancellation, playbackCancellation))
+            {
+                _playbackCancellation?.Dispose();
+                _playbackCancellation = null;
+            }
             _speaking = false;
             if (_active)
             {
@@ -361,6 +440,8 @@ public sealed partial class MicrophoneTranscriptionService(
             RaiseChanged();
             _speechGate.Release();
         }
+
+        return speechProvider;
     }
 
     public Task StopSpeechAsync(CancellationToken cancellationToken = default)
@@ -369,6 +450,57 @@ public sealed partial class MicrophoneTranscriptionService(
         _playbackCancellation?.Cancel();
         StopPlayback();
         return Task.CompletedTask;
+    }
+
+    public async Task<MicrophoneSnapshot> ToggleSpeechPauseAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var changed = false;
+        Func<SpeechSegmentPlaybackUpdate, Task>? progress = null;
+        SpeechSegmentPlaybackUpdate? playbackUpdate = null;
+        lock (_playbackGate)
+        {
+            if (!_speaking || !_canPauseSpeech || _activeOutput is null)
+            {
+                return Current;
+            }
+
+            try
+            {
+                if (_speechPaused)
+                {
+                    _activeOutput.Play();
+                    _speechPaused = false;
+                    _status = "AI-Antwort wird vorgelesen";
+                    playbackUpdate = new(_activePlaybackSegmentIndex, SpeechPlaybackState.Playing, _provider);
+                }
+                else
+                {
+                    _activeOutput.Pause();
+                    _speechPaused = true;
+                    _status = "Vorlesen pausiert";
+                    playbackUpdate = new(_activePlaybackSegmentIndex, SpeechPlaybackState.Paused, _provider);
+                }
+                progress = _playbackProgress;
+                changed = true;
+            }
+            catch (ObjectDisposedException)
+            {
+                _activeOutput = null;
+                _canPauseSpeech = false;
+                _speechPaused = false;
+            }
+        }
+
+        if (changed)
+        {
+            RaiseChanged();
+            if (progress is not null && playbackUpdate is not null)
+            {
+                await progress(playbackUpdate).ConfigureAwait(false);
+            }
+        }
+        return Current;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
@@ -540,37 +672,215 @@ public sealed partial class MicrophoneTranscriptionService(
             cancellationToken);
     }
 
-    private async Task PlayWaveAsync(string path, CancellationToken cancellationToken)
+    private static async Task ProduceSpeechAudioBatchesAsync(
+        GoAiClient client,
+        IReadOnlyList<PreparedSpeechSegment> segments,
+        IReadOnlyList<SpeechPlaybackBatchPlan> batches,
+        ChannelWriter<PreparedAudioBatch> writer,
+        ConcurrentDictionary<string, byte> temporaryFiles,
+        Func<int, PreparedSpeechSegment, CancellationToken, ValueTask<PreparedSpeechSegment>>? segmentResolver,
+        CancellationToken cancellationToken)
     {
-        using var reader = new WaveFileReader(path);
-        ValidateAudibleWave(reader);
-        reader.Position = 0;
-        using var output = new WaveOutEvent();
-        var completion = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        output.PlaybackStopped += (_, args) => completion.TrySetResult(args.Exception);
-        output.Init(reader);
-        lock (_playbackGate)
+        Exception? error = null;
+        try
         {
-            _activeOutput = output;
-        }
-        using var registration = cancellationToken.Register(static value =>
-        {
-            try { ((WaveOutEvent)value!).Stop(); }
-            catch (ObjectDisposedException) { }
-        }, output);
-        output.Play();
-        var error = await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
-        lock (_playbackGate)
-        {
-            if (ReferenceEquals(_activeOutput, output))
+            var directory = Path.Combine(Path.GetTempPath(), "GO", "Voice");
+            Directory.CreateDirectory(directory);
+            for (var batchIndex = 0; batchIndex < batches.Count; batchIndex++)
             {
-                _activeOutput = null;
+                var batch = batches[batchIndex];
+                var preparedParts = new List<PreparedAudioPart>(batch.SegmentIndexes.Count);
+                foreach (var index in batch.SegmentIndexes)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var segment = segmentResolver is null
+                        ? segments[index]
+                        : await segmentResolver(index, segments[index], cancellationToken).ConfigureAwait(false);
+                    var synthesisText = SpeechSourceSegmentation.PrepareForSynthesis(segment);
+                    if (string.IsNullOrWhiteSpace(synthesisText))
+                    {
+                        throw new InvalidDataException("Ein vorbereitetes Sprachsegment enthält keinen vorlesbaren Text.");
+                    }
+                    var speech = await client.SynthesizeSpeechAsync(
+                        new SpeechRequest(
+                            synthesisText,
+                            Speed: segment.Speed),
+                        cancellationToken).ConfigureAwait(false);
+                    var path = Path.Combine(directory, $"{Guid.NewGuid():N}.wav");
+                    temporaryFiles.TryAdd(path, 0);
+                    try
+                    {
+                        await client.DownloadArtifactAsync(
+                            speech.Artifact.ArtifactId,
+                            path,
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                        preparedParts.Add(new(index, path, speech.Provider));
+                    }
+                    catch
+                    {
+                        temporaryFiles.TryRemove(path, out _);
+                        TryDelete(path);
+                        throw;
+                    }
+                }
+                await writer.WriteAsync(
+                    new PreparedAudioBatch(batchIndex, batch.Id, preparedParts),
+                    cancellationToken).ConfigureAwait(false);
             }
         }
-        if (error is not null)
+        catch (Exception exception)
         {
-            throw error;
+            error = exception;
+            throw;
         }
+        finally
+        {
+            writer.TryComplete(error);
+        }
+    }
+
+    private static Task NotifyPlaybackProgressAsync(
+        Func<SpeechSegmentPlaybackUpdate, Task>? progress,
+        SpeechSegmentPlaybackUpdate update) =>
+        progress is null ? Task.CompletedTask : progress(update);
+
+    private async Task<string?> PlayPreparedAudioBatchAsync(
+        PreparedAudioBatch batch,
+        Func<SpeechSegmentPlaybackUpdate, Task>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (batch.Parts.Count == 0)
+        {
+            return null;
+        }
+
+        var readers = new List<WaveFileReader>(batch.Parts.Count);
+        try
+        {
+            var providers = new List<ISampleProvider>(batch.Parts.Count);
+            var cumulativeDurations = new List<TimeSpan>(batch.Parts.Count);
+            var elapsed = TimeSpan.Zero;
+            foreach (var part in batch.Parts)
+            {
+                var reader = new WaveFileReader(part.Path);
+                readers.Add(reader);
+                ValidateAudibleWave(reader);
+                reader.Position = 0;
+                providers.Add(CreatePlaybackSampleProvider(reader));
+                elapsed += reader.TotalTime;
+                cumulativeDurations.Add(elapsed);
+            }
+
+            var concatenated = new ConcatenatingSampleProvider(providers);
+            using var output = new WaveOutEvent();
+            var completion = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            output.PlaybackStopped += (_, args) => completion.TrySetResult(args.Exception);
+            output.Init(concatenated.ToWaveProvider());
+
+            var activePart = -1;
+            async Task ActivatePartAsync(int partIndex)
+            {
+                if (partIndex == activePart || partIndex < 0 || partIndex >= batch.Parts.Count)
+                {
+                    return;
+                }
+
+                activePart = partIndex;
+                var part = batch.Parts[partIndex];
+                lock (_playbackGate)
+                {
+                    _activePlaybackSegmentIndex = part.Index;
+                    _provider = part.Provider;
+                    _status = "AI-Antwort wird vorgelesen";
+                }
+                RaiseChanged();
+                await NotifyPlaybackProgressAsync(
+                    progress,
+                    new(part.Index, SpeechPlaybackState.Playing, part.Provider)).ConfigureAwait(false);
+            }
+
+            lock (_playbackGate)
+            {
+                _activeOutput = output;
+                _canPauseSpeech = true;
+                _speechPaused = false;
+                _status = "AI-Antwort wird vorgelesen";
+            }
+            await ActivatePartAsync(0).ConfigureAwait(false);
+            using var registration = cancellationToken.Register(static value =>
+            {
+                try { ((WaveOutEvent)value!).Stop(); }
+                catch (ObjectDisposedException) { }
+            }, output);
+
+            Exception? error = null;
+            try
+            {
+                output.Play();
+                while (!completion.Task.IsCompleted)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var position = TimeSpan.FromSeconds(
+                        output.GetPosition() / (double)output.OutputWaveFormat.AverageBytesPerSecond);
+                    var nextPart = 0;
+                    while (nextPart < cumulativeDurations.Count - 1
+                        && position >= cumulativeDurations[nextPart])
+                    {
+                        nextPart++;
+                    }
+                    await ActivatePartAsync(nextPart).ConfigureAwait(false);
+                    await Task.WhenAny(
+                        completion.Task,
+                        Task.Delay(TimeSpan.FromMilliseconds(35), cancellationToken)).ConfigureAwait(false);
+                }
+                error = await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_playbackGate)
+                {
+                    if (ReferenceEquals(_activeOutput, output))
+                    {
+                        _activeOutput = null;
+                        _canPauseSpeech = false;
+                        _speechPaused = false;
+                    }
+                }
+                RaiseChanged();
+            }
+            if (error is not null)
+            {
+                throw error;
+            }
+            return batch.Parts[^1].Provider;
+        }
+        finally
+        {
+            foreach (var reader in readers)
+            {
+                reader.Dispose();
+            }
+        }
+    }
+
+    private static ISampleProvider CreatePlaybackSampleProvider(WaveFileReader reader)
+    {
+        ISampleProvider provider = reader.ToSampleProvider();
+        provider = provider.WaveFormat.Channels switch
+        {
+            1 => provider,
+            2 => new StereoToMonoSampleProvider(provider)
+            {
+                LeftVolume = 0.5f,
+                RightVolume = 0.5f,
+            },
+            _ => throw new InvalidDataException("Die erzeugte Sprachausgabe besitzt ein nicht unterstütztes Kanalformat."),
+        };
+        if (provider.WaveFormat.SampleRate != 44_100)
+        {
+            provider = new WdlResamplingSampleProvider(provider, 44_100);
+        }
+        return provider;
     }
 
     internal static void ValidateAudibleWave(WaveFileReader reader)
@@ -604,6 +914,7 @@ public sealed partial class MicrophoneTranscriptionService(
         {
             try { _activeOutput?.Stop(); }
             catch (ObjectDisposedException) { }
+            _speechPaused = false;
         }
     }
 
@@ -697,35 +1008,17 @@ public sealed partial class MicrophoneTranscriptionService(
         return WhitespaceRegex().Replace(text, " ").Trim();
     }
 
-    private static IEnumerable<string> SplitSpeechText(string text)
-    {
-        const int maximum = 2_400;
-        var remaining = text;
-        while (remaining.Length > maximum)
-        {
-            var split = remaining.LastIndexOfAny(['.', '!', '?', ';', ':'], maximum - 1);
-            if (split < maximum / 2)
-            {
-                split = remaining.LastIndexOf(' ', maximum - 1);
-            }
-            if (split <= 0)
-            {
-                split = maximum;
-            }
-            else
-            {
-                split++;
-            }
-            yield return remaining[..split].Trim();
-            remaining = remaining[split..].TrimStart();
-        }
-        if (remaining.Length > 0)
-        {
-            yield return remaining;
-        }
-    }
-
     private void RaiseChanged() => Changed?.Invoke(this, Current);
+
+    private sealed record PreparedAudioPart(
+        int Index,
+        string Path,
+        string Provider);
+
+    private sealed record PreparedAudioBatch(
+        int Index,
+        string Id,
+        IReadOnlyList<PreparedAudioPart> Parts);
 
     private static void TryDelete(string path)
     {

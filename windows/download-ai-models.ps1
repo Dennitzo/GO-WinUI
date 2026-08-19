@@ -187,9 +187,12 @@ if (-not $SkipWorkerModels) {
     $whisperRoot = Join-Path $modelRoot 'faster-whisper-large-v3'
     $speakerRoot = Join-Path $modelRoot 'spkrec-ecapa-voxceleb'
     $ttsRoot = Join-Path $modelRoot 'piper\de_DE-kerstin-low'
+    $supertonicRoot = Join-Path $modelRoot 'supertonic-3'
     $zImageRoot = Join-Path $modelRoot 'z-image'
     New-Item -ItemType Directory -Path $zImageRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $ttsRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $supertonicRoot 'onnx') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $supertonicRoot 'voice_styles') -Force | Out-Null
 
     Invoke-CheckedCommand -FilePath $hf -Arguments @(
         'download', 'Systran/faster-whisper-large-v3',
@@ -227,6 +230,27 @@ if (-not $SkipWorkerModels) {
         -ExpectedLength 5952 `
         -Sha256 '370e4a87c1d3df1f1b2d251e75d750cf3f9d869563d5fbf7fa1ced557bfefa8d' `
         -StagingDirectory $downloadRoot
+    $supertonicRevision = '3cadd1ee6394adea1bd021217a0e650ede09a323'
+    $supertonicFiles = @(
+        @{ File = 'onnx/duration_predictor.onnx'; Length = 3700147; Sha256 = 'c3eb91414d5ff8a7a239b7fe9e34e7e2bf8a8140d8375ffb14718b1c639325db' },
+        @{ File = 'onnx/text_encoder.onnx'; Length = 36416150; Sha256 = 'c7befd5ea8c3119769e8a6c1486c4edc6a3bc8365c67621c881bbb774b9902ff' },
+        @{ File = 'onnx/vector_estimator.onnx'; Length = 256534781; Sha256 = '883ac868ea0275ef0e991524dc64f16b3c0376efd7c320af6b53f5b780d7c61c' },
+        @{ File = 'onnx/vocoder.onnx'; Length = 101424195; Sha256 = '085de76dd8e8d5836d6ca66826601f615939218f90e519f70ee8a36ed2a4c4ba' },
+        @{ File = 'onnx/tts.json'; Length = 8253; Sha256 = '42078d3aef1cd43ab43021f3c54f47d2d75ceb4e75f627f118890128b06a0d09' },
+        @{ File = 'onnx/unicode_indexer.json'; Length = 277676; Sha256 = '9bf7346e43883a81f8645c81224f786d43c5b57f3641f6e7671a7d6c493cb24f' },
+        @{ File = 'voice_styles/F5.json'; Length = 291479; Sha256 = '45966e73316415626cf41a7d1c6f3b4c70dbc1ba2bee5c1978ef0ce33244fc8d' },
+        @{ File = 'LICENSE'; Length = 15007; Sha256 = '0d944a9110fed9a9602d60e0423a272903e7bd21ab060490774efc77c2275e9f' }
+    )
+    foreach ($file in $supertonicFiles) {
+        Invoke-PinnedModelFileDownload `
+            -Repository 'Supertone/supertonic-3' `
+            -Revision $supertonicRevision `
+            -FileName $file.File `
+            -Destination (Join-Path $supertonicRoot $file.File) `
+            -ExpectedLength $file.Length `
+            -Sha256 $file.Sha256 `
+            -StagingDirectory $downloadRoot
+    }
     Invoke-CheckedCommand -FilePath $hf -Arguments @(
         'download', 'leejet/Z-Image-Turbo-GGUF', 'z_image_turbo-Q4_K.gguf',
         '--revision', 'c61c0e422dc8b541b7548cf33a4ef8302b0f8085',
