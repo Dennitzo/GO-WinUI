@@ -14,7 +14,3 @@
 :7084 {
   reverse_proxy image:8080
 }
-
-:7085 {
-  reverse_proxy video:8080
-}

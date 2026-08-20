@@ -5,11 +5,16 @@ namespace GoAi.Server.Core.Models;
 
 public sealed class GpuLeaseScheduler : IDisposable
 {
-    // General chat, short voice-command STT and live-caption translation may
-    // overlap. Heavy model profiles acquire all three slots exclusively.
+    // LM Studio workloads share one guarded lane. Heavy profiles such as the
+    // coding model acquire that entire lane. The resident speech stack runs in
+    // a separate, bounded lane so Whisper, ECAPA and Supertonic remain usable
+    // while the selected coding model owns LM Studio.
     private const int SharedCapacity = 3;
+    private const int SpeechCapacity = 3;
     private readonly SemaphoreSlim _slots = new(SharedCapacity, SharedCapacity);
     private readonly SemaphoreSlim _admissionGate = new(1, 1);
+    private readonly SemaphoreSlim _speechSlots = new(SpeechCapacity, SpeechCapacity);
+    private readonly SemaphoreSlim _speechAdmissionGate = new(1, 1);
     private readonly GoAiDatabase _database;
     private readonly ServerRuntimeState _runtime;
     private readonly object _activeGate = new();
@@ -52,6 +57,8 @@ public sealed class GpuLeaseScheduler : IDisposable
 
     public void Dispose()
     {
+        _speechAdmissionGate.Dispose();
+        _speechSlots.Dispose();
         _admissionGate.Dispose();
         _slots.Dispose();
     }
@@ -85,29 +92,36 @@ public sealed class GpuLeaseScheduler : IDisposable
         var leaseId = $"lease-{Guid.NewGuid():N}";
         await RecordAsync(leaseId, runId, workload, "queued", cancellationToken).ConfigureAwait(false);
         _ = Interlocked.Increment(ref _queueLength);
-        var requiredSlots = mode == GpuLeaseMode.Shared ? 1 : SharedCapacity;
+        var speechLane = mode == GpuLeaseMode.Speech;
+        var slots = speechLane ? _speechSlots : _slots;
+        var admissionGate = speechLane ? _speechAdmissionGate : _admissionGate;
+        var requiredSlots = mode switch
+        {
+            GpuLeaseMode.Shared or GpuLeaseMode.Speech => 1,
+            _ => SharedCapacity,
+        };
         var acquiredSlots = 0;
         try
         {
-            await _admissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await admissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 while (acquiredSlots < requiredSlots)
                 {
-                    await _slots.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    await slots.WaitAsync(cancellationToken).ConfigureAwait(false);
                     acquiredSlots++;
                 }
             }
             finally
             {
-                _admissionGate.Release();
+                admissionGate.Release();
             }
         }
         catch
         {
             if (acquiredSlots > 0)
             {
-                _slots.Release(acquiredSlots);
+                slots.Release(acquiredSlots);
             }
             _ = Interlocked.Decrement(ref _queueLength);
             await MarkAsync(leaseId, "cancelled", false, CancellationToken.None).ConfigureAwait(false);
@@ -127,10 +141,10 @@ public sealed class GpuLeaseScheduler : IDisposable
         }
         await MarkAsync(leaseId, "active", true, cancellationToken).ConfigureAwait(false);
         _runtime.WriteLog("Information", "gpu.lease.acquired", $"GPU-Lane für {workload} belegt ({mode}, {leaseId}).");
-        return new GpuLease(this, leaseId, requiredSlots);
+        return new GpuLease(this, leaseId, mode, requiredSlots);
     }
 
-    private async Task ReleaseAsync(string leaseId, int slotCount)
+    private async Task ReleaseAsync(string leaseId, GpuLeaseMode mode, int slotCount)
     {
         lock (_activeGate)
         {
@@ -147,7 +161,8 @@ public sealed class GpuLeaseScheduler : IDisposable
         }
         finally
         {
-            _slots.Release(slotCount);
+            var slots = mode == GpuLeaseMode.Speech ? _speechSlots : _slots;
+            slots.Release(slotCount);
         }
     }
 
@@ -192,11 +207,17 @@ public sealed class GpuLeaseScheduler : IDisposable
     public sealed class GpuLease : IAsyncDisposable
     {
         private GpuLeaseScheduler? _owner;
+        private readonly GpuLeaseMode _mode;
         private readonly int _slotCount;
 
-        internal GpuLease(GpuLeaseScheduler owner, string leaseId, int slotCount)
+        internal GpuLease(
+            GpuLeaseScheduler owner,
+            string leaseId,
+            GpuLeaseMode mode,
+            int slotCount)
         {
             _owner = owner;
+            _mode = mode;
             _slotCount = slotCount;
             LeaseId = leaseId;
         }
@@ -208,7 +229,7 @@ public sealed class GpuLeaseScheduler : IDisposable
             var owner = Interlocked.Exchange(ref _owner, null);
             if (owner is not null)
             {
-                await owner.ReleaseAsync(LeaseId, _slotCount).ConfigureAwait(false);
+                await owner.ReleaseAsync(LeaseId, _mode, _slotCount).ConfigureAwait(false);
             }
         }
     }
@@ -217,6 +238,7 @@ public sealed class GpuLeaseScheduler : IDisposable
 public enum GpuLeaseMode
 {
     Shared,
+    Speech,
     Exclusive,
 }
 

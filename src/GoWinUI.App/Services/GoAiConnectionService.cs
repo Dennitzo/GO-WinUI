@@ -12,6 +12,7 @@ using System.Text.Json;
 namespace GoWinUI.App.Services;
 
 public sealed record GoAiConnectionStatus(
+    bool IsReachable,
     bool IsReady,
     string Message,
     CapabilitySnapshot? Capabilities = null,
@@ -128,7 +129,7 @@ public sealed class GoAiConnectionService(
             }, cancellationToken).ConfigureAwait(false);
 
             var status = await TestAsync(cancellationToken).ConfigureAwait(false);
-            if (!status.IsReady)
+            if (!status.IsReachable)
             {
                 LocalProvisioningDeferred(logger, status.Message, null);
                 return true;
@@ -164,24 +165,56 @@ public sealed class GoAiConnectionService(
     {
         if (!settings.Current.IsAiConnectionEnabled)
         {
-            return new(false, "Offline · AI-Verbindungen sind deaktiviert.");
+            return new(false, false, "Offline · AI-Verbindungen sind deaktiviert.");
         }
 
         try
         {
             using var client = await CreateClientAsync(cancellationToken).ConfigureAwait(false);
-            var health = await client.GetReadyHealthAsync(cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(health.ProtocolVersion, settings.Current.GoAiProtocolVersion, StringComparison.Ordinal))
+            var live = await client.GetLiveHealthAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(live.ProtocolVersion, settings.Current.GoAiProtocolVersion, StringComparison.Ordinal))
             {
-                return new(false, $"Protokollabweichung: Server {health.ProtocolVersion}, GO {settings.Current.GoAiProtocolVersion}.", Health: health);
+                return new(
+                    false,
+                    false,
+                    $"Protokollabweichung: Server {live.ProtocolVersion}, GO {settings.Current.GoAiProtocolVersion}.",
+                    Health: live);
             }
+
+            // Capabilities requires authentication. A successful response is the
+            // authoritative signal that this client can actually use the server;
+            // global readiness may still be degraded by an optional model.
+            var capabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(capabilities.ProtocolVersion, settings.Current.GoAiProtocolVersion, StringComparison.Ordinal))
+            {
+                return new(
+                    false,
+                    false,
+                    $"Protokollabweichung: Server {capabilities.ProtocolVersion}, GO {settings.Current.GoAiProtocolVersion}.",
+                    capabilities,
+                    live);
+            }
+
+            var health = await client.GetReadyHealthAsync(cancellationToken).ConfigureAwait(false);
             if (!string.Equals(health.Status, "ready", StringComparison.OrdinalIgnoreCase))
             {
                 var detail = string.IsNullOrWhiteSpace(health.Reason) ? "Server nicht bereit" : health.Reason;
-                return new(false, detail, Health: health);
+                var repair = string.IsNullOrWhiteSpace(health.Repair)
+                    ? string.Empty
+                    : $" · Hinweis: {health.Repair}";
+                return new(
+                    true,
+                    false,
+                    $"Verbunden · Eingeschränkt · {detail}{repair}",
+                    capabilities,
+                    health);
             }
-            var capabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
-            return new(true, $"Verbunden · {capabilities.Models.Count} Modelle · {capabilities.ServerTools.Count} Servertools", capabilities, health);
+            return new(
+                true,
+                true,
+                $"Verbunden · {capabilities.Models.Count} Modelle · {capabilities.ServerTools.Count} Servertools",
+                capabilities,
+                health);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -190,7 +223,7 @@ public sealed class GoAiConnectionService(
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             ConnectionFailed(logger, exception.GetType().Name, exception);
-            return new(false, FriendlyConnectionError(exception));
+            return new(false, false, FriendlyConnectionError(exception));
         }
     }
 
@@ -293,6 +326,9 @@ public sealed class GoAiConnectionService(
     private static string FriendlyConnectionError(Exception exception) => exception switch
     {
         GoAiConnectionDisabledException => exception.Message,
+        GoAiApiException { StatusCode: System.Net.HttpStatusCode.Unauthorized } apiException =>
+            apiException.Problem?.Detail ?? "Der gespeicherte API-Schlüssel wurde vom GO AI Server abgelehnt.",
+        GoAiApiException apiException => apiException.Problem?.Detail ?? apiException.Message,
         HttpRequestException => "GO AI Server ist nicht erreichbar.",
         TaskCanceledException => "Die Verbindung zu GO AI Server hat das Zeitlimit überschritten.",
         _ => exception.Message,

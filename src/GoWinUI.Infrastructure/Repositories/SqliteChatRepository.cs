@@ -140,7 +140,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,code_diff
             FROM chat_messages WHERE session_id=$id ORDER BY created_at,id;
             """;
         command.Parameters.AddWithValue("$id", sessionId.ToString("D"));
@@ -228,6 +228,18 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             command.CommandText = "UPDATE chat_messages SET context_summary=$summary,updated_at=$now WHERE id=$id;";
             command.Parameters.AddWithValue("$id", messageId.ToString("D"));
             command.Parameters.AddWithValue("$summary", contextSummary.Trim());
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
+    public Task SetCodeDiffAsync(Guid messageId, string? codeDiff, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE chat_messages SET code_diff=$diff,updated_at=$now WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+            command.Parameters.AddWithValue("$diff", string.IsNullOrWhiteSpace(codeDiff) ? DBNull.Value : codeDiff);
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken);
@@ -363,72 +375,6 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         }, cancellationToken);
     }
 
-    public async Task<SpeechPreparation?> GetSpeechPreparationAsync(
-        string cacheKey,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(cacheKey);
-        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT cache_key,session_id,source_message_id,source_kind,source_hash,
-                   model_id,prepared_text,created_at,source_units_json,segments_json
-            FROM speech_preparations
-            WHERE cache_key=$key;
-            """;
-        command.Parameters.AddWithValue("$key", cacheKey);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
-            ? new SpeechPreparation(
-                reader.GetString(0),
-                reader.ReadGuid(1),
-                reader.IsDBNull(2) ? null : reader.ReadGuid(2),
-                reader.GetString(3),
-                reader.GetString(4),
-                reader.GetString(5),
-                reader.GetString(6),
-                reader.ReadDate(7),
-                reader.GetString(8),
-                reader.GetString(9))
-            : null;
-    }
-
-    public Task SaveSpeechPreparationAsync(
-        SpeechPreparation preparation,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(preparation);
-        return database.WriteAsync(async (connection, transaction, token) =>
-        {
-            await using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = """
-                INSERT INTO speech_preparations
-                    (cache_key,session_id,source_message_id,source_kind,source_hash,
-                     model_id,prepared_text,created_at,source_units_json,segments_json)
-                VALUES($key,$session,$message,$kind,$hash,$model,$text,$created,$units,$segments)
-                ON CONFLICT(cache_key) DO UPDATE SET
-                    prepared_text=excluded.prepared_text,
-                    source_units_json=excluded.source_units_json,
-                    segments_json=excluded.segments_json,
-                    created_at=excluded.created_at;
-                """;
-            command.Parameters.AddWithValue("$key", preparation.CacheKey);
-            command.Parameters.AddWithValue("$session", preparation.SessionId.ToString("D"));
-            command.Parameters.AddWithValue("$message", preparation.SourceMessageId is { } messageId
-                ? messageId.ToString("D")
-                : DBNull.Value);
-            command.Parameters.AddWithValue("$kind", preparation.SourceKind);
-            command.Parameters.AddWithValue("$hash", preparation.SourceHash);
-            command.Parameters.AddWithValue("$model", preparation.ModelId);
-            command.Parameters.AddWithValue("$text", preparation.PreparedText);
-            command.Parameters.AddWithValue("$created", preparation.CreatedAt.ToDb());
-            command.Parameters.AddWithValue("$units", preparation.SourceUnitsJson);
-            command.Parameters.AddWithValue("$segments", preparation.SegmentsJson);
-            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
-        }, cancellationToken);
-    }
-
     public Task<int> MarkStreamingMessagesInterruptedAsync(CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
         {
@@ -480,5 +426,6 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             reader.GetString(8), reader.GetString(9), reader.GetString(10),
             reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12)),
         reader.IsDBNull(13) ? null : reader.GetString(13),
-        reader.IsDBNull(14) ? MessageContentProfile.General : reader.ReadEnum<MessageContentProfile>(14));
+        reader.IsDBNull(14) ? MessageContentProfile.General : reader.ReadEnum<MessageContentProfile>(14),
+        reader.IsDBNull(15) ? null : reader.GetString(15));
 }

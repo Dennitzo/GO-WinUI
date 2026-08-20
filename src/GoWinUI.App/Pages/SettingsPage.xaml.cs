@@ -137,12 +137,16 @@ public sealed partial class SettingsPage : Page
     {
         await RunActionAsync(async () =>
         {
-            await ViewModel.RefreshModelsAsync();
+            var status = await ViewModel.RefreshModelsAsync();
             SynchronizeModelSelection();
             ApiKeyBox.Password = string.Empty;
             UpdateApiKeyState();
 
-            ShowStatus(ViewModel.ConnectionStatus, InfoBarSeverity.Success);
+            ShowStatus(
+                ViewModel.ConnectionStatus,
+                status?.IsReady == false
+                    ? InfoBarSeverity.Warning
+                    : InfoBarSeverity.Success);
         });
     }
 
@@ -335,6 +339,14 @@ public sealed partial class SettingsPage : Page
         }
     }
 
+    private void OnCodingModelChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_synchronizing && CodingModelBox.SelectedItem is LmModel model)
+        {
+            ViewModel.SelectedCodingModel = model.Id;
+        }
+    }
+
     private void OnThemeChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_synchronizing
@@ -459,6 +471,8 @@ public sealed partial class SettingsPage : Page
         try
         {
             ModelBox.SelectedItem = ViewModel.Models.FirstOrDefault(model => model.Id == ViewModel.SelectedModel);
+            CodingModelBox.SelectedItem = ViewModel.CodingModels.FirstOrDefault(model =>
+                model.Id == ViewModel.SelectedCodingModel);
         }
         finally
         {

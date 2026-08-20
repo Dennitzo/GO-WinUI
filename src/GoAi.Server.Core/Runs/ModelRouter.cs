@@ -26,7 +26,7 @@ public sealed class ModelRouter
         CancellationToken cancellationToken = default)
     {
         var selected = Select(request);
-        if (!string.Equals(selected.Role, "general", StringComparison.Ordinal) || _lmStudio is null)
+        if (_lmStudio is null)
         {
             return selected;
         }
@@ -39,7 +39,8 @@ public sealed class ModelRouter
         var model = status.Models.FirstOrDefault(candidate =>
             candidate.Downloaded
             && string.Equals(candidate.Id, selected.ModelId, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidOperationException($"The selected general model '{selected.ModelId}' is not available.");
+            ?? throw new InvalidOperationException(
+                $"The selected {selected.Role} model '{selected.ModelId}' is not available.");
         return selected with { ContextLength = Math.Max(2_048, model.ContextTokens) };
     }
 
@@ -52,7 +53,7 @@ public sealed class ModelRouter
 
         if (request.Mode == RunMode.Code)
         {
-            return new ModelSelection(_options.CodeModelId, "code", _options.CodeContextLength);
+            return SelectCode(request);
         }
 
         var codeAttachment = request.Messages
@@ -65,7 +66,7 @@ public sealed class ModelRouter
             .Content.FirstOrDefault(static part => !string.IsNullOrWhiteSpace(part.Text))?.Text;
         var explicitlyCode = latestText is not null && ContainsCodeIntent(latestText);
         return codeAttachment || (codeCapability && explicitlyCode)
-            ? new ModelSelection(_options.CodeModelId, "code", _options.CodeContextLength)
+            ? SelectCode(request)
             : SelectGeneral(request);
     }
 
@@ -75,6 +76,15 @@ public sealed class ModelRouter
             ? _options.GeneralModelId
             : request.PreferredGeneralModelId.Trim();
         return new ModelSelection(modelId, "general", _options.GeneralContextLength);
+    }
+
+    private ModelSelection SelectCode(RunRequest request)
+    {
+        var modelId = string.IsNullOrWhiteSpace(request.PreferredCodeModelId)
+            ? _options.CodeModelId
+            : request.PreferredCodeModelId.Trim();
+        var profile = CodingModelCatalog.Get(modelId);
+        return new ModelSelection(profile.Id, "code", profile.ContextLength);
     }
 
     private static bool ContainsCodeIntent(string text)

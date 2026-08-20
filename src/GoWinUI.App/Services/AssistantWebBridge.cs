@@ -29,10 +29,14 @@ public sealed class AssistantWebBridge : IDisposable
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
         "state.snapshot", "chat.started", "chat.delta", "chat.completed",
-        "chat.cancelled", "chat.failed", "session.changed", "workflow.snapshot",
+        "chat.cancelled", "chat.failed", "chat.codeDiff", "chat.codingTrace", "session.changed", "workflow.snapshot",
         "workflow.changed", "workflow.draft", "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
         "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
         "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady", "host.error",
+    };
+    private static readonly HashSet<string> ReadableBlockKinds = new(StringComparer.Ordinal)
+    {
+        "heading", "paragraph", "listItem", "tableRow", "quote", "math", "code",
     };
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
@@ -41,6 +45,10 @@ public sealed class AssistantWebBridge : IDisposable
     private readonly WebView2 _webView;
     private readonly DispatcherQueue _dispatcher;
     private readonly ILogger<AssistantWebBridge> _logger;
+    private CoreWebView2Environment? _environment;
+    private CoreWebView2ContextMenuItem? _readFromHereMenuItem;
+    private CoreWebView2ContextMenuItem? _readFromHereSeparator;
+    private ReadFromContextTarget? _activeReadFromContextTarget;
     private bool _initialized;
     private bool _disposed;
 
@@ -52,6 +60,10 @@ public sealed class AssistantWebBridge : IDisposable
     }
 
     public event EventHandler<WebBridgeMessageEventArgs>? MessageReceived;
+
+    public event EventHandler<ReadFromContextRequestedEventArgs>? ReadFromContextRequested;
+
+    public Func<ReadFromContextTarget, CancellationToken, Task<bool>>? ReadFromContextValidator { get; set; }
 
     internal static bool IsIncomingTypeAllowed(string type) => AllowedIncomingTypes.Contains(type);
 
@@ -88,6 +100,7 @@ public sealed class AssistantWebBridge : IDisposable
             AppLog.WebViewProfileFallback(_logger, exception);
             environment = await CoreWebView2Environment.CreateWithOptionsAsync(null, fallbackFolder, null);
         }
+        _environment = environment;
         await _webView.EnsureCoreWebView2Async(environment);
         var core = _webView.CoreWebView2;
         core.SetVirtualHostNameToFolderMapping(
@@ -102,7 +115,7 @@ public sealed class AssistantWebBridge : IDisposable
                 previewRoot,
                 CoreWebView2HostResourceAccessKind.Allow);
         }
-        core.Settings.AreDefaultContextMenusEnabled = false;
+        core.Settings.AreDefaultContextMenusEnabled = true;
         core.Settings.AreDevToolsEnabled = IsDebugBuild;
         core.Settings.AreBrowserAcceleratorKeysEnabled = false;
         core.Settings.AreHostObjectsAllowed = false;
@@ -114,6 +127,7 @@ public sealed class AssistantWebBridge : IDisposable
         core.NewWindowRequested += OnNewWindowRequested;
         core.PermissionRequested += OnPermissionRequested;
         core.ProcessFailed += OnProcessFailed;
+        core.ContextMenuRequested += OnContextMenuRequested;
         _initialized = true;
     }
 
@@ -206,7 +220,14 @@ public sealed class AssistantWebBridge : IDisposable
             core.NewWindowRequested -= OnNewWindowRequested;
             core.PermissionRequested -= OnPermissionRequested;
             core.ProcessFailed -= OnProcessFailed;
+            core.ContextMenuRequested -= OnContextMenuRequested;
         }
+        if (_readFromHereMenuItem is not null)
+        {
+            _readFromHereMenuItem.CustomItemSelected -= OnReadFromContextSelected;
+        }
+        _activeReadFromContextTarget = null;
+        ReadFromContextValidator = null;
     }
 
     private void PostOnUiThread(string json)
@@ -304,6 +325,83 @@ public sealed class AssistantWebBridge : IDisposable
             }
         }
     }
+
+    private async void OnContextMenuRequested(
+        CoreWebView2 sender,
+        CoreWebView2ContextMenuRequestedEventArgs args)
+    {
+        var deferral = args.GetDeferral();
+        args.Handled = true;
+        try
+        {
+            var json = await sender.ExecuteScriptAsync(
+                "globalThis.goGetReadFromContextTarget?.() ?? null");
+            var target = JsonSerializer.Deserialize<ReadFromContextTarget?>(json, SerializerOptions);
+            if (!IsValidReadFromContextTarget(target))
+            {
+                _activeReadFromContextTarget = null;
+                return;
+            }
+            if (ReadFromContextValidator is not { } validator
+                || !await validator(target!, CancellationToken.None))
+            {
+                _activeReadFromContextTarget = null;
+                return;
+            }
+
+            EnsureReadFromContextMenuItems();
+            _activeReadFromContextTarget = target;
+            args.MenuItems.Insert(0, _readFromHereSeparator!);
+            args.MenuItems.Insert(0, _readFromHereMenuItem!);
+            args.Handled = false;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            _activeReadFromContextTarget = null;
+            AppLog.ReadFromContextMenuFailed(_logger, exception);
+        }
+        finally
+        {
+            deferral.Complete();
+        }
+    }
+
+    private void EnsureReadFromContextMenuItems()
+    {
+        if (_readFromHereMenuItem is not null || _environment is null)
+        {
+            return;
+        }
+
+        _readFromHereMenuItem = _environment.CreateContextMenuItem(
+            "Ab hier vorlesen",
+            null,
+            CoreWebView2ContextMenuItemKind.Command);
+        _readFromHereMenuItem.CustomItemSelected += OnReadFromContextSelected;
+        _readFromHereSeparator = _environment.CreateContextMenuItem(
+            string.Empty,
+            null,
+            CoreWebView2ContextMenuItemKind.Separator);
+    }
+
+    private void OnReadFromContextSelected(object? sender, object args)
+    {
+        if (_activeReadFromContextTarget is not { } target)
+        {
+            return;
+        }
+
+        _activeReadFromContextTarget = null;
+        ReadFromContextRequested?.Invoke(this, new(target));
+    }
+
+    internal static bool IsValidReadFromContextTarget(ReadFromContextTarget? target) =>
+        target is not null
+        && target.SessionId != Guid.Empty
+        && target.MessageId != Guid.Empty
+        && target.MessageUpdatedAt != default
+        && ReadableBlockKinds.Contains(target.Kind)
+        && target.BlockIndex >= 0;
 
     private static bool IsTrustedOrigin(string source)
     {

@@ -12,6 +12,22 @@ public sealed class LiveCaptionService : BackgroundService
 {
     private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(2);
     private const int MaximumTranscriptCharacters = 500_000;
+    private const double MinimumConfidentGermanProbability = 0.80;
+    private static readonly HashSet<string> EnglishLanguageMarkers = new(
+        [
+            "a", "about", "and", "are", "as", "at", "be", "but", "can", "do", "does",
+            "for", "from", "has", "have", "how", "in", "is", "it", "not", "of", "on",
+            "that", "the", "this", "to", "was", "we", "were", "what", "where", "why",
+            "will", "with", "you",
+        ],
+        StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> GermanLanguageMarkers = new(
+        [
+            "aber", "als", "auf", "aus", "bei", "das", "dass", "der", "die", "dies", "ein",
+            "eine", "es", "für", "haben", "hat", "in", "ist", "kann", "mit", "nicht", "sie",
+            "sind", "über", "und", "von", "wir", "wird", "zu",
+        ],
+        StringComparer.OrdinalIgnoreCase);
     private readonly WorkerOrchestrator _workers;
     private readonly ServerRuntimeState _runtime;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
@@ -201,15 +217,19 @@ public sealed class LiveCaptionService : BackgroundService
             // Bereits als Deutsch erkannte Abschnitte bleiben unverändert. Dadurch
             // entstehen weder ein unnötiger General-AI-Lauf noch Verfälschungen bei
             // deutschen Sätzen mit üblichen englischen Fachbegriffen (Denglisch).
-            if (displaySegments.Count > 0 && RequiresGermanTranslation(transcription.Language))
+            if (displaySegments.Count > 0 && RequiresGermanTranslation(
+                    transcription.Language,
+                    transcription.LanguageProbability,
+                    uniqueRawText))
             {
                 try
                 {
-                    displaySegments = await _workers.TranslateCaptionSegmentsAsync(
+                    var translation = await _workers.TranslateCaptionSegmentsAsync(
                         displaySegments,
                         session.SessionId,
                         cancellationToken).ConfigureAwait(false);
-                    provider += " + gpt-oss-20b → Deutsch";
+                    displaySegments = translation.Segments;
+                    provider += $" + {translation.ModelId} → Deutsch";
                 }
                 catch (Exception exception) when (exception is HttpRequestException or JsonException)
                 {
@@ -445,7 +465,10 @@ public sealed class LiveCaptionService : BackgroundService
         return session;
     }
 
-    internal static bool RequiresGermanTranslation(string? language)
+    internal static bool RequiresGermanTranslation(
+        string? language,
+        double languageProbability,
+        string? transcript)
     {
         if (string.IsNullOrWhiteSpace(language))
         {
@@ -453,8 +476,29 @@ public sealed class LiveCaptionService : BackgroundService
         }
 
         var normalized = language.Trim().Replace('_', '-').ToLowerInvariant();
-        return normalized is not "de" and not "deutsch" and not "german"
-            && !normalized.StartsWith("de-", StringComparison.Ordinal);
+        var reportsGerman = normalized is "de" or "deutsch" or "german"
+            || normalized.StartsWith("de-", StringComparison.Ordinal);
+        if (!reportsGerman
+            || !double.IsFinite(languageProbability)
+            || languageProbability < MinimumConfidentGermanProbability)
+        {
+            return true;
+        }
+
+        // Short Whisper windows can inherit a stale German language decision
+        // from the preceding overlap. This conservative lexical guard catches
+        // coherent English passages while leaving German with a few English
+        // technical terms untouched.
+        var words = (transcript ?? string.Empty)
+            .Split(
+                [' ', '\t', '\r', '\n'],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizeWord)
+            .Where(static word => word.Length > 0)
+            .ToArray();
+        var englishMarkers = words.Count(EnglishLanguageMarkers.Contains);
+        var germanMarkers = words.Count(GermanLanguageMarkers.Contains);
+        return englishMarkers >= 4 && englishMarkers >= Math.Max(4, germanMarkers * 2);
     }
 
     private static void ValidateRequest(LiveCaptionSessionRequest request)

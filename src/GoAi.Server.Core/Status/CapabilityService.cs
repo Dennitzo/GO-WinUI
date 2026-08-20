@@ -18,7 +18,8 @@ public sealed class CapabilityService
         typeof(CapabilityService).Assembly.GetName().Version?.ToString() ?? "1.0.0",
         [
             new ModelCapability(_options.GeneralModelId, "general", _options.GeneralContextLength, true, false, false),
-            new ModelCapability(_options.CodeModelId, "code", _options.CodeContextLength, true, false, false),
+            .. CodingModelCatalog.Models.Select(static profile =>
+                new ModelCapability(profile.Id, "code", profile.ContextLength, true, false, false)),
             new ModelCapability(_options.VisionModelId, "vision", 65536, true, true, false),
             new ModelCapability(_options.EmbeddingModelId, "embedding", 8192, false, false, false),
         ],
@@ -35,6 +36,7 @@ public sealed class CapabilityService
             ClientToolNames.FileSystemReadMany,
             ClientToolNames.FileSystemSearch,
             ClientToolNames.FileSystemWriteText,
+            ClientToolNames.FileSystemReplaceText,
             ClientToolNames.FileSystemMove,
             ClientToolNames.FileSystemProposePatch,
             ClientToolNames.FileSystemProposeCreate,

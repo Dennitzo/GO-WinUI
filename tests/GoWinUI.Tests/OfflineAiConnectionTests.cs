@@ -4,11 +4,53 @@ using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 
 namespace GoWinUI.Tests;
 
 public sealed class OfflineAiConnectionTests
 {
+    [Fact]
+    public async Task MissingOptionalCodingModelIsReportedAsReachableButDegraded()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = ServeProbeResponsesAsync(listener,
+        [
+            (200, "OK", """
+                {"status":"live","protocolVersion":"1.0","timestamp":"2026-08-20T07:29:18Z"}
+                """),
+            (200, "OK", """
+                {"protocolVersion":"1.0","serverVersion":"1.0","models":[],"serverTools":[],"clientTools":[],"uploadLimits":{},"mediaTypes":[],"supportsSseResume":true,"uploadChunkSize":8388608}
+                """),
+            (503, "Service Unavailable", """
+                {"status":"notReady","protocolVersion":"1.0","timestamp":"2026-08-20T07:29:18Z","reason":"Erforderliche Modelle fehlen: qwen3-coder-next","repair":"Das Coding-Modell vollständig herunterladen."}
+                """),
+        ]);
+        var store = new RecordingSettingsStore(new AppSettings
+        {
+            IsAiConnectionEnabled = true,
+            GoAiServerUrl = $"http://127.0.0.1:{port}",
+        });
+        using var settings = new SettingsCoordinator(store);
+        await settings.InitializeAsync();
+        var secrets = new RecordingSecretStore("test-api-key");
+        using var connection = new GoAiConnectionService(
+            settings,
+            secrets,
+            NullLogger<GoAiConnectionService>.Instance);
+
+        var status = await connection.TestAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await server.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(status.IsReachable);
+        Assert.False(status.IsReady);
+        Assert.Contains("Eingeschränkt", status.Message, StringComparison.Ordinal);
+        Assert.Contains("qwen3-coder-next", status.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("nicht erreichbar", status.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task OfflineOperationsReturnBeforeReadingTheApiKey()
     {
@@ -101,7 +143,39 @@ public sealed class OfflineAiConnectionTests
 
         var restored = await store.LoadAsync();
         Assert.True(restored.IsAiConnectionEnabled);
-        Assert.Equal(6, restored.Version);
+        Assert.Equal(9, restored.Version);
+    }
+
+    private static async Task ServeProbeResponsesAsync(
+        TcpListener listener,
+        IReadOnlyList<(int StatusCode, string Reason, string Body)> responses)
+    {
+        foreach (var response in responses)
+        {
+            using var accepted = await listener.AcceptTcpClientAsync();
+            await using var stream = accepted.GetStream();
+            using var reader = new StreamReader(
+                stream,
+                Encoding.ASCII,
+                detectEncodingFromByteOrderMarks: false,
+                leaveOpen: true);
+            string? line;
+            do
+            {
+                line = await reader.ReadLineAsync();
+            }
+            while (!string.IsNullOrEmpty(line));
+
+            var body = Encoding.UTF8.GetBytes(response.Body);
+            var header = Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 {response.StatusCode} {response.Reason}\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                $"Content-Length: {body.Length}\r\n" +
+                "Connection: close\r\n\r\n");
+            await stream.WriteAsync(header);
+            await stream.WriteAsync(body);
+            await stream.FlushAsync();
+        }
     }
 
     private sealed class RecordingSettingsStore(AppSettings current) : ISettingsStore

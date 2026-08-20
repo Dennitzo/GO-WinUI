@@ -17,9 +17,7 @@ param(
 
     [string] $AudioFixture,
 
-    [string] $VideoFixture,
-
-    [switch] $SkipWindowsTtsFallback
+    [string] $VideoFixture
 
 )
 
@@ -178,7 +176,6 @@ $previousApiKey = $env:GO_AI_API_KEY
 $previousServerUrl = $env:GO_AI_SERVER_URL
 $previousRootCertificate = $env:GO_AI_ROOT_CERTIFICATE
 $previousCertificateRevocationCheck = [Net.ServicePointManager]::CheckCertificateRevocationList
-$speechStopped = $false
 try {
     # Caddy's private CA has no public CRL endpoint. Chain trust, validity, IP-SAN
     # and the pinned CA are still validated; only an unavailable online revocation
@@ -216,31 +213,7 @@ try {
         throw "GO AI live smoke client failed with exit code $LASTEXITCODE."
     }
 
-    if (-not $SkipWindowsTtsFallback) {
-        $docker = Resolve-GoDockerCommand
-        & $docker stop go-ai-speech | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Unable to stop the speech worker for the explicit Windows TTS fallback smoke.'
-        }
-        $speechStopped = $true
-        $fallback = Invoke-RestMethod `
-            -Method Post `
-            -Uri 'http://127.0.0.1:7080/v1/audio/speech' `
-            -Headers @{ 'X-GO-AI-Key' = $apiKey } `
-            -ContentType 'application/json' `
-            -Body '{"text":"Sichtbarer Windows TTS Fallback Test.","voice":"de-DE-Hedda","format":"wav","speed":1.0}' `
-            -TimeoutSec 60
-        if ($fallback.isFallback -ne $true -or $fallback.provider -notmatch 'Windows') {
-            throw 'The explicit Windows TTS fallback was not reported by the public API.'
-        }
-        & $docker start go-ai-speech | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Unable to restart the speech worker after the fallback smoke.'
-        }
-        $speechStopped = $false
-    }
-
-    $internalPorts = @(7080, 7081, 7082, 7083, 7084, 7085)
+    $internalPorts = @(7080, 7081, 7082, 7083, 7084, 7085, 7086)
     $unsafeListeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {
         $_.LocalPort -in $internalPorts -and $_.LocalAddress -notin @('127.0.0.1', '::1')
     })
@@ -254,10 +227,6 @@ try {
     }
 }
 finally {
-    if ($speechStopped) {
-        $docker = Resolve-GoDockerCommand
-        & $docker start go-ai-speech | Out-Null
-    }
     $env:GO_AI_API_KEY = $previousApiKey
     $env:GO_AI_SERVER_URL = $previousServerUrl
     $env:GO_AI_ROOT_CERTIFICATE = $previousRootCertificate

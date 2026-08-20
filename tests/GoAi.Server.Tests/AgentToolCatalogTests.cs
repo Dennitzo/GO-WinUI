@@ -15,6 +15,7 @@ public sealed class AgentToolCatalogTests
 
         Assert.DoesNotContain(withoutClient, static tool => !tool.ServerSide);
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.FileSystemReadText);
+        Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.FileSystemReplaceText);
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.ProcessRunPreset);
         Assert.DoesNotContain(withCode, static tool => tool.Name == ClientToolNames.BricsCadMove);
 
@@ -23,6 +24,19 @@ public sealed class AgentToolCatalogTests
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsSearch);
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsReadPages);
         Assert.DoesNotContain(withDocuments, static tool => tool.Name == ClientToolNames.FileSystemWriteText);
+    }
+
+    [Fact]
+    public void ReplaceTextRequiresExactBlocksAndRejectsUnknownProperties()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
+        var replace = catalog.Resolve(ClientToolNames.FileSystemReplaceText, tools);
+        using var valid = JsonDocument.Parse("""{"path":"ViewModels/ShellViewModel.cs","oldText":"public string Name","newText":"public string DisplayName","replaceAll":false}""");
+        using var invalid = JsonDocument.Parse("""{"path":"ViewModels/ShellViewModel.cs","oldText":"","newText":"x","shell":true}""");
+
+        catalog.Validate(replace, valid.RootElement);
+        Assert.Throws<ArgumentException>(() => catalog.Validate(replace, invalid.RootElement));
     }
 
     [Fact]
@@ -35,6 +49,22 @@ public sealed class AgentToolCatalogTests
 
         Assert.Throws<ArgumentException>(() => catalog.Validate(search, arguments.RootElement));
         Assert.Throws<InvalidOperationException>(() => catalog.Resolve("shell.execute", tools));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(".")]
+    public void WorkspaceRootCanBeAddressedConsistently(string path)
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
+        var list = catalog.Resolve(ClientToolNames.FileSystemList, tools);
+        var search = catalog.Resolve(ClientToolNames.FileSystemSearch, tools);
+        using var listArguments = JsonDocument.Parse(JsonSerializer.Serialize(new { path }));
+        using var searchArguments = JsonDocument.Parse(JsonSerializer.Serialize(new { path, query = "test" }));
+
+        catalog.Validate(list, listArguments.RootElement);
+        catalog.Validate(search, searchArguments.RootElement);
     }
 
     [Fact]

@@ -45,17 +45,35 @@ public sealed class GeneralModelSelectionService : IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            var requestedModelId = modelId.Trim();
+            var modelChanged = !string.Equals(
+                _options.GeneralModelId,
+                requestedModelId,
+                StringComparison.OrdinalIgnoreCase);
             var status = await _lmStudio.GetStatusAsync(cancellationToken).ConfigureAwait(false);
             var model = status.Models.FirstOrDefault(candidate =>
                 candidate.Downloaded
                 && candidate.Role == "general"
-                && string.Equals(candidate.Id, modelId.Trim(), StringComparison.OrdinalIgnoreCase))
+                && string.Equals(candidate.Id, requestedModelId, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException($"Das LM-Studio-Textmodell '{modelId}' ist nicht verfügbar.");
             _options.GeneralModelId = model.Id;
             _options.GeneralContextLength = Math.Max(2_048, model.ContextTokens);
-            await _lmStudio.UnloadModelsExceptAsync([model.Id], cancellationToken).ConfigureAwait(false);
-            _ = await _lmStudio.EnsureModelLoadedAsync(model.Id, _options.GeneralContextLength, cancellationToken).ConfigureAwait(false);
-            var selection = new GeneralModelSelection(model.Id, _options.GeneralContextLength, true);
+            var codingModelLoaded = status.Models.Any(candidate =>
+                candidate.Loaded
+                && string.Equals(candidate.Role, "code", StringComparison.OrdinalIgnoreCase));
+            var loadGeneralNow = modelChanged || !codingModelLoaded;
+            if (loadGeneralNow)
+            {
+                await _lmStudio.UnloadModelsExceptAsync([model.Id], cancellationToken).ConfigureAwait(false);
+                _ = await _lmStudio.EnsureModelLoadedAsync(
+                    model.Id,
+                    _options.GeneralContextLength,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            var selection = new GeneralModelSelection(
+                model.Id,
+                _options.GeneralContextLength,
+                loadGeneralNow || model.Loaded);
             Directory.CreateDirectory(Path.GetDirectoryName(SelectionPath)!);
             var temporary = SelectionPath + ".tmp";
             await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(selection), cancellationToken).ConfigureAwait(false);

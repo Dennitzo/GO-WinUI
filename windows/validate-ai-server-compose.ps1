@@ -11,7 +11,7 @@ $validationRoot = Reset-GoArtifactDirectory -Path (Resolve-GoRepositoryPath -Rel
 $directories = @(
     'Artifacts\worker', 'Cache\searxng',
     'Caddy\config', 'Caddy\config\caddy', 'Caddy\data', 'Caddy\data\caddy', 'Config\searxng',
-    'Models', 'Secrets', 'Uploads', 'Voices'
+    'Models', 'Secrets', 'Uploads'
 )
 foreach ($relative in $directories) {
     New-Item -ItemType Directory -Path (Join-Path $validationRoot $relative) -Force | Out-Null

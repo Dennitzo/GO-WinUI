@@ -261,7 +261,7 @@ public sealed class RunRepository
         return queued;
     }
 
-    public async Task SaveClientToolResultAsync(
+    public async Task<bool> SaveClientToolResultAsync(
         string runId,
         ClientToolResult result,
         CancellationToken cancellationToken = default)
@@ -287,14 +287,18 @@ public sealed class RunRepository
         command.CommandText = """
             INSERT INTO client_tool_results(proposal_id, run_id, result_json, created_at)
             VALUES($proposal, $run, $result, $created)
-            ON CONFLICT(proposal_id) DO UPDATE SET result_json = excluded.result_json;
+            ON CONFLICT(proposal_id) DO NOTHING;
             """;
         command.Parameters.AddWithValue("$proposal", result.ProposalId);
         command.Parameters.AddWithValue("$run", runId);
         command.Parameters.AddWithValue("$result", JsonSerializer.Serialize(result, _database.JsonOptions));
         command.Parameters.AddWithValue("$created", GoAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
-        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        _notifier.Notify(runId);
+        var inserted = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        if (inserted)
+        {
+            _notifier.Notify(runId);
+        }
+        return inserted;
     }
 
     public async Task SaveToolProposalAsync(ToolProposal proposal, CancellationToken cancellationToken = default)

@@ -2,6 +2,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using GoWinUI.App.Services;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
+using GoAi.Contracts;
 using System.Collections.ObjectModel;
 using System.Globalization;
 
@@ -26,6 +27,7 @@ public sealed partial class SettingsViewModel(
     private readonly List<(Guid Id, long Revision)> _deletedTriggers = [];
 
     public ObservableCollection<LmModel> Models { get; } = [];
+    public ObservableCollection<LmModel> CodingModels { get; } = [];
     public ObservableCollection<PromptTriggerEditorItem> PromptTriggers { get; } = [];
     public IReadOnlyList<PromptTriggerActionOption> TriggerActions { get; } =
         PromptTriggerEditorItem.AvailableActions;
@@ -65,6 +67,9 @@ public sealed partial class SettingsViewModel(
     public partial string? SelectedModel { get; set; }
 
     [ObservableProperty]
+    public partial string SelectedCodingModel { get; set; } = AppSettings.DefaultSelectedCodingModel;
+
+    [ObservableProperty]
     public partial string ReasoningEffort { get; set; } = "medium";
 
     [ObservableProperty]
@@ -97,6 +102,9 @@ public sealed partial class SettingsViewModel(
     public partial string ConnectionStatus { get; set; } = "Nicht geprüft";
 
     [ObservableProperty]
+    public partial bool IsServerReady { get; set; }
+
+    [ObservableProperty]
     public partial bool IsBusy { get; set; }
 
     public void Initialize()
@@ -107,11 +115,13 @@ public sealed partial class SettingsViewModel(
         LocalToolWorkspacePath = current.LocalToolWorkspacePath ?? string.Empty;
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel;
+        SelectedCodingModel = current.SelectedCodingModel;
         ReasoningEffort = current.ReasoningEffort;
         Theme = current.Theme;
         AccentColor = current.AccentColor;
         BackgroundColor = current.BackgroundColor;
         Language = current.Language;
+        IsServerReady = shell.IsAiServerReady;
         ConnectionStatus = IsAiConnectionEnabled
             ? "Nicht geprüft"
             : "Offline · keine Serververbindungen";
@@ -152,6 +162,8 @@ public sealed partial class SettingsViewModel(
         }
 
         Models.Clear();
+        CodingModels.Clear();
+        IsServerReady = false;
         ConnectionStatus = "Offline · keine Serververbindungen";
     }
 
@@ -182,6 +194,9 @@ public sealed partial class SettingsViewModel(
             SelectedModel = string.IsNullOrWhiteSpace(SelectedModel)
                 ? AppSettings.DefaultSelectedModel
                 : SelectedModel.Trim(),
+            SelectedCodingModel = string.IsNullOrWhiteSpace(SelectedCodingModel)
+                ? AppSettings.DefaultSelectedCodingModel
+                : SelectedCodingModel.Trim(),
             ReasoningEffort = ReasoningEffort,
             Theme = Theme,
             AccentColor = AccentColor,
@@ -193,6 +208,7 @@ public sealed partial class SettingsViewModel(
         {
             using var client = await goAi.CreateClientAsync(cancellationToken);
             _ = await client.SelectGeneralModelAsync(SelectedModel, cancellationToken);
+            _ = await client.SelectCodingModelAsync(SelectedCodingModel, cancellationToken);
         }
         await SaveTriggersAsync(cancellationToken);
         App.Current.ApplyTheme(Theme);
@@ -200,29 +216,33 @@ public sealed partial class SettingsViewModel(
         App.Current.ApplyBackgroundColor(BackgroundColor);
         if (!IsAiConnectionEnabled)
         {
+            IsServerReady = false;
             ConnectionStatus = "Offline · keine Serververbindungen";
             return null;
         }
 
         var status = await goAi.TestAsync(cancellationToken);
         ConnectionStatus = status.Message;
-        shell.IsAiAvailable = status.IsReady;
+        IsServerReady = status.IsReady;
+        shell.ApplyAiConnectionState(status.IsReachable, status.IsReady);
         return status;
     }
 
-    public async Task RefreshModelsAsync(CancellationToken cancellationToken = default)
+    public async Task<GoAiConnectionStatus?> RefreshModelsAsync(CancellationToken cancellationToken = default)
     {
+        GoAiConnectionStatus? status = null;
         IsBusy = true;
         try
         {
-            var status = await SaveAsync(cancellationToken);
+            status = await SaveAsync(cancellationToken);
             if (status is null)
             {
                 Models.Clear();
-                return;
+                CodingModels.Clear();
+                return null;
             }
             IReadOnlyList<LmModel> items;
-            if (!status.IsReady)
+            if (!status.IsReachable)
             {
                 throw new InvalidOperationException(status.Message);
             }
@@ -230,7 +250,21 @@ public sealed partial class SettingsViewModel(
             var modelStatus = await client.GetModelStatusAsync(cancellationToken);
             items = modelStatus.Models
                 .Where(model => model.Downloaded && model.Role == "general")
-                .Select(model => new LmModel(model.Id, string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.Role, model.ContextTokens), model.ContextTokens))
+                .Select(model => new LmModel(
+                    model.Id,
+                    string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.DisplayName ?? model.Id, model.ContextTokens),
+                    model.ContextTokens))
+                .ToArray();
+            var codingItems = modelStatus.Models
+                .Where(model => model.Downloaded && model.Role == "code")
+                .OrderByDescending(model => string.Equals(
+                    model.Id,
+                    AppSettings.DefaultSelectedCodingModel,
+                    StringComparison.OrdinalIgnoreCase))
+                .Select(model => new LmModel(
+                    model.Id,
+                    string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.DisplayName ?? model.Id, model.ContextTokens),
+                    model.ContextTokens))
                 .ToArray();
             ConnectionStatus = status.Message;
 
@@ -239,12 +273,30 @@ public sealed partial class SettingsViewModel(
             {
                 Models.Add(item);
             }
-            shell.IsAiAvailable = true;
+            CodingModels.Clear();
+            foreach (var item in codingItems)
+            {
+                CodingModels.Add(item);
+            }
+            IsServerReady = status.IsReady;
+            shell.ApplyAiConnectionState(true, status.IsReady);
+            return status;
         }
-        catch
+        catch (Exception exception) when (exception is not OutOfMemoryException)
         {
-            ConnectionStatus = "GO AI Server nicht erreichbar";
-            shell.IsAiAvailable = false;
+            if (status?.IsReachable == true)
+            {
+                ConnectionStatus = $"Verbunden · Modellstatus nicht verfügbar · {exception.Message}";
+                shell.ApplyAiConnectionState(true, status.IsReady);
+            }
+            else
+            {
+                ConnectionStatus = string.IsNullOrWhiteSpace(exception.Message)
+                    ? "GO AI Server nicht erreichbar"
+                    : exception.Message;
+                IsServerReady = false;
+                shell.ApplyAiConnectionState(false, false);
+            }
             throw;
         }
         finally

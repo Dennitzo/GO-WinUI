@@ -15,7 +15,10 @@ public sealed class LiveCaptionServiceTests
     [InlineData("German")]
     public void GermanCaptionsBypassGeneralAiTranslation(string language)
     {
-        Assert.False(LiveCaptionService.RequiresGermanTranslation(language));
+        Assert.False(LiveCaptionService.RequiresGermanTranslation(
+            language,
+            0.95,
+            "Die Lüftungsanlage ist aktiv und der Volumenstrom bleibt stabil."));
     }
 
     [Theory]
@@ -25,7 +28,37 @@ public sealed class LiveCaptionServiceTests
     [InlineData(null)]
     public void ForeignOrUnknownCaptionsStillTranslateToGerman(string? language)
     {
-        Assert.True(LiveCaptionService.RequiresGermanTranslation(language));
+        Assert.True(LiveCaptionService.RequiresGermanTranslation(
+            language,
+            0.95,
+            "Today we discuss the largest questions about the world."));
+    }
+
+    [Fact]
+    public void UncertainGermanDetectionStillUsesGeneralAiTranslation()
+    {
+        Assert.True(LiveCaptionService.RequiresGermanTranslation(
+            "de",
+            0.62,
+            "The current window is not reliably German."));
+    }
+
+    [Fact]
+    public void ClearlyEnglishTextOverridesAStaleGermanLanguageDecision()
+    {
+        Assert.True(LiveCaptionService.RequiresGermanTranslation(
+            "de",
+            0.96,
+            "Well today we are going to answer the biggest questions about the world and how it works."));
+    }
+
+    [Fact]
+    public void GermanWithEnglishTechnicalTermsDoesNotRunThroughTranslation()
+    {
+        Assert.False(LiveCaptionService.RequiresGermanTranslation(
+            "de",
+            0.96,
+            "Die Anlage nutzt einen Cloud Service und das aktuelle Building Information Model."));
     }
 
     [Fact]

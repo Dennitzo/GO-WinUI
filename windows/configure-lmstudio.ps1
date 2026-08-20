@@ -117,7 +117,7 @@ if ($null -eq $settings.PSObject.Properties['developer']) {
     Set-JsonProperty $settings 'developer' ([PSCustomObject]@{})
 }
 # gpt-oss-20b remains resident while the Speech worker handles voice control,
-# live captions or translation. Laguna and other heavy profiles are still
+# live captions or translation. Qwen3-Coder-Next and other heavy profiles are still
 # switched explicitly and exclusively by the gateway scheduler.
 Set-JsonProperty $settings.developer 'unloadPreviousJITModelOnLoad' $false
 Set-JsonProperty $settings.developer 'runtimeLogVerbosityLevel' 1
@@ -173,8 +173,8 @@ if ($lanListeners.Count -eq 0) {
 if (-not $SkipEstimates) {
     & $lms.Source load 'openai/gpt-oss-20b' --gpu max --context-length 131072 --parallel 1 --ttl $TtlSeconds --estimate-only -y
     if ($LASTEXITCODE -ne 0) { throw 'gpt-oss-20b load estimate failed.' }
-    & $lms.Source load 'poolside/laguna-s-2.1' --gpu max --context-length 262144 --parallel 1 --ttl $TtlSeconds --estimate-only -y
-    if ($LASTEXITCODE -ne 0) { throw 'Laguna-S-2.1 load estimate failed.' }
+    & $lms.Source load 'qwen3-coder-next' --gpu max --context-length 262144 --parallel 1 --ttl $TtlSeconds --estimate-only -y
+    if ($LASTEXITCODE -ne 0) { throw 'Qwen3-Coder-Next Q6_K load estimate failed.' }
 }
 
 $authenticationEnabled = $false

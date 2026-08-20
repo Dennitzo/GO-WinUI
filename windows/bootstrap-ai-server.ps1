@@ -46,7 +46,7 @@ if ($dockerSettings.AutoStart -ne $true) {
 $directories = @(
     'Artifacts', 'Artifacts\worker', 'Cache\searxng',
     'Caddy\config', 'Caddy\config\caddy', 'Caddy\data', 'Caddy\data\caddy',
-    'Config', 'Config\searxng', 'Data', 'Logs', 'Models', 'Secrets', 'Uploads', 'Voices'
+    'Config', 'Config\searxng', 'Data', 'Logs', 'Models', 'Secrets', 'Uploads'
 )
 foreach ($relative in $directories) {
     New-Item -ItemType Directory -Path (Join-Path $DataRoot $relative) -Force | Out-Null
@@ -55,27 +55,6 @@ foreach ($worker in @('speech', 'media', 'image', 'video')) {
     $keyPath = Join-Path $DataRoot ("Secrets\{0}-worker.key" -f $worker)
     if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
         New-GoRandomSecret | Set-Content -LiteralPath $keyPath -Encoding ascii -NoNewline
-    }
-}
-
-$referenceVoice = Join-Path $DataRoot 'Voices\hedda-reference.wav'
-if (-not (Test-Path -LiteralPath $referenceVoice -PathType Leaf)) {
-    Add-Type -AssemblyName System.Speech
-    $synthesizer = New-Object System.Speech.Synthesis.SpeechSynthesizer
-    try {
-        $germanVoice = $synthesizer.GetInstalledVoices() |
-            Where-Object { $_.VoiceInfo.Culture.Name -eq 'de-DE' } |
-            Select-Object -First 1
-        if ($null -eq $germanVoice) {
-            throw 'No installed German Windows speech voice was found for the TTS reference.'
-        }
-
-        $synthesizer.SelectVoice($germanVoice.VoiceInfo.Name)
-        $synthesizer.SetOutputToWaveFile($referenceVoice)
-        $synthesizer.Speak('Willkommen beim GO AI Server. Ich unterstütze die technische Gebäudeausrüstung klar und zuverlässig.')
-    }
-    finally {
-        $synthesizer.Dispose()
     }
 }
 

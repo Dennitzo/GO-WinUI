@@ -113,7 +113,7 @@ async Task<object> RunLiveSmokeAsync()
         ["filesystem", "code"],
         respondToClientTools: true);
     EnsureToolEvent(code, ClientToolNames.FileSystemReadText, clientSide: true);
-    EnsureCompletedWithModel(code, "laguna-s-2.1");
+    EnsureCompletedWithModel(code, "ud");
 
     var embedding = await CreateAndCompleteRunAsync(
         RunMode.General,
@@ -169,7 +169,8 @@ async Task<object> RunLiveSmokeAsync()
         "Live-caption session did not preserve the confirmed transcript.");
 
     var speech = await client.SynthesizeSpeechAsync(new SpeechRequest("GO AI Sprachtest für die technische Gebäudeausrüstung."));
-    Ensure(!speech.IsFallback, $"Primary Supertonic TTS failed; provider was {speech.Provider}.");
+    Ensure(string.Equals(speech.Provider, SpeechProviderIds.SupertonicF5Cuda, StringComparison.Ordinal),
+        $"Speech used unexpected provider {speech.Provider}.");
     Ensure(speech.Artifact.MediaType == "audio/wav", "TTS did not create WAV audio.");
     await AssertArtifactRangeAsync(speech.Artifact);
 

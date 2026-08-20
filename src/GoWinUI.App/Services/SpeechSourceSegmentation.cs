@@ -1,7 +1,7 @@
 using System.Net;
-using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
+using GoAi.Contracts;
 
 namespace GoWinUI.App.Services;
 
@@ -14,33 +14,6 @@ public enum SpeechPlaybackState
     Cancelled,
 }
 
-public enum SpeechDelivery
-{
-    Narration,
-    Dialogue,
-}
-
-public enum SpeechMood
-{
-    Neutral,
-    Warm,
-    Joyful,
-    Tense,
-    Sad,
-    Relieved,
-    Angry,
-    Mysterious,
-    Fearful,
-    Tender,
-}
-
-public enum SpeechExpression
-{
-    Laugh,
-    Breath,
-    Sigh,
-}
-
 public sealed record SpeechSourceUnit(
     string Id,
     string BlockId,
@@ -50,42 +23,38 @@ public sealed record SpeechSourceUnit(
     int Start,
     int Length,
     string Text,
-    string SpeechText,
-    SpeechDelivery Delivery = SpeechDelivery.Narration);
+    string SpeechText);
 
 public sealed record PreparedSpeechSegment(
     string Id,
     string Text,
     IReadOnlyList<string> SourceUnitIds,
-    SpeechDelivery Delivery = SpeechDelivery.Narration,
-    SpeechMood Mood = SpeechMood.Neutral,
-    double Intensity = 0,
-    double Speed = 1.0,
-    int PauseAfterMilliseconds = 0,
-    SpeechExpression? ExpressionBefore = null,
-    SpeechExpression? ExpressionAfter = null,
-    string? SynthesisText = null,
-    bool DirectionResolved = false,
     string? PlaybackBatchId = null);
 
 public sealed record SpeechPlaybackProgress(
     Guid SessionId,
     Guid? SourceMessageId,
     string SourceKind,
+    Guid PlaybackId,
+    long EventSequence,
     int SegmentIndex,
     int SegmentCount,
     IReadOnlyList<string> SourceUnitIds,
     SpeechPlaybackState State,
     IReadOnlyList<SpeechSourceUnit>? SourceUnits = null);
 
+public sealed record SpeechStartAnchor(string Kind, int BlockIndex);
+
 internal sealed record SpeechSegmentPlaybackUpdate(
     int SegmentIndex,
     SpeechPlaybackState State,
-    string? Provider = null);
+    string? Provider = null,
+    IReadOnlyList<int>? SegmentIndexes = null);
 
 internal sealed record SpeechPlaybackBatchPlan(
     string Id,
-    IReadOnlyList<int> SegmentIndexes);
+    IReadOnlyList<int> SegmentIndexes,
+    int PauseAfterMilliseconds = 180);
 
 internal static class SpeechPlaybackProgressBridge
 {
@@ -94,6 +63,8 @@ internal static class SpeechPlaybackProgressBridge
         progress.SessionId,
         progress.SourceMessageId,
         progress.SourceKind,
+        progress.PlaybackId,
+        progress.EventSequence,
         progress.SegmentIndex,
         progress.SegmentCount,
         progress.SourceUnitIds,
@@ -114,7 +85,7 @@ internal static class SpeechPlaybackProgressBridge
 
 internal static partial class SpeechSourceSegmentation
 {
-    internal const int MaximumSegmentCharacters = 300;
+    internal const int MaximumSegmentCharacters = 3_000;
 
     public static IReadOnlyList<SpeechSourceUnit> CreateUnits(string? markdown)
     {
@@ -158,13 +129,11 @@ internal static partial class SpeechSourceSegmentation
             var blockIndex = blockCounts.GetValueOrDefault(kind);
             blockCounts[kind] = blockIndex + 1;
             var blockId = $"b{++blockNumber:0000}";
-            var spokenParts = atomic
-                ? [new SpeechTextPart(spoken, DetectDelivery(spoken))]
-                : SplitForPlaybackParts(spoken);
+            var spokenParts = atomic ? [spoken] : SplitForPlaybackParts(spoken);
             var visibleParts = atomic ? [visible] : SplitForPlayback(visible);
             if (spokenParts.Count == 0)
             {
-                spokenParts = [new SpeechTextPart(spoken, DetectDelivery(spoken))];
+                spokenParts = [spoken];
             }
             if (visibleParts.Count == 0)
             {
@@ -187,8 +156,7 @@ internal static partial class SpeechSourceSegmentation
                     start,
                     length,
                     matchingVisible,
-                    spokenParts[partIndex].Text,
-                    spokenParts[partIndex].Delivery));
+                    spokenParts[partIndex]));
             }
         }
 
@@ -325,33 +293,104 @@ internal static partial class SpeechSourceSegmentation
         IReadOnlyList<SpeechSourceUnit> units,
         string? fallbackText = null)
     {
-        var output = new List<PreparedSpeechSegment>();
+        var directSegments = new List<PreparedSpeechSegment>();
         foreach (var unit in units)
         {
-            foreach (var part in SplitForPlayback(unit.SpeechText))
+            var spoken = MicrophoneTranscriptionService.PrepareSpeechText(unit.SpeechText);
+            if (string.IsNullOrWhiteSpace(spoken))
             {
-                output.Add(new(
-                    $"s{output.Count + 1:0000}",
-                    part,
-                    [unit.Id],
-                    unit.Delivery,
-                    PlaybackBatchId: unit.BlockId));
+                continue;
             }
+            directSegments.Add(new(
+                $"source-{directSegments.Count + 1:0000}",
+                spoken,
+                [unit.Id],
+                PlaybackBatchId: unit.BlockId));
         }
 
+        var output = NormalizePreparedSegments(directSegments);
         if (output.Count == 0 && !string.IsNullOrWhiteSpace(fallbackText))
         {
             foreach (var part in SplitForPlayback(fallbackText))
             {
-                output.Add(new(
-                    $"s{output.Count + 1:0000}",
-                    part,
-                    [],
-                    DetectDelivery(part)));
+                directSegments.Add(new(
+                    $"source-{directSegments.Count + 1:0000}",
+                    MicrophoneTranscriptionService.PrepareSpeechText(part),
+                    []));
             }
+            output = NormalizePreparedSegments(directSegments);
         }
         return output;
     }
+
+
+    internal static bool ContainsForbiddenSpeechQuotation(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return false;
+        }
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (!IsSpeechQuotation(character))
+            {
+                continue;
+            }
+            var previousIsWord = index > 0 && char.IsLetterOrDigit(value[index - 1]);
+            var nextIsWord = index + 1 < value.Length && char.IsLetterOrDigit(value[index + 1]);
+            if (!IsApostrophe(character) || !previousIsWord || !nextIsWord)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    internal static string NormalizeSpeechPunctuation(string? value)
+    {
+        var text = QuotePrefixRegex().Replace(value ?? string.Empty, string.Empty);
+        if (text.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder(text.Length);
+        for (var index = 0; index < text.Length; index++)
+        {
+            var character = text[index];
+            if (!IsSpeechQuotation(character))
+            {
+                builder.Append(character);
+                continue;
+            }
+
+            var previousIsWord = index > 0 && char.IsLetterOrDigit(text[index - 1]);
+            var nextIsWord = index + 1 < text.Length && char.IsLetterOrDigit(text[index + 1]);
+            if (IsApostrophe(character) && previousIsWord && nextIsWord)
+            {
+                builder.Append('\'');
+            }
+            else if (builder.Length > 0 && !char.IsWhiteSpace(builder[^1]))
+            {
+                builder.Append(' ');
+            }
+        }
+
+        text = WhitespaceRegex().Replace(builder.ToString(), " ").Trim();
+        text = SpaceBeforePunctuationRegex().Replace(text, "$1");
+        text = RepeatedCommaRegex().Replace(text, ",");
+        return text.Trim(' ', ',');
+    }
+
+    private static bool IsSpeechQuotation(char character) => character is
+        '"' or '\'' or '\u2018' or '\u2019' or '\u201A' or '\u201B'
+        or '\u201C' or '\u201D' or '\u201E' or '\u201F'
+        or '\u00AB' or '\u00BB' or '\u2039' or '\u203A';
+
+    private static bool IsApostrophe(char character) =>
+        character is '\'' or '\u2018' or '\u2019' or '\u201B';
+
 
     public static IReadOnlyList<PreparedSpeechSegment> NormalizePreparedSegments(
         IEnumerable<PreparedSpeechSegment> segments)
@@ -364,55 +403,24 @@ internal static partial class SpeechSourceSegmentation
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
             var parts = SplitForPlayback(segment.Text);
-            var delivery = Enum.IsDefined(segment.Delivery)
-                ? segment.Delivery
-                : SpeechDelivery.Narration;
-            var isDialogue = delivery == SpeechDelivery.Dialogue;
-            var mood = isDialogue && Enum.IsDefined(segment.Mood)
-                ? segment.Mood
-                : SpeechMood.Neutral;
-            var intensity = isDialogue && double.IsFinite(segment.Intensity)
-                ? Math.Clamp(segment.Intensity, 0, 1)
-                : 0;
-            var speed = isDialogue && double.IsFinite(segment.Speed)
-                ? Math.Clamp(segment.Speed, 0.82, 1.32)
-                : 1.0;
-            var pause = isDialogue
-                ? Math.Clamp(segment.PauseAfterMilliseconds, 0, 1_500)
-                : 0;
-            var synthesisParts = string.IsNullOrWhiteSpace(segment.SynthesisText)
-                ? []
-                : parts.Count == 1
-                    ? [NormalizeVisibleText(segment.SynthesisText)]
-                    : SplitForPlayback(segment.SynthesisText);
-            var canMapSynthesisParts = synthesisParts.Count == parts.Count;
             var playbackBatchId = string.IsNullOrWhiteSpace(segment.PlaybackBatchId)
                 ? null
                 : segment.PlaybackBatchId.Trim();
             for (var partIndex = 0; partIndex < parts.Count; partIndex++)
             {
-                var isFirst = partIndex == 0;
-                var isLast = partIndex == parts.Count - 1;
-                var synthesisText = canMapSynthesisParts
-                    ? synthesisParts[partIndex]
-                    : null;
+                // Splitting happens before quotation marks are removed so the
+                // visible source mapping remains stable. A closing quote followed
+                // by a comma can therefore become a punctuation-only helper part.
+                // Such a part must never reach the TTS request as an empty string.
+                var spokenText = NormalizeSpeechPunctuation(parts[partIndex]);
+                if (spokenText.Length == 0)
+                {
+                    continue;
+                }
                 output.Add(new(
                     $"s{output.Count + 1:0000}",
-                    parts[partIndex],
+                    spokenText,
                     ids,
-                    delivery,
-                    mood,
-                    intensity,
-                    speed,
-                    isLast ? pause : 0,
-                    isDialogue && isFirst && IsKnownExpression(segment.ExpressionBefore)
-                        ? segment.ExpressionBefore
-                        : null,
-                    isDialogue && isLast && IsKnownExpression(segment.ExpressionAfter)
-                        ? segment.ExpressionAfter
-                        : null,
-                    synthesisText,
-                    isDialogue && segment.DirectionResolved && canMapSynthesisParts,
                     playbackBatchId));
             }
         }
@@ -422,124 +430,34 @@ internal static partial class SpeechSourceSegmentation
     internal static IReadOnlyList<SpeechPlaybackBatchPlan> CreatePlaybackBatches(
         IReadOnlyList<PreparedSpeechSegment> segments)
     {
-        const int maximumFallbackCharacters = 1_800;
-        var output = new List<SpeechPlaybackBatchPlan>();
-        var currentIndexes = new List<int>();
-        string? currentId = null;
-        var currentIsFallback = false;
-        var currentCharacters = 0;
-
-        void CompleteCurrent()
-        {
-            if (currentIndexes.Count == 0 || currentId is null)
-            {
-                return;
-            }
-            output.Add(new(currentId, currentIndexes.ToArray()));
-            currentIndexes.Clear();
-            currentId = null;
-            currentIsFallback = false;
-            currentCharacters = 0;
-        }
-
+        var output = new List<SpeechPlaybackBatchPlan>(segments.Count);
         for (var index = 0; index < segments.Count; index++)
         {
             var segment = segments[index];
-            var explicitId = string.IsNullOrWhiteSpace(segment.PlaybackBatchId)
-                ? null
-                : segment.PlaybackBatchId.Trim();
-            var startsNewBatch = currentIndexes.Count > 0
-                && (explicitId is not null
-                    ? currentIsFallback || !string.Equals(currentId, explicitId, StringComparison.Ordinal)
-                    : !currentIsFallback || currentCharacters + segment.Text.Length > maximumFallbackCharacters);
-            if (startsNewBatch)
-            {
-                CompleteCurrent();
-            }
-            if (currentIndexes.Count == 0)
-            {
-                currentIsFallback = explicitId is null;
-                currentId = explicitId ?? $"auto-{output.Count + 1:0000}";
-            }
-            currentIndexes.Add(index);
-            currentCharacters += segment.Text.Length;
+            var sameVisibleBlock = index + 1 < segments.Count
+                && !string.IsNullOrWhiteSpace(segment.PlaybackBatchId)
+                && string.Equals(
+                    segment.PlaybackBatchId,
+                    segments[index + 1].PlaybackBatchId,
+                    StringComparison.Ordinal);
+            output.Add(new(
+                $"sentence-{index + 1:0000}-{segment.Id}",
+                [index],
+                sameVisibleBlock ? 40 : 180));
         }
-        CompleteCurrent();
         return output;
     }
 
     internal static string PrepareForSynthesis(PreparedSpeechSegment segment)
     {
-        var text = NormalizeVisibleText(segment.SynthesisText ?? segment.Text);
-        if (text.Length == 0)
-        {
-            return string.Empty;
-        }
-
-        var before = ExpressionTag(segment.ExpressionBefore);
-        var after = ExpressionTag(segment.ExpressionAfter);
-        return string.Concat(
-            before.Length == 0 ? string.Empty : before + " ",
-            text,
-            after.Length == 0 ? string.Empty : " " + after);
+        return NormalizeSpeechPunctuation(segment.Text);
     }
 
-    internal static bool HasSameSpokenWords(string original, string candidate)
-    {
-        var originalWords = SpokenWordRegex().Matches(original.Normalize(NormalizationForm.FormKC))
-            .Select(static match => match.Value)
-            .ToArray();
-        var candidateWords = SpokenWordRegex().Matches(candidate.Normalize(NormalizationForm.FormKC))
-            .Select(static match => match.Value)
-            .ToArray();
-        return originalWords.SequenceEqual(candidateWords, StringComparer.Ordinal)
-            && string.Equals(
-                NonPunctuationContent(original),
-                NonPunctuationContent(candidate),
-                StringComparison.Ordinal);
-    }
 
-    internal static double ResolveDialogueSpeed(SpeechMood mood, double intensity)
-    {
-        var amount = double.IsFinite(intensity) ? Math.Clamp(intensity, 0, 1) : 0;
-        var (minimum, maximum, strongerIsFaster) = mood switch
-        {
-            SpeechMood.Warm or SpeechMood.Tender => (0.88, 0.98, false),
-            SpeechMood.Joyful => (1.12, 1.28, true),
-            SpeechMood.Tense or SpeechMood.Fearful => (1.08, 1.30, true),
-            SpeechMood.Sad or SpeechMood.Mysterious => (0.82, 0.94, false),
-            SpeechMood.Relieved => (0.90, 1.00, false),
-            SpeechMood.Angry => (1.15, 1.32, true),
-            _ => (0.98, 1.05, true),
-        };
-        var interpolation = strongerIsFaster ? amount : 1 - amount;
-        return Math.Round(minimum + ((maximum - minimum) * interpolation), 3);
-    }
+    internal static IReadOnlyList<string> SplitForPlayback(string? value) =>
+        SplitForPlaybackParts(value);
 
-    internal static int ResolveDialoguePause(double intensity)
-    {
-        var amount = double.IsFinite(intensity) ? Math.Clamp(intensity, 0, 1) : 0;
-        return (int)Math.Round(80 + (720 * amount), MidpointRounding.AwayFromZero);
-    }
-
-    private static string NonPunctuationContent(string value) => string.Concat(
-        value.Normalize(NormalizationForm.FormKC).Where(static character =>
-        {
-            if (char.IsWhiteSpace(character)) return false;
-            return CharUnicodeInfo.GetUnicodeCategory(character) is not (
-                UnicodeCategory.ConnectorPunctuation
-                or UnicodeCategory.DashPunctuation
-                or UnicodeCategory.OpenPunctuation
-                or UnicodeCategory.ClosePunctuation
-                or UnicodeCategory.InitialQuotePunctuation
-                or UnicodeCategory.FinalQuotePunctuation
-                or UnicodeCategory.OtherPunctuation);
-        }));
-
-    internal static IReadOnlyList<string> SplitForPlayback(string? value)
-        => SplitForPlaybackParts(value).Select(static part => part.Text).ToArray();
-
-    private static List<SpeechTextPart> SplitForPlaybackParts(string? value)
+    private static List<string> SplitForPlaybackParts(string? value)
     {
         var text = NormalizeVisibleText(value ?? string.Empty);
         if (text.Length == 0)
@@ -547,18 +465,14 @@ internal static partial class SpeechSourceSegmentation
             return [];
         }
 
-        var sentences = new List<SpeechTextPart>();
-        foreach (var run in SplitDialogueRuns(text))
-        {
-            AddSentenceParts(run.Text, run.Delivery, sentences);
-        }
+        var sentences = new List<string>();
+        AddSentenceParts(text, sentences);
         return sentences;
     }
 
     private static void AddSentenceParts(
         string text,
-        SpeechDelivery delivery,
-        List<SpeechTextPart> sentences)
+        List<string> sentences)
     {
         var start = 0;
         for (var index = 0; index < text.Length; index++)
@@ -566,145 +480,35 @@ internal static partial class SpeechSourceSegmentation
             if (text[index] is not ('.' or '!' or '?')) continue;
             var end = index + 1;
             while (end < text.Length && text[end] is '.' or '!' or '?') end++;
+            while (end < text.Length && IsSpeechQuotation(text[end])) end++;
             if (end < text.Length && !char.IsWhiteSpace(text[end])) continue;
-            AddLongPart(text[start..end], delivery, sentences);
+            AddLongPart(text[start..end], sentences);
             start = end;
             while (start < text.Length && char.IsWhiteSpace(text[start])) start++;
             index = start - 1;
         }
         if (start < text.Length)
         {
-            AddLongPart(text[start..], delivery, sentences);
+            AddLongPart(text[start..], sentences);
         }
     }
 
     private static void AddLongPart(
         string value,
-        SpeechDelivery delivery,
-        List<SpeechTextPart> output)
+        List<string> output)
     {
         var remaining = value.Trim().TrimStart(',', ';', ':');
         while (remaining.Length > MaximumSegmentCharacters)
         {
             var boundary = FindSpeechBoundary(remaining, MaximumSegmentCharacters);
-            output.Add(new(remaining[..boundary].Trim(), delivery));
+            output.Add(remaining[..boundary].Trim());
             remaining = remaining[boundary..].TrimStart();
         }
         if (remaining.Length > 0)
         {
-            output.Add(new(remaining, delivery));
+            output.Add(remaining);
         }
     }
-
-    private static List<SpeechTextPart> SplitDialogueRuns(string text)
-    {
-        var output = new List<SpeechTextPart>();
-        var cursor = 0;
-        while (cursor < text.Length)
-        {
-            var opening = FindNextDialogueOpening(text, cursor);
-            if (opening < 0)
-            {
-                AddRun(text[cursor..], SpeechDelivery.Narration, output);
-                break;
-            }
-
-            if (opening > cursor)
-            {
-                AddRun(text[cursor..opening], SpeechDelivery.Narration, output);
-            }
-
-            var closing = FindDialogueClosing(text, opening);
-            if (closing < 0)
-            {
-                AddRun(text[opening..], SpeechDelivery.Narration, output);
-                break;
-            }
-
-            var end = closing + 1;
-            while (end < text.Length && text[end] is ',' or ';' or ':') end++;
-            AddRun(text[opening..end], SpeechDelivery.Dialogue, output);
-            cursor = end;
-        }
-
-        if (output.Count == 0)
-        {
-            output.Add(new(text, DetectDelivery(text)));
-        }
-        return output;
-    }
-
-    private static void AddRun(
-        string value,
-        SpeechDelivery delivery,
-        List<SpeechTextPart> output)
-    {
-        var normalized = NormalizeVisibleText(value).Trim().TrimStart(',', ';', ':');
-        if (normalized.Length > 0)
-        {
-            output.Add(new(normalized, delivery));
-        }
-    }
-
-    private static int FindNextDialogueOpening(string text, int start)
-    {
-        for (var index = start; index < text.Length; index++)
-        {
-            if (text[index] is '„' or '»' or '«' or '\"' or '“')
-            {
-                return index;
-            }
-        }
-        return -1;
-    }
-
-    private static int FindDialogueClosing(string text, int opening)
-    {
-        var expected = text[opening] switch
-        {
-            '„' => new[] { '“', '”' },
-            '»' => new[] { '«' },
-            '«' => new[] { '»' },
-            '“' => new[] { '”' },
-            _ => new[] { '\"' },
-        };
-        for (var index = opening + 1; index < text.Length; index++)
-        {
-            if (expected.Contains(text[index]))
-            {
-                return index;
-            }
-        }
-        return -1;
-    }
-
-    private static SpeechDelivery DetectDelivery(string text)
-    {
-        var trimmed = text.Trim();
-        return trimmed.StartsWith('„')
-            || trimmed.StartsWith('»')
-            || trimmed.StartsWith('«')
-            || trimmed.StartsWith('\"')
-            || trimmed.StartsWith('“')
-            || trimmed.EndsWith('“')
-            || trimmed.EndsWith('”')
-            || trimmed.EndsWith('«')
-            || trimmed.EndsWith('»')
-            || trimmed.EndsWith('\"')
-                ? SpeechDelivery.Dialogue
-                : SpeechDelivery.Narration;
-    }
-
-    private static bool IsKnownExpression(SpeechExpression? expression) =>
-        expression is null || Enum.IsDefined(expression.Value);
-
-    private static string ExpressionTag(SpeechExpression? expression) => expression switch
-    {
-        SpeechExpression.Laugh => "<laugh>",
-        SpeechExpression.Breath => "<breath>",
-        SpeechExpression.Sigh => "<sigh>",
-        _ => string.Empty,
-    };
 
     private static int FindSpeechBoundary(string value, int maximum)
     {
@@ -718,8 +522,6 @@ internal static partial class SpeechSourceSegmentation
         }
         return Math.Min(maximum, value.Length);
     }
-
-    private sealed record SpeechTextPart(string Text, SpeechDelivery Delivery);
 
     private static bool IsStructuralStart(IReadOnlyList<MarkdownLine> lines, int index)
     {
@@ -828,6 +630,9 @@ internal static partial class SpeechSourceSegmentation
     [GeneratedRegex(@"\s+", RegexOptions.CultureInvariant)]
     private static partial Regex WhitespaceRegex();
 
-    [GeneratedRegex(@"[\p{L}\p{M}\p{Nd}]+", RegexOptions.CultureInvariant)]
-    private static partial Regex SpokenWordRegex();
+    [GeneratedRegex(@"\s+([,.;:!?])", RegexOptions.CultureInvariant)]
+    private static partial Regex SpaceBeforePunctuationRegex();
+
+    [GeneratedRegex(@",(?:\s*,)+", RegexOptions.CultureInvariant)]
+    private static partial Regex RepeatedCommaRegex();
 }

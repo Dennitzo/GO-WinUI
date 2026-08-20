@@ -1,4 +1,5 @@
 using GoAi.Contracts;
+using GoAi.Server.Core.Configuration;
 
 namespace GoAi.Server.Core.Gateway;
 
@@ -192,6 +193,13 @@ public static class RunRequestValidator
                 || preferredModel.Any(char.IsControl)))
         {
             throw new ArgumentException("preferredGeneralModelId must contain a bounded model ID.");
+        }
+        if (request.PreferredCodeModelId is { } preferredCodeModel
+            && (request.Mode != RunMode.Code
+                || !CodingModelCatalog.TryGet(preferredCodeModel, out _)))
+        {
+            throw new ArgumentException(
+                "preferredCodeModelId is only valid in code mode and must name a supported coding model.");
         }
         if (request.Limits?.MaximumOutputTokens is { } maximumOutputTokens
             && maximumOutputTokens is < 1 or > 65_536)

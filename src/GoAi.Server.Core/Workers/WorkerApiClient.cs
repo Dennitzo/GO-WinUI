@@ -96,6 +96,51 @@ public sealed class WorkerApiClient
             request,
             cancellationToken);
 
+    public Task<WorkerSpeechSessionSnapshot> BeginSpeechSessionAsync(
+        string sessionId,
+        SpeechContentProfile profile,
+        CancellationToken cancellationToken = default) =>
+        SendAsync<WorkerSpeechSessionSnapshot>(
+            "speech",
+            _options.SpeechWorkerUri,
+            "/speech/sessions",
+            new
+            {
+                sessionId,
+                profile = profile.ToString().ToLowerInvariant(),
+            },
+            cancellationToken);
+
+    public Task<WorkerSpeechResult> SynthesizeParagraphAsync(
+        string sessionId,
+        SpeechParagraphRequest request,
+        bool forceSegmentSynthesis = false,
+        CancellationToken cancellationToken = default) =>
+        SendAsync<WorkerSpeechResult>(
+            "speech",
+            _options.SpeechWorkerUri,
+            $"/speech/sessions/{Uri.EscapeDataString(sessionId)}/paragraphs",
+            new
+            {
+                sessionId,
+                request.ParagraphIndex,
+                request.Text,
+                request.Speed,
+                request.Parts,
+                forceSegmentSynthesis,
+            },
+            cancellationToken);
+
+    public Task<WorkerSpeechSessionSnapshot> EndSpeechSessionAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default) =>
+        SendAsync<WorkerSpeechSessionSnapshot>(
+            "speech",
+            _options.SpeechWorkerUri,
+            $"/speech/sessions/{Uri.EscapeDataString(sessionId)}/end",
+            body: null,
+            cancellationToken: cancellationToken);
+
     public Task<JsonElement> LoadSpeechComponentAsync(
         string component,
         CancellationToken cancellationToken = default)
@@ -266,8 +311,16 @@ public sealed record WorkerSpeechResult(
     string FileName,
     string MediaType,
     string Provider,
-    bool IsFallback,
-    IReadOnlyDictionary<string, string>? Metadata);
+    IReadOnlyDictionary<string, string>? Metadata,
+    IReadOnlyList<SpeechParagraphTiming>? Timings = null);
+
+public sealed record WorkerSpeechSessionSnapshot(
+    string SessionId,
+    string State,
+    string? Profile,
+    string Provider,
+    double? CreatedAtUnix = null,
+    double? LastUsedUnix = null);
 
 public sealed record WorkerImageResult(
     string Provider,

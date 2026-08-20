@@ -324,15 +324,22 @@ public sealed class AgentToolExecutor
             runId,
             GpuLeaseMode.Shared,
             cancellationToken).ConfigureAwait(false);
-        _ = await _workers.PrepareLmModelAsync(
-            _options.VisionModelId,
-            65_536,
-            cancellationToken).ConfigureAwait(false);
-        return await _lmStudio.AnalyzeImagesAsync(
-            _options.VisionModelId,
-            prompt,
-            imagePaths,
-            cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _ = await _workers.PrepareLmModelAsync(
+                _options.VisionModelId,
+                65_536,
+                cancellationToken).ConfigureAwait(false);
+            return await _lmStudio.AnalyzeImagesAsync(
+                _options.VisionModelId,
+                prompt,
+                imagePaths,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await _workers.RestoreGeneralModelAsync(CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     private async Task<string> AnalyzeTranscriptAsync(

@@ -26,9 +26,9 @@ public sealed class GoAiServerOptions
 
     public int GeneralContextLength { get; set; } = 131_072;
 
-    public string CodeModelId { get; set; } = "poolside/laguna-s-2.1";
+    public string CodeModelId { get; set; } = CodingModelCatalog.DefaultModelId;
 
-    // Laguna always owns the exclusive GPU lane, so its full context profile is safe.
+    // The selected coding model owns the exclusive LM Studio GPU lane.
     public int CodeContextLength { get; set; } = 262_144;
 
     public string VisionModelId { get; set; } = "qwen3-vl-30b-a3b-instruct";
@@ -43,9 +43,9 @@ public sealed class GoAiServerOptions
 
     public int MaximumToolCalls { get; set; } = 30;
 
-    public int MaximumCodingModelRounds { get; set; } = 48;
+    public int MaximumCodingModelRounds { get; set; } = 96;
 
-    public int MaximumCodingToolCalls { get; set; } = 128;
+    public int MaximumCodingToolCalls { get; set; } = 192;
 
     public bool RequireLmStudioAuthentication { get; set; } = true;
 

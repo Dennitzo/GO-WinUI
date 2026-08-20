@@ -109,13 +109,27 @@
             </ComboBox>
           </Grid>
 
-          <ComboBox
-            x:Name="ModelBox"
-            DisplayMemberPath="Id"
-            Header="Verfügbare AI-Servermodelle"
-            ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
-            PlaceholderText="Verbindung testen"
-            SelectionChanged="OnModelChanged" />
+          <Grid ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <ComboBox
+              x:Name="ModelBox"
+              DisplayMemberPath="DisplayName"
+              Header="General AI"
+              ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
+              PlaceholderText="Verbindung testen"
+              SelectionChanged="OnModelChanged" />
+            <ComboBox
+              x:Name="CodingModelBox"
+              Grid.Column="1"
+              DisplayMemberPath="DisplayName"
+              Header="Coding-Agent"
+              ItemsSource="{x:Bind ViewModel.CodingModels, Mode=OneWay}"
+              PlaceholderText="Verbindung testen"
+              SelectionChanged="OnCodingModelChanged" />
+          </Grid>
 
         </StackPanel>
       </Border>

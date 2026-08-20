@@ -38,7 +38,8 @@ public sealed record ChatMessage(
     string? Error = null,
     ToolExecutionInfo? ToolExecution = null,
     string? ContextSummary = null,
-    MessageContentProfile ContentProfile = MessageContentProfile.General);
+    MessageContentProfile ContentProfile = MessageContentProfile.General,
+    string? CodeDiff = null);
 
 public sealed record SessionContextPreparation(
     string CacheKey,
@@ -51,18 +52,6 @@ public sealed record SessionContextPreparation(
     string PreparedText,
     DateTimeOffset CreatedAt,
     SessionContextProfile Profile = SessionContextProfile.General);
-
-public sealed record SpeechPreparation(
-    string CacheKey,
-    Guid SessionId,
-    Guid? SourceMessageId,
-    string SourceKind,
-    string SourceHash,
-    string ModelId,
-    string PreparedText,
-    DateTimeOffset CreatedAt,
-    string SourceUnitsJson = "[]",
-    string SegmentsJson = "[]");
 
 public sealed record ToolExecutionInfo(
     string Tool,
@@ -259,11 +248,12 @@ public sealed record WindowPlacement(
 public sealed record AppSettings
 {
     public const string DefaultSelectedModel = "openai/gpt-oss-20b";
+    public const string DefaultSelectedCodingModel = "ud";
     public const string DefaultAccentColor = "#A970FF";
     public const string DefaultBackgroundColor = "#6B6872";
     public const int MaximumRecentActivityTextLength = 180;
 
-    public int Version { get; init; } = 6;
+    public int Version { get; init; } = 9;
     public bool IsAiConnectionEnabled { get; init; }
     public AiProviderKind AiProvider { get; init; } = AiProviderKind.GoAiServer;
     public string GoAiServerUrl { get; init; } = "https://192.168.0.67:8443";
@@ -274,6 +264,7 @@ public sealed record AppSettings
     public string LiveCaptionLanguage { get; init; } = "auto";
     public string LmStudioBaseUrl { get; init; } = "http://127.0.0.1:1234/v1";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
+    public string SelectedCodingModel { get; init; } = DefaultSelectedCodingModel;
     public string ReasoningEffort { get; init; } = "medium";
     public AppTheme Theme { get; init; } = AppTheme.System;
     public string AccentColor { get; init; } = DefaultAccentColor;

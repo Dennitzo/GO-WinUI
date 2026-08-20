@@ -15,13 +15,21 @@ public sealed class ShellViewModelTests
 
         viewModel.IsAiConnectionEnabled = true;
 
+        Assert.Equal("Wird geprüft", viewModel.AiConnectionModeText);
+
+        viewModel.ApplyAiConnectionState(false, false);
+
         Assert.Equal("Nicht erreichbar", viewModel.AiConnectionModeText);
 
-        viewModel.IsAiAvailable = true;
+        viewModel.ApplyAiConnectionState(true, false);
+
+        Assert.Equal("Online · Eingeschränkt", viewModel.AiConnectionModeText);
+
+        viewModel.ApplyAiConnectionState(true, true);
 
         Assert.Equal("Online", viewModel.AiConnectionModeText);
 
-        viewModel.IsAiAvailable = false;
+        viewModel.ApplyAiConnectionState(false, false);
 
         Assert.Equal("Nicht erreichbar", viewModel.AiConnectionModeText);
 
@@ -74,7 +82,7 @@ public sealed class ShellViewModelTests
         Assert.All(viewModel.AiServices, static item => Assert.True(item.IsReachable));
         Assert.All(viewModel.AiServices, static item => Assert.Equal("Bereit", item.StateLabel));
         Assert.Contains(viewModel.AiServices, static item =>
-            item.DisplayName == "Coding" && item.Runtime.Contains("Laguna", StringComparison.Ordinal));
+            item.DisplayName == "Coding" && item.Runtime.Contains("Qwen3-Coder-Next", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -138,7 +146,7 @@ public sealed class ShellViewModelTests
     }
 
     [Fact]
-    public void CodingWorkloadActivatesLagunaChipOnly()
+    public void CodingWorkloadActivatesQwenCoderChipOnly()
     {
         var now = DateTimeOffset.UtcNow;
         var viewModel = new ShellViewModel();
@@ -150,7 +158,7 @@ public sealed class ShellViewModelTests
             "lease-code",
             [],
             now,
-            ActiveWorkloads: [new("lease-code", "llm-code", "Laguna-S-2.1", "LM Studio", "run-code", now)]));
+            ActiveWorkloads: [new("lease-code", "llm-code", "Qwen3-Coder-Next Q6_K", "LM Studio", "run-code", now)]));
 
         Assert.True(viewModel.AiServices.Single(static item => item.Key == "coding").IsActive);
         Assert.False(viewModel.AiServices.Single(static item => item.Key == "general").IsActive);
@@ -161,7 +169,7 @@ public sealed class ShellViewModelTests
         "http://127.0.0.1:1234",
         [
             new("gpt-oss-20b", "general", true, true, "loaded", 131_072),
-            new("Laguna-S-2.1", "code", true, false, "available", 262_144),
+            new("Qwen3-Coder-Next Q6_K", "code", true, false, "available", 262_144),
             new("Qwen3-VL", "vision", true, false, "available", 65_536),
         ],
         DateTimeOffset.UtcNow);

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
+using Microsoft.Data.Sqlite;
 
 namespace GoWinUI.Tests;
 
@@ -71,7 +72,7 @@ public sealed class DatabaseAndWorkflowTests
     }
 
     [Fact]
-    public async Task SchemaNineteenPersistsAudiobookToolMessagesChroniclesAndTriggers()
+    public async Task CurrentSchemaPersistsAudiobookStateCodeDiffAndRemovesLegacySpeechCache()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -97,11 +98,22 @@ public sealed class DatabaseAndWorkflowTests
             DateTimeOffset.UtcNow,
             SessionContextProfile.Audiobook));
 
-        Assert.Equal(19, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
+        await chats.SetCodeDiffAsync(message.Id, "diff --git a/demo.cs b/demo.cs\n+added\n");
+
+        Assert.Equal(21, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
+        await using (var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='speech_preparations';";
+            Assert.Equal(0L, (long)(await command.ExecuteScalarAsync() ?? -1L));
+        }
         var storedSession = await chats.GetSessionAsync(session.Id);
         Assert.Equal(PersistentToolAction.Audiobook, storedSession?.PersistentToolAction);
         Assert.Equal(AssistantMode.General, storedSession?.AssistantMode);
-        Assert.Equal(MessageContentProfile.Audiobook, Assert.Single(await chats.ListMessagesAsync(session.Id)).ContentProfile);
+        var storedMessage = Assert.Single(await chats.ListMessagesAsync(session.Id));
+        Assert.Equal(MessageContentProfile.Audiobook, storedMessage.ContentProfile);
+        Assert.Contains("demo.cs", storedMessage.CodeDiff, StringComparison.Ordinal);
         Assert.Equal(SessionContextProfile.Audiobook, (await chats.GetSessionContextPreparationAsync(cacheKey))?.Profile);
         var triggers = await environment.Get<IPromptTriggerRepository>().ListAsync();
         Assert.Contains(triggers, item => item.Action == PromptTriggerAction.Audiobook && item.Phrase == "Hörbuch erstellen");

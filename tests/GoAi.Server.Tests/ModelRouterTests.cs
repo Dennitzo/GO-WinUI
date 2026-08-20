@@ -15,11 +15,28 @@ public sealed class ModelRouterTests
         var code = router.Select(CreateRequest(RunMode.Code, "TGA erklären"));
 
         Assert.Equal(context.Options.GeneralModelId, general.ModelId);
+        Assert.Equal("ud", context.Options.CodeModelId);
         Assert.Equal(context.Options.CodeModelId, code.ModelId);
     }
 
     [Fact]
-    public void AutoRoutesCodeAttachmentToLaguna()
+    public void ExplicitCodeModeHonorsThePersistedClientSelection()
+    {
+        using var context = new TestServerContext();
+        var router = new ModelRouter(context.WrappedOptions);
+        var request = CreateRequest(RunMode.Code, "Projekt analysieren") with
+        {
+            PreferredCodeModelId = "qwen3-coder-next",
+        };
+
+        var selection = router.Select(request);
+
+        Assert.Equal("code", selection.Role);
+        Assert.Equal("qwen3-coder-next", selection.ModelId);
+    }
+
+    [Fact]
+    public void AutoRoutesCodeAttachmentToQwenCoder()
     {
         using var context = new TestServerContext();
         var router = new ModelRouter(context.WrappedOptions);

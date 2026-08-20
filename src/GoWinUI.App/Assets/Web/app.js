@@ -26,11 +26,17 @@
       sessionId: null,
       sourceMessageId: null,
       sourceKind: null,
+      playbackId: null,
+      eventSequence: 0,
       sourceUnits: [],
       activeSourceUnitIds: [],
       state: null
     },
+    readFromContextTarget: null,
     messageRunStatus: new Map(),
+    closedCodeDiffs: new Set(),
+    closedCodingTraces: new Set(),
+    closedPowerShellPanels: new Set(),
     artifactPreviewUrls: new Map(),
     artifactPreviewPending: new Set(),
     selectedToolAction: null,
@@ -393,7 +399,7 @@
 
   function speechBlockCandidates(content, kind) {
     const selectors = {
-      heading: ":scope > h1, :scope > h2, :scope > h3, :scope > h4",
+      heading: ":scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6",
       paragraph: ":scope > p",
       listItem: ":scope > ul > li, :scope > ol > li",
       tableRow: ":scope > .table-wrap tr",
@@ -403,6 +409,55 @@
     };
     const selector = selectors[String(kind || "")];
     return selector ? Array.from(content.querySelectorAll(selector)) : [];
+  }
+
+  const readableSpeechMessageStatuses = new Set(["completed", "cancelled", "interrupted", "failed"]);
+  const readableSpeechBlockKinds = ["heading", "paragraph", "listItem", "tableRow", "quote", "math", "code"];
+
+  function annotateReadableSpeechBlocks(message, article, content) {
+    if (String(message?.role || "").toLowerCase() !== "assistant"
+      || message?.isIntro
+      || !String(message?.content || "").trim()
+      || !readableSpeechMessageStatuses.has(String(message?.status || "").toLowerCase())
+      || !message?.updatedAt) {
+      return;
+    }
+
+    article.dataset.messageUpdatedAt = String(message.updatedAt);
+    for (const kind of readableSpeechBlockKinds) {
+      speechBlockCandidates(content, kind).forEach((block, blockIndex) => {
+        block.dataset.speechBlockKind = kind;
+        block.dataset.speechBlockIndex = String(blockIndex);
+      });
+    }
+  }
+
+  function captureReadFromContextTarget(event) {
+    state.readFromContextTarget = null;
+    const origin = event?.target instanceof Element ? event.target : null;
+    const block = origin?.closest("[data-speech-block-kind][data-speech-block-index]");
+    const article = block?.closest("article[data-message-id]");
+    if (!block || !article || !elements.messageList.contains(article)) return;
+
+    const message = state.messages.find(item => String(item.id) === String(article.dataset.messageId));
+    if (!message
+      || String(message.role || "").toLowerCase() !== "assistant"
+      || !readableSpeechMessageStatuses.has(String(message.status || "").toLowerCase())
+      || !String(message.content || "").trim()
+      || String(message.sessionId || "") !== String(state.activeSessionId || "")
+      || !message.updatedAt) {
+      return;
+    }
+
+    const blockIndex = Number(block.dataset.speechBlockIndex);
+    if (!Number.isSafeInteger(blockIndex) || blockIndex < 0) return;
+    state.readFromContextTarget = {
+      sessionId: message.sessionId,
+      messageId: message.id,
+      messageUpdatedAt: message.updatedAt,
+      kind: block.dataset.speechBlockKind,
+      blockIndex
+    };
   }
 
   function isSpeechTextNode(node) {
@@ -438,28 +493,113 @@
       .trim();
   }
 
-  function findSpeechText(text, needle, start) {
+  function findSpeechText(text, needle, start, allowRestart = true) {
     let found = text.indexOf(needle, start);
     if (found >= 0) return found;
     found = text.toLocaleLowerCase("de-DE").indexOf(needle.toLocaleLowerCase("de-DE"), start);
     if (found >= 0) return found;
+    if (!allowRestart) return -1;
     found = text.indexOf(needle);
     if (found >= 0) return found;
     return text.toLocaleLowerCase("de-DE").indexOf(needle.toLocaleLowerCase("de-DE"));
   }
 
-  function rangeForSpeechUnit(searchable, unit, startAt) {
-    const needle = normalizedSpeechNeedle(unit?.text);
-    if (!needle || !searchable.positions.length) return null;
-    const index = findSpeechText(searchable.text, needle, startAt);
-    if (index < 0 || index + needle.length > searchable.positions.length) return null;
-    const first = searchable.positions[index];
-    const last = searchable.positions[index + needle.length - 1];
+  function rangeForSpeechOffsets(searchable, start, end) {
+    if (start < 0 || end <= start || end > searchable.positions.length) return null;
+    const first = searchable.positions[start];
+    const last = searchable.positions[end - 1];
     if (!first || !last) return null;
     const range = document.createRange();
     range.setStart(first.node, first.offset);
     range.setEnd(last.node, last.offset + 1);
-    return { range, next: index + needle.length };
+    return { range, next: end };
+  }
+
+  function rangeForSpeechUnit(searchable, unit, startAt, allowRestart = true) {
+    const needle = normalizedSpeechNeedle(unit?.text);
+    if (!needle || !searchable.positions.length) return null;
+    const index = findSpeechText(searchable.text, needle, startAt, allowRestart);
+    if (index < 0 || index + needle.length > searchable.positions.length) return null;
+    return rangeForSpeechOffsets(searchable, index, index + needle.length);
+  }
+
+  function speechSentenceOffsets(text) {
+    const output = [];
+    const maximum = 3000;
+
+    const addPart = (rawStart, rawEnd) => {
+      let start = rawStart;
+      let end = rawEnd;
+      while (start < end && /\s/u.test(text[start])) start += 1;
+      while (end > start && /\s/u.test(text[end - 1])) end -= 1;
+      while (end - start > maximum) {
+        const minimum = start + Math.floor(maximum / 2);
+        let boundary = Math.min(start + maximum, end - 1);
+        while (boundary >= minimum
+          && !/[\s,;:]/u.test(text[boundary])) boundary -= 1;
+        if (boundary < minimum) boundary = Math.min(start + maximum, end);
+        else if (/[,;:]/u.test(text[boundary])) boundary += 1;
+        output.push({ start, end: boundary });
+        start = boundary;
+        while (start < end && /\s/u.test(text[start])) start += 1;
+      }
+      if (end > start) output.push({ start, end });
+    };
+
+    let start = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      if (![".", "!", "?"].includes(text[index])) continue;
+      let end = index + 1;
+      while (end < text.length && [".", "!", "?"].includes(text[end])) end += 1;
+      while (end < text.length && /["'‘’‚‛“”„‟«»‹›]/u.test(text[end])) end += 1;
+      if (end < text.length && !/\s/u.test(text[end])) continue;
+      addPart(start, end);
+      start = end;
+      while (start < text.length && /\s/u.test(text[start])) start += 1;
+      index = start - 1;
+    }
+    if (start < text.length) addPart(start, text.length);
+    return output;
+  }
+
+  function rangeForSpeechOrdinal(searchable, ordinal) {
+    const offsets = speechSentenceOffsets(searchable.text);
+    const selected = offsets[Number(ordinal) || 0];
+    return selected
+      ? rangeForSpeechOffsets(searchable, selected.start, selected.end)
+      : null;
+  }
+
+  function speechSourceRangeMap(content, sourceUnits) {
+    const output = new Map();
+    const groups = new Map();
+    for (const unit of sourceUnits) {
+      if (["tableRow", "math", "code"].includes(String(unit?.kind))) continue;
+      const key = `${unit?.kind}:${Number(unit?.blockIndex) || 0}`;
+      const group = groups.get(key) || [];
+      group.push(unit);
+      groups.set(key, group);
+    }
+
+    for (const group of groups.values()) {
+      group.sort((left, right) => (Number(left?.ordinalInBlock) || 0) - (Number(right?.ordinalInBlock) || 0));
+      const firstUnit = group[0];
+      const candidates = speechBlockCandidates(content, firstUnit?.kind);
+      const block = candidates[Number(firstUnit?.blockIndex) || 0];
+      if (!block) continue;
+      const searchable = searchableSpeechText(block);
+      let cursor = 0;
+      for (const unit of group) {
+        // Resolve all preceding sentences as well, so repeated wording can
+        // never make a later progress event jump back to the first match.
+        const exact = rangeForSpeechUnit(searchable, unit, cursor, false);
+        const match = exact || rangeForSpeechOrdinal(searchable, unit?.ordinalInBlock);
+        if (!match) continue;
+        output.set(String(unit.id), { block, range: match.range });
+        cursor = Math.max(cursor, match.next);
+      }
+    }
+    return output;
   }
 
   function activeSpeechArticle(messageId) {
@@ -477,36 +617,31 @@
     const content = article?.querySelector(":scope > .message-body > .message-content");
     if (!content) return;
 
-    const activeIds = new Set(progress.activeSourceUnitIds.map(String));
-    const units = (Array.isArray(progress.sourceUnits) ? progress.sourceUnits : [])
+    // One playback segment maps to one visible sentence. Keeping this as one
+    // ID also prevents a delayed multi-part event from lighting two places.
+    const activeIds = new Set(progress.activeSourceUnitIds.slice(0, 1).map(String));
+    const sourceUnits = Array.isArray(progress.sourceUnits) ? progress.sourceUnits : [];
+    const units = sourceUnits
       .filter(unit => activeIds.has(String(unit.id)));
     const ranges = [];
-    const blockCache = new Map();
+    const sourceRangeMap = speechSourceRangeMap(content, sourceUnits);
     for (const unit of units) {
       const candidates = speechBlockCandidates(content, unit.kind);
       const block = candidates[Number(unit.blockIndex) || 0];
       if (!block) continue;
-      block.dataset.speechSourceActive = "true";
-      block.setAttribute("aria-current", "true");
 
       if (["tableRow", "math", "code"].includes(String(unit.kind))) {
+        block.dataset.speechSourceActive = "true";
+        block.setAttribute("aria-current", "true");
         block.classList.add("speech-source-active--block");
         continue;
       }
 
-      const key = `${unit.kind}:${Number(unit.blockIndex) || 0}`;
-      let cached = blockCache.get(key);
-      if (!cached) {
-        cached = { searchable: searchableSpeechText(block), cursor: 0 };
-        blockCache.set(key, cached);
-      }
-      const match = rangeForSpeechUnit(cached.searchable, unit, cached.cursor);
-      if (match) {
-        cached.cursor = match.next;
-        ranges.push(match.range);
-      } else {
-        block.classList.add("speech-source-active--block");
-      }
+      const match = sourceRangeMap.get(String(unit.id));
+      if (!match) continue;
+      match.block.dataset.speechSourceActive = "true";
+      match.block.setAttribute("aria-current", "true");
+      ranges.push(match.range);
     }
 
     let customHighlightApplied = false;
@@ -518,27 +653,32 @@
         customHighlightApplied = false;
       }
     }
-    if (ranges.length && !customHighlightApplied) {
-      for (const range of ranges) {
-        const fallback = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
-          ? range.commonAncestorContainer
-          : range.commonAncestorContainer.parentElement;
-        if (fallback instanceof HTMLElement) {
-          fallback.dataset.speechSourceActive = "true";
-          fallback.setAttribute("aria-current", "true");
-          fallback.classList.add("speech-source-active--block");
-        }
-      }
-    }
+    // Current WebView2 versions support CSS Custom Highlight. If unavailable,
+    // leave prose unmarked instead of incorrectly flashing the whole paragraph.
   }
 
   function updateSpeechProgress(payload) {
     const playbackState = String(payload?.state || "").toLowerCase();
+    const incomingPlaybackId = String(payload?.playbackId || "");
+    const incomingSequence = Number(payload?.eventSequence) || 0;
+    const current = state.speechProgress || {};
+    const currentPlaybackId = String(current.playbackId || "");
+    const isNewPlayback = playbackState === "buffering"
+      && incomingPlaybackId
+      && incomingPlaybackId !== currentPlaybackId;
+
+    if (!isNewPlayback && incomingPlaybackId && currentPlaybackId
+      && incomingPlaybackId !== currentPlaybackId) return;
+    if (!isNewPlayback && incomingSequence > 0
+      && incomingSequence <= (Number(current.eventSequence) || 0)) return;
+
     if (["completed", "cancelled"].includes(playbackState)) {
       state.speechProgress = {
         sessionId: null,
         sourceMessageId: null,
         sourceKind: null,
+        playbackId: incomingPlaybackId || currentPlaybackId || null,
+        eventSequence: incomingSequence,
         sourceUnits: [],
         activeSourceUnitIds: [],
         state: playbackState
@@ -547,19 +687,21 @@
       return;
     }
 
-    const current = state.speechProgress || {};
     const sourceChanged = String(current.sourceMessageId || "") !== String(payload?.sourceMessageId || "")
-      || String(current.sessionId || "") !== String(payload?.sessionId || "");
+      || String(current.sessionId || "") !== String(payload?.sessionId || "")
+      || isNewPlayback;
     const incomingUnits = Array.isArray(payload?.sourceUnits) ? payload.sourceUnits : null;
     const shouldAdvanceHighlight = playbackState === "playing" || playbackState === "paused";
     state.speechProgress = {
       sessionId: payload?.sessionId || current.sessionId || null,
       sourceMessageId: payload?.sourceMessageId || current.sourceMessageId || null,
       sourceKind: payload?.sourceKind || current.sourceKind || null,
+      playbackId: incomingPlaybackId || current.playbackId || null,
+      eventSequence: incomingSequence || current.eventSequence || 0,
       sourceUnits: incomingUnits || (sourceChanged ? [] : current.sourceUnits || []),
       activeSourceUnitIds: shouldAdvanceHighlight
-        ? (Array.isArray(payload?.sourceUnitIds) ? payload.sourceUnitIds : [])
-        : (sourceChanged ? [] : current.activeSourceUnitIds || []),
+        ? (Array.isArray(payload?.sourceUnitIds) ? payload.sourceUnitIds.slice(0, 1) : [])
+        : [],
       state: playbackState || current.state || null
     };
     applySpeechHighlight();
@@ -655,6 +797,276 @@
     return footer;
   }
 
+  function createCodeDiff(message, force = false) {
+    const diff = String(message.codeDiff || "").replace(/\r\n?/g, "\n");
+    const hasDiff = Boolean(diff.trim());
+    if (!force && !hasDiff) return null;
+
+    const lines = hasDiff ? diff.split("\n") : [];
+    const fileCount = lines.filter(line => line.startsWith("diff --git ")).length;
+    const addedLines = lines.filter(line => line.startsWith("+") && !line.startsWith("+++")).length;
+    const deletedLines = lines.filter(line => line.startsWith("-") && !line.startsWith("---")).length;
+    const messageKey = String(message.id);
+    const details = document.createElement("details");
+    details.className = "message-code-diff";
+    details.open = !state.closedCodeDiffs.has(messageKey);
+    details.addEventListener("toggle", () => {
+      if (details.open) state.closedCodeDiffs.delete(messageKey);
+      else state.closedCodeDiffs.add(messageKey);
+    });
+
+    const summary = document.createElement("summary");
+    summary.className = "message-code-diff__summary";
+    const icon = createToolIcon("M16 18l6-6-6-6M8 6l-6 6 6 6M14 4l-4 16");
+    icon.classList.add("message-code-diff__icon");
+    const title = document.createElement("span");
+    title.className = "message-code-diff__title";
+    title.textContent = "Codeänderungen";
+    const stats = document.createElement("span");
+    stats.className = "message-code-diff__stats";
+    stats.textContent = hasDiff
+      ? `${fileCount} ${fileCount === 1 ? "Datei" : "Dateien"} · +${addedLines} · −${deletedLines}`
+      : "Bereit";
+    summary.append(icon, title, stats);
+    details.append(summary);
+
+    if (hasDiff) {
+      const toolbar = document.createElement("div");
+      toolbar.className = "message-code-diff__toolbar";
+      const copy = createMessageIconAction("Git-Diff kopieren", messageCopyIcon, button => {
+        post("message.copy", { text: diff });
+        flashMessageAction(button, messageCopyIcon, "Git-Diff kopieren");
+      });
+      toolbar.append(copy);
+      details.append(toolbar);
+    }
+
+    const code = document.createElement("code");
+    const maximumRenderedLines = 5000;
+    for (const line of lines.slice(0, maximumRenderedLines)) {
+      const row = document.createElement("span");
+      row.className = line.startsWith("diff --git ") || line.startsWith("index ")
+        || line.startsWith("--- ") || line.startsWith("+++ ")
+        ? "diff-line diff-line--header"
+        : line.startsWith("@@")
+          ? "diff-line diff-line--hunk"
+          : line.startsWith("+")
+            ? "diff-line diff-line--added"
+            : line.startsWith("-")
+              ? "diff-line diff-line--deleted"
+              : "diff-line";
+      row.textContent = `${line}\n`;
+      code.append(row);
+    }
+    if (!hasDiff) {
+      const empty = document.createElement("span");
+      empty.className = "diff-line diff-line--notice";
+      empty.textContent = "Noch keine Codeänderungen.\n";
+      code.append(empty);
+    }
+    if (lines.length > maximumRenderedLines) {
+      const omitted = document.createElement("span");
+      omitted.className = "diff-line diff-line--notice";
+      omitted.textContent = `[${lines.length - maximumRenderedLines} weitere Zeilen – vollständigen Diff über die Kopierfunktion übernehmen]\n`;
+      code.append(omitted);
+    }
+    const pre = document.createElement("pre");
+    pre.className = "message-code-diff__content";
+    pre.append(code);
+    details.append(pre);
+    return details;
+  }
+
+  function createCodingTrace(message, force = false) {
+    const entries = Array.isArray(message.codingTrace) ? message.codingTrace : [];
+    const visibleEntries = entries.filter(entry => ![
+      "Coding-Modell wird geladen",
+      "Coding-Modell geladen"
+    ].includes(String(entry?.title || "")));
+    if (!force && !visibleEntries.length) return null;
+
+    const details = document.createElement("details");
+    details.className = "message-coding-trace";
+    details.open = !state.closedCodingTraces.has(String(message.id));
+    details.addEventListener("toggle", () => {
+      const id = String(message.id);
+      if (details.open) state.closedCodingTraces.delete(id);
+      else state.closedCodingTraces.add(id);
+    });
+
+    const last = visibleEntries[visibleEntries.length - 1] || {};
+    const summary = document.createElement("summary");
+    summary.className = "message-coding-trace__summary";
+    const icon = createToolIcon(toolVisuals.code[1]);
+    icon.classList.add("message-coding-trace__icon");
+    const title = document.createElement("span");
+    title.className = "message-coding-trace__title";
+    title.textContent = "Coding-Ablauf";
+    const current = document.createElement("span");
+    current.className = `message-coding-trace__current trace-status--${String(last.status || "running").toLowerCase()}`;
+    current.textContent = visibleEntries.length
+      ? `${visibleEntries.length} Schritte · ${last.title || "Wird vorbereitet"}`
+      : "Bereit · Warte auf Agentenaktion";
+    summary.append(icon, title, current);
+    details.append(summary);
+
+    const list = document.createElement("ol");
+    list.className = "message-coding-trace__list";
+    for (const entry of visibleEntries) {
+      const row = document.createElement("li");
+      row.className = `message-coding-trace__entry trace-status--${String(entry.status || "running").toLowerCase()}`;
+      const marker = document.createElement("span");
+      marker.className = "message-coding-trace__marker";
+      marker.setAttribute("aria-hidden", "true");
+      const text = document.createElement("div");
+      text.className = "message-coding-trace__text";
+      const heading = document.createElement("div");
+      heading.className = "message-coding-trace__heading";
+      const time = entry.timestamp ? timeLabel(entry.timestamp) : "";
+      heading.textContent = [time, entry.title].filter(Boolean).join(" · ");
+      const metadata = document.createElement("div");
+      metadata.className = "message-coding-trace__metadata";
+      const duration = Number.isFinite(entry.durationMilliseconds)
+        ? `${Math.max(0, entry.durationMilliseconds)} ms`
+        : null;
+      metadata.textContent = [entry.target, entry.tool, duration, entry.detail]
+        .filter(Boolean)
+        .join(" · ");
+      text.append(heading);
+      if (metadata.textContent) text.append(metadata);
+      row.append(marker, text);
+      list.append(row);
+    }
+    if (!visibleEntries.length) {
+      const row = document.createElement("li");
+      row.className = "message-coding-trace__entry trace-status--running";
+      const marker = document.createElement("span");
+      marker.className = "message-coding-trace__marker";
+      marker.setAttribute("aria-hidden", "true");
+      const text = document.createElement("div");
+      text.className = "message-coding-trace__text";
+      text.textContent = "Warte auf die erste Agentenaktion …";
+      row.append(marker, text);
+      list.append(row);
+    }
+    details.append(list);
+    requestAnimationFrame(() => {
+      list.scrollTop = list.scrollHeight;
+    });
+    return details;
+  }
+
+  function createPowerShellPanel(message, force = false) {
+    const entries = Array.isArray(message.codingTrace) ? message.codingTrace : [];
+    if (!force && !entries.length) return null;
+    const latestByOperation = new Map();
+    for (const entry of entries) {
+      const processConsole = entry?.processConsole;
+      const operationId = String(processConsole?.operationId || "");
+      if (operationId) latestByOperation.set(operationId, { ...processConsole, sequence: Number(entry.sequence) || 0 });
+    }
+    const consoles = [...latestByOperation.values()].sort((left, right) => left.sequence - right.sequence);
+
+    const messageKey = String(message.id);
+    const details = document.createElement("details");
+    details.className = "message-coding-powershell";
+    details.open = !state.closedPowerShellPanels.has(messageKey);
+    details.addEventListener("toggle", () => {
+      if (details.open) state.closedPowerShellPanels.delete(messageKey);
+      else state.closedPowerShellPanels.add(messageKey);
+    });
+
+    const latest = consoles.length ? consoles[consoles.length - 1] : null;
+    const summary = document.createElement("summary");
+    summary.className = "message-coding-powershell__summary";
+    const icon = createToolIcon("M4 5h16v14H4zM7 9l3 3-3 3M12 15h5");
+    icon.classList.add("message-coding-powershell__icon");
+    const title = document.createElement("span");
+    title.className = "message-coding-powershell__title";
+    title.textContent = "PowerShell";
+    const current = document.createElement("span");
+    current.className = `message-coding-powershell__current console-status--${String(latest?.status || "idle").toLowerCase()}`;
+    current.textContent = !latest
+      ? "Bereit"
+      : latest.status === "running"
+        ? "Befehl läuft"
+        : latest.exitCode == null
+          ? "Beendet"
+          : `Exit-Code ${latest.exitCode}`;
+    summary.append(icon, title, current);
+    details.append(summary);
+
+    const body = document.createElement("div");
+    body.className = "message-coding-powershell__body";
+    if (!consoles.length) {
+      const idle = document.createElement("div");
+      idle.className = "message-coding-powershell__idle";
+      const idlePrompt = document.createElement("span");
+      idlePrompt.className = "message-coding-powershell__prompt";
+      idlePrompt.textContent = "PS>";
+      const idleText = document.createElement("span");
+      idleText.textContent = "Warte auf einen Terminalbefehl …";
+      idle.append(idlePrompt, idleText);
+      body.append(idle);
+    }
+    for (const item of consoles) {
+      const section = document.createElement("section");
+      section.className = `message-coding-powershell__run console-status--${String(item.status || "running").toLowerCase()}`;
+      const command = document.createElement("div");
+      command.className = "message-coding-powershell__command";
+      const prompt = document.createElement("span");
+      prompt.className = "message-coding-powershell__prompt";
+      prompt.textContent = "PS>";
+      const commandText = document.createElement("code");
+      commandText.textContent = item.command || "PowerShell-Befehl";
+      command.append(prompt, commandText);
+
+      const metadata = document.createElement("div");
+      metadata.className = "message-coding-powershell__metadata";
+      const purposeLabels = {
+        inspect: "Prüfung",
+        test: "Test",
+        build: "Build",
+        start: "Programmstart",
+        verify: "Verifikation"
+      };
+      metadata.textContent = [
+        item.workingDirectory && item.workingDirectory !== "." ? item.workingDirectory : null,
+        purposeLabels[String(item.purpose || "").toLowerCase()] || "Terminalbefehl",
+        item.exitCode == null ? null : `Exit-Code ${item.exitCode}`
+      ].filter(Boolean).join(" · ");
+      section.append(command);
+      if (metadata.textContent) section.append(metadata);
+
+      const output = document.createElement("pre");
+      output.className = "message-coding-powershell__output";
+      const stdout = String(item.standardOutput || "").trimEnd();
+      const stderr = String(item.standardError || "").trimEnd();
+      if (stdout) {
+        const stdoutNode = document.createElement("span");
+        stdoutNode.textContent = stdout;
+        output.append(stdoutNode);
+      }
+      if (stderr) {
+        if (stdout) output.append(document.createTextNode("\n"));
+        const stderrNode = document.createElement("span");
+        stderrNode.className = "message-coding-powershell__stderr";
+        stderrNode.textContent = stderr;
+        output.append(stderrNode);
+      }
+      if (!stdout && !stderr) {
+        output.textContent = item.status === "running" ? "Befehl wird ausgeführt …" : "[Keine Konsolenausgabe]";
+      }
+      section.append(output);
+      body.append(section);
+    }
+    details.append(body);
+    requestAnimationFrame(() => {
+      body.scrollTop = body.scrollHeight;
+    });
+    return details;
+  }
+
   function createMessage(message) {
     const role = String(message.role).toLowerCase();
     const article = document.createElement("article");
@@ -698,6 +1110,7 @@
     content.className = "message-content";
     if (["streaming", "Streaming"].includes(message.status)) content.classList.add("stream-cursor");
     content.append(globalThis.goMarkdown.render(message.content || ""));
+    annotateReadableSpeechBlocks(message, article, content);
     body.append(content);
     if (message.tool) {
       const toolBox = document.createElement("div");
@@ -705,6 +1118,22 @@
       toolBox.textContent = [message.tool.tool, message.tool.context, message.tool.detail, message.tool.status]
         .filter(Boolean).join(" · ");
       body.append(toolBox);
+    }
+    const hasCodingState = (Array.isArray(message.codingTrace) && message.codingTrace.length > 0)
+      || typeof message.codeDiff === "string";
+    const codingPanels = hasCodingState
+      ? [
+          createCodingTrace(message, true),
+          createPowerShellPanel(message, true),
+          createCodeDiff(message, true)
+        ]
+      : [];
+    if (codingPanels.length) {
+      const codingPanelGrid = document.createElement("div");
+      codingPanelGrid.className = "message-coding-panels";
+      body.classList.add("message-body--coding");
+      codingPanelGrid.append(...codingPanels);
+      body.append(codingPanelGrid);
     }
     const artifactItems = Array.isArray(message.artifacts) ? message.artifacts : [];
     if (artifactItems.length) body.append(createArtifactList(artifactItems));
@@ -862,7 +1291,10 @@
   }
 
   function isVoiceControlActive() {
-    return Boolean(state.microphone?.isRecording || globalThis.goVoiceCapture?.isActive || state.voiceStarting);
+    return Boolean(
+      globalThis.goVoiceCapture?.isActive
+      || globalThis.goVoiceCapture?.isStarting
+      || state.voiceStarting);
   }
 
   function mediaCaptureFeedback(action) {
@@ -1166,17 +1598,11 @@
       : canPause
         ? "Sprachausgabe wird wiedergegeben"
         : speech.status;
-    const directionModel = String(speech.directionModel || "").trim();
     const speechModel = String(speech.model || "").trim();
-    const speechModelLabel = /supertonic|piper|katja|windows/i.test(speechModel)
-      ? `Sprachausgabe: ${speechModel}`
-      : speechModel
-        ? `Modell: ${speechModel}`
-        : null;
+    const speechModelLabel = speechModel ? `Sprachausgabe: ${speechModel}` : null;
     elements.composerSpeechDetail.textContent = uniqueStatusParts(
       liveStatus,
       cleanStatusMetadata(speech.detail),
-      directionModel ? `Dialogregie: ${directionModel}` : null,
       speechModelLabel).join(" · ");
     const controlLabel = isPaused ? "Fortsetzen" : "Pausieren";
     elements.composerSpeechPause.disabled = !canPause;
@@ -1214,16 +1640,16 @@
   }
 
   function renderMicrophone() {
-    const microphone = state.microphone || {};
     const browserActive = Boolean(globalThis.goVoiceCapture?.isActive || globalThis.goVoiceCapture?.isStarting);
-    const active = Boolean(microphone.isRecording || browserActive || state.voiceStarting);
+    const active = Boolean(browserActive || state.voiceStarting);
     elements.microphone.classList.toggle("recording", active);
-    elements.microphone.classList.toggle("speaking", Boolean(microphone.isSpeaking));
-    elements.microphone.disabled = Boolean(state.voiceStarting || (microphone.isBusy && !active));
+    elements.microphone.classList.remove("speaking");
+    // Only a Chromium microphone capture explicitly started by the user owns
+    // the button state. TTS and native transcription status must never make an
+    // inactive voice-control button look active.
+    elements.microphone.disabled = Boolean(state.voiceStarting);
     const label = active ? "Sprachsteuerung beenden" : "Sprachsteuerung starten";
-    elements.microphone.title = microphone.status && microphone.status !== "Inaktiv"
-      ? `${label} · ${microphone.status}`
-      : label;
+    elements.microphone.title = label;
     elements.microphone.setAttribute("aria-label", label);
     renderVoiceMeter();
   }
@@ -1246,6 +1672,26 @@
     // side accepts only pause/resume/cancel commands during playback and discards
     // every other transcript, preventing the AI voice from feeding itself back.
     globalThis.goVoiceCapture.setSuspended(!state.microphone?.isRecording);
+  }
+
+  async function stopVoiceControl(notifyHost = true) {
+    state.voiceStarting = false;
+    state.voicePlaybackPending = false;
+    state.voiceTurn = null;
+    state.voiceLevel = 0;
+    state.voiceFrequency = 0;
+    state.voiceDominantHz = 0;
+    globalThis.goVoiceCapture?.setSuspended(true);
+    // stop() marks capture inactive and closes all MediaStream tracks before
+    // its asynchronous AudioContext shutdown. Reflect that off-state and ask
+    // the native transcription session to stop immediately instead of waiting
+    // for the context shutdown first.
+    const captureStop = globalThis.goVoiceCapture?.stop(false);
+    renderMessages(false);
+    renderMicrophone();
+    if (notifyHost) post("microphone.stop", {});
+    await captureStop;
+    renderMicrophone();
   }
 
   function microphoneErrorMessage(error) {
@@ -1759,6 +2205,28 @@
         }
         break;
       }
+      case "chat.codeDiff": {
+        if (payload.sessionId !== state.activeSessionId) break;
+        const message = state.messages.find(item => item.id === payload.messageId);
+        if (message) {
+          message.codeDiff = payload.codeDiff || null;
+          renderMessages(false);
+        }
+        break;
+      }
+      case "chat.codingTrace": {
+        if (payload.sessionId !== state.activeSessionId) break;
+        const message = state.messages.find(item => item.id === payload.messageId);
+        if (message && payload.entry) {
+          if (!Array.isArray(message.codingTrace)) message.codingTrace = [];
+          const sequence = Number(payload.entry.sequence);
+          const existing = message.codingTrace.findIndex(entry => Number(entry.sequence) === sequence);
+          if (existing >= 0) message.codingTrace[existing] = payload.entry;
+          else message.codingTrace.push(payload.entry);
+          renderMessages(false);
+        }
+        break;
+      }
       case "chat.completed":
       case "chat.cancelled":
       case "chat.failed":
@@ -1789,7 +2257,7 @@
         renderMessages(true);
         renderStatus();
         if (type === "chat.completed"
-          && state.microphone?.isRecording
+          && isVoiceControlActive()
           && payload.message?.content
           && payload.message?.contentProfile !== "audiobook"
           && payload.message.content.trim() !== "Der Text wurde vorgelesen.") {
@@ -1898,6 +2366,8 @@
             sessionId: null,
             sourceMessageId: null,
             sourceKind: null,
+            playbackId: null,
+            eventSequence: 0,
             sourceUnits: [],
             activeSourceUnitIds: [],
             state: null
@@ -1939,7 +2409,12 @@
         renderSpeechStatus();
         renderStatus();
         syncVoiceCaptureSuspension();
-        renderMessages(false);
+        // The audio service emits progress independently. Rebuilding the whole
+        // message DOM for every unchanged speaking snapshot briefly reapplied
+        // the previous sentence and caused visible highlight jumps.
+        if (!payload?.isSpeaking || !wasSpeaking || payload?.error) {
+          renderMessages(false);
+        }
         if (!payload?.isRecording
           && !payload?.isBusy
           && !payload?.error
@@ -1953,6 +2428,10 @@
         break;
       case "microphone.transcript": {
         const text = String(payload?.text || "").trim();
+        if (payload?.isFinal && payload?.stopVoice) {
+          void stopVoiceControl(false);
+          break;
+        }
         state.voiceTurn = text ? {
           turnId: payload.turnId,
           text,
@@ -2101,18 +2580,9 @@
   byId("pick-document").addEventListener("click", () => post("document.pick", { sessionId: state.activeSessionId }));
   elements.microphone.addEventListener("click", async () => {
     if (state.voiceStarting) return;
-    const active = Boolean(state.microphone?.isRecording || globalThis.goVoiceCapture?.isActive);
+    const active = Boolean(globalThis.goVoiceCapture?.isActive || globalThis.goVoiceCapture?.isStarting);
     if (active) {
-      state.voicePlaybackPending = false;
-      state.voiceTurn = null;
-      state.voiceLevel = 0;
-      state.voiceFrequency = 0;
-      state.voiceDominantHz = 0;
-      globalThis.goVoiceCapture?.setSuspended(true);
-      await globalThis.goVoiceCapture?.stop(true);
-      renderMessages(false);
-      renderMicrophone();
-      post("microphone.stop", {});
+      await stopVoiceControl(true);
       return;
     }
 
@@ -2142,14 +2612,7 @@
     renderVoiceMeter();
   });
   globalThis.addEventListener("go:voice-capture-ended", async () => {
-    await globalThis.goVoiceCapture?.stop(false);
-    state.voiceTurn = null;
-    state.voiceLevel = 0;
-    state.voiceFrequency = 0;
-    state.voiceDominantHz = 0;
-    renderMessages(false);
-    renderMicrophone();
-    post("microphone.stop", {});
+    await stopVoiceControl(true);
     showToast("Die Mikrofonquelle wurde von Windows beendet.", true);
   });
   globalThis.addEventListener("beforeunload", () => {
@@ -2198,6 +2661,10 @@
     });
   }
   elements.stopLiveCaption.addEventListener("click", () => post("liveCaption.stop", {}));
+  document.addEventListener("pointerdown", event => {
+    if (event.button === 2) captureReadFromContextTarget(event);
+  }, { capture: true });
+  document.addEventListener("contextmenu", captureReadFromContextTarget, { capture: true });
   document.addEventListener("click", () => {
     setToolsMenuOpen(false);
     closeAttachmentMenu();
@@ -2264,6 +2731,9 @@
     else if (!elements.overlay.hidden) closeWorkflows();
   });
   globalThis.goCaptureDraft = () => ({ sessionId: state.activeSessionId, draft: elements.prompt.value });
+  globalThis.goGetReadFromContextTarget = () => state.readFromContextTarget
+    ? { ...state.readFromContextTarget }
+    : null;
   globalThis.goFlushDraft = flushDraft;
   let preparedPdfBook = null;
 

@@ -49,9 +49,16 @@ public sealed record ModelRuntimeStatus(
     bool Downloaded,
     bool Loaded,
     string State,
-    int ContextTokens);
+    int ContextTokens,
+    string? DisplayName = null);
 
 public sealed record GeneralModelSelection(string ModelId, int ContextTokens, bool Loaded);
+
+public sealed record CodingModelSelection(
+    string ModelId,
+    string DisplayName,
+    int ContextTokens,
+    bool Loaded);
 
 public sealed record GpuStatusSnapshot(
     bool Available,

@@ -17,6 +17,7 @@ public sealed partial class LmStudioClient : IDisposable
     private readonly GoAiServerOptions _options;
     private readonly DpapiSecretStore _secretStore;
     private readonly ILogger<LmStudioClient> _logger;
+    private readonly LmStudioCliModelLoader? _cliModelLoader;
     private readonly SemaphoreSlim _modelOperationGate = new(1, 1);
     private readonly SemaphoreSlim _statusGate = new(1, 1);
     private readonly object _idleTimerSync = new();
@@ -34,12 +35,14 @@ public sealed partial class LmStudioClient : IDisposable
         HttpClient httpClient,
         IOptions<GoAiServerOptions> options,
         DpapiSecretStore secretStore,
-        ILogger<LmStudioClient> logger)
+        ILogger<LmStudioClient> logger,
+        LmStudioCliModelLoader? cliModelLoader = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _secretStore = secretStore;
         _logger = logger;
+        _cliModelLoader = cliModelLoader;
         _httpClient.BaseAddress = EnsureTrailingSlash(_options.LmStudioUri);
         _httpClient.Timeout = TimeSpan.FromMinutes(30);
     }
@@ -98,7 +101,8 @@ public sealed partial class LmStudioClient : IDisposable
             var status = await GetRawModelsAsync(cancellationToken).ConfigureAwait(false);
             var selected = status.Models.FirstOrDefault(model => string.Equals(model.Key, modelId, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException($"Configured LM Studio model is not downloaded: {modelId}");
-            if (string.Equals(modelId, _options.CodeModelId, StringComparison.OrdinalIgnoreCase)
+            var isCodingModel = CodingModelCatalog.TryGet(modelId, out _);
+            if (isCodingModel
                 && selected.MaximumContextLength < contextLength)
             {
                 throw new LmStudioContextLengthException(modelId, contextLength, selected.MaximumContextLength);
@@ -109,7 +113,11 @@ public sealed partial class LmStudioClient : IDisposable
                 : null;
             var isEmbedding = string.Equals(selected.Type, "embedding", StringComparison.OrdinalIgnoreCase);
             await UnloadIncompatibleModelsAsync(status.Models, modelId, cancellationToken).ConfigureAwait(false);
-            if (loaded is not null && HasRequiredConfiguration(loaded, expectedContextLength, isEmbedding))
+            if (loaded is not null
+                && HasRequiredConfiguration(loaded, expectedContextLength, isEmbedding)
+                && (!isCodingModel
+                    || _cliModelLoader is null
+                    || _cliModelLoader.IsKnownMaximumGpuLoad(modelId, expectedContextLength)))
             {
                 InvalidateStatusCache();
                 return loaded.ModelInstanceId ?? loaded.Id ?? modelId;
@@ -118,6 +126,31 @@ public sealed partial class LmStudioClient : IDisposable
             if (loaded is not null)
             {
                 await UnloadModelInstancesAsync([selected], cancellationToken).ConfigureAwait(false);
+            }
+            if (isCodingModel && _cliModelLoader is not null)
+            {
+                await _cliModelLoader.LoadWithMaximumGpuOffloadAsync(
+                    modelId,
+                    expectedContextLength,
+                    cancellationToken).ConfigureAwait(false);
+                var refreshed = await GetRawModelsAsync(cancellationToken).ConfigureAwait(false);
+                var refreshedModel = refreshed.Models.FirstOrDefault(model =>
+                    string.Equals(model.Key, modelId, StringComparison.OrdinalIgnoreCase));
+                var refreshedInstance = refreshedModel?.LoadedInstances?.FirstOrDefault(instance =>
+                    HasRequiredConfiguration(instance, expectedContextLength, isEmbedding: false));
+                if (refreshedInstance is null)
+                {
+                    _cliModelLoader.ClearMarker();
+                    if (refreshedModel is not null)
+                    {
+                        await UnloadModelInstancesAsync([refreshedModel], cancellationToken).ConfigureAwait(false);
+                    }
+                    throw new InvalidOperationException(
+                        $"LM Studio hat das GPU-Ladeprofil für das Coding-Modell '{modelId}' nicht vollständig angewendet.");
+                }
+
+                InvalidateStatusCache();
+                return refreshedInstance.ModelInstanceId ?? refreshedInstance.Id ?? modelId;
             }
             // The installed LM Studio load API rejects a `ttl` property. Explicit
             // loads are released by this client's own ModelTtlSeconds idle timer;
@@ -167,6 +200,34 @@ public sealed partial class LmStudioClient : IDisposable
         }
     }
 
+    public async Task<bool> UnloadModelAsync(
+        string modelId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelId);
+        await BeginModelOperationAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var status = await GetRawModelsAsync(cancellationToken).ConfigureAwait(false);
+            var matches = status.Models
+                .Where(model => string.Equals(model.Key, modelId, StringComparison.OrdinalIgnoreCase)
+                    && model.LoadedInstances is { Count: > 0 })
+                .ToArray();
+            if (matches.Length == 0)
+            {
+                return false;
+            }
+
+            await UnloadModelInstancesAsync(matches, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        finally
+        {
+            InvalidateStatusCache();
+            EndModelOperation();
+        }
+    }
+
     public async Task UnloadModelsExceptAsync(
         IReadOnlyCollection<string> preservedModelIds,
         CancellationToken cancellationToken = default)
@@ -212,14 +273,14 @@ public sealed partial class LmStudioClient : IDisposable
             }
         }
 
-        var body = new
+        var body = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            model = modelId,
-            input,
-            stream = true,
-            reasoning = new { effort = "low" },
-            ttl = _options.ModelTtlSeconds,
+            ["model"] = modelId,
+            ["input"] = input,
+            ["stream"] = true,
         };
+        AddOptionalModelTtl(body, modelId);
+        ApplySamplingProfile(body, modelId, includeReasoning: true);
         using var request = await CreateRequestAsync(HttpMethod.Post, "v1/responses", body, cancellationToken).ConfigureAwait(false);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
         using var response = await _httpClient.SendAsync(
@@ -302,12 +363,11 @@ public sealed partial class LmStudioClient : IDisposable
             ["instructions"] = instructions,
             ["input"] = input,
             ["stream"] = false,
-            ["temperature"] = 0.2,
             ["max_output_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
-            ["reasoning"] = new { effort = "low" },
-            ["ttl"] = _options.ModelTtlSeconds,
             ["store"] = false,
         };
+        AddOptionalModelTtl(body, modelId);
+        ApplySamplingProfile(body, modelId, includeReasoning: true);
         if (toolPayload.Length > 0)
         {
             body["tools"] = toolPayload;
@@ -845,9 +905,7 @@ public sealed partial class LmStudioClient : IDisposable
     }
 
     private bool IsGeneralCompatibleModel(string modelId) =>
-        string.Equals(modelId, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase);
+        string.Equals(modelId, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase);
 
     private async Task UnloadModelInstancesAsync(
         IEnumerable<LmStudioModel> models,
@@ -870,6 +928,10 @@ public sealed partial class LmStudioClient : IDisposable
                     cancellationToken).ConfigureAwait(false);
                 using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
                 response.EnsureSuccessStatusCode();
+                if (CodingModelCatalog.TryGet(model.Key, out _))
+                {
+                    _cliModelLoader?.ClearMarker();
+                }
                 InvalidateStatusCache();
             }
         }
@@ -906,24 +968,29 @@ public sealed partial class LmStudioClient : IDisposable
 
     private ModelRuntimeStatus[] CreateConfiguredModelStatus(IReadOnlyList<LmStudioModel> rawModels)
     {
-        var definitions = new[]
+        var definitions = new List<(string Id, string Role, int ContextLength, string? DisplayName)>
         {
-            (_options.GeneralModelId, "general", _options.GeneralContextLength),
-            (_options.CodeModelId, "code", _options.CodeContextLength),
-            (_options.VisionModelId, "vision", 65536),
-            (_options.EmbeddingModelId, "embedding", 8192),
+            (_options.GeneralModelId, "general", _options.GeneralContextLength, null),
+            (_options.VisionModelId, "vision", 65_536, null),
+            (_options.EmbeddingModelId, "embedding", 8_192, null),
         };
+        definitions.AddRange(CodingModelCatalog.Models.Select(static profile =>
+            (profile.Id, "code", profile.ContextLength, (string?)profile.DisplayName)));
+        definitions = definitions
+            .DistinctBy(static definition => definition.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
         var configured = definitions.Select(definition =>
         {
-            var raw = rawModels.FirstOrDefault(model => string.Equals(model.Key, definition.Item1, StringComparison.OrdinalIgnoreCase));
+            var raw = rawModels.FirstOrDefault(model => string.Equals(model.Key, definition.Id, StringComparison.OrdinalIgnoreCase));
             var loaded = raw?.LoadedInstances is { Count: > 0 };
             return new ModelRuntimeStatus(
-                definition.Item1,
-                definition.Item2,
+                definition.Id,
+                definition.Role,
                 raw is not null,
                 loaded,
                 raw is null ? "Fehlt" : loaded ? "Geladen" : "Bereit zum Laden",
-                raw?.MaximumContextLength ?? definition.Item3);
+                raw?.MaximumContextLength ?? definition.ContextLength,
+                definition.DisplayName);
         }).ToList();
         foreach (var raw in rawModels.Where(raw => configured.All(item =>
                      !string.Equals(item.Id, raw.Key, StringComparison.OrdinalIgnoreCase))))
@@ -935,7 +1002,8 @@ public sealed partial class LmStudioClient : IDisposable
                 true,
                 loaded,
                 loaded ? "Geladen" : "Bereit zum Laden",
-                raw.MaximumContextLength));
+                raw.MaximumContextLength,
+                raw.Key));
         }
         return configured.ToArray();
     }
@@ -1028,10 +1096,10 @@ public sealed partial class LmStudioClient : IDisposable
             ["model"] = modelId,
             ["messages"] = CreateChatCompletionMessages(messages),
             ["stream"] = false,
-            ["temperature"] = 0.2,
             ["max_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
-            ["ttl"] = _options.ModelTtlSeconds,
         };
+        AddOptionalModelTtl(body, modelId);
+        ApplySamplingProfile(body, modelId, includeReasoning: false);
         if (tools.Count > 0)
         {
             body["tools"] = tools.Select(static tool => new
@@ -1153,6 +1221,40 @@ public sealed partial class LmStudioClient : IDisposable
             });
         }
         return result.ToArray();
+    }
+
+    private static void ApplySamplingProfile(
+        Dictionary<string, object?> body,
+        string modelId,
+        bool includeReasoning)
+    {
+        if (CodingModelCatalog.TryGet(modelId, out var codingProfile))
+        {
+            // Both supported coding agents use their published exploratory profile
+            // and must not receive gpt-oss-specific reasoning options.
+            body["temperature"] = 1.0;
+            body["top_p"] = 0.95;
+            if (string.Equals(codingProfile.SamplingProfile, "qwen-coder", StringComparison.Ordinal))
+            {
+                body["top_k"] = 40;
+            }
+            return;
+        }
+
+        body["temperature"] = 0.2;
+        if (includeReasoning)
+        {
+            body["reasoning"] = new { effort = "low" };
+        }
+    }
+
+    private void AddOptionalModelTtl(Dictionary<string, object?> body, string modelId)
+    {
+        if (!string.Equals(modelId, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase)
+            && !CodingModelCatalog.TryGet(modelId, out _))
+        {
+            body["ttl"] = _options.ModelTtlSeconds;
+        }
     }
 
     private sealed class ResponsesCompatibilityException(System.Net.HttpStatusCode statusCode) : Exception

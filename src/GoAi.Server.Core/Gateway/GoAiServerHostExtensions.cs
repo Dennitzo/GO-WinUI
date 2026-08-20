@@ -40,6 +40,7 @@ public static class GoAiServerHostExtensions
         services.AddSingleton<RunWorkChannel>();
         services.AddSingleton<ModelRouter>();
         services.AddSingleton<GeneralModelSelectionService>();
+        services.AddSingleton<CodingModelSelectionService>();
         services.AddSingleton<AgentToolCatalog>();
         services.AddSingleton<AgentToolExecutor>();
         services.AddSingleton<GpuLeaseScheduler>();
@@ -52,16 +53,17 @@ public static class GoAiServerHostExtensions
         services.AddSingleton<ServiceProbeService>();
         services.AddSingleton<ServerMetricsService>();
         services.AddSingleton<WebResearchService>();
-        services.AddSingleton<WindowsSpeechService>();
         services.AddSingleton<UtteranceIntentService>();
         services.AddSingleton<WorkerOrchestrator>();
         services.AddSingleton<LiveCaptionService>();
+        services.AddSingleton<LmStudioCliModelLoader>();
         services.AddHttpClient();
         services.AddSingleton(static provider => new LmStudioClient(
             provider.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(LmStudioClient)),
             provider.GetRequiredService<IOptions<GoAiServerOptions>>(),
             provider.GetRequiredService<DpapiSecretStore>(),
-            provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<LmStudioClient>>()));
+            provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<LmStudioClient>>(),
+            provider.GetRequiredService<LmStudioCliModelLoader>()));
         services.AddHttpClient<WorkerApiClient>();
         services.AddSingleton<RunProcessor>();
         if (includeHostedServices)

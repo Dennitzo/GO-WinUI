@@ -6,6 +6,9 @@ param(
 
     [string] $ImageVersion = '1.0.0',
 
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')]
+    [string] $BuilderName = 'goai-builder',
+
     [switch] $NoPull
 )
 
@@ -15,6 +18,17 @@ $ErrorActionPreference = 'Stop'
 
 & (Join-Path $PSScriptRoot 'validate-ai-server-compose.ps1')
 $docker = Resolve-GoDockerCommand
+$null = & $docker buildx inspect $BuilderName 2>$null
+if ($LASTEXITCODE -ne 0) {
+    & $docker buildx create --name $BuilderName --driver docker-container | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker Buildx builder '$BuilderName' could not be created."
+    }
+}
+& $docker buildx inspect $BuilderName --bootstrap | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Docker Buildx builder '$BuilderName' is not ready."
+}
 $compose = Resolve-GoRepositoryPath -RelativePath 'deploy\go-ai\compose.yaml'
 $validationRoot = Resolve-GoRepositoryPath -RelativePath 'artifacts\go-ai-server\compose-validation'
 $previousDataRoot = $env:GO_AI_DATA_ROOT
@@ -23,7 +37,12 @@ try {
     $env:GO_AI_DATA_ROOT = $validationRoot.Replace('\', '/')
     $env:GO_AI_IMAGE_VERSION = $ImageVersion
     $targets = if ($Worker -contains 'all') { @('media', 'speech', 'image') } else { $Worker }
-    $arguments = @('compose', '--file', $compose, 'build')
+    $arguments = @(
+        'compose', '--file', $compose, 'build',
+        '--builder', $BuilderName,
+        '--provenance=false',
+        '--sbom=false'
+    )
     if (-not $NoPull) {
         $arguments += '--pull'
     }

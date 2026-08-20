@@ -116,7 +116,7 @@ public sealed partial class PromptTriggerEditorItem : ObservableObject
         PromptTriggerAction.WebSearch => "Websuche",
         PromptTriggerAction.YouTubeSearch => "YouTube-Suche",
         PromptTriggerAction.BricsCad => "BricsCAD",
-        PromptTriggerAction.Code => "Code / Laguna",
+        PromptTriggerAction.Code => "Code / Coding-Agent",
         PromptTriggerAction.VoiceInput => "Sprachsteuerung",
         PromptTriggerAction.LiveCaptions => "Live-Untertitel",
         PromptTriggerAction.LiveTranslation => "Live-Übersetzung",

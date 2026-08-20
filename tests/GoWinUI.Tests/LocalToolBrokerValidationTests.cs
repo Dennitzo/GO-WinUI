@@ -50,6 +50,141 @@ public sealed class LocalToolBrokerValidationTests
         LocalToolBroker.ValidateProposal(proposal, now);
     }
 
+    [Theory]
+    [InlineData("pip", "install")]
+    [InlineData("pip3.exe", "uninstall")]
+    public void GlobalPythonPackageMutationsAreRejected(string executable, string command)
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            LocalToolBroker.ValidatePythonEnvironmentBoundary(
+                executable,
+                [command, "numpy"],
+                executableIsInsideWorkspace: false));
+
+        Assert.Contains(".venv", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PythonLauncherCannotMutateGlobalPackages()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            LocalToolBroker.ValidatePythonEnvironmentBoundary(
+                "py.exe",
+                ["-3.11", "-m", "pip", "install", "scipy"],
+                executableIsInsideWorkspace: false));
+    }
+
+    [Fact]
+    public void WorkspacePythonMayInstallItsOwnDependencies()
+    {
+        LocalToolBroker.ValidatePythonEnvironmentBoundary(
+            @"C:\Workspace\.venv\Scripts\python.exe",
+            ["-m", "pip", "install", "numpy"],
+            executableIsInsideWorkspace: true);
+    }
+
+    [Fact]
+    public void ReadOnlyGlobalPipInspectionRemainsAvailable()
+    {
+        LocalToolBroker.ValidatePythonEnvironmentBoundary(
+            "pip",
+            ["show", "numpy"],
+            executableIsInsideWorkspace: false);
+    }
+
+    [Fact]
+    public void EmptyPythonInvocationCannotMasqueradeAsVerification()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            LocalToolBroker.ValidatePythonProcessHasEntryPoint("python.exe", []));
+
+        Assert.Contains("keine ausführbare Test-, Build- oder Startprüfung", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("-m", "pytest")]
+    [InlineData("-m", "py_compile")]
+    [InlineData("-c", "import app")]
+    public void ConcretePythonEntryPointsRemainAllowed(string first, string second)
+    {
+        LocalToolBroker.ValidatePythonProcessHasEntryPoint("python.exe", [first, second]);
+    }
+
+    [Fact]
+    public void BarePythonCommandsUseAnExistingWorkspaceEnvironment()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "go-python-command-" + Guid.NewGuid().ToString("N"));
+        var python = Path.Combine(workspace, ".venv", "Scripts", "python.exe");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(python)!);
+            File.WriteAllBytes(python, []);
+
+            var resolved = LocalToolBroker.ResolveWorkspacePythonCommand(
+                "pip",
+                "pip",
+                ["install", "numpy"],
+                workspace);
+
+            Assert.True(resolved.Isolated);
+            Assert.Equal(Path.GetFullPath(python), resolved.Executable);
+            Assert.Equal(["-m", "pip", "install", "numpy"], resolved.Arguments);
+        }
+        finally
+        {
+            if (Directory.Exists(workspace))
+            {
+                Directory.Delete(workspace, recursive: true);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(@"C:\Users\AMD\AppData\Local\Programs\Python\Python311\python.exe")]
+    [InlineData("python311")]
+    public void PythonBootstrapPathsAndInventedAliasesUseTheVersionedLauncher(string executable)
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "go-python-bootstrap-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var normalized = LocalToolBroker.NormalizePythonProcessRequest(
+                executable,
+                ["-m", "venv", ".venv"],
+                workspace);
+
+            Assert.Equal("py", normalized.Executable);
+            Assert.Equal(["-3.11", "-m", "venv", ".venv"], normalized.Arguments);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void GlobalPipPathUsesExistingWorkspaceEnvironmentAndDropsItsPythonSelector()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "go-python-pip-" + Guid.NewGuid().ToString("N"));
+        var python = Path.Combine(workspace, ".venv", "Scripts", "python.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(python)!);
+        File.WriteAllBytes(python, []);
+        try
+        {
+            var normalized = LocalToolBroker.NormalizePythonProcessRequest(
+                @"C:\Users\AMD\AppData\Local\Programs\Python\Python311\Scripts\pip.exe",
+                ["--python", @".venv\Scripts\python.exe", "install", "sympy"],
+                workspace);
+
+            Assert.Equal(Path.GetFullPath(python), normalized.Executable);
+            Assert.Equal(["-m", "pip", "install", "sympy"], normalized.Arguments);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
     [Fact]
     public void MultiSearchAndArbitraryFileExtensionsAreAccepted()
     {
@@ -84,6 +219,33 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Theory]
+    [InlineData("")]
+    [InlineData(".")]
+    public void WorkspaceRootPathsAreAcceptedByReadOnlyTools(string path)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var list = Create(
+            ClientToolNames.FileSystemList,
+            ToolRiskClass.ReadOnly,
+            new { path },
+            now);
+        var stat = Create(
+            ClientToolNames.FileSystemStat,
+            ToolRiskClass.ReadOnly,
+            new { path },
+            now);
+        var search = Create(
+            ClientToolNames.FileSystemSearch,
+            ToolRiskClass.ReadOnly,
+            new { path, query = "test" },
+            now);
+
+        LocalToolBroker.ValidateProposal(list, now);
+        LocalToolBroker.ValidateProposal(stat, now);
+        LocalToolBroker.ValidateProposal(search, now);
+    }
+
+    [Theory]
     [InlineData("/workspace/primzahlen_bis_1000.py", "primzahlen_bis_1000.py")]
     [InlineData("workspace/primzahlen_bis_1000.py", "primzahlen_bis_1000.py")]
     [InlineData("primzahlen_bis_1000.py", "primzahlen_bis_1000.py")]
@@ -103,6 +265,241 @@ public sealed class LocalToolBrokerValidationTests
             now);
 
         LocalToolBroker.ValidateProposal(proposal, now);
+    }
+
+    [Fact]
+    public void ExactTextReplacementIsAcceptedAsWorkspaceMutation()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var proposal = Create(
+            ClientToolNames.FileSystemReplaceText,
+            ToolRiskClass.LocalMutation,
+            new
+            {
+                path = "src/TwitchAI.App/ViewModels/ShellViewModel.cs",
+                oldText = "public string Status",
+                newText = "public string RuntimeStatus",
+                expectedSha256 = new string('a', 64),
+                replaceAll = false,
+            },
+            now);
+
+        LocalToolBroker.ValidateProposal(proposal, now);
+    }
+
+    [Fact]
+    public void EmptyContentHashCanRepresentAnAtomicallyMissingWriteTarget()
+    {
+        Assert.True(LocalToolBroker.ExpectedHashRepresentsMissingTarget(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            targetExists: false));
+        Assert.False(LocalToolBroker.ExpectedHashRepresentsMissingTarget(
+            new string('a', 64),
+            targetExists: false));
+        Assert.False(LocalToolBroker.ExpectedHashRepresentsMissingTarget(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            targetExists: true));
+    }
+
+    [Fact]
+    public void ReplacementTextAdoptsCrLfFromAnExistingWinUiFile()
+    {
+        var existing = "<Grid>\r\n  <TextBlock />\r\n</Grid>\r\n";
+        var modelText = "<Grid>\n  <TextBlock />\n</Grid>";
+
+        var normalized = LocalToolBroker.NormalizeReplacementLineEndings(modelText, existing);
+
+        Assert.Equal("<Grid>\r\n  <TextBlock />\r\n</Grid>", normalized);
+    }
+
+    [Fact]
+    public void ReplacementTextPreservesLfFromAnExistingRepositoryFile()
+    {
+        var existing = "first\nsecond\n";
+        var modelText = "first\r\nreplacement\r\n";
+
+        var normalized = LocalToolBroker.NormalizeReplacementLineEndings(modelText, existing);
+
+        Assert.Equal("first\nreplacement\n", normalized);
+    }
+
+    [Fact]
+    public void XamlReplacementFindsOneElementDespiteDifferentAttributeWhitespace()
+    {
+        const string existing = "<Grid>\r\n  <Button Grid.Column=\"2\" VerticalAlignment=\"Center\" HorizontalAlignment=\"Right\" Content=\"Status\" />\r\n</Grid>\r\n";
+        const string requested = "<Button\n    Grid.Column=\"2\"\n    VerticalAlignment=\"Center\"\n    HorizontalAlignment=\"Right\"\n    Content=\"Status\" />";
+
+        var match = LocalToolBroker.FindUniqueWhitespaceTolerantMatch(existing, requested, out var occurrences);
+
+        Assert.Equal(1, occurrences);
+        Assert.Equal("<Button Grid.Column=\"2\" VerticalAlignment=\"Center\" HorizontalAlignment=\"Right\" Content=\"Status\" />", match);
+    }
+
+    [Fact]
+    public void WhitespaceTolerantReplacementRejectsAmbiguousShortcuts()
+    {
+        const string existing = "<TextBlock Text=\"Status\" />\n<TextBlock   Text=\"Status\" />\n";
+        const string requested = "<TextBlock Text=\"Status\" />";
+
+        var match = LocalToolBroker.FindUniqueWhitespaceTolerantMatch(existing, requested, out var occurrences);
+
+        Assert.Null(match);
+        Assert.Equal(2, occurrences);
+    }
+
+    [Fact]
+    public void NewlyIntroducedAttachedFlyoutIsRejectedBeforeWritingXaml()
+    {
+        const string original = "<Window><Grid><Button /></Grid></Window>";
+        const string invalid = "<Window><Grid><Button /><FlyoutBase.AttachedFlyout><Flyout /></FlyoutBase.AttachedFlyout></Grid></Window>";
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            LocalToolBroker.ValidateSourceMutation("MainWindow.xaml", original, invalid, isFullWrite: false));
+
+        Assert.Contains("Button.Flyout", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NormalButtonFlyoutPassesFastXamlValidation()
+    {
+        const string original = "<Window><Grid><Button /></Grid></Window>";
+        const string valid = "<Window><Grid><Button><Button.Flyout><Flyout /></Button.Flyout></Button></Grid></Window>";
+
+        LocalToolBroker.ValidateSourceMutation("MainWindow.xaml", original, valid, isFullWrite: false);
+    }
+
+    [Fact]
+    public void CoherentFullSourceRewriteIsAllowedInsideTheBoundWorkspace()
+    {
+        var original = string.Join('\n', Enumerable.Range(1, 60).Select(index => $"public string Property{index} => \"{index}\";"));
+        var rewritten = original + "\npublic string RuntimeStatus => \"Ready\";\n";
+
+        LocalToolBroker.ValidateSourceMutation("ShellViewModel.cs", original, rewritten, isFullWrite: true);
+    }
+
+    [Fact]
+    public void JsonUnicodeEscapesCopiedFromToolOutputCanBeNormalized()
+    {
+        const string copied = @"value = \u0022Bereit\u0022; unit = \u0022m\u00B3/h\u0022;";
+
+        var normalized = LocalToolBroker.DecodeCopiedJsonUnicodeEscapes(copied);
+
+        Assert.Equal("value = \"Bereit\"; unit = \"m³/h\";", normalized);
+    }
+
+    [Fact]
+    public void DoubleEscapedLineBreaksAndHtmlEntitiesCanBeNormalized()
+    {
+        const string copied = @"if ready:\n    return \u0022value -&gt; valid\u0022\n\nnext_step()";
+
+        var normalized = LocalToolBroker.DecodeCopiedJsonTextEscapes(copied);
+
+        Assert.Equal("if ready:\n    return \"value -> valid\"\n\nnext_step()", normalized);
+    }
+
+    [Fact]
+    public void SingleFilePatchGetsGitHeaderAndTerminalNewline()
+    {
+        const string patch = "--- a/src/App.xaml\n+++ b/src/App.xaml\n@@ -1 +1 @@\n-<Grid />\n+<Grid Padding=\"8\" />";
+
+        var normalized = LocalToolBroker.NormalizeSingleFilePatch(patch, "src/App.xaml");
+
+        Assert.StartsWith("diff --git a/src/App.xaml b/src/App.xaml\n", normalized, StringComparison.Ordinal);
+        Assert.EndsWith("\n", normalized, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("tests/App.Tests/RuntimeTests.cs", "tmp/RuntimeTests.cs.disabled")]
+    [InlineData("tests/App.Tests/RuntimeTests.cs", "src/App/RuntimeTests.cs")]
+    public void TestFilesCannotBeMovedOutOfTheRegularTestTree(string source, string destination)
+    {
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            LocalToolBroker.ValidateVerificationAssetMove(source, destination));
+
+        Assert.Contains("Testdateien", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TestFilesCanBeRenamedInsideTheRegularTestTree()
+    {
+        LocalToolBroker.ValidateVerificationAssetMove(
+            "tests/App.Tests/OldRuntimeTests.cs",
+            "tests/App.Tests/RuntimeDescriptionTests.cs");
+    }
+
+    [Fact]
+    public void DotNetTestPresetUsesTheRequestedProjectTarget()
+    {
+        var arguments = LocalToolBroker.BuildDotNetPresetArguments(
+            "test",
+            "tests/App.Tests/App.Tests.csproj");
+
+        Assert.Equal(
+            ["test", "tests/App.Tests/App.Tests.csproj", "--nologo"],
+            arguments);
+    }
+
+    [Fact]
+    public void DotNetBuildPresetRemainsRepositoryWideWithoutATarget()
+    {
+        Assert.Equal(
+            ["build", "--nologo"],
+            LocalToolBroker.BuildDotNetPresetArguments("build", null));
+    }
+
+    [Fact]
+    public void PythonUnittestFileUsesTheStandardLibraryRunner()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"go-unittest-{Guid.NewGuid():N}.py");
+        try
+        {
+            File.WriteAllText(path, "import unittest\n\nclass SolverTests(unittest.TestCase):\n    pass\n");
+
+            Assert.Equal(
+                ["-m", "unittest", path],
+                LocalToolBroker.BuildPythonTestArguments(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void PythonPytestFileKeepsThePytestRunner()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"go-pytest-{Guid.NewGuid():N}.py");
+        try
+        {
+            File.WriteAllText(path, "def test_solver():\n    assert 1 + 1 == 2\n");
+
+            Assert.Equal(
+                ["-m", "pytest", path],
+                LocalToolBroker.BuildPythonTestArguments(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void GitStatusCollapsesGeneratedTreesButKeepsSourceEntries()
+    {
+        var status = string.Join('\n',
+        [
+            "A  .venv/Lib/site-packages/numpy/__init__.py",
+            "A  .venv/Scripts/python.exe",
+            "A  __pycache__/solver.cpython-311.pyc",
+            " M physics_solver.py",
+        ]);
+
+        var summarized = LocalToolBroker.SummarizeGitStatus(status);
+
+        Assert.Contains(" M physics_solver.py", summarized, StringComparison.Ordinal);
+        Assert.Contains("[2 Git-Status-Einträge unter '.venv' zusammengefasst]", summarized, StringComparison.Ordinal);
+        Assert.Contains("[1 Git-Status-Einträge unter '__pycache__' zusammengefasst]", summarized, StringComparison.Ordinal);
+        Assert.DoesNotContain("site-packages", summarized, StringComparison.Ordinal);
     }
 
     [Fact]

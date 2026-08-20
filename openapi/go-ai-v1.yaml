@@ -62,6 +62,40 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ModelStatusSnapshot"
+  /v1/models/general:
+    post:
+      summary: General-AI-Modell auswählen und laden
+      operationId: selectGeneralModel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeneralModelSelection"
+      responses:
+        "200":
+          description: Gespeicherte General-AI-Auswahl.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeneralModelSelection"
+  /v1/models/code:
+    post:
+      summary: Coding-Agent-Modell auswählen
+      operationId: selectCodingModel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodingModelSelection"
+      responses:
+        "200":
+          description: Gespeicherte Coding-Modellauswahl; das Modell wird erst beim Coding-Lauf geladen.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodingModelSelection"
   /v1/gpu/status:
     get:
       summary: GPU- und Warteschlangenstatus abrufen
@@ -383,7 +417,7 @@ paths:
                 $ref: "#/components/schemas/TranscriptionResponse"
   /v1/audio/speech:
     post:
-      summary: Sprache mit Piper Kerstin erzeugen
+      summary: Sprache über Supertonic in einer kurzlebigen Sitzung erzeugen
       operationId: synthesizeSpeech
       requestBody:
         required: true
@@ -407,11 +441,85 @@ paths:
                   maximum: 2
       responses:
         "200":
-          description: Piper-Kerstin- oder sichtbar markiertes Windows-Katja-Artefakt.
+          description: Von Supertonic erzeugtes WAV-Artefakt.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SpeechResponse"
+  /v1/audio/speech/sessions:
+    post:
+      summary: Absatzbasierte Vorlesesitzung starten
+      operationId: createSpeechSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpeechSessionRequest"
+      responses:
+        "201":
+          description: Vorlesesitzung mit dem residenten Provider wurde angelegt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeechSessionSnapshot"
+  /v1/audio/speech/sessions/{sessionId}/paragraphs:
+    post:
+      summary: Einen vollständigen Absatz innerhalb der Vorlesesitzung erzeugen
+      operationId: synthesizeSpeechParagraph
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpeechParagraphRequest"
+      responses:
+        "200":
+          description: Absatzartefakt mit Provider- und Fallbackstatus.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeechParagraphResponse"
+  /v1/audio/speech/sessions/{sessionId}/end:
+    post:
+      summary: Vorlesesitzung erfolgreich beenden
+      operationId: endSpeechSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Abgeschlossene Vorlesesitzung.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeechSessionSnapshot"
+  /v1/audio/speech/sessions/{sessionId}/cancel:
+    post:
+      summary: Vorlesesitzung abbrechen
+      operationId: cancelSpeechSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Abgebrochene Vorlesesitzung.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeechSessionSnapshot"
   /v1/audio/utterance-intent:
     post:
       summary: Finale Spracheingabe als Frage, Anweisung, Abbruch oder Störgeräusch klassifizieren
@@ -767,6 +875,9 @@ components:
           type: string
           minLength: 1
           maxLength: 512
+        preferredCodeModelId:
+          type: string
+          enum: [ud, qwen3-coder-next]
         documentContext:
           $ref: "#/components/schemas/DocumentContextDescriptor"
         sessionContext:
@@ -1124,6 +1235,32 @@ components:
           type: string
         contextTokens:
           type: integer
+        displayName:
+          type: string
+    GeneralModelSelection:
+      type: object
+      additionalProperties: false
+      required: [modelId, contextTokens, loaded]
+      properties:
+        modelId:
+          type: string
+        contextTokens:
+          type: integer
+        loaded:
+          type: boolean
+    CodingModelSelection:
+      type: object
+      additionalProperties: false
+      required: [modelId, displayName, contextTokens, loaded]
+      properties:
+        modelId:
+          enum: [ud, qwen3-coder-next]
+        displayName:
+          type: string
+        contextTokens:
+          type: integer
+        loaded:
+          type: boolean
     GpuStatusSnapshot:
       type: object
       additionalProperties: false
@@ -1525,14 +1662,134 @@ components:
     SpeechResponse:
       type: object
       additionalProperties: false
-      required: [artifact, provider, isFallback]
+      required: [artifact, provider]
       properties:
         artifact:
           $ref: "#/components/schemas/ArtifactDescriptor"
         provider:
           type: string
-        isFallback:
+    SpeechSessionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        profile:
+          enum: [prepared, audiobook]
+          default: prepared
+        language:
+          type: string
+          enum: [de, de-DE]
+          default: de
+    SpeechSessionSnapshot:
+      type: object
+      additionalProperties: false
+      required: [sessionId, state, profile, provider, generalModelEjected, createdAt, updatedAt]
+      properties:
+        sessionId:
+          type: string
+        state:
+          type: string
+        profile:
+          enum: [prepared, audiobook]
+        provider:
+          type: string
+        generalModelEjected:
           type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    SpeechParagraphRequest:
+      type: object
+      additionalProperties: false
+      required: [text, paragraphIndex]
+      properties:
+        text:
+          type: string
+          maxLength: 3000
+        paragraphIndex:
+          type: integer
+          minimum: 0
+        speed:
+          type: number
+          minimum: 0.5
+          maximum: 2
+          default: 1
+        parts:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/SpeechParagraphPart"
+    SpeechParagraphPart:
+      type: object
+      additionalProperties: false
+      required: [segmentIndex, text]
+      properties:
+        segmentIndex:
+          type: integer
+          minimum: 0
+        text:
+          type: string
+          maxLength: 3000
+        speed:
+          type: number
+          minimum: 0.5
+          maximum: 2
+          default: 1
+        pauseBeforeMilliseconds:
+          type: integer
+          minimum: 0
+          maximum: 1500
+          default: 0
+        pauseAfterMilliseconds:
+          type: integer
+          minimum: 0
+          maximum: 1500
+          default: 0
+    SpeechParagraphTiming:
+      type: object
+      additionalProperties: false
+      required: [segmentIndex, startSeconds, endSeconds]
+      properties:
+        segmentIndex:
+          type: integer
+          minimum: 0
+        startSeconds:
+          type: number
+          minimum: 0
+        endSeconds:
+          type: number
+          minimum: 0
+    SpeechParagraphResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact, provider, paragraphIndex, durationSeconds, sampleRate, alignmentStatus]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/ArtifactDescriptor"
+        provider:
+          type: string
+        paragraphIndex:
+          type: integer
+          minimum: 0
+        durationSeconds:
+          type: number
+          minimum: 0
+        sampleRate:
+          type: integer
+          minimum: 8000
+        timings:
+          type: array
+          items:
+            $ref: "#/components/schemas/SpeechParagraphTiming"
+        alignmentStatus:
+          type: string
+          enum: [notRequested, deterministic, failed]
+        alignmentConfidence:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
     UtteranceIntentRequest:
       type: object
       additionalProperties: false

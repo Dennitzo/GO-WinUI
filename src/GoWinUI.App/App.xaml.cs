@@ -95,6 +95,8 @@ public partial class App : Application
                 services.AddSingleton<DocumentContextPreparationService>();
                 services.AddSingleton<SessionContextPreparationService>();
                 services.AddSingleton<LocalToolBroker>();
+                services.AddSingleton<CodingDiffService>();
+                services.AddSingleton<CodingRunTraceService>();
                 services.AddSingleton<GoAiAssistantService>();
             })
             .Build();
@@ -237,8 +239,14 @@ public partial class App : Application
 
             var shell = GetService<ShellViewModel>();
             shell.IsAiConnectionEnabled = enabled;
-            SetLocalAiStatus(false, null, null, null);
-            if (!enabled || Volatile.Read(ref _shutdownStarted) != 0)
+            if (!enabled)
+            {
+                SetLocalAiStatus(false, false, null, null, null);
+                return;
+            }
+
+            shell.BeginAiAvailabilityCheck();
+            if (Volatile.Read(ref _shutdownStarted) != 0)
             {
                 return;
             }
@@ -281,11 +289,12 @@ public partial class App : Application
         var currentSettings = GetService<SettingsCoordinator>().Current;
         if (!currentSettings.IsAiConnectionEnabled)
         {
-            SetLocalAiStatus(false, null, null, null);
+            SetLocalAiStatus(false, false, null, null, null);
             return false;
         }
 
         var connected = false;
+        var serverReady = false;
         GpuStatusSnapshot? gpuStatus = null;
         ModelStatusSnapshot? modelStatus = null;
         IReadOnlyList<ServiceStatusSnapshot>? serviceStatus = null;
@@ -297,22 +306,39 @@ public partial class App : Application
                     .CreateClientAsync(cancellationToken)
                     .ConfigureAwait(false);
                 var healthTask = client.GetReadyHealthAsync(cancellationToken);
+                var capabilitiesTask = client.GetCapabilitiesAsync(cancellationToken);
+
+                // Readiness may legitimately be degraded because one optional
+                // model is still downloading. Capabilities is authenticated and
+                // therefore proves that this client can use the gateway.
+                var health = await healthTask.ConfigureAwait(false);
+                var capabilities = await capabilitiesTask.ConfigureAwait(false);
+                connected = string.Equals(
+                    health.ProtocolVersion,
+                    currentSettings.GoAiProtocolVersion,
+                    StringComparison.Ordinal)
+                    && string.Equals(
+                        capabilities.ProtocolVersion,
+                        currentSettings.GoAiProtocolVersion,
+                        StringComparison.Ordinal);
+                serverReady = connected
+                    && string.Equals(health.Status, "ready", StringComparison.OrdinalIgnoreCase);
+
+                // Diagnostic endpoints enrich individual service chips but must
+                // never downgrade an already authenticated gateway connection.
                 var gpuTask = client.GetGpuStatusAsync(cancellationToken);
                 var modelTask = client.GetModelStatusAsync(cancellationToken);
                 var serviceTask = client.GetServiceStatusAsync(cancellationToken);
-                await Task.WhenAll(healthTask, gpuTask, modelTask, serviceTask).ConfigureAwait(false);
-                var health = await healthTask.ConfigureAwait(false);
-                gpuStatus = await gpuTask.ConfigureAwait(false);
-                modelStatus = await modelTask.ConfigureAwait(false);
-                serviceStatus = await serviceTask.ConfigureAwait(false);
-                connected = string.Equals(health.Status, "ready", StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(health.ProtocolVersion, currentSettings.GoAiProtocolVersion, StringComparison.Ordinal);
+                gpuStatus = await AwaitOptionalStatusAsync(gpuTask, cancellationToken).ConfigureAwait(false);
+                modelStatus = await AwaitOptionalStatusAsync(modelTask, cancellationToken).ConfigureAwait(false);
+                serviceStatus = await AwaitOptionalStatusAsync(serviceTask, cancellationToken).ConfigureAwait(false);
             }
             else
             {
                 connected = await GetService<ILmStudioClient>()
                     .TestConnectionAsync(cancellationToken)
                     .ConfigureAwait(false);
+                serverReady = connected;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -333,13 +359,33 @@ public partial class App : Application
             return false;
         }
 
-        SetLocalAiStatus(connected, gpuStatus, modelStatus, serviceStatus);
+        SetLocalAiStatus(connected, serverReady, gpuStatus, modelStatus, serviceStatus);
         return gpuStatus?.ActiveWorkloads is { Count: > 0 }
             || !string.IsNullOrWhiteSpace(gpuStatus?.ActiveLease);
     }
 
+    private static async Task<T?> AwaitOptionalStatusAsync<T>(
+        Task<T> task,
+        CancellationToken cancellationToken)
+        where T : class
+    {
+        try
+        {
+            return await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            return null;
+        }
+    }
+
     private void SetLocalAiStatus(
         bool connected,
+        bool serverReady,
         GpuStatusSnapshot? gpuStatus,
         ModelStatusSnapshot? modelStatus,
         IReadOnlyList<ServiceStatusSnapshot>? serviceStatus)
@@ -348,13 +394,13 @@ public partial class App : Application
         var dispatcher = _window?.DispatcherQueue;
         if (dispatcher is null || dispatcher.HasThreadAccess)
         {
-            shell.ApplyAiAvailabilitySnapshot(connected, gpuStatus, modelStatus, serviceStatus);
+            shell.ApplyAiAvailabilitySnapshot(connected, serverReady, gpuStatus, modelStatus, serviceStatus);
             return;
         }
 
         _ = dispatcher.TryEnqueue(() =>
         {
-            shell.ApplyAiAvailabilitySnapshot(connected, gpuStatus, modelStatus, serviceStatus);
+            shell.ApplyAiAvailabilitySnapshot(connected, serverReady, gpuStatus, modelStatus, serviceStatus);
         });
     }
 

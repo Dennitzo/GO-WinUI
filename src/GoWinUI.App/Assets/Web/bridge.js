@@ -16,7 +16,7 @@
   ]);
   const allowedInbound = new Set([
     "state.snapshot", "chat.started", "chat.delta", "chat.completed",
-    "chat.cancelled", "chat.failed", "session.changed", "workflow.snapshot",
+    "chat.cancelled", "chat.failed", "chat.codeDiff", "chat.codingTrace", "session.changed", "workflow.snapshot",
     "workflow.changed", "workflow.draft", "document.changed", "status.changed", "speech.status", "speech.progress", "theme.changed",
     "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
     "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady",

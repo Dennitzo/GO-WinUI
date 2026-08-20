@@ -95,7 +95,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         var lastActivityAt = lastActivityText is null ? null : settings.LastActivityAt;
         return settings with
         {
-            Version = 6,
+            Version = 9,
             GoAiServerUrl = goAiServerUrl.TrimEnd('/'),
             GoAiProtocolVersion = string.IsNullOrWhiteSpace(settings.GoAiProtocolVersion)
                 ? "1.0"
@@ -115,6 +115,9 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             SelectedModel = string.IsNullOrWhiteSpace(settings.SelectedModel)
                 ? AppSettings.DefaultSelectedModel
                 : settings.SelectedModel.Trim(),
+            SelectedCodingModel = settings.Version < 9 || string.IsNullOrWhiteSpace(settings.SelectedCodingModel)
+                ? AppSettings.DefaultSelectedCodingModel
+                : settings.SelectedCodingModel.Trim(),
             AccentColor = accentColor,
             BackgroundColor = backgroundColor,
             NavigationPaneWidth = Math.Clamp(settings.NavigationPaneWidth, 280, 520),

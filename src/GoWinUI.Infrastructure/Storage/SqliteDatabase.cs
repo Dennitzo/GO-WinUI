@@ -9,7 +9,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 19;
+    public const int CurrentSchemaVersion = 21;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -67,6 +67,8 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationSeventeenAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationEighteenAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationNineteenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyOneAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -738,6 +740,44 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private static async Task ApplyMigrationTwentyAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=20;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                DROP TABLE IF EXISTS speech_preparations;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(20,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyOneAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=21;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_messages ADD COLUMN code_diff TEXT NULL;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(21,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
@@ -1056,7 +1096,7 @@ internal static class PromptTriggerSeeds
         new(Guid.Parse("a1000000-0000-4000-8000-000000000010"), "webSearch", "Suche im Web", "Durchsucht das Web über den GO AI Server.", 170),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000011"), "youTubeSearch", "Suche auf YouTube", "Durchsucht YouTube über den GO AI Server.", 170),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000012"), "bricsCad", "In BricsCAD", "Aktiviert die typisierten BricsCAD-Werkzeuge für diesen Lauf.", 180),
-        new(Guid.Parse("a1000000-0000-4000-8000-000000000013"), "code", "Code analysieren", "Routet die Aufgabe exklusiv an Laguna.", 170),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000013"), "code", "Code analysieren", "Routet die Aufgabe exklusiv an das ausgewählte Coding-Modell.", 170),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000014"), "liveCaptions", "Untertitel", "Startet Live-Untertitel für das Windows-Systemaudio.", 180),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000015"), "liveTranslation", "Live übersetzen", "Startet die Echtzeitübersetzung des Windows-Systemaudios.", 180),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000019"), "audiobook", "Hörbuch erstellen", "Erstellt oder lenkt ein fortlaufendes, direkt vorlesbares Hörbuchkapitel.", 190),

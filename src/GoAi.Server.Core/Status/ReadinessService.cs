@@ -67,8 +67,11 @@ public sealed class ReadinessService
                 "In LM Studio 'Require Authentication' aktivieren und den Token in der Serverkonsole geschützt speichern.");
         }
 
+        var requiredModelIds = new HashSet<string>(
+            [_options.GeneralModelId, _options.CodeModelId],
+            StringComparer.OrdinalIgnoreCase);
         var missingRequired = modelStatus.Models
-            .Where(static model => model.Role is "general" or "code")
+            .Where(model => requiredModelIds.Contains(model.Id))
             .Where(static model => !model.Downloaded)
             .Select(static model => model.Id)
             .ToArray();

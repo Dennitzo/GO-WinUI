@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using GoWinUI.Core.Contracts;
 
 namespace GoWinUI.App.Services;
@@ -21,6 +22,7 @@ public sealed class LocalToolBroker(
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private const int MaximumProcessStreamCharacters = 1_900_000;
+    private const string EmptyContentSha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
     private readonly AsyncLocal<string?> _executionWorkspace = new();
     private readonly AsyncLocal<Guid?> _executionSession = new();
@@ -79,6 +81,7 @@ public sealed class LocalToolBroker(
                 ClientToolNames.FileSystemReadMany => await ReadManyAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemSearch => await SearchAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemWriteText => await WriteTextAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
+                ClientToolNames.FileSystemReplaceText => await ReplaceTextAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemMove => await MoveAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemProposePatch => await ApplyPatchAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemProposeCreate => await CreateFileAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
@@ -140,7 +143,7 @@ public sealed class LocalToolBroker(
                 or ClientToolNames.FileSystemFindFiles or ClientToolNames.FileSystemReadText
                 or ClientToolNames.FileSystemReadMany or ClientToolNames.FileSystemSearch
                 or ClientToolNames.BricsCadGeometryQuery or ClientToolNames.BricsCadMeasure => ToolRiskClass.ReadOnly,
-            ClientToolNames.FileSystemWriteText or ClientToolNames.FileSystemMove
+            ClientToolNames.FileSystemWriteText or ClientToolNames.FileSystemReplaceText or ClientToolNames.FileSystemMove
                 or ClientToolNames.FileSystemProposePatch or ClientToolNames.FileSystemProposeCreate
                 or ClientToolNames.FileSystemProposeDelete => ToolRiskClass.LocalMutation,
             ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun => ToolRiskClass.Process,
@@ -176,6 +179,9 @@ public sealed class LocalToolBroker(
                 break;
             case ClientToolNames.FileSystemList:
             case ClientToolNames.FileSystemStat:
+                ValidateProperties(arguments, ["path"], ["path"]);
+                ValidateString(arguments, "path", 0, 1_024);
+                break;
             case ClientToolNames.FileSystemProposeDelete:
                 ValidateProperties(arguments, ["path"], ["path"]);
                 ValidateString(arguments, "path", 1, 1_024);
@@ -188,7 +194,7 @@ public sealed class LocalToolBroker(
                 break;
             case ClientToolNames.FileSystemFindFiles:
                 ValidateProperties(arguments, ["patterns"], ["path", "patterns", "maximumResults"]);
-                ValidateOptionalString(arguments, "path", 1, 1_024);
+                ValidateOptionalString(arguments, "path", 0, 1_024);
                 ValidateStringArray(arguments, "patterns", 1, 64, 256);
                 ValidateOptionalInteger(arguments, "maximumResults", 1, 5_000);
                 break;
@@ -202,7 +208,7 @@ public sealed class LocalToolBroker(
                     arguments,
                     ["path"],
                     ["path", "query", "queries", "matchMode", "includeGlobs", "excludeGlobs", "maximumResults", "contextLines"]);
-                ValidateString(arguments, "path", 1, 1_024);
+                ValidateString(arguments, "path", 0, 1_024);
                 var hasQuery = arguments.TryGetProperty("query", out _);
                 var hasQueries = arguments.TryGetProperty("queries", out _);
                 if (hasQuery == hasQueries)
@@ -222,6 +228,14 @@ public sealed class LocalToolBroker(
                 ValidateString(arguments, "path", 1, 1_024);
                 ValidateString(arguments, "content", 0, MaximumResultCharacters);
                 ValidateOptionalString(arguments, "expectedSha256", 64, 64);
+                break;
+            case ClientToolNames.FileSystemReplaceText:
+                ValidateProperties(arguments, ["path", "oldText", "newText"], ["path", "oldText", "newText", "expectedSha256", "replaceAll"]);
+                ValidateString(arguments, "path", 1, 1_024);
+                ValidateString(arguments, "oldText", 1, MaximumResultCharacters / 2);
+                ValidateString(arguments, "newText", 0, MaximumResultCharacters / 2);
+                ValidateOptionalString(arguments, "expectedSha256", 64, 64);
+                ValidateOptionalBoolean(arguments, "replaceAll");
                 break;
             case ClientToolNames.FileSystemMove:
                 ValidateProperties(arguments, ["source", "destination"], ["source", "destination", "overwrite"]);
@@ -432,7 +446,7 @@ public sealed class LocalToolBroker(
     private Task<object> ListAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var path = ResolvePath(RequiredString(arguments, "path"), requireExisting: true);
+        var path = ResolvePath(WorkspaceRootPath(arguments, "path"), requireExisting: true);
         if (!Directory.Exists(path))
         {
             throw new DirectoryNotFoundException("Der angeforderte Pfad ist kein Ordner.");
@@ -459,7 +473,7 @@ public sealed class LocalToolBroker(
     private Task<object> StatAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var path = ResolvePath(RequiredString(arguments, "path"), requireExisting: true);
+        var path = ResolvePath(WorkspaceRootPath(arguments, "path"), requireExisting: true);
         var isDirectory = Directory.Exists(path);
         var info = isDirectory ? null : new FileInfo(path);
         return Task.FromResult<object>(new
@@ -476,7 +490,7 @@ public sealed class LocalToolBroker(
     private async Task<object> FindFilesAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         var root = arguments.TryGetProperty("path", out var rootValue) && rootValue.ValueKind == JsonValueKind.String
-            ? rootValue.GetString() ?? "."
+            ? string.IsNullOrWhiteSpace(rootValue.GetString()) ? "." : rootValue.GetString()!
             : ".";
         _ = ResolvePath(root, requireExisting: true);
         var patterns = ReadStringArray(arguments, "patterns");
@@ -556,7 +570,7 @@ public sealed class LocalToolBroker(
 
     private async Task<object> SearchAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
-        var root = ResolvePath(RequiredString(arguments, "path"), requireExisting: true);
+        var root = ResolvePath(WorkspaceRootPath(arguments, "path"), requireExisting: true);
         var mode = arguments.TryGetProperty("matchMode", out var modeValue)
             ? modeValue.GetString() ?? "literal"
             : "literal";
@@ -642,31 +656,49 @@ public sealed class LocalToolBroker(
     private async Task<object> WriteTextAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         var path = ResolvePath(RequiredString(arguments, "path"), requireExisting: false);
+        var targetExisted = File.Exists(path);
+        var existingContent = targetExisted
+            ? await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false)
+            : null;
         if (Directory.Exists(path))
         {
             throw new IOException("fs.writeText kann keinen Ordner überschreiben.");
         }
+        var expectsMissingTarget = false;
         if (arguments.TryGetProperty("expectedSha256", out var expectedValue)
             && expectedValue.ValueKind == JsonValueKind.String)
         {
-            if (!File.Exists(path))
+            var expectedSha256 = expectedValue.GetString();
+            if (!targetExisted)
             {
-                throw new IOException("Die erwartete Zieldatei existiert nicht mehr.");
+                if (!ExpectedHashRepresentsMissingTarget(expectedSha256, targetExists: false))
+                {
+                    throw new IOException("Die erwartete Zieldatei existiert nicht mehr.");
+                }
+
+                // Some coding models use SHA-256(empty) as an optimistic token for a
+                // new file. Keep that creation race-safe by requiring the target to
+                // remain absent until the atomic move below.
+                expectsMissingTarget = true;
             }
-            await using var existing = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 81_920, true);
-            var actual = Convert.ToHexString(await SHA256.HashDataAsync(existing, cancellationToken).ConfigureAwait(false)).ToLowerInvariant();
-            if (!actual.Equals(expectedValue.GetString(), StringComparison.OrdinalIgnoreCase))
+            else
             {
-                throw new IOException("Die Zieldatei wurde zwischenzeitlich geändert; fs.writeText wurde nicht ausgeführt.");
+                await using var existing = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 81_920, true);
+                var actual = Convert.ToHexString(await SHA256.HashDataAsync(existing, cancellationToken).ConfigureAwait(false)).ToLowerInvariant();
+                if (!actual.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException("Die Zieldatei wurde zwischenzeitlich geändert; fs.writeText wurde nicht ausgeführt.");
+                }
             }
         }
         var content = RequiredString(arguments, "content", allowEmpty: true);
+        ValidateSourceMutation(path, existingContent, content, isFullWrite: existingContent is not null);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".go-ai.tmp";
         try
         {
             await File.WriteAllTextAsync(temporary, content, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
-            File.Move(temporary, path, overwrite: true);
+            File.Move(temporary, path, overwrite: !expectsMissingTarget);
         }
         finally
         {
@@ -682,11 +714,268 @@ public sealed class LocalToolBroker(
         };
     }
 
+    internal static bool ExpectedHashRepresentsMissingTarget(string? expectedSha256, bool targetExists) =>
+        !targetExists
+        && string.Equals(expectedSha256, EmptyContentSha256, StringComparison.OrdinalIgnoreCase);
+
+    private async Task<object> ReplaceTextAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var path = ResolvePath(RequiredString(arguments, "path"), requireExisting: true);
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException("Das Ziel für fs.replaceText wurde nicht gefunden.", path);
+        }
+        if (IsProbablyBinary(path))
+        {
+            throw new InvalidDataException("fs.replaceText kann keine bekannte Binärdatei bearbeiten.");
+        }
+
+        var original = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+        if (original.Contains('\0'))
+        {
+            throw new InvalidDataException("fs.replaceText kann keine Binärdatei bearbeiten.");
+        }
+        if (arguments.TryGetProperty("expectedSha256", out var expectedValue)
+            && expectedValue.ValueKind == JsonValueKind.String)
+        {
+            var actual = await ComputeFileHashAsync(path, cancellationToken).ConfigureAwait(false);
+            if (!actual.Equals(expectedValue.GetString(), StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("Die Zieldatei wurde zwischenzeitlich geändert; fs.replaceText wurde nicht ausgeführt.");
+            }
+        }
+
+        var requestedOldText = RequiredString(arguments, "oldText");
+        var requestedNewText = RequiredString(arguments, "newText", allowEmpty: true);
+        var oldText = NormalizeReplacementLineEndings(requestedOldText, original);
+        var newText = NormalizeReplacementLineEndings(requestedNewText, original);
+        if (string.Equals(oldText, newText, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("fs.replaceText benötigt eine tatsächliche Textänderung.");
+        }
+        var occurrences = CountOrdinalOccurrences(original, oldText);
+        var whitespaceNormalized = false;
+        var copiedJsonUnicodeEscapesNormalized = false;
+        var whitespaceMatch = occurrences == 0
+            ? FindUniqueWhitespaceTolerantMatch(original, oldText, out _)
+            : null;
+        if (occurrences == 0 && whitespaceMatch is null)
+        {
+            var decodedOldText = NormalizeReplacementLineEndings(
+                DecodeCopiedJsonUnicodeEscapes(requestedOldText),
+                original);
+            if (!string.Equals(decodedOldText, oldText, StringComparison.Ordinal))
+            {
+                var decodedOccurrences = CountOrdinalOccurrences(original, decodedOldText);
+                var decodedWhitespaceMatch = decodedOccurrences == 0
+                    ? FindUniqueWhitespaceTolerantMatch(original, decodedOldText, out _)
+                    : null;
+                if (decodedOccurrences > 0 || decodedWhitespaceMatch is not null)
+                {
+                    oldText = decodedOldText;
+                    newText = NormalizeReplacementLineEndings(
+                        DecodeCopiedJsonUnicodeEscapes(requestedNewText),
+                        original);
+                    occurrences = decodedOccurrences;
+                    whitespaceMatch = decodedWhitespaceMatch;
+                    copiedJsonUnicodeEscapesNormalized = true;
+                }
+            }
+        }
+        if (occurrences == 0 && whitespaceMatch is null)
+        {
+            var decodedOldText = NormalizeReplacementLineEndings(
+                DecodeCopiedJsonTextEscapes(requestedOldText),
+                original);
+            if (!string.Equals(decodedOldText, oldText, StringComparison.Ordinal))
+            {
+                var decodedOccurrences = CountOrdinalOccurrences(original, decodedOldText);
+                var decodedWhitespaceMatch = decodedOccurrences == 0
+                    ? FindUniqueWhitespaceTolerantMatch(original, decodedOldText, out _)
+                    : null;
+                if (decodedOccurrences > 0 || decodedWhitespaceMatch is not null)
+                {
+                    oldText = decodedOldText;
+                    newText = NormalizeReplacementLineEndings(
+                        DecodeCopiedJsonTextEscapes(requestedNewText),
+                        original);
+                    occurrences = decodedOccurrences;
+                    whitespaceMatch = decodedWhitespaceMatch;
+                    copiedJsonUnicodeEscapesNormalized = true;
+                }
+            }
+        }
+        if (occurrences == 0 && whitespaceMatch is null)
+        {
+            throw new InvalidDataException("Der exakt angegebene oldText wurde nicht gefunden. Lies den aktuellen Dateibereich erneut und verwende dessen unveränderten Wortlaut.");
+        }
+        if (whitespaceMatch is not null)
+        {
+            oldText = whitespaceMatch;
+            occurrences = 1;
+            whitespaceNormalized = true;
+        }
+        var replaceAll = arguments.TryGetProperty("replaceAll", out var replaceAllValue)
+            && replaceAllValue.ValueKind == JsonValueKind.True;
+        if (!replaceAll && occurrences != 1)
+        {
+            throw new InvalidDataException($"oldText kommt {occurrences} Mal vor. Gib mehr eindeutigen Kontext an oder setze replaceAll ausdrücklich auf true.");
+        }
+
+        var firstOccurrence = original.IndexOf(oldText, StringComparison.Ordinal);
+        var updated = replaceAll
+            ? original.Replace(oldText, newText, StringComparison.Ordinal)
+            : original.Remove(firstOccurrence, oldText.Length).Insert(firstOccurrence, newText);
+        ValidateSourceMutation(path, original, updated, isFullWrite: false);
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".go-ai.tmp";
+        try
+        {
+            await File.WriteAllTextAsync(temporary, updated, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch (IOException) { }
+        }
+
+        return new
+        {
+            replaced = true,
+            path = Relative(path),
+            replacements = replaceAll ? occurrences : 1,
+            lineEndingsNormalized = !string.Equals(requestedOldText, oldText, StringComparison.Ordinal)
+                || !string.Equals(requestedNewText, newText, StringComparison.Ordinal),
+            whitespaceNormalized,
+            copiedJsonUnicodeEscapesNormalized,
+            length = Encoding.UTF8.GetByteCount(updated),
+            sha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(updated))).ToLowerInvariant(),
+        };
+    }
+
+    private static int CountOrdinalOccurrences(string source, string value)
+    {
+        var count = 0;
+        var offset = 0;
+        while ((offset = source.IndexOf(value, offset, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            offset += value.Length;
+        }
+        return count;
+    }
+
+    internal static string? FindUniqueWhitespaceTolerantMatch(
+        string source,
+        string requestedText,
+        out int occurrences)
+    {
+        occurrences = 0;
+        if (requestedText.Count(static character => !char.IsWhiteSpace(character)) < 8)
+        {
+            return null;
+        }
+
+        var pattern = new StringBuilder();
+        for (var index = 0; index < requestedText.Length;)
+        {
+            if (char.IsWhiteSpace(requestedText[index]))
+            {
+                while (index < requestedText.Length && char.IsWhiteSpace(requestedText[index])) index++;
+                pattern.Append(@"\s+");
+                continue;
+            }
+
+            var start = index;
+            while (index < requestedText.Length && !char.IsWhiteSpace(requestedText[index])) index++;
+            pattern.Append(Regex.Escape(requestedText[start..index]));
+        }
+
+        var regex = new Regex(
+            pattern.ToString(),
+            RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
+            TimeSpan.FromSeconds(2));
+        var matches = regex.Matches(source).Cast<Match>().ToArray();
+        occurrences = matches.Length;
+        return matches.Length == 1 ? matches[0].Value : null;
+    }
+
+    internal static string NormalizeReplacementLineEndings(string value, string existingContent)
+    {
+        string? lineEnding = existingContent.Contains("\r\n", StringComparison.Ordinal)
+            ? "\r\n"
+            : existingContent.Contains('\n')
+                ? "\n"
+                : existingContent.Contains('\r')
+                    ? "\r"
+                    : null;
+        if (lineEnding is null)
+        {
+            return value;
+        }
+
+        return value
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Replace("\n", lineEnding, StringComparison.Ordinal);
+    }
+
+    internal static string DecodeCopiedJsonUnicodeEscapes(string value) => Regex.Replace(
+        value,
+        @"\\u(?<code>[0-9a-fA-F]{4})",
+        static match => ((char)Convert.ToUInt16(match.Groups["code"].Value, 16)).ToString(),
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
+        TimeSpan.FromMilliseconds(250));
+
+    internal static string DecodeCopiedJsonTextEscapes(string value)
+    {
+        var decoded = DecodeCopiedJsonUnicodeEscapes(value)
+            .Replace("\\r\\n", "\n", StringComparison.Ordinal)
+            .Replace("\\n", "\n", StringComparison.Ordinal)
+            .Replace("\\r", "\n", StringComparison.Ordinal)
+            .Replace("\\t", "\t", StringComparison.Ordinal);
+        return System.Net.WebUtility.HtmlDecode(decoded);
+    }
+
+    internal static void ValidateSourceMutation(
+        string path,
+        string? original,
+        string updated,
+        bool isFullWrite)
+    {
+        if (string.Equals(Path.GetExtension(path), ".xaml", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                _ = XDocument.Parse(updated, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
+            }
+            catch (Exception exception) when (exception is System.Xml.XmlException or ArgumentException)
+            {
+                throw new InvalidDataException(
+                    $"Die erzeugte XAML-Datei ist nicht wohlgeformt: {exception.Message}",
+                    exception);
+            }
+
+            if (updated.Contains("<FlyoutBase.AttachedFlyout", StringComparison.Ordinal)
+                && original?.Contains("<FlyoutBase.AttachedFlyout", StringComparison.Ordinal) != true)
+            {
+                throw new InvalidDataException(
+                    "FlyoutBase.AttachedFlyout öffnet sich bei einem normalen Button-Klick nicht automatisch. "
+                    + "Verwende Button.Flyout mit einem normalen Flyout oder einen expliziten ShowAttachedFlyout-Aufruf.");
+            }
+        }
+
+        // A coding prompt authorizes coherent full-file rewrites inside the bound workspace.
+        // Atomic replacement and optional expectedSha256 still protect against torn or stale writes;
+        // git diff plus mandatory verification expose unintended broad changes to the agent.
+    }
+
     private Task<object> MoveAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var source = ResolvePath(RequiredString(arguments, "source"), requireExisting: true);
         var destination = ResolvePath(RequiredString(arguments, "destination"), requireExisting: false);
+        ValidateVerificationAssetMove(Relative(source), Relative(destination));
         var overwrite = arguments.TryGetProperty("overwrite", out var overwriteValue)
             && overwriteValue.ValueKind == JsonValueKind.True;
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -717,6 +1006,7 @@ public sealed class LocalToolBroker(
             throw new IOException("Das Ziel existiert bereits; fs.proposeCreate überschreibt keine Daten.");
         }
         var content = RequiredString(arguments, "content", allowEmpty: true);
+        ValidateSourceMutation(path, null, content, isFullWrite: false);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path, content, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
         return new { created = true, path = Relative(path), length = Encoding.UTF8.GetByteCount(content) };
@@ -756,11 +1046,14 @@ public sealed class LocalToolBroker(
         {
             throw new FileNotFoundException("Das Patchziel wurde nicht gefunden.", target);
         }
-        var patch = RequiredString(arguments, "patch");
+        var original = await File.ReadAllTextAsync(target, cancellationToken).ConfigureAwait(false);
+        var patch = NormalizeSingleFilePatch(
+            RequiredString(arguments, "patch"),
+            Relative(target));
         ValidatePatchTargets(patch, target);
         var result = await RunProcessAsync(
             "git",
-            ["-C", Workspace(), "apply", "--whitespace=nowarn", "-"],
+            ["-C", Workspace(), "apply", "--recount", "--whitespace=nowarn", "-"],
             Workspace(),
             patch,
             TimeSpan.FromMinutes(2),
@@ -769,7 +1062,44 @@ public sealed class LocalToolBroker(
         {
             throw new InvalidOperationException($"git apply ist fehlgeschlagen: {result.StandardError}");
         }
+        try
+        {
+            var updated = await File.ReadAllTextAsync(target, cancellationToken).ConfigureAwait(false);
+            ValidateSourceMutation(target, original, updated, isFullWrite: false);
+        }
+        catch (Exception validationException) when (validationException is InvalidDataException or IOException)
+        {
+            var rollback = await RunProcessAsync(
+                "git",
+                ["-C", Workspace(), "apply", "--reverse", "--recount", "--whitespace=nowarn", "-"],
+                Workspace(),
+                patch,
+                TimeSpan.FromMinutes(2),
+                CancellationToken.None).ConfigureAwait(false);
+            if (rollback.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Die lokale Quellprüfung ist fehlgeschlagen und der Patch konnte nicht automatisch zurückgenommen werden: {rollback.StandardError}",
+                    validationException);
+            }
+            throw;
+        }
         return new { patched = true, path = Relative(target), result.ExitCode, result.StandardOutput };
+    }
+
+    internal static string NormalizeSingleFilePatch(string patch, string relativeTarget)
+    {
+        var normalized = patch
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .TrimStart('\uFEFF');
+        if (!normalized.StartsWith("diff --git ", StringComparison.Ordinal))
+        {
+            var path = relativeTarget.Replace('\\', '/');
+            normalized = $"diff --git a/{path} b/{path}\n{normalized}";
+        }
+
+        return normalized.TrimEnd('\n') + "\n";
     }
 
     private async Task<object> RunPresetAsync(JsonElement arguments, CancellationToken cancellationToken)
@@ -796,33 +1126,25 @@ public sealed class LocalToolBroker(
                 break;
             case "dotnet.build":
                 fileName = "dotnet";
-                commandArguments = ["build", "--nologo"];
+                commandArguments = BuildDotNetPresetArguments("build", ResolveOptionalPresetTarget(arguments));
                 timeout = TimeSpan.FromMinutes(20);
                 break;
             case "dotnet.test":
                 fileName = "dotnet";
-                commandArguments = ["test", "--nologo"];
+                commandArguments = BuildDotNetPresetArguments("test", ResolveOptionalPresetTarget(arguments));
                 timeout = TimeSpan.FromMinutes(20);
                 break;
             case "repository.build":
-            case "repository.verify":
-                var script = ResolvePath(Path.Combine(workspace, "windows", "build.ps1"), requireExisting: true);
+                var script = ResolveRepositoryBuildScript(workspace);
                 fileName = "powershell.exe";
                 commandArguments = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script];
                 timeout = TimeSpan.FromMinutes(45);
                 break;
+            case "repository.verify":
+                return await RunRepositoryVerificationAsync(workspace, arguments, cancellationToken).ConfigureAwait(false);
             case "repository.start":
-                var smokeScript = ResolvePath(Path.Combine(workspace, "windows", "smoke.ps1"), requireExisting: true);
-                var publishDirectory = ResolvePath(Path.Combine(workspace, "artifacts", "portable", "win-x64"), requireExisting: true);
-                var manifest = ResolvePath(Path.Combine(workspace, "artifacts", "portable", "win-x64.manifest.json"), requireExisting: true);
-                fileName = "powershell.exe";
-                commandArguments =
-                [
-                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", smokeScript,
-                    "-PublishDirectory", publishDirectory, "-ManifestPath", manifest, "-Mode", "SingleFile",
-                ];
-                timeout = TimeSpan.FromMinutes(5);
-                break;
+                var startResult = await RunRepositoryStartProcessAsync(workspace, cancellationToken).ConfigureAwait(false);
+                return Bounded(new { preset, startResult.ExitCode, startResult.StandardOutput, startResult.StandardError });
             case "code.run":
                 (fileName, commandArguments) = ResolveCodeCommand(workspace, arguments, test: false);
                 timeout = TimeSpan.FromMinutes(20);
@@ -835,14 +1157,269 @@ public sealed class LocalToolBroker(
                 throw new InvalidOperationException($"Das Prozess-Preset '{preset}' ist nicht freigegeben.");
         }
         var result = await RunProcessAsync(fileName, commandArguments, workspace, null, timeout, cancellationToken).ConfigureAwait(false);
+        if (preset == "git.status" && result.ExitCode == 0)
+        {
+            result = result with { StandardOutput = SummarizeGitStatus(result.StandardOutput) };
+        }
         return Bounded(new { preset, result.ExitCode, result.StandardOutput, result.StandardError });
+    }
+
+    internal static string SummarizeGitStatus(string output, int maximumDetailedEntries = 240)
+    {
+        var detailed = new List<string>();
+        var grouped = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var omittedDetailed = 0;
+        foreach (var rawLine in output.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            var line = rawLine.TrimEnd();
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            var path = line.Length > 3 ? line[3..].Trim(' ', '"') : line;
+            var generatedRoot = FindGeneratedStatusRoot(path);
+            if (generatedRoot is not null)
+            {
+                grouped[generatedRoot] = grouped.GetValueOrDefault(generatedRoot) + 1;
+                continue;
+            }
+
+            if (detailed.Count < maximumDetailedEntries)
+            {
+                detailed.Add(line);
+            }
+            else
+            {
+                omittedDetailed++;
+            }
+        }
+
+        foreach (var group in grouped.OrderBy(static item => item.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            detailed.Add($"[{group.Value} Git-Status-Einträge unter '{group.Key}' zusammengefasst]");
+        }
+        if (omittedDetailed > 0)
+        {
+            detailed.Add($"[{omittedDetailed} weitere Git-Status-Einträge zusammengefasst]");
+        }
+        return detailed.Count == 0 ? string.Empty : string.Join('\n', detailed) + "\n";
+    }
+
+    private static string? FindGeneratedStatusRoot(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        var renameTarget = normalized.LastIndexOf(" -> ", StringComparison.Ordinal);
+        if (renameTarget >= 0)
+        {
+            normalized = normalized[(renameTarget + 4)..];
+        }
+        var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var generatedSegment = Array.FindIndex(segments, static segment =>
+            segment.Equals(".venv", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("venv", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("node_modules", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("__pycache__", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("bin", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals("obj", StringComparison.OrdinalIgnoreCase)
+            || segment.Equals(".vs", StringComparison.OrdinalIgnoreCase));
+        return generatedSegment < 0 ? null : string.Join('/', segments.Take(generatedSegment + 1));
+    }
+
+    private string? ResolveOptionalPresetTarget(JsonElement arguments)
+    {
+        if (!arguments.TryGetProperty("target", out var target)
+            || target.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(target.GetString()))
+        {
+            return null;
+        }
+
+        return Relative(ResolvePath(target.GetString()!, requireExisting: true));
+    }
+
+    internal static IReadOnlyList<string> BuildDotNetPresetArguments(string command, string? target)
+    {
+        var result = new List<string> { command };
+        if (!string.IsNullOrWhiteSpace(target))
+        {
+            result.Add(target);
+        }
+        result.Add("--nologo");
+        return result;
+    }
+
+    private string ResolveRepositoryBuildScript(string workspace)
+    {
+        var candidates = new[]
+        {
+            Path.Combine(workspace, "windows", "build.ps1"),
+            Path.Combine(workspace, "windows", "Build-Portable.ps1"),
+        };
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate))
+            {
+                return ResolvePath(candidate, requireExisting: true);
+            }
+        }
+        throw new FileNotFoundException(
+            "Kein unterstütztes Repository-Buildskript gefunden. Erwartet wird windows/build.ps1 oder windows/Build-Portable.ps1.");
+    }
+
+    private async Task<object> RunRepositoryVerificationAsync(
+        string workspace,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        const string preset = "repository.verify";
+        var goBuildScript = Path.Combine(workspace, "windows", "build.ps1");
+        if (File.Exists(goBuildScript))
+        {
+            var result = await RunProcessAsync(
+                "powershell.exe",
+                ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", ResolvePath(goBuildScript, requireExisting: true)],
+                workspace,
+                null,
+                TimeSpan.FromMinutes(45),
+                cancellationToken).ConfigureAwait(false);
+            return Bounded(new { preset, result.ExitCode, result.StandardOutput, result.StandardError });
+        }
+
+        var requestedTarget = arguments.TryGetProperty("target", out var targetValue)
+            && targetValue.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(targetValue.GetString());
+        var (testExecutable, testArguments) = requestedTarget
+            ? ResolveCodeCommand(workspace, arguments, test: true)
+            : ("dotnet", (IReadOnlyList<string>)["test", "--nologo"]);
+        var test = await RunProcessAsync(
+            testExecutable,
+            testArguments,
+            workspace,
+            null,
+            TimeSpan.FromMinutes(20),
+            cancellationToken).ConfigureAwait(false);
+        if (test.ExitCode != 0)
+        {
+            return Bounded(new
+            {
+                preset,
+                test.ExitCode,
+                StandardOutput = "[Tests]\n" + test.StandardOutput,
+                StandardError = "[Tests]\n" + test.StandardError,
+            });
+        }
+
+        var buildScript = ResolveRepositoryBuildScript(workspace);
+        var build = await RunProcessAsync(
+            "powershell.exe",
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", buildScript],
+            workspace,
+            null,
+            TimeSpan.FromMinutes(45),
+            cancellationToken).ConfigureAwait(false);
+        if (build.ExitCode != 0)
+        {
+            return Bounded(new
+            {
+                preset,
+                build.ExitCode,
+                StandardOutput = "[Tests]\n" + test.StandardOutput + "\n[Build]\n" + build.StandardOutput,
+                StandardError = "[Tests]\n" + test.StandardError + "\n[Build]\n" + build.StandardError,
+            });
+        }
+
+        var start = await RunRepositoryStartProcessAsync(workspace, cancellationToken).ConfigureAwait(false);
+        return Bounded(new
+        {
+            preset,
+            start.ExitCode,
+            StandardOutput = "[Tests]\n" + test.StandardOutput
+                + "\n[Build]\n" + build.StandardOutput
+                + "\n[App-Smoke]\n" + start.StandardOutput,
+            StandardError = "[Tests]\n" + test.StandardError
+                + "\n[Build]\n" + build.StandardError
+                + "\n[App-Smoke]\n" + start.StandardError,
+        });
+    }
+
+    private async Task<ProcessResult> RunRepositoryStartProcessAsync(
+        string workspace,
+        CancellationToken cancellationToken)
+    {
+        var smokeScript = Path.Combine(workspace, "windows", "smoke.ps1");
+        if (File.Exists(smokeScript))
+        {
+            var publishDirectory = ResolvePath(Path.Combine(workspace, "artifacts", "portable", "win-x64"), requireExisting: true);
+            var manifest = ResolvePath(Path.Combine(workspace, "artifacts", "portable", "win-x64.manifest.json"), requireExisting: true);
+            return await RunProcessAsync(
+                "powershell.exe",
+                [
+                    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+                    ResolvePath(smokeScript, requireExisting: true),
+                    "-PublishDirectory", publishDirectory, "-ManifestPath", manifest, "-Mode", "SingleFile",
+                ],
+                workspace,
+                null,
+                TimeSpan.FromMinutes(5),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        var executable = ResolvePortableApplication(workspace);
+        return await RunSmokeProcessAsync(
+            executable,
+            [],
+            Path.GetDirectoryName(executable)!,
+            TimeSpan.FromMinutes(2),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private string ResolvePortableApplication(string workspace)
+    {
+        var artifacts = ResolvePath(Path.Combine(workspace, "artifacts"), requireExisting: true);
+        var ignoredNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "createdump.exe",
+            "testhost.exe",
+            "vstest.console.exe",
+        };
+        var executable = Directory.EnumerateFiles(artifacts, "*.exe", System.IO.SearchOption.AllDirectories)
+            .Where(path => !ignoredNames.Contains(Path.GetFileName(path)))
+            .OrderByDescending(path => path.Contains("portable", StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault()
+            ?? throw new FileNotFoundException("Nach dem Portable-Build wurde im Artefaktordner keine startbare Anwendung gefunden.");
+        return ResolvePath(executable, requireExisting: true);
+    }
+
+    internal static void ValidateVerificationAssetMove(string source, string destination)
+    {
+        var normalizedSource = source.Replace('\\', '/').TrimStart('/');
+        var normalizedDestination = destination.Replace('\\', '/').TrimStart('/');
+        var sourceIsTest = normalizedSource.StartsWith("tests/", StringComparison.OrdinalIgnoreCase)
+            || normalizedSource.Contains("/tests/", StringComparison.OrdinalIgnoreCase);
+        var destinationIsTest = normalizedDestination.StartsWith("tests/", StringComparison.OrdinalIgnoreCase)
+            || normalizedDestination.Contains("/tests/", StringComparison.OrdinalIgnoreCase);
+        if (sourceIsTest
+            && (!destinationIsTest
+                || normalizedDestination.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidDataException(
+                "Testdateien dürfen nicht aus dem regulären Testbaum verschoben oder deaktiviert werden. Behebe die Implementierung oder den Test am ursprünglichen Testpfad.");
+        }
     }
 
     private async Task<object> RunArbitraryProcessAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         var requestedExecutable = RequiredString(arguments, "executable");
-        var executable = ResolveProcessExecutable(requestedExecutable);
         var processArguments = ReadProcessArguments(arguments);
+        var normalizedPython = NormalizePythonProcessRequest(
+            requestedExecutable,
+            processArguments,
+            Workspace());
+        requestedExecutable = normalizedPython.Executable;
+        processArguments = normalizedPython.Arguments;
+        var executable = ResolveProcessExecutable(requestedExecutable);
         var workingDirectory = arguments.TryGetProperty("workingDirectory", out var workingValue)
             && workingValue.ValueKind == JsonValueKind.String
             ? ResolvePath(workingValue.GetString()!, requireExisting: true)
@@ -851,6 +1428,14 @@ public sealed class LocalToolBroker(
         {
             throw new DirectoryNotFoundException("Das Arbeitsverzeichnis des Prozesses wurde nicht gefunden.");
         }
+        var pythonCommand = ResolveWorkspacePythonCommand(
+            requestedExecutable,
+            executable,
+            processArguments,
+            Workspace());
+        executable = pythonCommand.Executable;
+        processArguments = pythonCommand.Arguments;
+        ValidatePythonProcessHasEntryPoint(executable, processArguments);
         ValidateProcessBoundary(executable, processArguments);
         var timeoutSeconds = OptionalInteger(arguments, "timeoutSeconds") ?? 1_200;
         var timeout = TimeSpan.FromSeconds(timeoutSeconds);
@@ -867,10 +1452,148 @@ public sealed class LocalToolBroker(
             executable = Path.GetFileName(executable),
             workingDirectory = Relative(workingDirectory),
             startMode,
+            isolatedPythonEnvironment = pythonCommand.Isolated,
             result.ExitCode,
             result.StandardOutput,
             result.StandardError,
         });
+    }
+
+    internal static (string Executable, string[] Arguments) NormalizePythonProcessRequest(
+        string requestedExecutable,
+        string[] arguments,
+        string workspace)
+    {
+        var requestedName = Path.GetFileName(requestedExecutable);
+        var workspacePython = Path.GetFullPath(Path.Combine(workspace, ".venv", "Scripts", "python.exe"));
+        var workspaceEnvironmentExists = File.Exists(workspacePython);
+        var isPython = IsPythonExecutableName(requestedName);
+        var isLauncher = requestedName.Equals("py", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("py.exe", StringComparison.OrdinalIgnoreCase);
+        var isPip = requestedName.Equals("pip", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("pip.exe", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("pip3", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("pip3.exe", StringComparison.OrdinalIgnoreCase)
+            || requestedName.StartsWith("pip3.", StringComparison.OrdinalIgnoreCase);
+        var isPytest = requestedName.Equals("pytest", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("pytest.exe", StringComparison.OrdinalIgnoreCase);
+
+        if (workspaceEnvironmentExists)
+        {
+            if (isPip)
+            {
+                return (workspacePython, ["-m", "pip", .. RemovePipPythonSelector(arguments)]);
+            }
+            if (isPytest)
+            {
+                return (workspacePython, ["-m", "pytest", .. arguments]);
+            }
+            if (isPython)
+            {
+                return (workspacePython, arguments);
+            }
+            if (isLauncher && !IsPythonLauncherInspection(arguments) && !InvokesVenv(arguments))
+            {
+                return (workspacePython, RemovePythonLauncherVersion(arguments));
+            }
+            return (requestedExecutable, arguments);
+        }
+
+        if (!InvokesVenv(arguments))
+        {
+            return (requestedExecutable, arguments);
+        }
+        if (isLauncher)
+        {
+            return (requestedExecutable, arguments);
+        }
+        if (!isPython)
+        {
+            return (requestedExecutable, arguments);
+        }
+
+        var selector = InferPythonLauncherSelector(requestedExecutable) ?? "-3.11";
+        return ("py", [selector, .. arguments]);
+    }
+
+    internal static void ValidatePythonProcessHasEntryPoint(
+        string executable,
+        IReadOnlyList<string> arguments)
+    {
+        if (IsPythonExecutableName(Path.GetFileName(executable)) && arguments.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "Ein Python-Prozess ohne Skript, -m-Modul oder -c-Ausdruck ist keine ausführbare Test-, Build- oder Startprüfung. "
+                + "Verwende beispielsweise -m pytest, -m py_compile <Datei> oder einen konkreten Programmeinstiegspunkt.");
+        }
+    }
+
+    private static bool IsPythonExecutableName(string name) =>
+        name.Equals("python", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("python.exe", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("python3", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("python3.exe", StringComparison.OrdinalIgnoreCase)
+        || Regex.IsMatch(name, "^python\\d+(?:\\.\\d+)?(?:\\.exe)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static bool InvokesVenv(string[] arguments)
+    {
+        for (var index = 0; index + 1 < arguments.Length; index++)
+        {
+            if (arguments[index].Equals("-m", StringComparison.OrdinalIgnoreCase)
+                && arguments[index + 1].Equals("venv", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool IsPythonLauncherInspection(IReadOnlyList<string> arguments) =>
+        arguments.Any(argument => argument.Equals("-0", StringComparison.OrdinalIgnoreCase)
+            || argument.Equals("-0p", StringComparison.OrdinalIgnoreCase)
+            || argument.Equals("--list", StringComparison.OrdinalIgnoreCase)
+            || argument.Equals("--list-paths", StringComparison.OrdinalIgnoreCase));
+
+    private static string[] RemovePythonLauncherVersion(string[] arguments) =>
+        arguments.Length > 0 && Regex.IsMatch(arguments[0], "^-\\d+(?:\\.\\d+)?$", RegexOptions.CultureInvariant)
+            ? arguments.Skip(1).ToArray()
+            : arguments.ToArray();
+
+    private static string[] RemovePipPythonSelector(string[] arguments)
+    {
+        var result = new List<string>(arguments.Length);
+        for (var index = 0; index < arguments.Length; index++)
+        {
+            if (arguments[index].Equals("--python", StringComparison.OrdinalIgnoreCase)
+                && index + 1 < arguments.Length)
+            {
+                index++;
+                continue;
+            }
+            result.Add(arguments[index]);
+        }
+        return result.ToArray();
+    }
+
+    private static string? InferPythonLauncherSelector(string executable)
+    {
+        var match = Regex.Match(
+            executable,
+            "python(?<version>\\d{2,3})(?:\\\\|/|$)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            match = Regex.Match(
+                Path.GetFileNameWithoutExtension(executable),
+                "^python(?<version>\\d{2,3})$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+        if (!match.Success)
+        {
+            return null;
+        }
+        var digits = match.Groups["version"].Value;
+        return digits.Length >= 2 ? $"-{digits[0]}.{digits[1..]}" : null;
     }
 
     private (string FileName, IReadOnlyList<string> Arguments) ResolveCodeCommand(
@@ -885,14 +1608,18 @@ public sealed class LocalToolBroker(
         var normalizedTarget = NormalizeWorkspaceAlias(requestedTarget);
         var target = string.IsNullOrWhiteSpace(normalizedTarget)
             ? FindCodeTarget(workspace, test)
-            : ResolvePath(normalizedTarget, requireExisting: true);
+            : ResolveCodeTarget(workspace, normalizedTarget, test);
         var extension = Path.GetExtension(target).ToLowerInvariant();
 
         if (extension == ".py")
         {
+            var workspacePython = Path.Combine(workspace, ".venv", "Scripts", "python.exe");
+            var python = File.Exists(workspacePython)
+                ? ResolvePath(workspacePython, requireExisting: true)
+                : "python";
             return test
-                ? ("python", ["-m", "pytest", target])
-                : ("python", [target]);
+                ? (python, BuildPythonTestArguments(target))
+                : (python, [target]);
         }
         if (extension == ".js")
         {
@@ -965,6 +1692,13 @@ public sealed class LocalToolBroker(
                     ? throw new InvalidOperationException("Zum Starten muss ein konkretes .NET-Projekt statt einer Solution angegeben werden.")
                     : ("dotnet", ["run", "--project", target]);
         }
+        if (extension is ".cs" or ".fs" or ".vb")
+        {
+            var project = FindNearestDotNetProject(workspace, target);
+            return test
+                ? ("dotnet", ["test", project, "--nologo", "--filter", $"FullyQualifiedName~{Path.GetFileNameWithoutExtension(target)}"])
+                : ("dotnet", ["run", "--project", project]);
+        }
         if (Path.GetFileName(target).Equals("package.json", StringComparison.OrdinalIgnoreCase))
         {
             return test
@@ -977,6 +1711,72 @@ public sealed class LocalToolBroker(
         }
         throw new InvalidOperationException(
             "Für diesen Dateityp gibt es kein universelles code.run/code.test-Kommando. Verwende process.run mit dem im Repository vorgesehenen Compiler, Interpreter oder Buildwerkzeug.");
+    }
+
+    internal static IReadOnlyList<string> BuildPythonTestArguments(string target)
+    {
+        var content = File.ReadAllText(target);
+        var usesUnittest = content.Contains("import unittest", StringComparison.Ordinal)
+            || content.Contains("from unittest", StringComparison.Ordinal);
+        return usesUnittest
+            ? ["-m", "unittest", target]
+            : ["-m", "pytest", target];
+    }
+
+    private string ResolveCodeTarget(string workspace, string requestedTarget, bool test)
+    {
+        try
+        {
+            return ResolvePath(requestedTarget, requireExisting: true);
+        }
+        catch (FileNotFoundException) when (test && !Path.IsPathFullyQualified(requestedTarget))
+        {
+            var normalizedSuffix = requestedTarget.Replace('\\', '/').TrimStart('/');
+            var fileName = Path.GetFileName(normalizedSuffix);
+            var suffixMatches = EnumerateFilesSafe(workspace)
+                .Where(path => Path.GetFileName(path).Equals(fileName, StringComparison.OrdinalIgnoreCase))
+                .Where(path => Relative(path).EndsWith(normalizedSuffix, StringComparison.OrdinalIgnoreCase))
+                .Take(2)
+                .ToArray();
+            if (suffixMatches.Length == 1)
+            {
+                return ResolvePath(suffixMatches[0], requireExisting: true);
+            }
+
+            var nameMatches = EnumerateFilesSafe(workspace)
+                .Where(path => Path.GetFileName(path).Equals(fileName, StringComparison.OrdinalIgnoreCase))
+                .Take(2)
+                .ToArray();
+            if (nameMatches.Length == 1)
+            {
+                return ResolvePath(nameMatches[0], requireExisting: true);
+            }
+            throw new FileNotFoundException(
+                "Das Testziel wurde nicht eindeutig gefunden. Nutze fs.findFiles und übergib danach einen vorhandenen relativen Pfad.",
+                requestedTarget);
+        }
+    }
+
+    private string FindNearestDotNetProject(string workspace, string sourcePath)
+    {
+        var directory = Path.GetDirectoryName(sourcePath);
+        while (!string.IsNullOrWhiteSpace(directory) && IsWithin(workspace, directory))
+        {
+            var projects = Directory.EnumerateFiles(directory, "*.*proj", System.IO.SearchOption.TopDirectoryOnly)
+                .Where(path => Path.GetExtension(path).Equals(".csproj", StringComparison.OrdinalIgnoreCase)
+                    || Path.GetExtension(path).Equals(".fsproj", StringComparison.OrdinalIgnoreCase)
+                    || Path.GetExtension(path).Equals(".vbproj", StringComparison.OrdinalIgnoreCase))
+                .Take(2)
+                .ToArray();
+            if (projects.Length == 1)
+            {
+                return ResolvePath(projects[0], requireExisting: true);
+            }
+            directory = Path.GetDirectoryName(directory);
+        }
+        throw new FileNotFoundException(
+            "Für die Quelldatei wurde im übergeordneten Workspace kein eindeutiges .NET-Projekt gefunden.",
+            sourcePath);
     }
 
     private string FindCodeTarget(string workspace, bool test)
@@ -1336,6 +2136,7 @@ public sealed class LocalToolBroker(
         {
             process.StartInfo.ArgumentList.Add(argument);
         }
+        ConfigureCodingProcessEnvironment(process.StartInfo);
         if (!process.Start())
         {
             throw new InvalidOperationException($"Der freigegebene Prozess '{fileName}' konnte nicht gestartet werden.");
@@ -1345,8 +2146,9 @@ public sealed class LocalToolBroker(
             await process.StandardInput.WriteAsync(standardInput.AsMemory(), cancellationToken).ConfigureAwait(false);
             process.StandardInput.Close();
         }
-        var outputTask = ReadBoundedProcessStreamAsync(process.StandardOutput);
-        var errorTask = ReadBoundedProcessStreamAsync(process.StandardError);
+        using var streamCancellation = new CancellationTokenSource();
+        var outputTask = ReadBoundedProcessStreamAsync(process.StandardOutput, streamCancellation.Token);
+        var errorTask = ReadBoundedProcessStreamAsync(process.StandardError, streamCancellation.Token);
         using var timeoutCancellation = new CancellationTokenSource(timeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
         try
@@ -1358,6 +2160,7 @@ public sealed class LocalToolBroker(
             try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
             try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false); }
             catch (Exception drainException) when (drainException is TimeoutException or InvalidOperationException) { }
+            CancelProcessStreamReads(process, streamCancellation);
             _ = await ObserveProcessStreamAsync(outputTask).ConfigureAwait(false);
             _ = await ObserveProcessStreamAsync(errorTask).ConfigureAwait(false);
             if (timeoutCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
@@ -1366,10 +2169,8 @@ public sealed class LocalToolBroker(
             }
             throw;
         }
-        return new ProcessResult(
-            process.ExitCode,
-            await outputTask.ConfigureAwait(false),
-            await errorTask.ConfigureAwait(false));
+        var streams = await DrainProcessStreamsAsync(process, outputTask, errorTask, streamCancellation).ConfigureAwait(false);
+        return new ProcessResult(process.ExitCode, streams.StandardOutput, streams.StandardError);
     }
 
     private static async Task<ProcessResult> RunSmokeProcessAsync(
@@ -1397,12 +2198,14 @@ public sealed class LocalToolBroker(
         {
             process.StartInfo.ArgumentList.Add(argument);
         }
+        ConfigureCodingProcessEnvironment(process.StartInfo);
         if (!process.Start())
         {
             throw new InvalidOperationException($"Der Smoke-Start '{fileName}' konnte nicht gestartet werden.");
         }
-        var outputTask = ReadBoundedProcessStreamAsync(process.StandardOutput);
-        var errorTask = ReadBoundedProcessStreamAsync(process.StandardError);
+        using var streamCancellation = new CancellationTokenSource();
+        var outputTask = ReadBoundedProcessStreamAsync(process.StandardOutput, streamCancellation.Token);
+        var errorTask = ReadBoundedProcessStreamAsync(process.StandardError, streamCancellation.Token);
         using var timeoutCancellation = new CancellationTokenSource(timeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
         try
@@ -1412,22 +2215,65 @@ public sealed class LocalToolBroker(
                 Task.Delay(TimeSpan.FromSeconds(8), linked.Token)).ConfigureAwait(false);
             if (process.HasExited)
             {
+                var completedStreams = await DrainProcessStreamsAsync(process, outputTask, errorTask, streamCancellation).ConfigureAwait(false);
                 return new ProcessResult(
                     process.ExitCode,
-                    await outputTask.ConfigureAwait(false),
-                    await errorTask.ConfigureAwait(false));
+                    completedStreams.StandardOutput,
+                    completedStreams.StandardError);
             }
             process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            var output = await outputTask.ConfigureAwait(false);
-            var error = await errorTask.ConfigureAwait(false);
-            return new ProcessResult(0, output + "\n[App-Smoke-Start war 8 Sekunden stabil.]", error);
+            var streams = await DrainProcessStreamsAsync(process, outputTask, errorTask, streamCancellation).ConfigureAwait(false);
+            return new ProcessResult(0, streams.StandardOutput + "\n[App-Smoke-Start war 8 Sekunden stabil.]", streams.StandardError);
         }
         catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            CancelProcessStreamReads(process, streamCancellation);
             throw;
         }
+    }
+
+    private static void ConfigureCodingProcessEnvironment(ProcessStartInfo startInfo)
+    {
+        // MSBuild- und Compiler-Server dürfen die umgeleiteten Pipe-Handles des
+        // bereits beendeten Elternprozesses nicht offenhalten. Andernfalls wartet
+        // der Toolbroker trotz abgeschlossenem Build endlos auf EOF.
+        startInfo.Environment["MSBUILDDISABLENODEREUSE"] = "1";
+        startInfo.Environment["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1";
+        startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+    }
+
+    private static async Task<(string StandardOutput, string StandardError)> DrainProcessStreamsAsync(
+        Process process,
+        Task<string> outputTask,
+        Task<string> errorTask,
+        CancellationTokenSource streamCancellation)
+    {
+        try
+        {
+            await Task.WhenAll(outputTask, errorTask)
+                .WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            CancelProcessStreamReads(process, streamCancellation);
+        }
+
+        var output = await ObserveProcessStreamAsync(outputTask).ConfigureAwait(false) ?? string.Empty;
+        var error = await ObserveProcessStreamAsync(errorTask).ConfigureAwait(false) ?? string.Empty;
+        return (output, error);
+    }
+
+    private static void CancelProcessStreamReads(Process process, CancellationTokenSource streamCancellation)
+    {
+        if (!streamCancellation.IsCancellationRequested)
+        {
+            streamCancellation.Cancel();
+        }
+        try { process.StandardOutput.Dispose(); } catch (InvalidOperationException) { }
+        try { process.StandardError.Dispose(); } catch (InvalidOperationException) { }
     }
 
     private string ResolveProcessExecutable(string requested)
@@ -1440,9 +2286,51 @@ public sealed class LocalToolBroker(
                 : normalized;
     }
 
+    internal static (string Executable, string[] Arguments, bool Isolated) ResolveWorkspacePythonCommand(
+        string requestedExecutable,
+        string resolvedExecutable,
+        string[] arguments,
+        string workspace)
+    {
+        var requestedName = Path.GetFileName(requestedExecutable);
+        var isBareExecutable = string.Equals(requestedExecutable, requestedName, StringComparison.OrdinalIgnoreCase);
+        var workspacePython = Path.GetFullPath(Path.Combine(workspace, ".venv", "Scripts", "python.exe"));
+        if (!isBareExecutable || !File.Exists(workspacePython))
+        {
+            return (resolvedExecutable, arguments, false);
+        }
+
+        if (requestedName.Equals("python", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("python.exe", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("python3", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("python3.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return (workspacePython, arguments, true);
+        }
+
+        if (requestedName.Equals("pip", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("pip.exe", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("pip3", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("pip3.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return (workspacePython, ["-m", "pip", .. arguments], true);
+        }
+
+        if (requestedName.Equals("pytest", StringComparison.OrdinalIgnoreCase)
+            || requestedName.Equals("pytest.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return (workspacePython, ["-m", "pytest", .. arguments], true);
+        }
+
+        return (resolvedExecutable, arguments, false);
+    }
+
     private void ValidateProcessBoundary(string executable, string[] arguments)
     {
         var name = Path.GetFileName(executable);
+        var executableIsInsideWorkspace = Path.IsPathFullyQualified(executable)
+            && IsWithin(Workspace(), executable);
+        ValidatePythonEnvironmentBoundary(executable, arguments, executableIsInsideWorkspace);
         if (name.Equals("powershell.exe", StringComparison.OrdinalIgnoreCase)
             || name.Equals("pwsh.exe", StringComparison.OrdinalIgnoreCase)
             || name.Equals("pwsh", StringComparison.OrdinalIgnoreCase))
@@ -1476,27 +2364,99 @@ public sealed class LocalToolBroker(
         }
     }
 
-    private static async Task<string> ReadBoundedProcessStreamAsync(StreamReader reader)
+    internal static void ValidatePythonEnvironmentBoundary(
+        string executable,
+        IReadOnlyList<string> arguments,
+        bool executableIsInsideWorkspace)
+    {
+        var name = Path.GetFileName(executable);
+        var isPipExecutable = name.Equals("pip", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("pip.exe", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("pip3", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("pip3.exe", StringComparison.OrdinalIgnoreCase);
+        var isPythonExecutable = name.Equals("python", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("python.exe", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("python3", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("python3.exe", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("py", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("py.exe", StringComparison.OrdinalIgnoreCase);
+        var moduleIndex = -1;
+        if (isPythonExecutable)
+        {
+            for (var index = 0; index + 1 < arguments.Count; index++)
+            {
+                if (arguments[index].Equals("-m", StringComparison.OrdinalIgnoreCase))
+                {
+                    moduleIndex = index;
+                    break;
+                }
+            }
+        }
+
+        var invokesPip = isPipExecutable
+            || (moduleIndex >= 0 && arguments[moduleIndex + 1].Equals("pip", StringComparison.OrdinalIgnoreCase));
+        var invokesEnsurePip = moduleIndex >= 0
+            && arguments[moduleIndex + 1].Equals("ensurepip", StringComparison.OrdinalIgnoreCase);
+        if ((!invokesPip && !invokesEnsurePip) || executableIsInsideWorkspace)
+        {
+            return;
+        }
+
+        var commandOffset = isPipExecutable ? 0 : moduleIndex + 2;
+        var command = arguments
+            .Skip(commandOffset)
+            .FirstOrDefault(static argument => argument.Length == 0 || argument[0] != '-');
+        var mutatesEnvironment = invokesEnsurePip
+            || command is null
+            || command.Equals("install", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("uninstall", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("cache", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("config", StringComparison.OrdinalIgnoreCase);
+        if (!mutatesEnvironment)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "Globale Python-Paketänderungen sind im Coding-Modus gesperrt. Erzeuge .venv im Workspace "
+            + "(unter Windows bevorzugt mit 'py -3.11 -m venv .venv') und verwende anschließend "
+            + "'.venv\\Scripts\\python.exe -m pip ...'. Bare python-, pip- und pytest-Aufrufe werden danach "
+            + "automatisch auf diese Workspace-Umgebung umgeleitet.");
+    }
+
+    private static async Task<string> ReadBoundedProcessStreamAsync(StreamReader reader, CancellationToken cancellationToken)
     {
         var result = new StringBuilder(Math.Min(MaximumProcessStreamCharacters, 65_536));
         var buffer = new char[8_192];
         var truncated = false;
-        int read;
-        while ((read = await reader.ReadAsync(buffer.AsMemory(), CancellationToken.None).ConfigureAwait(false)) > 0)
+        try
         {
-            var available = MaximumProcessStreamCharacters - result.Length;
-            if (available > 0)
+            int read;
+            while ((read = await reader.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) > 0)
             {
-                result.Append(buffer, 0, Math.Min(available, read));
+                var available = MaximumProcessStreamCharacters - result.Length;
+                if (available > 0)
+                {
+                    result.Append(buffer, 0, Math.Min(available, read));
+                }
+                if (read > available)
+                {
+                    truncated = true;
+                }
             }
-            if (read > available)
-            {
-                truncated = true;
-            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            truncated = true;
+        }
+        catch (Exception exception) when (cancellationToken.IsCancellationRequested
+            && exception is IOException or ObjectDisposedException)
+        {
+            truncated = true;
         }
         if (truncated)
         {
-            result.Append("\n[Ausgabe gekürzt]");
+            result.Append("\n[Ausgabe gekürzt oder Pipe nach Prozessende geschlossen]");
         }
         return result.ToString();
     }
@@ -1507,7 +2467,7 @@ public sealed class LocalToolBroker(
         {
             return await streamTask.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is IOException or ObjectDisposedException or TimeoutException)
+        catch (Exception exception) when (exception is IOException or ObjectDisposedException or TimeoutException or OperationCanceledException)
         {
             return null;
         }
@@ -1635,6 +2595,12 @@ public sealed class LocalToolBroker(
             throw new InvalidDataException($"Das Werkzeugargument '{name}' ist leer.");
         }
         return result;
+    }
+
+    private static string WorkspaceRootPath(JsonElement value, string name)
+    {
+        var requested = RequiredString(value, name, allowEmpty: true);
+        return string.IsNullOrWhiteSpace(requested) ? "." : requested;
     }
 
     private static object Bounded(object value)

@@ -519,6 +519,31 @@ public sealed class SqliteClientToolExecutionRepository(SqliteDatabase database)
         return await ReadSingleAsync(command, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<ClientToolExecutionRecord>> ListPendingSubmissionsAsync(
+        Guid localRunId,
+        CancellationToken cancellationToken = default)
+    {
+        if (localRunId == Guid.Empty)
+        {
+            throw new ArgumentException("Die lokale Lauf-ID ist ungültig.", nameof(localRunId));
+        }
+
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = SelectSql + " " + """
+             WHERE local_run_id=$localRun AND state='completed' AND result_json IS NOT NULL
+             ORDER BY event_id;
+             """;
+        command.Parameters.AddWithValue("$localRun", localRunId.ToString("D"));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        var pending = new List<ClientToolExecutionRecord>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            pending.Add(ReadCurrent(reader));
+        }
+        return pending;
+    }
+
     public async Task<ClientToolExecutionRecord> BeginAsync(
         ClientToolExecutionRecord execution,
         CancellationToken cancellationToken = default)
@@ -625,6 +650,11 @@ public sealed class SqliteClientToolExecutionRepository(SqliteDatabase database)
         {
             return null;
         }
+        return ReadCurrent(reader);
+    }
+
+    private static ClientToolExecutionRecord ReadCurrent(SqliteDataReader reader)
+    {
         return new ClientToolExecutionRecord(
             reader.GetString(0),
             Guid.Parse(reader.GetString(1)),

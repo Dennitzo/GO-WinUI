@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import gc
 import base64
 import binascii
+import gc
 import json
 import os
 import re
@@ -12,6 +12,7 @@ import unicodedata
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -82,28 +83,43 @@ SUPERTONIC_INTRA_OP_THREADS = max(
     1,
     int(os.environ.get("GO_AI_SUPERTONIC_INTRA_OP_THREADS", "4")),
 )
-PIPER_MODEL = Path(os.environ.get("GO_AI_PIPER_MODEL", MODEL_ROOT / "piper" / "de_DE-kerstin-low" / "de_DE-kerstin-low.onnx"))
-PIPER_CONFIG = Path(os.environ.get("GO_AI_PIPER_CONFIG", f"{PIPER_MODEL}.json"))
-TTS_PROVIDER = "supertonic-3-F5-cuda"
-TTS_FALLBACK_PROVIDER = "piper-de_DE-kerstin-low"
-TTS_EXECUTION_PROVIDER = "CUDAExecutionProvider+CPUFallback"
-MODEL_TTL_SECONDS = max(60, int(os.environ.get("GO_AI_MODEL_TTL_SECONDS", "600")))
+# Keep the proven F5 pacing explicit instead of inheriting SDK defaults.  These
+# values intentionally match the Supertonic setup used before paragraph-sized
+# Qwen requests were introduced.
+SUPERTONIC_MAX_CHUNK_LENGTH = min(
+    1000,
+    max(300, int(os.environ.get("GO_AI_SUPERTONIC_MAX_CHUNK_LENGTH", "1000"))),
+)
+# Supertonic's ONNX vector estimator has a fixed sequence axis of 1,000
+# Unicode tokens. The processed length below includes Unicode decomposition,
+# terminal punctuation and the language wrapper, so every model call stays at
+# or below the recommended sequence limit without truncating the source text.
+SUPERTONIC_MODEL_CONTEXT_TOKENS = 1000
+SUPERTONIC_SILENCE_DURATION = 0.22
+SUPERTONIC_WARMUP_SILENCE_DURATION = 0.15
+SUPERTONIC_PROVIDER = "supertonic-3-f5-cuda"
 WORKER_KEY = read_worker_key()
 MAX_PARALLEL_SPEECH_OPERATIONS = 2
 PROCESS_GATE = threading.BoundedSemaphore(MAX_PARALLEL_SPEECH_OPERATIONS)
-ACTIVE_OPERATIONS_GATE = threading.Lock()
-ACTIVE_OPERATIONS = 0
-SUPERTONIC_EXECUTOR = ThreadPoolExecutor(
+TTS_EXECUTOR = ThreadPoolExecutor(
     max_workers=1,
-    thread_name_prefix="go-ai-supertonic",
+    thread_name_prefix="go-ai-tts",
 )
 MAXIMUM_LIVE_CAPTION_BYTES = 512 * 1024
 
 SUPERTONIC_CHARACTER_REPLACEMENTS = str.maketrans(
     {
-        "„": '"',
-        "“": '"',
-        "”": '"',
+        # Supertonic occasionally voices a trailing double-quote token as a
+        # short additional vowel. Quotation marks are structural metadata for
+        # the visible chat text and must not become part of the synthesis text.
+        '"': "",
+        "„": "",
+        "“": "",
+        "”": "",
+        "«": "",
+        "»": "",
+        "‹": "",
+        "›": "",
         "‚": "'",
         "‘": "'",
         "’": "'",
@@ -169,16 +185,132 @@ def _normalize_supertonic_text(text: str, text_processor) -> str:
     return normalized
 
 
+def _synthesize_supertonic_cancellable(
+    model,
+    voice_style,
+    text: str,
+    speed: float,
+    cancel_event: threading.Event | None,
+) -> np.ndarray:
+    """Mirror Supertonic's chunk pipeline while observing session cancellation."""
+    from supertonic.pipeline import chunk_text
+
+    request_chunks = chunk_text(text, SUPERTONIC_MAX_CHUNK_LENGTH)
+    chunks = [
+        model_chunk
+        for request_chunk in request_chunks
+        for model_chunk in _split_supertonic_model_context(
+            request_chunk,
+            model.model.text_processor,
+        )
+    ]
+    if not chunks:
+        raise RuntimeError("Supertonic produced no text chunks")
+
+    waveforms: list[np.ndarray] = []
+    for chunk in chunks:
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("Supertonic synthesis was cancelled")
+        waveform, _ = model.model(
+            [chunk],
+            voice_style,
+            SUPERTONIC_STEPS,
+            speed,
+            SUPERTONIC_LANGUAGE,
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("Supertonic synthesis was cancelled")
+        waveform = np.asarray(waveform, dtype=np.float32)
+        if waveform.ndim != 2 or waveform.shape[0] != 1 or waveform.shape[1] == 0:
+            raise RuntimeError("Supertonic returned invalid chunk audio")
+        waveforms.append(waveform)
+
+    if len(waveforms) == 1:
+        return waveforms[0]
+
+    silence = np.zeros(
+        (1, int(SUPERTONIC_SILENCE_DURATION * model.sample_rate)),
+        dtype=np.float32,
+    )
+    output: list[np.ndarray] = []
+    for index, waveform in enumerate(waveforms):
+        output.append(waveform)
+        if index < len(waveforms) - 1:
+            output.append(silence)
+    return np.concatenate(output, axis=1)
+
+
+def _supertonic_processed_length(text: str, text_processor) -> int:
+    preprocess = getattr(text_processor, "_preprocess_text", None)
+    if callable(preprocess):
+        return len(preprocess(text, SUPERTONIC_LANGUAGE))
+    # Current Supertonic releases expose the processor above.  Keep a safe
+    # fallback for a future compatible SDK where the helper becomes private.
+    return len(unicodedata.normalize("NFKD", text)) + 16
+
+
+def _split_supertonic_model_context(text: str, text_processor) -> list[str]:
+    """Split losslessly for the ONNX context while keeping one GO sentence."""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+    if _supertonic_processed_length(normalized, text_processor) <= SUPERTONIC_MODEL_CONTEXT_TOKENS:
+        return [normalized]
+
+    words = normalized.split(" ")
+    chunks: list[str] = []
+    current = ""
+
+    def append_oversized_word(word: str) -> None:
+        remaining = word
+        while remaining:
+            low = 1
+            high = len(remaining)
+            accepted = 0
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = remaining[:middle]
+                if _supertonic_processed_length(candidate, text_processor) <= SUPERTONIC_MODEL_CONTEXT_TOKENS:
+                    accepted = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            if accepted == 0:
+                raise RuntimeError("Supertonic could not fit a character into its model context")
+            chunks.append(remaining[:accepted])
+            remaining = remaining[accepted:]
+
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if _supertonic_processed_length(candidate, text_processor) <= SUPERTONIC_MODEL_CONTEXT_TOKENS:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if _supertonic_processed_length(word, text_processor) <= SUPERTONIC_MODEL_CONTEXT_TOKENS:
+            current = word
+        else:
+            append_oversized_word(word)
+
+    if current:
+        chunks.append(current)
+
+    if any(
+        _supertonic_processed_length(chunk, text_processor) > SUPERTONIC_MODEL_CONTEXT_TOKENS
+        for chunk in chunks
+    ):
+        raise RuntimeError("Supertonic model context splitting exceeded its safety limit")
+    return chunks
+
+
 def _acquire_process_slots(count: int = 1) -> int:
-    global ACTIVE_OPERATIONS
     acquired = 0
     try:
         while acquired < count:
             if not PROCESS_GATE.acquire(timeout=120):
                 raise HTTPException(503, detail={"errorCode": "speech.worker_queue_timeout"})
             acquired += 1
-        with ACTIVE_OPERATIONS_GATE:
-            ACTIVE_OPERATIONS += acquired
         return acquired
     except BaseException:
         for _ in range(acquired):
@@ -187,16 +319,10 @@ def _acquire_process_slots(count: int = 1) -> int:
 
 
 def _release_process_slots(count: int) -> None:
-    global ACTIVE_OPERATIONS
-    with ACTIVE_OPERATIONS_GATE:
-        ACTIVE_OPERATIONS = max(0, ACTIVE_OPERATIONS - count)
     for _ in range(count):
         PROCESS_GATE.release()
 
 
-def _has_active_operations() -> bool:
-    with ACTIVE_OPERATIONS_GATE:
-        return ACTIVE_OPERATIONS > 0
 LANGUAGE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 CAPTION_SESSION_PATTERN = re.compile(r"^caption-[a-f0-9]{32}$")
 
@@ -223,10 +349,6 @@ def _tts_available() -> bool:
     )
 
 
-def _tts_fallback_available() -> bool:
-    return PIPER_MODEL.is_file() and PIPER_CONFIG.is_file()
-
-
 def _speaker_available() -> bool:
     return all(
         (SPEAKER_MODEL / name).is_file()
@@ -249,9 +371,51 @@ class TranscriptionRequest(StrictModel):
 
 class SpeechRequest(StrictModel):
     text: str = Field(min_length=1, max_length=10000)
-    voice: str = Field(default="de-DE-Hedda", max_length=64)
+    voice: str = Field(default="de-DE-Female", max_length=64)
     format: Literal["wav"] = "wav"
     speed: float = Field(default=1.0, ge=0.5, le=2.0)
+
+
+class SpeechSessionRequest(StrictModel):
+    sessionId: str = Field(pattern=r"^speech-[a-f0-9]{32}$")
+    profile: Literal["prepared", "audiobook"] = "prepared"
+
+
+class SpeechParagraphPart(StrictModel):
+    segmentIndex: int = Field(ge=0, le=100000)
+    text: str = Field(min_length=1, max_length=3000)
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    pauseBeforeMilliseconds: int = Field(default=0, ge=0, le=1500)
+    pauseAfterMilliseconds: int = Field(default=0, ge=0, le=1500)
+
+
+class SpeechParagraphRequest(StrictModel):
+    sessionId: str = Field(pattern=r"^speech-[a-f0-9]{32}$")
+    paragraphIndex: int = Field(ge=0, le=100000)
+    text: str = Field(min_length=1, max_length=10000)
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    parts: list[SpeechParagraphPart] | None = Field(default=None, max_length=256)
+    forceSegmentSynthesis: bool = False
+
+
+@dataclass
+class SpeechWorkerSession:
+    session_id: str
+    profile: str
+    provider: str
+    created_at: float = 0.0
+    last_used: float = 0.0
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+    def snapshot(self) -> dict:
+        return {
+            "sessionId": self.session_id,
+            "state": "active",
+            "profile": self.profile,
+            "provider": self.provider,
+            "createdAtUnix": self.created_at,
+            "lastUsedUnix": self.last_used,
+        }
 
 
 class ModelRegistry:
@@ -260,19 +424,20 @@ class ModelRegistry:
         self._stt = None
         self._tts = None
         self._tts_voice_style = None
-        self._tts_fallback = None
         self._speaker = None
         self._last_used: float | None = None
-        self._tts_fallback_last_used: float | None = None
         self._tts_error: str | None = None
 
     def status(self) -> dict:
         with self._gate:
             whisper_available = _whisper_available()
             tts_available = _tts_available()
-            tts_fallback_available = _tts_fallback_available()
             speaker_available = _speaker_available()
-            files_available = whisper_available and tts_available and speaker_available
+            files_available = (
+                whisper_available
+                and tts_available
+                and speaker_available
+            )
             return {
                 "status": "ready" if files_available else "model-missing",
                 "sttLoaded": self._stt is not None,
@@ -286,24 +451,25 @@ class ModelRegistry:
                 "sttFilePatience": WHISPER_FILE_PATIENCE,
                 "sttLivePatience": WHISPER_LIVE_PATIENCE,
                 "ttsLoaded": self._tts is not None,
-                "ttsFallbackLoaded": self._tts_fallback is not None,
                 "speakerLoaded": self._speaker is not None,
                 "speakerCudaDevice": SPEAKER_CUDA_DEVICE,
                 "whisperModelAvailable": whisper_available,
                 "ttsModelAvailable": tts_available,
-                "ttsFallbackModelAvailable": tts_fallback_available,
                 "speakerModelAvailable": speaker_available,
-                "ttsProvider": TTS_PROVIDER,
-                "ttsFallbackProvider": TTS_FALLBACK_PROVIDER,
-                "ttsVoice": SUPERTONIC_VOICE,
+                "ttsProvider": SUPERTONIC_PROVIDER,
+                "ttsVoice": f"{SUPERTONIC_VOICE} Ultra",
                 "ttsLanguage": SUPERTONIC_LANGUAGE,
-                "ttsSteps": SUPERTONIC_STEPS,
-                "ttsExecutionProvider": TTS_EXECUTION_PROVIDER,
+                "ttsPrecision": "onnx",
+                "ttsPrecisionQualification": f"quality-steps-{SUPERTONIC_STEPS}",
+                "ttsExecutionProvider": f"CUDAExecutionProvider:{SUPERTONIC_CUDA_DEVICE}",
                 "ttsCudaDevice": SUPERTONIC_CUDA_DEVICE,
-                "ttsQuality": "ultra" if SUPERTONIC_STEPS >= 15 else "custom",
+                "ttsQuality": f"supertonic-3-steps-{SUPERTONIC_STEPS}",
+                "ttsPeakMemoryBytes": 0,
                 "ttsLastError": self._tts_error,
+                "ttsResident": self._tts is not None,
+                "ttsIdleTtlSeconds": 0,
                 "lastUsedUnix": self._last_used,
-                "idleTtlSeconds": MODEL_TTL_SECONDS,
+                "idleTtlSeconds": 0,
             }
 
     def load_stt(self):
@@ -328,144 +494,117 @@ class ModelRegistry:
         with self._gate:
             if self._tts is None:
                 if not _tts_available():
-                    raise HTTPException(503, detail={"errorCode": "speech.tts_model_missing"})
-                try:
-                    import onnxruntime as ort
-                    from supertonic import TTS
-                    from supertonic.core import Supertonic, UnicodeProcessor
-                    from supertonic.loader import load_voice_style_from_json_file
+                    raise HTTPException(503, detail={"errorCode": "speech.supertonic_model_missing"})
+                import onnxruntime as ort
+                from supertonic import TTS
+                from supertonic.core import Supertonic, UnicodeProcessor
+                from supertonic.loader import load_voice_style_from_json_file
 
-                    options = ort.SessionOptions()
-                    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-                    options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-                    # Four ONNX sessions otherwise create one CPU pool per host
-                    # core. Together with resident Whisper and ECAPA this can hit
-                    # the container PID limit during synthesis. A small shared
-                    # budget is sufficient for the few graph nodes that are not
-                    # supported by CUDA and does not alter inference quality.
-                    options.intra_op_num_threads = SUPERTONIC_INTRA_OP_THREADS
-                    options.inter_op_num_threads = 1
-                    available_providers = ort.get_available_providers()
-                    if "CUDAExecutionProvider" not in available_providers:
-                        raise RuntimeError(
-                            f"CUDAExecutionProvider is unavailable: {available_providers}"
-                        )
-                    providers = [
-                        ("CUDAExecutionProvider", {"device_id": SUPERTONIC_CUDA_DEVICE}),
-                        "CPUExecutionProvider",
-                    ]
-                    onnx_root = SUPERTONIC_MODEL_ROOT / "onnx"
-                    sessions = tuple(
-                        ort.InferenceSession(
-                            str(onnx_root / file_name),
-                            sess_options=options,
-                            providers=providers,
-                        )
-                        for file_name in (
-                            "duration_predictor.onnx",
-                            "text_encoder.onnx",
-                            "vector_estimator.onnx",
-                            "vocoder.onnx",
-                        )
+                options = ort.SessionOptions()
+                options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                options.intra_op_num_threads = SUPERTONIC_INTRA_OP_THREADS
+                options.inter_op_num_threads = 1
+                available_providers = ort.get_available_providers()
+                if "CUDAExecutionProvider" not in available_providers:
+                    raise HTTPException(503, detail={"errorCode": "speech.supertonic_cuda_unavailable"})
+                providers = [
+                    ("CUDAExecutionProvider", {"device_id": SUPERTONIC_CUDA_DEVICE}),
+                ]
+                onnx_root = SUPERTONIC_MODEL_ROOT / "onnx"
+                sessions = tuple(
+                    ort.InferenceSession(
+                        str(onnx_root / file_name),
+                        sess_options=options,
+                        providers=providers,
                     )
-                    if any(
-                        not session.get_providers()
-                        or session.get_providers()[0] != "CUDAExecutionProvider"
-                        for session in sessions
-                    ):
-                        raise RuntimeError("A Supertonic session did not select CUDA first")
-                    with (onnx_root / "tts.json").open("r", encoding="utf-8") as config_file:
-                        configs = json.load(config_file)
-                    runtime = Supertonic(
-                        configs,
-                        UnicodeProcessor(str(onnx_root / "unicode_indexer.json")),
-                        *sessions,
+                    for file_name in (
+                        "duration_predictor.onnx",
+                        "text_encoder.onnx",
+                        "vector_estimator.onnx",
+                        "vocoder.onnx",
                     )
-                    # Build the public high-level wrapper without invoking its CPU-
-                    # oriented loader or any automatic network download.
-                    engine = TTS.__new__(TTS)
-                    engine.model_name = "supertonic-3"
-                    engine.is_multilingual = True
-                    engine.model = runtime
-                    engine.model_dir = SUPERTONIC_MODEL_ROOT
-                    engine.sample_rate = runtime.sample_rate
-                    engine.voice_style_names = [SUPERTONIC_VOICE]
-                    voice_style = load_voice_style_from_json_file(
-                        SUPERTONIC_MODEL_ROOT / "voice_styles" / f"{SUPERTONIC_VOICE}.json"
-                    )
-                    # Real inference verifies CUDA kernels and keeps allocations warm.
-                    warm_audio, _ = engine.synthesize(
-                        text="Sprachausgabe bereit.",
-                        lang=SUPERTONIC_LANGUAGE,
-                        voice_style=voice_style,
-                        total_steps=SUPERTONIC_STEPS,
-                        speed=1.0,
-                        silence_duration=0.15,
-                    )
-                    if np.asarray(warm_audio).size == 0:
-                        raise RuntimeError("Supertonic warmup produced no audio")
-                    self._tts = engine
-                    self._tts_voice_style = voice_style
-                    self._tts_error = None
-                except Exception as exception:
+                )
+                if any(
+                    not session.get_providers()
+                    or session.get_providers()[0] != "CUDAExecutionProvider"
+                    for session in sessions
+                ):
+                    raise HTTPException(503, detail={"errorCode": "speech.supertonic_cuda_unavailable"})
+                with (onnx_root / "tts.json").open("r", encoding="utf-8") as config_file:
+                    configs = json.load(config_file)
+                runtime = Supertonic(
+                    configs,
+                    UnicodeProcessor(str(onnx_root / "unicode_indexer.json")),
+                    *sessions,
+                )
+                engine = TTS.__new__(TTS)
+                engine.model_name = "supertonic-3"
+                engine.is_multilingual = True
+                engine.model = runtime
+                engine.model_dir = SUPERTONIC_MODEL_ROOT
+                engine.sample_rate = runtime.sample_rate
+                engine.voice_style_names = [SUPERTONIC_VOICE]
+                self._tts_voice_style = load_voice_style_from_json_file(
+                    SUPERTONIC_MODEL_ROOT / "voice_styles" / f"{SUPERTONIC_VOICE}.json"
+                )
+                self._tts = engine
+                warm_text = _normalize_supertonic_text(
+                    "Die Sprachausgabe ist bereit.",
+                    engine.model.text_processor,
+                )
+                warm_audio, _ = engine.synthesize(
+                    text=warm_text,
+                    lang=SUPERTONIC_LANGUAGE,
+                    voice_style=self._tts_voice_style,
+                    total_steps=SUPERTONIC_STEPS,
+                    speed=1.0,
+                    max_chunk_length=SUPERTONIC_MAX_CHUNK_LENGTH,
+                    silence_duration=SUPERTONIC_WARMUP_SILENCE_DURATION,
+                )
+                if np.asarray(warm_audio, dtype=np.float32).size == 0:
                     self._tts = None
                     self._tts_voice_style = None
-                    self._tts_error = type(exception).__name__
-                    raise HTTPException(
-                        503,
-                        detail={"errorCode": "speech.supertonic_cuda_unavailable"},
-                    ) from exception
+                    raise HTTPException(503, detail={"errorCode": "speech.supertonic_warmup_failed"})
             self._last_used = time.time()
             return self._tts, self._tts_voice_style
 
     def load_tts(self):
-        # CUDA stream/event handles used by the published ONNX graphs are
-        # thread-affine. Keep model creation, warm-up and every inference on one
-        # permanent owner thread; moving a resident session between FastAPI
-        # worker threads otherwise raises cudaErrorInvalidResourceHandle.
-        return SUPERTONIC_EXECUTOR.submit(
-            self._load_tts_on_owner_thread,
-        ).result(timeout=300)
+        return TTS_EXECUTOR.submit(self._load_tts_on_owner_thread).result(timeout=300)
 
-    def synthesize_tts(self, text: str, speed: float):
+    def synthesize_tts(
+        self,
+        text: str,
+        speed: float,
+        cancel_event: threading.Event | None = None,
+    ):
         def synthesize_on_owner_thread():
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("Supertonic synthesis was cancelled")
             model, voice_style = self._load_tts_on_owner_thread()
-            normalized_text = _normalize_supertonic_text(
-                text,
-                model.model.text_processor,
+            normalized_text = _normalize_supertonic_text(text, model.model.text_processor)
+            audio = _synthesize_supertonic_cancellable(
+                model,
+                voice_style,
+                normalized_text,
+                min(2.0, max(0.7, speed)),
+                cancel_event,
             )
-            return model.synthesize(
-                text=normalized_text,
-                lang=SUPERTONIC_LANGUAGE,
-                voice_style=voice_style,
-                total_steps=SUPERTONIC_STEPS,
-                speed=min(2.0, max(0.7, speed)),
-                max_chunk_length=300,
-                silence_duration=0.22,
-            )
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("Supertonic synthesis was cancelled")
+            return audio, int(model.sample_rate)
 
-        return SUPERTONIC_EXECUTOR.submit(
-            synthesize_on_owner_thread,
-        ).result(timeout=600)
-
-    def load_tts_fallback(self):
-        with self._gate:
-            if self._tts_fallback is None:
-                if not _tts_fallback_available():
-                    raise HTTPException(503, detail={"errorCode": "speech.piper_model_missing"})
-                from piper import PiperVoice
-
-                self._tts_fallback = PiperVoice.load(
-                    str(PIPER_MODEL),
-                    config_path=str(PIPER_CONFIG),
-                    use_cuda=False,
-                )
-            self._tts_fallback_last_used = time.time()
-            return self._tts_fallback
+        return TTS_EXECUTOR.submit(synthesize_on_owner_thread).result(timeout=900)
 
     def record_tts_error(self, exception: Exception | None) -> None:
         with self._gate:
             self._tts_error = None if exception is None else type(exception).__name__
+
+    def current_tts_precision(self) -> str:
+        return "onnx"
+
+    def current_tts_execution_provider(self) -> str:
+        return f"CUDAExecutionProvider:{SUPERTONIC_CUDA_DEVICE}"
 
     def load_speaker(self):
         with self._gate:
@@ -491,29 +630,56 @@ class ModelRegistry:
             return self._speaker
 
     def release(self) -> None:
-        with self._gate:
-            # Whisper, ECAPA and Supertonic form the permanently resident speech
-            # stack. Model transitions may only discard the lazy Piper fallback.
-            self._tts_fallback = None
-            self._tts_fallback_last_used = None
-        gc.collect()
+        def release_tts_on_owner_thread() -> None:
+            # ONNX Runtime sessions are created and destroyed on the same
+            # dedicated thread. This avoids retaining CUDA allocator state in a
+            # worker thread after GO switches to an exclusive coding model.
+            with self._gate:
+                self._tts = None
+                self._tts_voice_style = None
 
-    def release_if_idle(self) -> bool:
+        TTS_EXECUTOR.submit(release_tts_on_owner_thread).result(timeout=120)
         with self._gate:
-            if (
-                self._tts_fallback_last_used is None
-                or time.time() - self._tts_fallback_last_used < MODEL_TTL_SECONDS
-            ):
-                return False
-            self._tts_fallback = None
-            self._tts_fallback_last_used = None
+            self._stt = None
+            self._speaker = None
+            self._last_used = None
         gc.collect()
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return True
+            for device_index in sorted({
+                WHISPER_CUDA_DEVICE,
+                SPEAKER_CUDA_DEVICE,
+                SUPERTONIC_CUDA_DEVICE,
+            }):
+                if device_index >= torch.cuda.device_count():
+                    continue
+                with torch.cuda.device(device_index):
+                    torch.cuda.empty_cache()
 
 models = ModelRegistry()
 app = FastAPI(title="GO AI Speech Worker", docs_url=None, redoc_url=None, openapi_url=None)
+SPEECH_SESSIONS: dict[str, SpeechWorkerSession] = {}
+SPEECH_SESSION_GATE = threading.RLock()
+
+
+def _require_speech_session(session_id: str) -> SpeechWorkerSession:
+    with SPEECH_SESSION_GATE:
+        session = SPEECH_SESSIONS.get(session_id)
+        if session is None:
+            raise HTTPException(404, detail={"errorCode": "speech.session_not_found"})
+        session.last_used = time.time()
+        return session
+
+
+def _is_cuda_oom(exception: BaseException) -> bool:
+    current: BaseException | None = exception
+    while current is not None:
+        if isinstance(current, torch.OutOfMemoryError):
+            return True
+        message = str(current).lower()
+        if "cuda" in message and ("out of memory" in message or "memory allocation" in message):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class SpeakerTracker:
@@ -567,28 +733,18 @@ def _speaker_tracker(session_id: str) -> SpeakerTracker:
 
 
 def _preload_models() -> None:
-    # Components warm independently so one optional model cannot prevent primary
-    # TTS from becoming resident. Status exposes any unavailable component.
-    for loader in (models.load_stt, models.load_tts, models.load_speaker):
+    # Explicit maintenance hook only. Normal startup keeps speech unloaded so
+    # either large coding model can use the complete dual-GPU lane.
+    for loader in (models.load_stt, models.load_speaker, models.load_tts):
         try:
             loader()
         except Exception:
             pass
 
-
-def _reap_idle_models() -> None:
-    interval = min(30, max(5, MODEL_TTL_SECONDS // 4))
-    while True:
-        time.sleep(interval)
-        if not _has_active_operations():
-            models.release_if_idle()
-
-
 @app.on_event("startup")
 def preload_configured_models() -> None:
-    if os.environ.get("GO_AI_PRELOAD_STT", "1").strip().lower() in ("1", "true", "yes", "on"):
+    if os.environ.get("GO_AI_PRELOAD_SPEECH", "0").strip().lower() in ("1", "true", "yes", "on"):
         threading.Thread(target=_preload_models, name="go-ai-speech-preload", daemon=True).start()
-    threading.Thread(target=_reap_idle_models, name="go-ai-speech-idle-reaper", daemon=True).start()
 
 
 @app.get("/health")
@@ -625,14 +781,53 @@ def load(request: LoadRequest) -> dict:
 
 @app.post("/release")
 def release() -> dict:
+    with SPEECH_SESSION_GATE:
+        for session in SPEECH_SESSIONS.values():
+            session.cancel_event.set()
     slots = _acquire_process_slots(MAX_PARALLEL_SPEECH_OPERATIONS)
     try:
+        with SPEECH_SESSION_GATE:
+            SPEECH_SESSIONS.clear()
         models.release()
         with SPEAKER_TRACKER_GATE:
             SPEAKER_TRACKERS.clear()
         return models.status()
     finally:
         _release_process_slots(slots)
+
+
+@app.post("/speech/sessions")
+def create_speech_session(request: SpeechSessionRequest) -> dict:
+    models.load_tts()
+    now = time.time()
+    with SPEECH_SESSION_GATE:
+        if request.sessionId in SPEECH_SESSIONS:
+            raise HTTPException(409, detail={"errorCode": "speech.session_exists"})
+        session = SpeechWorkerSession(
+            session_id=request.sessionId,
+            profile=request.profile,
+            provider=SUPERTONIC_PROVIDER,
+            created_at=now,
+            last_used=now,
+        )
+        SPEECH_SESSIONS[request.sessionId] = session
+        return session.snapshot()
+
+
+@app.post("/speech/sessions/{session_id}/end")
+def end_speech_session(session_id: str) -> dict:
+    if not re.fullmatch(r"speech-[a-f0-9]{32}", session_id):
+        raise HTTPException(400, detail={"errorCode": "speech.session_id_invalid"})
+    with SPEECH_SESSION_GATE:
+        session = SPEECH_SESSIONS.pop(session_id, None)
+    if session is None:
+        raise HTTPException(404, detail={"errorCode": "speech.session_not_found"})
+    session.cancel_event.set()
+    return {
+        "sessionId": session_id,
+        "state": "completed",
+        "provider": session.provider,
+    }
 
 
 @app.post("/transcriptions")
@@ -784,40 +979,138 @@ async def live_captions(request: Request) -> dict:
     )
 
 
-@app.post("/speech")
-def synthesize(request: SpeechRequest) -> dict:
+def _paragraph_parts(request: SpeechParagraphRequest) -> list[SpeechParagraphPart]:
+    if request.parts:
+        return request.parts
+    return [
+        SpeechParagraphPart(
+            segmentIndex=request.paragraphIndex,
+            text=request.text,
+            speed=request.speed,
+        )
+    ]
+
+
+def _normalize_output_audio(audio, sample_rate: int) -> tuple[np.ndarray, int]:
+    waveform = np.asarray(audio, dtype=np.float32)
+    if waveform.ndim > 1:
+        waveform = np.mean(waveform, axis=0)
+    waveform = waveform.reshape(-1)
+    if waveform.size == 0 or not np.isfinite(waveform).all():
+        raise RuntimeError("TTS returned invalid paragraph audio")
+    if sample_rate != 44100:
+        import librosa
+
+        waveform = librosa.resample(
+            waveform,
+            orig_sr=int(sample_rate),
+            target_sr=44100,
+            res_type="soxr_hq",
+        ).astype(np.float32, copy=False)
+        sample_rate = 44100
+
+    audible = np.flatnonzero(np.abs(waveform) >= 0.001)
+    if audible.size:
+        leading = min(int(audible[0]), int(sample_rate * 0.04))
+        trailing = min(
+            int(waveform.size - audible[-1] - 1),
+            int(sample_rate * 0.10),
+        )
+        first = max(0, int(audible[0]) - leading)
+        last = min(waveform.size, int(audible[-1]) + trailing + 1)
+        waveform = waveform[first:last]
+    return waveform, int(sample_rate)
+
+
+def _synthesize_supertonic(
+    text: str,
+    speed: float,
+    cancel_event: threading.Event,
+) -> tuple[np.ndarray, int]:
+    audio, sample_rate = models.synthesize_tts(text, speed, cancel_event)
+    return _normalize_output_audio(audio, int(sample_rate))
+
+
+def _synthesize_paragraph_parts(
+    parts: list[SpeechParagraphPart],
+    cancel_event: threading.Event,
+) -> tuple[np.ndarray, int, list[dict]]:
+    waveforms: list[np.ndarray] = []
+    timings: list[dict] = []
+    sample_rate: int | None = None
+    sample_cursor = 0
+    for part in parts:
+        waveform, part_sample_rate = _synthesize_supertonic(
+            part.text,
+            1.0,
+            cancel_event,
+        )
+        if sample_rate is None:
+            sample_rate = int(part_sample_rate)
+        elif sample_rate != int(part_sample_rate):
+            raise RuntimeError("TTS changed sample rate inside a paragraph")
+
+        start_seconds = sample_cursor / sample_rate
+        sample_cursor += int(waveform.size)
+        timings.append(
+            {
+                "segmentIndex": part.segmentIndex,
+                "startSeconds": start_seconds,
+                "endSeconds": sample_cursor / sample_rate,
+            }
+        )
+        waveforms.append(waveform)
+        if part is not parts[-1]:
+            technical_pause = np.zeros(int(sample_rate * 0.02), dtype=np.float32)
+            waveforms.append(technical_pause)
+            sample_cursor += technical_pause.size
+    if sample_rate is None or not waveforms:
+        raise RuntimeError("TTS returned no paragraph audio")
+    return np.concatenate(waveforms), sample_rate, timings
+
+
+def _synthesize_paragraph(request: SpeechParagraphRequest) -> dict:
     slots = _acquire_process_slots()
     try:
+        session = _require_speech_session(request.sessionId)
         OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
         file_name = f"speech-{uuid.uuid4().hex}.wav"
         destination = OUTPUT_ROOT / file_name
-        provider = TTS_PROVIDER
-        is_fallback = False
-        sample_rate = 44100
+        parts = _paragraph_parts(request)
+        provider = session.provider
         try:
-            audio, _ = models.synthesize_tts(request.text, request.speed)
-            waveform = np.asarray(audio, dtype=np.float32).reshape(-1)
-            sf.write(str(destination), waveform, sample_rate, subtype="PCM_16")
+            if request.forceSegmentSynthesis:
+                audio, sample_rate, timings = _synthesize_paragraph_parts(
+                    parts,
+                    session.cancel_event,
+                )
+            else:
+                audio, sample_rate = _synthesize_supertonic(
+                    request.text,
+                    1.0,
+                    session.cancel_event,
+                )
+                timings = []
             models.record_tts_error(None)
+        except InterruptedError as exception:
+            models.record_tts_error(None)
+            destination.unlink(missing_ok=True)
+            raise HTTPException(
+                409,
+                detail={"errorCode": "speech.session_cancelled"},
+            ) from exception
         except Exception as exception:
             models.record_tts_error(exception)
             destination.unlink(missing_ok=True)
-            provider = TTS_FALLBACK_PROVIDER
-            is_fallback = True
-            sample_rate = 22050
-            fallback = models.load_tts_fallback()
-            from piper import SynthesisConfig
-
-            synthesis = SynthesisConfig(
-                length_scale=1.0 / request.speed,
-                normalize_audio=True,
+            status_code = 507 if _is_cuda_oom(exception) else 503
+            error_code = (
+                "speech.tts_cuda_oom"
+                if status_code == 507
+                else "speech.tts_provider_failed"
             )
-            fallback_text = _sanitize_supertonic_expression_tags(
-                request.text,
-                preserve_allowed=False,
-            )
-            with wave.open(str(destination), "wb") as wav_file:
-                fallback.synthesize_wav(fallback_text, wav_file, syn_config=synthesis)
+            raise HTTPException(status_code, detail={"errorCode": error_code}) from exception
+        waveform = np.asarray(audio, dtype=np.float32).reshape(-1)
+        sf.write(str(destination), waveform, int(sample_rate), subtype="PCM_16")
         with wave.open(str(destination), "rb") as wav_file:
             frames = wav_file.readframes(wav_file.getnframes())
             duration = wav_file.getnframes() / max(1, wav_file.getframerate())
@@ -834,18 +1127,48 @@ def synthesize(request: SpeechRequest) -> dict:
             "fileName": file_name,
             "mediaType": "audio/wav",
             "provider": provider,
-            "isFallback": is_fallback,
+            "timings": timings,
             "metadata": {
                 "sampleRate": str(sample_rate),
                 "language": "German",
-                "voice": "Kerstin" if is_fallback else SUPERTONIC_VOICE,
+                "voice": SUPERTONIC_VOICE,
                 "speed": str(request.speed),
-                "synthesisSteps": "" if is_fallback else str(SUPERTONIC_STEPS),
-                "executionProvider": "CPUExecutionProvider" if is_fallback else TTS_EXECUTION_PROVIDER,
-                "fallbackStage": "1" if is_fallback else "0",
+                "precision": models.current_tts_precision(),
+                "executionProvider": models.current_tts_execution_provider(),
+                "paragraphIndex": str(request.paragraphIndex),
                 "durationSeconds": f"{duration:.3f}",
                 "rms": f"{rms:.6f}",
             },
         }
     finally:
         _release_process_slots(slots)
+
+
+@app.post("/speech/sessions/{session_id}/paragraphs")
+def synthesize_speech_paragraph(session_id: str, request: SpeechParagraphRequest) -> dict:
+    if session_id != request.sessionId:
+        raise HTTPException(400, detail={"errorCode": "speech.session_id_mismatch"})
+    return _synthesize_paragraph(request)
+
+
+@app.post("/speech")
+def synthesize(request: SpeechRequest) -> dict:
+    session_id = f"speech-{uuid.uuid4().hex}"
+    create_speech_session(
+        SpeechSessionRequest(
+            sessionId=session_id,
+            profile="prepared",
+        )
+    )
+    try:
+        return _synthesize_paragraph(
+            SpeechParagraphRequest(
+                sessionId=session_id,
+                paragraphIndex=0,
+                text=request.text,
+                speed=request.speed,
+                forceSegmentSynthesis=False,
+            )
+        )
+    finally:
+        end_speech_session(session_id)

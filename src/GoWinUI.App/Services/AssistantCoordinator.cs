@@ -19,6 +19,7 @@ public sealed class AssistantCoordinator(
     IAssistantAttachmentRepository attachments,
     IChatArtifactRepository artifacts,
     GoAiAssistantService? goAi,
+    CodingRunTraceService codingTrace,
     SettingsCoordinator settings,
     RecentActivityService recentActivity,
     MicrophoneTranscriptionService? microphone = null) : IDisposable
@@ -680,7 +681,7 @@ public sealed class AssistantCoordinator(
                     "speech.progress",
                     SpeechPlaybackProgressBridge.ToPayload(playback),
                     envelope.RequestId),
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             return;
         }
         var requestedPersistentAction = PersistentToolActionFor(match?.Trigger.Action);
@@ -881,6 +882,26 @@ public sealed class AssistantCoordinator(
             case GoAiAssistantUpdateKind.ArtifactsChanged:
             case GoAiAssistantUpdateKind.DocumentsChanged:
                 await emit("session.changed", await BuildSnapshotAsync(CancellationToken.None), requestId).ConfigureAwait(false);
+                break;
+            case GoAiAssistantUpdateKind.CodeDiffChanged:
+                await emit("chat.codeDiff", new
+                {
+                    messageId = update.Message.Id,
+                    sessionId = update.Message.SessionId,
+                    codeDiff = update.Message.CodeDiff,
+                    detail = update.Detail,
+                }, requestId).ConfigureAwait(false);
+                break;
+            case GoAiAssistantUpdateKind.CodingTraceChanged:
+                if (update.CodingTrace is not null)
+                {
+                    await emit("chat.codingTrace", new
+                    {
+                        messageId = update.Message.Id,
+                        sessionId = update.Message.SessionId,
+                        entry = update.CodingTrace,
+                    }, requestId).ConfigureAwait(false);
+                }
                 break;
             case GoAiAssistantUpdateKind.Completed:
                 await emit("chat.completed", new
@@ -1257,7 +1278,7 @@ public sealed class AssistantCoordinator(
         session.PinnedAt,
     };
 
-    private static object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null) => new
+    private object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null) => new
     {
         id = message.Id,
         sessionId = message.SessionId,
@@ -1269,6 +1290,8 @@ public sealed class AssistantCoordinator(
         message.Error,
         message.ContextSummary,
         contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
+        codeDiff = message.CodeDiff,
+        codingTrace = codingTrace.GetForMessage(message.Id),
         tool = message.ToolExecution,
         artifacts = (messageArtifacts ?? []).Select(ToArtifactDto),
     };

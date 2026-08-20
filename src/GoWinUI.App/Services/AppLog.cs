@@ -37,6 +37,9 @@ internal static partial class AppLog
     [LoggerMessage(EventId = 1107, Level = LogLevel.Warning, Message = "Message view could not be reset after PDF export")]
     public static partial void MessagePdfViewResetFailed(ILogger logger, Exception exception);
 
+    [LoggerMessage(EventId = 1108, Level = LogLevel.Debug, Message = "Read-from-here context menu could not be prepared")]
+    public static partial void ReadFromContextMenuFailed(ILogger logger, Exception exception);
+
     [LoggerMessage(EventId = 1101, Level = LogLevel.Error, Message = "Assistant UI request {RequestType} failed")]
     public static partial void AssistantRequestFailed(ILogger logger, Exception exception, string requestType);
 

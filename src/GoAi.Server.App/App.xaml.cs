@@ -127,7 +127,7 @@ public partial class App : Application
             {
                 try
                 {
-                    await _host.StopAsync(TimeSpan.FromSeconds(12));
+                    await _host.StopAsync(TimeSpan.FromSeconds(90));
                 }
                 catch (Exception exception) when (exception is not OutOfMemoryException)
                 {

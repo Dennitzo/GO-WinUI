@@ -78,7 +78,6 @@ services:
       - "127.0.0.1:7082:7082"
       - "127.0.0.1:7083:7083"
       - "127.0.0.1:7084:7084"
-      - "127.0.0.1:7085:7085"
     volumes:
       - ./caddy/WorkerEdge.Caddyfile:/etc/caddy/Caddyfile:ro
     tmpfs:
@@ -111,7 +110,6 @@ services:
       - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Models:/models:ro
       - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Uploads:/data/Uploads:ro
       - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Artifacts/worker:/data/Artifacts/worker
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Voices:/data/Voices:ro
     secrets:
       - source: speech_worker_key
         target: worker_key
@@ -128,16 +126,14 @@ services:
       GO_AI_WHISPER_LIVE_PATIENCE: "1.5"
       GO_AI_WHISPER_LANGUAGE_DETECTION_SEGMENTS: "3"
       GO_AI_WHISPER_RECENT_CONTEXT_CHARACTERS: "800"
-      GO_AI_PRELOAD_STT: "1"
-      GO_AI_MODEL_TTL_SECONDS: "600"
+      GO_AI_PRELOAD_SPEECH: "0"
       GO_AI_SUPERTONIC_MODEL_ROOT: /models/supertonic-3
       GO_AI_SUPERTONIC_VOICE: F5
       GO_AI_SUPERTONIC_LANGUAGE: de
       GO_AI_SUPERTONIC_STEPS: "15"
+      GO_AI_SUPERTONIC_MAX_CHUNK_LENGTH: "1000"
       GO_AI_SUPERTONIC_CUDA_DEVICE: "1"
       GO_AI_SUPERTONIC_INTRA_OP_THREADS: "4"
-      GO_AI_PIPER_MODEL: /models/piper/de_DE-kerstin-low/de_DE-kerstin-low.onnx
-      GO_AI_PIPER_CONFIG: /models/piper/de_DE-kerstin-low/de_DE-kerstin-low.onnx.json
       CUDA_VISIBLE_DEVICES: "0,1"
       OMP_NUM_THREADS: "4"
       OPENBLAS_NUM_THREADS: "1"

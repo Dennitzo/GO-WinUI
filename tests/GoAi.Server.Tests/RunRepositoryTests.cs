@@ -76,7 +76,8 @@ public sealed class RunRepositoryTests
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             repository.SaveClientToolResultAsync(run.Snapshot.RunId, result));
         await repository.SaveToolProposalAsync(proposal);
-        await repository.SaveClientToolResultAsync(run.Snapshot.RunId, result);
+        Assert.True(await repository.SaveClientToolResultAsync(run.Snapshot.RunId, result));
+        Assert.False(await repository.SaveClientToolResultAsync(run.Snapshot.RunId, result));
 
         Assert.Equal("completed", (await repository.GetClientToolResultAsync(proposal.ProposalId))?.Status);
     }

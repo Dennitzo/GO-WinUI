@@ -57,6 +57,7 @@ public sealed class ProblemDetailsMiddleware
         ArgumentException => ((int)HttpStatusCode.BadRequest, "request.invalid_argument", "Ungültige Anfrage", exception.Message),
         KeyNotFoundException => ((int)HttpStatusCode.NotFound, "resource.not_found", "Nicht gefunden", exception.Message),
         InvalidDataException => (422, "upload.integrity_failed", "Integritätsprüfung fehlgeschlagen", exception.Message),
+        OperationCanceledException => ((int)HttpStatusCode.Conflict, "operation.cancelled", "Vorgang abgebrochen", "Die laufende Operation wurde abgebrochen."),
         InvalidOperationException => ((int)HttpStatusCode.Conflict, "operation.invalid_state", "Vorgang nicht möglich", exception.Message),
         HttpRequestException => ((int)HttpStatusCode.BadGateway, "upstream.failed", "Externer Dienst nicht erreichbar", "Ein interner AI-Dienst konnte die Anfrage nicht ausführen."),
         _ => ((int)HttpStatusCode.InternalServerError, "server.unhandled", "Interner Serverfehler", "Die Anfrage konnte nicht abgeschlossen werden."),

@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Globalization;
 
 namespace GoAi.Contracts;
 
@@ -75,9 +76,251 @@ public static partial class GermanSpeechTextNormalizer
             text = NormalizeExpression(text, mathOperators: false);
         }
 
+        text = NormalizeSpokenUnits(text);
+        // Units such as m³/h must be recognized before superscript glyphs are
+        // expanded into ordinary mathematical prose. A second pass handles
+        // numbers introduced while parsing formulas (for example x²).
+        text = NormalizeGermanValues(text);
         text = NormalizeUnicodeMathematics(text);
-        return WhitespaceRegex().Replace(text, " ").Trim();
+        text = NormalizeGermanValues(text);
+        text = text.Replace("^", " hoch ", StringComparison.Ordinal)
+            .Replace("_", " Index ", StringComparison.Ordinal)
+            .Replace("#", " Nummer ", StringComparison.Ordinal)
+            .Replace("$", " Dollar ", StringComparison.Ordinal)
+            .Replace("\\", " ", StringComparison.Ordinal)
+            .Replace("{", " ", StringComparison.Ordinal)
+            .Replace("}", " ", StringComparison.Ordinal);
+        text = WhitespaceRegex().Replace(text, " ").Trim();
+        return WhitespaceBeforePunctuationRegex().Replace(text, "$1");
     }
+
+    private static string NormalizeSpokenUnits(string input)
+    {
+        var text = CubicMetresPerTimeRegex().Replace(input, static match =>
+            string.Equals(match.Groups["time"].Value, "s", StringComparison.OrdinalIgnoreCase)
+                ? " Kubikmeter pro Sekunde "
+                : " Kubikmeter pro Stunde ");
+        text = SquareMetresRegex().Replace(text, " Quadratmeter ");
+        text = CubicMetresRegex().Replace(text, " Kubikmeter ");
+        return text;
+    }
+
+    private static string NormalizeGermanValues(string input)
+    {
+        var text = DateRegex().Replace(input, static match =>
+        {
+            var day = int.Parse(match.Groups["day"].Value, CultureInfo.InvariantCulture);
+            var month = int.Parse(match.Groups["month"].Value, CultureInfo.InvariantCulture);
+            var year = long.Parse(match.Groups["year"].Value, CultureInfo.InvariantCulture);
+            return $" {GermanOrdinal(day)} {GermanMonth(month)} {GermanCardinal(year)} ";
+        });
+        text = TimeRegex().Replace(text, static match =>
+        {
+            var hour = int.Parse(match.Groups["hour"].Value, CultureInfo.InvariantCulture);
+            var minute = int.Parse(match.Groups["minute"].Value, CultureInfo.InvariantCulture);
+            return minute == 0
+                ? $" {GermanQuantity(hour)} Uhr "
+                : $" {GermanQuantity(hour)} Uhr {GermanCardinal(minute)} ";
+        });
+        text = DinRegex().Replace(text, static match =>
+        {
+            var standard = SpeakNumericValue(match.Groups["main"].Value);
+            var part = match.Groups["part"].Success
+                ? $" Strich {SpeakNumericValue(match.Groups["part"].Value)}"
+                : string.Empty;
+            return $" DIN {standard}{part} ";
+        });
+        text = CurrencyRegex().Replace(text, static match =>
+        {
+            var amount = GermanQuantity(match.Groups["value"].Value);
+            var symbol = match.Groups["currency"].Value.ToUpperInvariant();
+            var currency = symbol switch
+            {
+                "$" or "USD" => "US Dollar",
+                "CHF" => "Schweizer Franken",
+                _ => "Euro",
+            };
+            return $" {amount} {currency} ";
+        });
+        text = PercentRegex().Replace(text, static match =>
+            $" {SpeakNumericValue(match.Groups["value"].Value)} Prozent ");
+        text = NumericRangeWithUnitRegex().Replace(text, static match =>
+            $" {SpeakNumericValue(match.Groups["from"].Value)} bis {SpeakNumericValue(match.Groups["to"].Value)} {SpeakUnit(match.Groups["unit"].Value)} ");
+        text = UnitRegex().Replace(text, static match =>
+            $" {GermanQuantity(match.Groups["value"].Value)} {SpeakUnit(match.Groups["unit"].Value)} ");
+        text = NumericRangeRegex().Replace(text, static match =>
+            $" {SpeakNumericValue(match.Groups["from"].Value)} bis {SpeakNumericValue(match.Groups["to"].Value)} ");
+        text = NumberRegex().Replace(text, static match =>
+            $" {SpeakNumericValue(match.Value)} ");
+        return text;
+    }
+
+    private static string SpeakUnit(string value)
+    {
+        var normalized = value.Replace("2", "²", StringComparison.Ordinal)
+            .Replace("3", "³", StringComparison.Ordinal)
+            .ToLowerInvariant();
+        return normalized switch
+        {
+            "m³/h" => "Kubikmeter pro Stunde",
+            "m³/s" => "Kubikmeter pro Sekunde",
+            "l/min" => "Liter pro Minute",
+            "l/s" => "Liter pro Sekunde",
+            "m²" => "Quadratmeter",
+            "m³" => "Kubikmeter",
+            "mm" => "Millimeter",
+            "cm" => "Zentimeter",
+            "km" => "Kilometer",
+            "m" => "Meter",
+            "kwh" => "Kilowattstunden",
+            "kw" => "Kilowatt",
+            "mw" => "Megawatt",
+            "w" => "Watt",
+            "°c" => "Grad Celsius",
+            "kpa" => "Kilopascal",
+            "pa" => "Pascal",
+            "bar" => "Bar",
+            "hz" => "Hertz",
+            "kg" => "Kilogramm",
+            "g" => "Gramm",
+            "v" => "Volt",
+            "a" => "Ampere",
+            _ => value,
+        };
+    }
+
+    private static string GermanQuantity(string value)
+    {
+        var spoken = SpeakNumericValue(value);
+        return string.Equals(spoken, "eins", StringComparison.Ordinal) ? "ein" : spoken;
+    }
+
+    private static string GermanQuantity(long value) => value == 1 ? "ein" : GermanCardinal(value);
+
+    private static string SpeakNumericValue(string value)
+    {
+        var normalized = value.Trim();
+        var negative = normalized.StartsWith('-');
+        if (negative || normalized.StartsWith('+'))
+        {
+            normalized = normalized[1..];
+        }
+
+        string spoken;
+        var comma = normalized.IndexOf(',');
+        var dot = normalized.IndexOf('.');
+        var decimalIndex = comma >= 0
+            ? comma
+            : dot >= 0 && !ThousandsNumberRegex().IsMatch(normalized)
+                ? dot
+                : -1;
+        if (decimalIndex >= 0)
+        {
+            var whole = normalized[..decimalIndex].Replace(".", string.Empty, StringComparison.Ordinal);
+            var fraction = normalized[(decimalIndex + 1)..];
+            spoken = $"{SpeakIntegerToken(whole)} Komma {string.Join(' ', fraction.Select(SpeakDigit))}";
+        }
+        else
+        {
+            spoken = SpeakIntegerToken(normalized.Replace(".", string.Empty, StringComparison.Ordinal));
+        }
+        return negative ? $"minus {spoken}" : spoken;
+    }
+
+    private static string SpeakIntegerToken(string value)
+    {
+        if (long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var number))
+        {
+            return GermanCardinal(number);
+        }
+        return string.Join(' ', value.Where(char.IsDigit).Select(SpeakDigit));
+    }
+
+    private static string SpeakDigit(char value) => value switch
+    {
+        '0' => "null", '1' => "eins", '2' => "zwei", '3' => "drei", '4' => "vier",
+        '5' => "fünf", '6' => "sechs", '7' => "sieben", '8' => "acht", '9' => "neun",
+        _ => string.Empty,
+    };
+
+    private static string GermanCardinal(long value)
+    {
+        if (value < 0)
+        {
+            return "minus " + GermanCardinal(-value);
+        }
+        if (value < 20)
+        {
+            return value switch
+            {
+                0 => "null", 1 => "eins", 2 => "zwei", 3 => "drei", 4 => "vier",
+                5 => "fünf", 6 => "sechs", 7 => "sieben", 8 => "acht", 9 => "neun",
+                10 => "zehn", 11 => "elf", 12 => "zwölf", 13 => "dreizehn",
+                14 => "vierzehn", 15 => "fünfzehn", 16 => "sechzehn", 17 => "siebzehn",
+                18 => "achtzehn", _ => "neunzehn",
+            };
+        }
+        if (value < 100)
+        {
+            var tens = value / 10;
+            var ones = value % 10;
+            var tensWord = tens switch
+            {
+                2 => "zwanzig", 3 => "dreißig", 4 => "vierzig", 5 => "fünfzig",
+                6 => "sechzig", 7 => "siebzig", 8 => "achtzig", _ => "neunzig",
+            };
+            if (ones == 0) return tensWord;
+            var oneWord = ones == 1 ? "ein" : GermanCardinal(ones);
+            return $"{oneWord}und{tensWord}";
+        }
+        if (value < 1_000)
+        {
+            var hundreds = value / 100;
+            var rest = value % 100;
+            var prefix = hundreds == 1 ? "einhundert" : GermanCardinal(hundreds) + "hundert";
+            return rest == 0 ? prefix : prefix + GermanCardinal(rest);
+        }
+        if (value < 1_000_000)
+        {
+            var thousands = value / 1_000;
+            var rest = value % 1_000;
+            var prefix = thousands == 1 ? "eintausend" : GermanCardinal(thousands) + "tausend";
+            return rest == 0 ? prefix : prefix + GermanCardinal(rest);
+        }
+        if (value < 1_000_000_000)
+        {
+            var millions = value / 1_000_000;
+            var rest = value % 1_000_000;
+            var prefix = millions == 1 ? "eine Million" : GermanCardinal(millions) + " Millionen";
+            return rest == 0 ? prefix : prefix + " " + GermanCardinal(rest);
+        }
+        var billions = value / 1_000_000_000;
+        var remainder = value % 1_000_000_000;
+        var billionPrefix = billions == 1 ? "eine Milliarde" : GermanCardinal(billions) + " Milliarden";
+        return remainder == 0 ? billionPrefix : billionPrefix + " " + GermanCardinal(remainder);
+    }
+
+    private static string GermanOrdinal(int value)
+    {
+        return value switch
+        {
+            1 => "erster", 2 => "zweiter", 3 => "dritter", 4 => "vierter",
+            5 => "fünfter", 6 => "sechster", 7 => "siebter", 8 => "achter",
+            9 => "neunter", 10 => "zehnter", 11 => "elfter", 12 => "zwölfter",
+            13 => "dreizehnter", 14 => "vierzehnter", 15 => "fünfzehnter",
+            16 => "sechzehnter", 17 => "siebzehnter", 18 => "achtzehnter",
+            19 => "neunzehnter", 20 => "zwanzigster",
+            _ => GermanCardinal(value) + "ster",
+        };
+    }
+
+    private static string GermanMonth(int value) => value switch
+    {
+        1 => "Januar", 2 => "Februar", 3 => "März", 4 => "April",
+        5 => "Mai", 6 => "Juni", 7 => "Juli", 8 => "August",
+        9 => "September", 10 => "Oktober", 11 => "November", 12 => "Dezember",
+        _ => string.Empty,
+    };
 
     private static string SpeakDelimited(string expression) =>
         $" {NormalizeExpression(expression, mathOperators: true)} ";
@@ -401,6 +644,9 @@ public static partial class GermanSpeechTextNormalizer
     [GeneratedRegex(@"\s+", RegexOptions.CultureInvariant)]
     private static partial Regex WhitespaceRegex();
 
+    [GeneratedRegex(@"\s+([,.;:!?])", RegexOptions.CultureInvariant)]
+    private static partial Regex WhitespaceBeforePunctuationRegex();
+
     [GeneratedRegex(@"[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]+", RegexOptions.CultureInvariant)]
     private static partial Regex SuperscriptUnicodeRegex();
 
@@ -412,4 +658,43 @@ public static partial class GermanSpeechTextNormalizer
 
     [GeneratedRegex(@"(?<=[⁰¹²³⁴⁵⁶⁷⁸⁹])/(?=[\p{L}])|(?<=[\p{L}])/(?=[\p{L}][⁰¹²³⁴⁵⁶⁷⁸⁹])", RegexOptions.CultureInvariant)]
     private static partial Regex UnitDivisionRegex();
+
+    [GeneratedRegex(@"(?<!\d)(?<day>0?[1-9]|[12]\d|3[01])\.(?<month>0?[1-9]|1[0-2])\.(?<year>\d{2,4})(?!\d)", RegexOptions.CultureInvariant)]
+    private static partial Regex DateRegex();
+
+    [GeneratedRegex(@"(?<!\d)(?<hour>[01]?\d|2[0-3]):(?<minute>[0-5]\d)(?:\s*Uhr)?\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex TimeRegex();
+
+    [GeneratedRegex(@"\bDIN\s+(?<main>\d{1,6})(?:-(?<part>\d{1,4}))?\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex DinRegex();
+
+    [GeneratedRegex(@"(?<![\p{L}\p{N}])(?<value>[+-]?\d+(?:[.,]\d+)?)\s*(?<currency>€|EUR|Euro|CHF|\$|USD)(?![\p{L}\p{N}])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CurrencyRegex();
+
+    [GeneratedRegex(@"(?<![\p{L}\p{N}])(?<value>[+-]?\d+(?:[.,]\d+)?)\s*%", RegexOptions.CultureInvariant)]
+    private static partial Regex PercentRegex();
+
+    [GeneratedRegex(@"(?<![\p{L}\p{N}])(?<value>[+-]?\d+(?:[.,]\d+)?)\s*(?<unit>m[³3]/[hs]|l/(?:min|s)|m[²2³3]|kWh|kW|MW|W|°C|kPa|Pa|bar|Hz|kg|mm|cm|km|m|g|V|A)(?![\p{L}\p{N}])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex UnitRegex();
+
+    [GeneratedRegex(@"(?<![\p{L}\p{N}])(?<from>\d+(?:[.,]\d+)?)\s*[-–]\s*(?<to>\d+(?:[.,]\d+)?)\s*(?<unit>m[³3]/[hs]|l/(?:min|s)|m[²2³3]|kWh|kW|MW|W|°C|kPa|Pa|bar|Hz|kg|mm|cm|km|m|g|V|A)(?![\p{L}\p{N}])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex NumericRangeWithUnitRegex();
+
+    [GeneratedRegex(@"(?<![\p{L}\p{N}])(?<from>\d+(?:[.,]\d+)?)\s*[-–]\s*(?<to>\d+(?:[.,]\d+)?)(?![\p{L}\p{N}])", RegexOptions.CultureInvariant)]
+    private static partial Regex NumericRangeRegex();
+
+    [GeneratedRegex(@"(?<![\p{L}\p{N}])[-+]?(?:\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:[.,]\d+)?)(?![\p{L}\p{N}])", RegexOptions.CultureInvariant)]
+    private static partial Regex NumberRegex();
+
+    [GeneratedRegex(@"^\d{1,3}(?:\.\d{3})+$", RegexOptions.CultureInvariant)]
+    private static partial Regex ThousandsNumberRegex();
+
+    [GeneratedRegex(@"\bm\s+hoch\s+(?:3|drei)\s+geteilt\s+durch\s+(?<time>h|s)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CubicMetresPerTimeRegex();
+
+    [GeneratedRegex(@"\bm\s+hoch\s+(?:2|zwei)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SquareMetresRegex();
+
+    [GeneratedRegex(@"\bm\s+hoch\s+(?:3|drei)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CubicMetresRegex();
 }

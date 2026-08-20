@@ -111,6 +111,8 @@ public sealed class LmStudioClientTests
         Assert.False(root.TryGetProperty("messages", out _));
         Assert.False(root.GetProperty("store").GetBoolean());
         Assert.Equal(8192, root.GetProperty("max_output_tokens").GetInt32());
+        Assert.Equal(0.2, root.GetProperty("temperature").GetDouble(), 3);
+        Assert.True(root.TryGetProperty("reasoning", out _));
         Assert.Equal("math.evaluate", root.GetProperty("tools")[0].GetProperty("name").GetString());
         Assert.False(root.GetProperty("parallel_tool_calls").GetBoolean());
         var input = root.GetProperty("input");
@@ -165,7 +167,7 @@ public sealed class LmStudioClientTests
     }
 
     [Fact]
-    public async Task LagunaLoadsExclusivelyAndUnloadsTheGeneralModel()
+    public async Task QwenCoderLoadsExclusivelyAndUnloadsTheGeneralModel()
     {
         using var context = new TestServerContext();
         var handler = new ResidentCoreLoadHandler();
@@ -176,15 +178,83 @@ public sealed class LmStudioClientTests
             new DpapiSecretStore(context.WrappedOptions),
             NullLogger<LmStudioClient>.Instance);
 
-        var instance = await client.EnsureModelLoadedAsync("poolside/laguna-s-2.1", 131_072);
+        var instance = await client.EnsureModelLoadedAsync("qwen3-coder-next", 262_144);
 
-        Assert.Equal("laguna-test", instance);
+        Assert.Equal("qwen-coder-test", instance);
         Assert.Equal(1, handler.UnloadRequests);
         Assert.Equal(1, handler.LoadRequests);
     }
 
     [Fact]
-    public async Task VisionLoadKeepsTheGeneralModelResident()
+    public async Task QwenCoderUsesPublishedNonThinkingSamplingProfile()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {
+              "status": "completed",
+              "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "GO_SESSION_TITLE: Fertig\n\nErledigt" }]
+              }],
+              "usage": { "input_tokens": 20, "output_tokens": 4 }
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Ändere die Datei und teste sie.")],
+            []);
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        var root = request.RootElement;
+        Assert.Equal(1.0, root.GetProperty("temperature").GetDouble(), 3);
+        Assert.Equal(0.95, root.GetProperty("top_p").GetDouble(), 3);
+        Assert.Equal(40, root.GetProperty("top_k").GetInt32());
+        Assert.False(root.TryGetProperty("reasoning", out _));
+    }
+
+    [Fact]
+    public async Task DeepSeekCoderUsesItsPublishedAgentSamplingProfile()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {
+              "status": "completed",
+              "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "Erledigt" }]
+              }],
+              "usage": { "input_tokens": 20, "output_tokens": 4 }
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.CompleteChatAsync(
+            "ud",
+            [new LmChatMessage("user", "Analysiere und ändere das Projekt.")],
+            []);
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        var root = request.RootElement;
+        Assert.Equal(1.0, root.GetProperty("temperature").GetDouble(), 3);
+        Assert.Equal(0.95, root.GetProperty("top_p").GetDouble(), 3);
+        Assert.False(root.TryGetProperty("top_k", out _));
+        Assert.False(root.TryGetProperty("reasoning", out _));
+    }
+
+    [Fact]
+    public async Task VisionLoadEjectsTheGeneralModelForTheOptionalRun()
     {
         using var context = new TestServerContext();
         var handler = new ResidentCoreLoadHandler();
@@ -197,7 +267,7 @@ public sealed class LmStudioClientTests
 
         _ = await client.EnsureModelLoadedAsync("qwen3-vl-30b-a3b-instruct", 65_536);
 
-        Assert.Equal(0, handler.UnloadRequests);
+        Assert.Equal(1, handler.UnloadRequests);
         Assert.Equal(1, handler.LoadRequests);
     }
 
@@ -508,8 +578,8 @@ public sealed class LmStudioClientTests
                         },
                         {
                           "type": "llm",
-                          "key": "poolside/laguna-s-2.1",
-                          "display_name": "Laguna S 2.1",
+                          "key": "qwen3-coder-next",
+                          "display_name": "Qwen3 Coder Next Q6_K",
                           "loaded_instances": [],
                           "max_context_length": 262144
                         },
@@ -540,8 +610,8 @@ public sealed class LmStudioClientTests
                 using var requestDocument = JsonDocument.Parse(requestBody);
                 var modelId = requestDocument.RootElement.GetProperty("model").GetString();
                 var contextLength = requestDocument.RootElement.GetProperty("context_length").GetInt32();
-                var instanceId = string.Equals(modelId, "poolside/laguna-s-2.1", StringComparison.OrdinalIgnoreCase)
-                    ? "laguna-test"
+                var instanceId = string.Equals(modelId, "qwen3-coder-next", StringComparison.OrdinalIgnoreCase)
+                    ? "qwen-coder-test"
                     : "vision-test";
                 return JsonResponse($$"""
                     {

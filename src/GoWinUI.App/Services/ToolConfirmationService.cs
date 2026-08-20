@@ -99,6 +99,7 @@ public sealed class ToolConfirmationService(MainWindow window) : IDisposable
             or ClientToolNames.FileSystemReadMany
             or ClientToolNames.FileSystemSearch
             or ClientToolNames.FileSystemWriteText
+            or ClientToolNames.FileSystemReplaceText
             or ClientToolNames.FileSystemMove
             or ClientToolNames.FileSystemProposePatch
             or ClientToolNames.FileSystemProposeCreate

@@ -354,7 +354,7 @@ public sealed class AiClientPersistenceTests
         var now = DateTimeOffset.UtcNow;
         var run = await environment.Get<IGoAiRunRepository>().CreateAsync(new GoAiRunRecord(
             Guid.NewGuid(), session.Id, message.Id, PromptTriggerAction.Code,
-            "idem-tool", "run-server-tool", 4, "waitingForClient", "laguna", null, now, now));
+            "idem-tool", "run-server-tool", 4, "waitingForClient", "qwen3-coder-next", null, now, now));
         var journal = environment.Get<IClientToolExecutionRepository>();
         var execution = new ClientToolExecutionRecord(
             "proposal-tool-1", run.Id, "run-server-tool", 5, "fs.proposePatch",
@@ -368,8 +368,10 @@ public sealed class AiClientPersistenceTests
             """{"proposalId":"proposal-tool-1","status":"completed","result":{"patched":true}}""");
         Assert.Equal("completed", completed.State);
         Assert.NotNull(completed.ResultJson);
+        Assert.Equal(execution.ProposalId, Assert.Single(await journal.ListPendingSubmissionsAsync(run.Id)).ProposalId);
         await journal.MarkSubmittedAsync(execution.ProposalId);
         Assert.Equal("submitted", (await journal.GetAsync(execution.ProposalId))?.State);
+        Assert.Empty(await journal.ListPendingSubmissionsAsync(run.Id));
 
         await Assert.ThrowsAsync<InvalidDataException>(() => journal.BeginAsync(
             execution with { LocalRunId = Guid.NewGuid() }));

@@ -20,4 +20,11 @@ public sealed record AgentRunCheckpoint(
     bool VerificationRequired = false,
     bool VerificationFailed = false,
     int RepairReminderCount = 0,
-    bool FinalSynthesisRequested = false);
+    bool FinalSynthesisRequested = false,
+    IReadOnlyList<string>? FailedToolFingerprints = null,
+    IReadOnlyList<string>? BlockedToolNames = null,
+    IReadOnlyList<string>? SuccessfulReadFingerprints = null,
+    IReadOnlyList<WorkspaceReadRange>? SuccessfulReadRanges = null,
+    IReadOnlyList<string>? SuccessfulToolFingerprints = null);
+
+public sealed record WorkspaceReadRange(string Path, int StartLine, int EndLine);

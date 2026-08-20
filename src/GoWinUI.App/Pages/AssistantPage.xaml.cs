@@ -54,11 +54,14 @@ public sealed partial class AssistantPage : Page, IDisposable
     private readonly SemaphoreSlim _audioCaptureBridgeGate = new(1, 1);
     private readonly SemaphoreSlim _voiceIntentGate = new(1, 1);
     private readonly SemaphoreSlim _chatBridgeGate = new(1, 1);
+    private readonly SemaphoreSlim _speechStartGate = new(1, 1);
     private readonly UISettings _uiSettings = new();
     private readonly AccessibilitySettings _accessibilitySettings = new();
     private WebView2? _assistantWebView;
     private CancellationTokenSource? _lifetime;
     private AssistantWebBridge? _bridge;
+    private Task? _activeSpeechTask;
+    private CancellationTokenSource? _activeSpeechRequestCancellation;
     private bool _initialized;
     private bool _disposed;
     private bool _colorEventsSubscribed;
@@ -126,6 +129,8 @@ public sealed partial class AssistantPage : Page, IDisposable
                 webView,
                 App.Current.GetService<ILogger<AssistantWebBridge>>());
             _bridge.MessageReceived += OnBridgeMessageReceived;
+            _bridge.ReadFromContextRequested += OnReadFromContextRequested;
+            _bridge.ReadFromContextValidator = ValidateReadFromContextTargetAsync;
             initializationStage = "Webassets";
             var webRoot = ApplicationAssets.ResolvePath("Assets", "Web");
             var userDataFolder = Path.Combine(App.Current.DataDirectory, "WebView2");
@@ -209,6 +214,9 @@ public sealed partial class AssistantPage : Page, IDisposable
         _microphone.TurnChanged -= OnMicrophoneTurnChanged;
         _audioCapture.Changed -= OnAudioCaptureChanged;
         _screenClips.Changed -= OnScreenClipChanged;
+        _activeSpeechRequestCancellation?.Cancel();
+        _activeSpeechRequestCancellation?.Dispose();
+        _activeSpeechRequestCancellation = null;
         ClearClientSpeechRuns();
         _ = StopMicrophoneAfterUnloadAsync();
         _ = _audioCapture.CancelAsync(CancellationToken.None);
@@ -220,6 +228,8 @@ public sealed partial class AssistantPage : Page, IDisposable
         if (_bridge is not null)
         {
             _bridge.MessageReceived -= OnBridgeMessageReceived;
+            _bridge.ReadFromContextRequested -= OnReadFromContextRequested;
+            _bridge.ReadFromContextValidator = null;
             _bridge.Dispose();
             _bridge = null;
         }
@@ -243,6 +253,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         _microphoneBridgeGate.Dispose();
         _audioCaptureBridgeGate.Dispose();
         _chatBridgeGate.Dispose();
+        _speechStartGate.Dispose();
         _exportGate.Dispose();
     }
 
@@ -415,7 +426,7 @@ public sealed partial class AssistantPage : Page, IDisposable
                         _lifetime?.Token ?? CancellationToken.None);
                     break;
                 case "microphone.stop":
-                    await _microphone.StopAsync(CancellationToken.None);
+                    await _microphone.StopVoiceControlAsync(CancellationToken.None);
                     await bridge.PostAsync("microphone.changed", _microphone.Current, args.Envelope.RequestId);
                     break;
                 case "microphone.speak":
@@ -423,12 +434,14 @@ public sealed partial class AssistantPage : Page, IDisposable
                     if (TryReadGuid(args.Envelope.Payload, "sessionId", out var speechSessionId)
                         && TryReadGuid(args.Envelope.Payload, "messageId", out var speechMessageId))
                     {
-                        _ = SpeakWithoutBlockingBridgeAsync(
+                        _ = StartSpeechRequestAsync(
                             speechSessionId,
                             speechMessageId,
                             speechText,
                             bridge,
-                            args.Envelope.RequestId);
+                            args.Envelope.RequestId,
+                            null,
+                            null);
                     }
                     else
                     {
@@ -501,12 +514,140 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
     }
 
+    private void OnReadFromContextRequested(
+        object? sender,
+        ReadFromContextRequestedEventArgs args)
+    {
+        var bridge = _bridge;
+        if (bridge is null || _disposed)
+        {
+            return;
+        }
+
+        var target = args.Target;
+        _ = StartSpeechRequestAsync(
+            target.SessionId,
+            target.MessageId,
+            null,
+            bridge,
+            Guid.NewGuid().ToString("D"),
+            new SpeechStartAnchor(target.Kind, target.BlockIndex),
+            target.MessageUpdatedAt);
+    }
+
+    private async Task<bool> ValidateReadFromContextTargetAsync(
+        ReadFromContextTarget target,
+        CancellationToken cancellationToken)
+    {
+        if (_disposed || _settings.Current.ActiveSessionId != target.SessionId)
+        {
+            return false;
+        }
+        try
+        {
+            await _goAi.ValidateSpeechStartAsync(
+                target.SessionId,
+                target.MessageId,
+                target.MessageUpdatedAt,
+                new SpeechStartAnchor(target.Kind, target.BlockIndex),
+                _lifetime?.Token ?? cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.ReadFromContextMenuFailed(_logger, exception);
+            return false;
+        }
+    }
+
+    private async Task StartSpeechRequestAsync(
+        Guid sessionId,
+        Guid messageId,
+        string? text,
+        AssistantWebBridge bridge,
+        string requestId,
+        SpeechStartAnchor? startAnchor,
+        DateTimeOffset? expectedMessageUpdatedAt)
+    {
+        var gateHeld = false;
+        try
+        {
+            await _speechStartGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
+            gateHeld = true;
+            if (startAnchor is not null)
+            {
+                if (_settings.Current.ActiveSessionId != sessionId)
+                {
+                    throw new InvalidOperationException("Die ausgewählte AI-Sitzung ist nicht mehr geöffnet.");
+                }
+                await _goAi.ValidateSpeechStartAsync(
+                    sessionId,
+                    messageId,
+                    expectedMessageUpdatedAt
+                        ?? throw new InvalidOperationException("Der Nachrichtenstand für den Vorlesestart fehlt."),
+                    startAnchor,
+                    _lifetime?.Token ?? CancellationToken.None).ConfigureAwait(false);
+            }
+
+            var previousTask = _activeSpeechTask;
+            var previousCancellation = _activeSpeechRequestCancellation;
+            previousCancellation?.Cancel();
+            if (_goAi.IsSpeaking || _microphone.Current.IsSpeaking)
+            {
+                await Task.WhenAll(
+                    _microphone.StopSpeechAsync(CancellationToken.None),
+                    _coordinator.CancelCurrentAsync()).ConfigureAwait(false);
+            }
+            if (previousTask is { IsCompleted: false })
+            {
+                await previousTask.ConfigureAwait(false);
+            }
+            previousCancellation?.Dispose();
+
+            var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                _lifetime?.Token ?? CancellationToken.None);
+            _activeSpeechRequestCancellation = requestCancellation;
+            _activeSpeechTask = SpeakWithoutBlockingBridgeAsync(
+                sessionId,
+                messageId,
+                text,
+                bridge,
+                requestId,
+                startAnchor,
+                expectedMessageUpdatedAt,
+                requestCancellation.Token);
+        }
+        catch (OperationCanceledException) when (_lifetime?.IsCancellationRequested == true)
+        {
+            // The page was closed while the native context action was being validated.
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "speech.readFromHere");
+            await bridge.PostErrorAsync(exception.Message, requestId).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (gateHeld)
+            {
+                _speechStartGate.Release();
+            }
+        }
+    }
+
     private async Task SpeakWithoutBlockingBridgeAsync(
         Guid sessionId,
         Guid messageId,
-        string text,
+        string? text,
         AssistantWebBridge bridge,
-        string requestId)
+        string requestId,
+        SpeechStartAnchor? startAnchor,
+        DateTimeOffset? expectedMessageUpdatedAt,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -528,7 +669,9 @@ public sealed partial class AssistantPage : Page, IDisposable
                     "speech.progress",
                     SpeechPlaybackProgressBridge.ToPayload(playback),
                     requestId),
-                _lifetime?.Token ?? CancellationToken.None).ConfigureAwait(false);
+                startAnchor,
+                expectedMessageUpdatedAt,
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -652,7 +795,7 @@ public sealed partial class AssistantPage : Page, IDisposable
             "microphone-tts",
             snapshot.IsSpeaking,
             "Antwort wird vorgelesen",
-            "Docker · Supertonic F5 Ultra · GPU 1");
+            $"Docker · {GoAiAssistantService.DisplaySpeechProvider(snapshot.Provider)}");
         var bridge = _bridge;
         if (bridge is null)
         {
@@ -696,6 +839,26 @@ public sealed partial class AssistantPage : Page, IDisposable
             if (!string.Equals(normalizedText, snapshot.Text, StringComparison.Ordinal))
             {
                 snapshot = snapshot with { Text = normalizedText };
+            }
+
+            if (IsVoiceControlStopCommand(snapshot.Text))
+            {
+                // This command controls the persistent microphone session itself,
+                // not the current TTS or AI operation. Chromium releases its
+                // track through the transcript event while this session stops.
+                await bridge.PostAsync("microphone.transcript", new
+                {
+                    snapshot.TurnId,
+                    snapshot.Text,
+                    snapshot.IsFinal,
+                    snapshot.Provider,
+                    Execute = false,
+                    Cancel = false,
+                    Noise = true,
+                    StopVoice = true,
+                });
+                await _microphone.StopVoiceControlAsync(CancellationToken.None).ConfigureAwait(false);
+                return;
             }
 
             var microphoneState = _microphone.Current;
@@ -807,6 +970,12 @@ public sealed partial class AssistantPage : Page, IDisposable
             .Trim()
             .ToLowerInvariant();
         return normalized is "beenden" or "aufnahme beenden" or "abschließen" or "aufnahme abschließen";
+    }
+
+    internal static bool IsVoiceControlStopCommand(string? text)
+    {
+        var command = NormalizeSpokenCommand(text);
+        return command is "sprachsteuerung abbrechen" or "sprachsteuerung beenden";
     }
 
     internal static string NormalizeAudiobookVoiceCommand(string? text, bool audiobookActive)

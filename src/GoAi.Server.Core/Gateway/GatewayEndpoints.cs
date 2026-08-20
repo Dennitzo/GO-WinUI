@@ -27,6 +27,7 @@ internal static class GatewayEndpoints
         endpoints.MapGet("/v1/capabilities", WriteCapabilitiesAsync);
         endpoints.MapGet("/v1/models/status", WriteModelStatusAsync);
         endpoints.MapPost("/v1/models/general", SelectGeneralModelAsync);
+        endpoints.MapPost("/v1/models/code", SelectCodingModelAsync);
         endpoints.MapGet("/v1/gpu/status", WriteGpuStatusAsync);
         endpoints.MapGet("/v1/services/status", WriteServiceStatusAsync);
         endpoints.MapPost("/v1/context/embeddings", CreateEmbeddingsAsync);
@@ -51,6 +52,10 @@ internal static class GatewayEndpoints
 
         endpoints.MapPost("/v1/audio/transcriptions", TranscribeAudioAsync);
         endpoints.MapPost("/v1/audio/speech", SynthesizeSpeechAsync);
+        endpoints.MapPost("/v1/audio/speech/sessions", CreateSpeechSessionAsync);
+        endpoints.MapPost("/v1/audio/speech/sessions/{sessionId}/paragraphs", SynthesizeSpeechParagraphAsync);
+        endpoints.MapPost("/v1/audio/speech/sessions/{sessionId}/end", EndSpeechSessionAsync);
+        endpoints.MapPost("/v1/audio/speech/sessions/{sessionId}/cancel", CancelSpeechSessionAsync);
         endpoints.MapPost("/v1/audio/utterance-intent", ClassifyUtteranceIntentAsync);
         endpoints.MapPost("/v1/audio/live-captions/sessions", CreateLiveCaptionSessionAsync);
         endpoints.MapGet("/v1/audio/live-captions/sessions/{sessionId}", GetLiveCaptionSessionAsync);
@@ -92,6 +97,15 @@ internal static class GatewayEndpoints
     {
         var request = await ReadJsonAsync<GeneralModelSelection>(context).ConfigureAwait(false);
         var selection = context.RequestServices.GetRequiredService<GeneralModelSelectionService>();
+        await WriteJsonAsync(
+            context,
+            await selection.SelectAsync(request.ModelId, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    private static async Task SelectCodingModelAsync(HttpContext context)
+    {
+        var request = await ReadJsonAsync<CodingModelSelection>(context).ConfigureAwait(false);
+        var selection = context.RequestServices.GetRequiredService<CodingModelSelectionService>();
         await WriteJsonAsync(
             context,
             await selection.SelectAsync(request.ModelId, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
@@ -274,7 +288,16 @@ internal static class GatewayEndpoints
             throw new KeyNotFoundException("Run not found.");
         }
 
-        await repository.SaveClientToolResultAsync(runId, result, context.RequestAborted).ConfigureAwait(false);
+        var inserted = await repository.SaveClientToolResultAsync(runId, result, context.RequestAborted).ConfigureAwait(false);
+        if (inserted)
+        {
+            var current = await repository.GetAsync(runId, context.RequestAborted).ConfigureAwait(false);
+            if (current?.State == RunState.WaitingForClient)
+            {
+                var queue = context.RequestServices.GetRequiredService<RunWorkChannel>();
+                await queue.EnqueueAsync(runId, context.RequestAborted).ConfigureAwait(false);
+            }
+        }
         context.Response.StatusCode = StatusCodes.Status204NoContent;
     }
 
@@ -441,6 +464,99 @@ internal static class GatewayEndpoints
 
         var workers = context.RequestServices.GetRequiredService<WorkerOrchestrator>();
         await WriteJsonAsync(context, await workers.SynthesizeAsync(request, cancellationToken: context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    private static async Task CreateSpeechSessionAsync(HttpContext context)
+    {
+        var request = await ReadJsonAsync<SpeechSessionRequest>(context).ConfigureAwait(false);
+        if (!string.Equals(request.Language, "de", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(request.Language, "de-DE", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Vorlesesitzungen unterstützen ausschließlich deutsche Sprachausgabe.");
+        }
+        var workers = context.RequestServices.GetRequiredService<WorkerOrchestrator>();
+        var result = await workers.BeginSpeechSessionAsync(request, context.RequestAborted).ConfigureAwait(false);
+        context.Response.StatusCode = StatusCodes.Status201Created;
+        context.Response.Headers.Location = $"/v1/audio/speech/sessions/{Uri.EscapeDataString(result.SessionId)}";
+        await WriteJsonAsync(context, result).ConfigureAwait(false);
+    }
+
+    private static async Task SynthesizeSpeechParagraphAsync(HttpContext context)
+    {
+        var sessionId = GetRouteString(context, "sessionId");
+        var request = await ReadJsonAsync<SpeechParagraphRequest>(context).ConfigureAwait(false);
+        if (request.ParagraphIndex < 0
+            || request.Speed is < 0.5 or > 2.0
+            || string.IsNullOrWhiteSpace(request.Text)
+            || request.Text.Length > 3_000)
+        {
+            throw new ArgumentException("Absatzindex, Text oder Geschwindigkeit liegt außerhalb der Vorlesegrenzen.");
+        }
+        IReadOnlyList<SpeechParagraphPart>? parts = null;
+        if (request.Parts is { Count: > 0 })
+        {
+            if (request.Parts.Count > 256)
+            {
+                throw new ArgumentException("Ein Vorleseabsatz enthält zu viele Satzteile.");
+            }
+            var normalizedParts = new List<SpeechParagraphPart>(request.Parts.Count);
+            var seenIndexes = new HashSet<int>();
+            foreach (var part in request.Parts)
+            {
+                var text = GermanSpeechTextNormalizer.Normalize(part.Text);
+                if (part.SegmentIndex < 0
+                    || !seenIndexes.Add(part.SegmentIndex)
+                    || part.Speed is < 0.5 or > 2.0
+                    || part.PauseBeforeMilliseconds is < 0 or > 1_500
+                    || part.PauseAfterMilliseconds is < 0 or > 1_500
+                    || string.IsNullOrWhiteSpace(text)
+                    || text.Length > 3_000)
+                {
+                    throw new ArgumentException("Ein Satzteil des Vorleseabsatzes ist ungültig.");
+                }
+                normalizedParts.Add(part with { Text = text });
+            }
+            var combined = string.Join(' ', normalizedParts.Select(static part => part.Text));
+            if (combined.Length > 3_000)
+            {
+                throw new ArgumentException("Die Satzteile überschreiten gemeinsam die Vorlesegrenze des Absatzes.");
+            }
+            parts = normalizedParts;
+            request = request with { Text = combined, Parts = parts };
+        }
+        else
+        {
+            request = request with { Text = GermanSpeechTextNormalizer.Normalize(request.Text), Parts = null };
+        }
+        if (string.IsNullOrWhiteSpace(request.Text) || request.Text.Length > 3_000)
+        {
+            throw new ArgumentException("Der Absatz ist nach der mathematischen Normalisierung leer oder zu lang.");
+        }
+        var workers = context.RequestServices.GetRequiredService<WorkerOrchestrator>();
+        await WriteJsonAsync(
+            context,
+            await workers.SynthesizeSpeechParagraphAsync(
+                sessionId,
+                request,
+                context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    private static Task EndSpeechSessionAsync(HttpContext context) =>
+        CompleteSpeechSessionAsync(context, cancelled: false);
+
+    private static Task CancelSpeechSessionAsync(HttpContext context) =>
+        CompleteSpeechSessionAsync(context, cancelled: true);
+
+    private static async Task CompleteSpeechSessionAsync(HttpContext context, bool cancelled)
+    {
+        var sessionId = GetRouteString(context, "sessionId");
+        var workers = context.RequestServices.GetRequiredService<WorkerOrchestrator>();
+        await WriteJsonAsync(
+            context,
+            await workers.EndSpeechSessionAsync(
+                sessionId,
+                cancelled,
+                context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     private static async Task ClassifyUtteranceIntentAsync(HttpContext context)

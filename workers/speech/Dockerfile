@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TRANSFORMERS_OFFLINE=1
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends python3 python3-pip python3-venv libsndfile1 ffmpeg sox \
+    && apt-get install --yes --no-install-recommends python3 python3-pip python3-venv libsndfile1 ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/venv
 
@@ -16,15 +16,12 @@ ENV PATH=/opt/venv/bin:$PATH
 
 COPY speech/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu128 -r /tmp/requirements.txt \
-    && pip install --no-cache-dir --no-deps qwen-tts==0.1.1 \
     && pip install --no-cache-dir --no-deps supertonic==1.3.1 \
     && rm /tmp/requirements.txt
 
-# Piper remains an unloaded CPU fallback. SpeechBrain provides live-caption
-# diarization. Supertonic uses CUDA first and the CPU provider only for ONNX
-# nodes that the published model cannot place on CUDA.
-RUN pip install --no-cache-dir --no-deps piper-tts==1.6.0 \
-    && pip install --no-cache-dir speechbrain==1.0.3 \
+# Supertonic is the resident CUDA voice model. SpeechBrain provides live-caption
+# diarization. No secondary speech provider is installed in this image.
+RUN pip install --no-cache-dir speechbrain==1.0.3 \
     && pip uninstall --yes onnxruntime \
     && pip install --no-cache-dir --no-deps --force-reinstall onnxruntime-gpu==1.23.2 \
     && python -c "import importlib.metadata as m, onnxruntime as ort; distributions=[d.metadata['Name'].lower() for d in m.distributions() if d.metadata.get('Name', '').lower().startswith('onnxruntime')]; assert distributions == ['onnxruntime-gpu'], distributions; assert 'CUDAExecutionProvider' in ort.get_available_providers(), ort.get_available_providers()"

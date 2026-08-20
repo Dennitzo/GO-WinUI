@@ -4,6 +4,7 @@ using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Chat;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -18,6 +19,8 @@ public enum GoAiAssistantUpdateKind
     Status,
     ArtifactsChanged,
     DocumentsChanged,
+    CodeDiffChanged,
+    CodingTraceChanged,
     Completed,
     Cancelled,
     Failed,
@@ -35,7 +38,8 @@ public sealed record GoAiAssistantUpdate(
     int? ContextUsed = null,
     int? ContextLimit = null,
     int? LoadedFiles = null,
-    bool ContextWasCompacted = false);
+    bool ContextWasCompacted = false,
+    CodingRunTraceEntry? CodingTrace = null);
 
 public sealed record GoAiSpeechUpdate(
     bool IsActive,
@@ -73,13 +77,14 @@ public sealed class GoAiAssistantService(
     SessionContextPreparationService sessionContexts,
     LocalToolBroker toolBroker,
     WorkspaceRepositoryIndex repositoryIndex,
+    CodingDiffService codingDiffs,
+    CodingRunTraceService codingTrace,
     SystemAudioCaptionService liveCaptions,
     MicrophoneTranscriptionService microphone,
     SettingsCoordinator settings,
     RecentActivityService recentActivity,
     ILogger<GoAiAssistantService> logger) : IDisposable
 {
-    private const int SpeechPreparationSchemaVersion = 5;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
     private static readonly Action<ILogger, string, string, Exception?> RunDiagnostic = LoggerMessage.Define<string, string>(
         LogLevel.Information,
@@ -89,9 +94,12 @@ public sealed class GoAiAssistantService(
     private CancellationTokenSource? _activeCancellation;
     private string? _activeServerRunId;
     private int _explicitCancellation;
+    private int _speechActive;
     private int _disposed;
 
     public bool IsRunning => _gate.CurrentCount == 0;
+
+    public bool IsSpeaking => Volatile.Read(ref _speechActive) != 0;
 
     public async Task<ChatMessage> SendAsync(
         Guid sessionId,
@@ -145,7 +153,7 @@ public sealed class GoAiAssistantService(
                 Status: "Denkt nach",
                 Detail: action switch
                 {
-                    PromptTriggerAction.Code => "Laguna bereitet den Workspace vor.",
+                    PromptTriggerAction.Code => "Der ausgewählte Coding-Agent bereitet den Workspace vor.",
                     PromptTriggerAction.Audiobook => "Der Buchautor bereitet das nächste Kapitel vor.",
                     _ => "GO AI Server verarbeitet die Anfrage.",
                 },
@@ -272,20 +280,39 @@ public sealed class GoAiAssistantService(
         _gate.Release();
     }
 
+    public async Task ValidateSpeechStartAsync(
+        Guid sessionId,
+        Guid sourceMessageId,
+        DateTimeOffset expectedUpdatedAt,
+        SpeechStartAnchor anchor,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(anchor);
+        var message = (await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false))
+            .SingleOrDefault(item => item.Id == sourceMessageId)
+            ?? throw new InvalidOperationException("Die ausgewählte AI-Nachricht wurde nicht gefunden.");
+        ValidateAnchoredSpeechMessage(message, sessionId, expectedUpdatedAt, anchor);
+    }
+
     public async Task SpeakAsync(
         Guid sessionId,
         string? explicitText,
         Guid? sourceMessageId,
         Func<GoAiSpeechUpdate, Task> update,
         Func<SpeechPlaybackProgress, Task>? progress = null,
+        SpeechStartAnchor? startAnchor = null,
+        DateTimeOffset? expectedMessageUpdatedAt = null,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(update);
+        var playbackId = Guid.NewGuid();
+        long playbackEventSequence = 0;
 
         // Automatic voice playback can arrive while the just-completed chat callback still
         // owns the gate. Waiting here preserves ordering without creating a prompt queue.
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        Interlocked.Exchange(ref _speechActive, 1);
         Interlocked.Exchange(ref _explicitCancellation, 0);
         _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
@@ -299,6 +326,8 @@ public sealed class GoAiAssistantService(
                 sessionId,
                 explicitText,
                 sourceMessageId,
+                startAnchor,
+                expectedMessageUpdatedAt,
                 _activeCancellation.Token).ConfigureAwait(false);
             var speechStatusDetail = VisibleSpeechSourceDetail(source.Detail);
             var cleanedSource = MicrophoneTranscriptionService.PrepareSpeechText(source.Text);
@@ -307,115 +336,49 @@ public sealed class GoAiAssistantService(
                 throw new InvalidOperationException("Es ist kein vorlesbarer Text vorhanden.");
             }
 
-            var sourceUnits = SpeechSourceSegmentation.CreateUnits(source.Text);
-            if (sourceUnits.Count == 0)
+            var allSourceUnits = SpeechSourceSegmentation.CreateUnits(source.Text);
+            if (allSourceUnits.Count == 0)
             {
-                sourceUnits = SpeechSourceSegmentation.CreateUnits(cleanedSource);
+                allSourceUnits = SpeechSourceSegmentation.CreateUnits(cleanedSource);
             }
-            var selectedGeneral = settings.Current.SelectedModel?.Trim() ?? string.Empty;
-            SpeechPreparation? cached = null;
-            var rewriteText = RequiresSpeechPreparation(source.ContentProfile);
-            var sourceHash = HashSpeechValue(source.Text.ReplaceLineEndings("\n"));
-            var cacheKey = HashSpeechValue(string.Join('|',
-                SpeechPreparationSchemaVersion,
-                sessionId.ToString("D"),
-                source.MessageId?.ToString("D") ?? "none",
-                source.Kind,
-                source.ContentProfile,
-                sourceHash,
-                selectedGeneral.ToLowerInvariant()));
-            cached = await chats.GetSpeechPreparationAsync(
-                cacheKey,
-                _activeCancellation.Token).ConfigureAwait(false);
-            var speechSegments = ReadCachedSpeechSegments(cached, sourceUnits);
-            DialogueDirectionSession? dialogueDirection = null;
-            if (speechSegments.Count > 0)
+            var sourceUnits = SelectSpeechUnitsFromAnchor(allSourceUnits, startAnchor);
+            if (startAnchor is not null)
             {
-                await update(new(
-                    true,
-                    rewriteText ? "Vorlesefassung geladen" : "Sprechregie geladen",
-                    CombineSpeechDetail(
-                        speechStatusDetail,
-                        rewriteText
-                            ? "Bereits in dieser Sitzung aufbereitet."
-                            : "Originaltext und Sprechregie wurden aus dieser Sitzung geladen."),
-                    rewriteText ? selectedGeneral : "Supertonic F5 Ultra",
-                    CacheHit: true)).ConfigureAwait(false);
+                cleanedSource = string.Join(
+                    Environment.NewLine,
+                    sourceUnits.Select(static unit => unit.SpeechText));
             }
-            else if (rewriteText)
-            {
-                cached = null;
-                speechSegments = await PrepareSpeechWithGeneralAiAsync(
-                    sourceUnits,
-                    selectedGeneral,
-                    update,
-                    preserveOriginalText: false,
-                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false) ?? [];
-                if (speechSegments.Count > 0)
-                {
-                    await SaveSpeechPreparationAsync(
-                        cacheKey,
-                        sessionId,
-                        source,
-                        sourceHash,
-                        selectedGeneral,
-                        sourceUnits,
-                        speechSegments,
-                        _activeCancellation.Token).ConfigureAwait(false);
-                }
-                else
-                {
-                    speechSegments = SpeechSourceSegmentation.CreateDirectSegments(sourceUnits, cleanedSource);
-                }
-            }
-            else
-            {
-                cached = null;
-                speechSegments = SpeechSourceSegmentation.CreateDirectSegments(sourceUnits, cleanedSource);
-                await update(new(
-                    true,
-                    "Sprachausgabe wird erzeugt",
-                    CombineSpeechDetail(speechStatusDetail, "Erzählertext wird direkt vorbereitet."),
-                    "Supertonic F5 Ultra")).ConfigureAwait(false);
-                dialogueDirection = StartDialogueDirection(
-                    sourceUnits,
-                    speechSegments,
-                    selectedGeneral,
-                    speechStatusDetail,
-                    update,
-                    _activeCancellation.Token);
-                if (dialogueDirection is null)
-                {
-                    await SaveSpeechPreparationAsync(
-                        cacheKey,
-                        sessionId,
-                        source,
-                        sourceHash,
-                        selectedGeneral,
-                        sourceUnits,
-                        speechSegments,
-                        _activeCancellation.Token).ConfigureAwait(false);
-                }
-            }
+            // Every source uses the same deterministic SpeechPlan. No LLM is
+            // involved in read-aloud preparation, regardless of content type.
+            var speechSegments = SpeechSourceSegmentation.CreateDirectSegments(
+                sourceUnits,
+                cleanedSource);
+            await update(new(
+                true,
+                "Sprachausgabe wird erzeugt",
+                CombineSpeechDetail(speechStatusDetail, "Sprechtext wird deterministisch vorbereitet."),
+                DisplaySpeechProvider(null))).ConfigureAwait(false);
 
             if (speechSegments.Count == 0)
             {
                 throw new InvalidOperationException("Es konnten keine vorlesbaren Sprachsegmente erstellt werden.");
             }
+            var speechPlanHash = HashSpeechPlan(speechSegments);
 
             await update(new(
                 true,
                 "Sprachausgabe wird erzeugt",
                 speechStatusDetail,
-                "Supertonic F5 Ultra",
-                CacheHit: cached is not null,
-                DirectionModel: dialogueDirection is null ? null : selectedGeneral)).ConfigureAwait(false);
+                DisplaySpeechProvider(null),
+                CacheHit: false)).ConfigureAwait(false);
             if (progress is not null)
             {
                 await progress(new(
                     sessionId,
                     source.MessageId,
                     source.Kind,
+                    playbackId,
+                    Interlocked.Increment(ref playbackEventSequence),
                     0,
                     speechSegments.Count,
                     [],
@@ -424,76 +387,60 @@ public sealed class GoAiAssistantService(
             }
             string? speechProvider;
             var playbackStarted = 0;
-            try
-            {
-                speechProvider = await microphone.PlaySegmentsAsync(
+            speechProvider = await microphone.PlaySegmentsAsync(
                     speechSegments,
                     progress: async playback =>
                     {
                         if (playback.State == SpeechPlaybackState.Playing
                             && Interlocked.CompareExchange(ref playbackStarted, 1, 0) == 0)
                         {
-                            dialogueDirection?.MarkPlaybackStarted();
                             await update(new(
                                 true,
                                 "Sprachausgabe wird wiedergegeben",
                                 speechStatusDetail,
                                 DisplaySpeechProvider(playback.Provider),
-                                CacheHit: cached is not null,
-                                DirectionModel: dialogueDirection is { IsCompleted: false }
-                                    ? selectedGeneral
-                                    : null)).ConfigureAwait(false);
+                                CacheHit: false)).ConfigureAwait(false);
                         }
                         if (progress is null) return;
-                        var segmentIndex = Math.Clamp(playback.SegmentIndex, 0, speechSegments.Count - 1);
-                        var segment = speechSegments[segmentIndex];
+                        if (!string.Equals(
+                            speechPlanHash,
+                            HashSpeechPlan(speechSegments),
+                            StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException(
+                                "Die sichtbare Vorlesemarkierung hat den vorbereiteten Sprachplan verändert.");
+                        }
+                        var activeIndex = Math.Clamp(playback.SegmentIndex, 0, speechSegments.Count - 1);
+                        // The WebView highlights exactly one visible sentence. A
+                        // synthesized technical split may continue to reference
+                        // that same sentence, but it must never activate multiple
+                        // source ranges at once.
+                        var sourceUnitId = speechSegments[activeIndex].SourceUnitIds
+                            .FirstOrDefault(static id => !string.IsNullOrWhiteSpace(id));
+                        IReadOnlyList<string> sourceUnitIds = sourceUnitId is null
+                            ? []
+                            : [sourceUnitId];
                         await progress(new(
                             sessionId,
                             source.MessageId,
                             source.Kind,
-                            segmentIndex,
+                            playbackId,
+                            Interlocked.Increment(ref playbackEventSequence),
+                            activeIndex,
                             speechSegments.Count,
-                            segment.SourceUnitIds,
+                            sourceUnitIds,
                             playback.State)).ConfigureAwait(false);
                     },
-                    segmentResolver: dialogueDirection is null ? null : dialogueDirection.ResolveAsync,
+                    profile: SpeechContentProfile.Prepared,
                     cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (dialogueDirection is not null && exception is not OutOfMemoryException)
-            {
-                _activeCancellation.Cancel();
-                try
-                {
-                    await dialogueDirection.Completion.ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Playback and its parallel dialogue analysis share the same cancellation.
-                }
-                throw;
-            }
-            if (dialogueDirection is not null)
-            {
-                var directionResult = await dialogueDirection.Completion.ConfigureAwait(false);
-                if (directionResult.Cacheable)
-                {
-                    await SaveSpeechPreparationAsync(
-                        cacheKey,
-                        sessionId,
-                        source,
-                        sourceHash,
-                        selectedGeneral,
-                        sourceUnits,
-                        directionResult.Segments,
-                        _activeCancellation.Token).ConfigureAwait(false);
-                }
-            }
             if (progress is not null)
             {
                 await progress(new(
                     sessionId,
                     source.MessageId,
                     source.Kind,
+                    playbackId,
+                    Interlocked.Increment(ref playbackEventSequence),
                     speechSegments.Count,
                     speechSegments.Count,
                     [],
@@ -504,7 +451,7 @@ public sealed class GoAiAssistantService(
                 "Abgeschlossen",
                 speechStatusDetail,
                 DisplaySpeechProvider(speechProvider),
-                CacheHit: cached is not null)).ConfigureAwait(false);
+                CacheHit: false)).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -514,6 +461,8 @@ public sealed class GoAiAssistantService(
                     sessionId,
                     sourceMessageId,
                     "Vorlesen",
+                    playbackId,
+                    Interlocked.Increment(ref playbackEventSequence),
                     0,
                     0,
                     [],
@@ -529,6 +478,8 @@ public sealed class GoAiAssistantService(
                     sessionId,
                     sourceMessageId,
                     "Vorlesen",
+                    playbackId,
+                    Interlocked.Increment(ref playbackEventSequence),
                     0,
                     0,
                     [],
@@ -539,6 +490,7 @@ public sealed class GoAiAssistantService(
         }
         finally
         {
+            Interlocked.Exchange(ref _speechActive, 0);
             _activeServerRunId = null;
             _activeCancellation?.Dispose();
             _activeCancellation = null;
@@ -550,15 +502,33 @@ public sealed class GoAiAssistantService(
         Guid sessionId,
         string? explicitText,
         Guid? sourceMessageId,
+        SpeechStartAnchor? startAnchor,
+        DateTimeOffset? expectedMessageUpdatedAt,
         CancellationToken cancellationToken)
     {
         var history = await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (sourceMessageId is { } requestedMessageId)
         {
-            var selected = history.FirstOrDefault(message => message.Id == requestedMessageId
-                && message.Role == ChatRole.Assistant
-                && message.Status == MessageStatus.Completed)
-                ?? throw new InvalidOperationException("Die ausgewählte abgeschlossene AI-Nachricht wurde nicht gefunden.");
+            var selected = history.FirstOrDefault(message => message.Id == requestedMessageId)
+                ?? throw new InvalidOperationException("Die ausgewählte AI-Nachricht wurde nicht gefunden.");
+            if (startAnchor is null)
+            {
+                if (selected.Role != ChatRole.Assistant
+                    || selected.Status != MessageStatus.Completed
+                    || string.IsNullOrWhiteSpace(selected.Content))
+                {
+                    throw new InvalidOperationException("Die ausgewählte abgeschlossene AI-Nachricht wurde nicht gefunden.");
+                }
+            }
+            else
+            {
+                ValidateAnchoredSpeechMessage(
+                    selected,
+                    sessionId,
+                    expectedMessageUpdatedAt
+                        ?? throw new InvalidOperationException("Der Nachrichtenstand für den Vorlesestart fehlt."),
+                    startAnchor);
+            }
             return new(
                 selected.Content,
                 "AI-Nachricht",
@@ -617,62 +587,62 @@ public sealed class GoAiAssistantService(
     private static string HashSpeechValue(string value) => Convert.ToHexString(
         SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
-    private Task SaveSpeechPreparationAsync(
-        string cacheKey,
+    internal static string HashSpeechPlan(IReadOnlyList<PreparedSpeechSegment> segments) =>
+        HashSpeechValue(JsonSerializer.Serialize(segments, JsonOptions));
+
+
+    internal static void ValidateAnchoredSpeechMessage(
+        ChatMessage message,
         Guid sessionId,
-        SpeechSource source,
-        string sourceHash,
-        string selectedGeneral,
+        DateTimeOffset expectedUpdatedAt,
+        SpeechStartAnchor anchor)
+    {
+        if (message.SessionId != sessionId
+            || message.Role != ChatRole.Assistant
+            || message.Status is not (MessageStatus.Completed
+                or MessageStatus.Cancelled
+                or MessageStatus.Interrupted
+                or MessageStatus.Failed)
+            || string.IsNullOrWhiteSpace(message.Content))
+        {
+            throw new InvalidOperationException("Diese AI-Nachricht kann nicht ab der gewählten Stelle vorgelesen werden.");
+        }
+        if (message.UpdatedAt.ToUniversalTime() != expectedUpdatedAt.ToUniversalTime())
+        {
+            throw new InvalidOperationException("Die AI-Nachricht wurde inzwischen geändert. Wähle die Vorlesestelle erneut aus.");
+        }
+
+        _ = SelectSpeechUnitsFromAnchor(
+            SpeechSourceSegmentation.CreateUnits(message.Content),
+            anchor);
+    }
+
+    internal static IReadOnlyList<SpeechSourceUnit> SelectSpeechUnitsFromAnchor(
         IReadOnlyList<SpeechSourceUnit> sourceUnits,
-        IReadOnlyList<PreparedSpeechSegment> speechSegments,
-        CancellationToken cancellationToken)
+        SpeechStartAnchor? anchor)
     {
-        var preparedText = string.Join(' ', speechSegments.Select(static segment => segment.Text));
-        return chats.SaveSpeechPreparationAsync(
-            new SpeechPreparation(
-                cacheKey,
-                sessionId,
-                source.MessageId,
-                source.Kind,
-                sourceHash,
-                selectedGeneral,
-                preparedText,
-                DateTimeOffset.UtcNow,
-                JsonSerializer.Serialize(sourceUnits, JsonOptions),
-                JsonSerializer.Serialize(speechSegments, JsonOptions)),
-            cancellationToken);
-    }
-
-    private static IReadOnlyList<PreparedSpeechSegment> ReadCachedSpeechSegments(
-        SpeechPreparation? preparation,
-        IReadOnlyList<SpeechSourceUnit> currentUnits)
-    {
-        if (preparation is null || string.IsNullOrWhiteSpace(preparation.SegmentsJson))
+        if (anchor is null)
         {
-            return [];
+            return sourceUnits;
         }
-        try
+
+        var firstIndex = -1;
+        for (var index = 0; index < sourceUnits.Count; index++)
         {
-            var segments = JsonSerializer.Deserialize<PreparedSpeechSegment[]>(
-                preparation.SegmentsJson,
-                JsonOptions) ?? [];
-            var validIds = currentUnits.Select(static unit => unit.Id).ToHashSet(StringComparer.Ordinal);
-            if (segments.Length == 0
-                || segments.Any(segment => string.IsNullOrWhiteSpace(segment.Text)
-                    || segment.SourceUnitIds.Any(id => !validIds.Contains(id))))
+            if (sourceUnits[index].BlockIndex == anchor.BlockIndex
+                && string.Equals(sourceUnits[index].Kind, anchor.Kind, StringComparison.Ordinal))
             {
-                return [];
+                firstIndex = index;
+                break;
             }
-            return SpeechSourceSegmentation.NormalizePreparedSegments(segments);
         }
-        catch (JsonException)
+        if (firstIndex < 0)
         {
-            return [];
+            throw new InvalidOperationException("Der ausgewählte Textblock ist nicht mehr eindeutig vorhanden.");
         }
+        return sourceUnits.Skip(firstIndex).ToArray();
     }
 
-    internal static bool RequiresSpeechPreparation(MessageContentProfile contentProfile) =>
-        contentProfile != MessageContentProfile.Audiobook;
 
     private async Task<IReadOnlyList<AssistantAttachment>> BindCapturedMediaToMessageAsync(
         ChatMessage userMessage,
@@ -783,6 +753,21 @@ public sealed class GoAiAssistantService(
                 Guid.NewGuid(), assistant.SessionId, assistant.Id, action, idempotencyKey, null, 0, "queued",
                 null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
             await runs.CreateAsync(localRun, cancellationToken).ConfigureAwait(false);
+            if (action == PromptTriggerAction.Code)
+            {
+                var codingSession = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
+                _ = await codingDiffs.BeginAsync(localRun.Id, codingSession?.WorkspacePath, cancellationToken).ConfigureAwait(false);
+                var trace = await codingTrace.StartAsync(
+                    localRun.Id,
+                    localRun.SessionId,
+                    localRun.AssistantMessageId,
+                    codingSession?.WorkspacePath,
+                    cancellationToken).ConfigureAwait(false);
+                await update(new(
+                    GoAiAssistantUpdateKind.CodingTraceChanged,
+                    assistant,
+                    CodingTrace: trace)).ConfigureAwait(false);
+            }
 
             if (action == PromptTriggerAction.ImageGeneration)
             {
@@ -826,6 +811,23 @@ public sealed class GoAiAssistantService(
             await runs.UpdateAsync(localRun.Id, accepted.RunId, 0, localRun.State, cancellationToken: cancellationToken).ConfigureAwait(false);
             _activeServerRunId = accepted.RunId;
             RunDiagnostic(logger, accepted.RunId, "accepted", null);
+            if (action == PromptTriggerAction.Code)
+            {
+                var trace = await codingTrace.AppendAsync(
+                    localRun.Id,
+                    accepted.RunId,
+                    localRun.SessionId,
+                    localRun.AssistantMessageId,
+                    "run",
+                    "running",
+                    "Serverlauf angenommen",
+                    $"Run-ID: {accepted.RunId}",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                await update(new(
+                    GoAiAssistantUpdateKind.CodingTraceChanged,
+                    assistant,
+                    CodingTrace: trace)).ConfigureAwait(false);
+            }
             var result = await StreamRunWithReconnectAsync(localRun, assistant, update, cancellationToken, client).ConfigureAwait(false);
             return result;
         }
@@ -846,6 +848,23 @@ public sealed class GoAiAssistantService(
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not GoAiStreamDetachedException and not OutOfMemoryException)
         {
+            if (action == PromptTriggerAction.Code && localRun is not null)
+            {
+                var trace = await codingTrace.AppendAsync(
+                    localRun.Id,
+                    localRun.ServerRunId,
+                    localRun.SessionId,
+                    localRun.AssistantMessageId,
+                    "run",
+                    "failed",
+                    "Coding-Lauf fehlgeschlagen",
+                    exception.Message,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                await update(new(
+                    GoAiAssistantUpdateKind.CodingTraceChanged,
+                    assistant,
+                    CodingTrace: trace)).ConfigureAwait(false);
+            }
             if (localRun is not null && string.IsNullOrWhiteSpace(localRun.ServerRunId))
             {
                 await runs.UpdateAsync(
@@ -899,12 +918,38 @@ public sealed class GoAiAssistantService(
                 assistant = (await chats.ListMessagesAsync(current.SessionId, CancellationToken.None).ConfigureAwait(false))
                     .SingleOrDefault(item => item.Id == current.AssistantMessageId) ?? assistant;
                 var delay = TimeSpan.FromMilliseconds(500 * Math.Pow(2, attempt));
-                await update(new(
-                    GoAiAssistantUpdateKind.Status,
-                    assistant,
-                    Status: "Verbindung wird wiederhergestellt",
-                    Detail: $"SSE ab Ereignis {current.LastEventId} · Versuch {attempt + 1}/{maximumReconnectAttempts}"))
-                    .ConfigureAwait(false);
+                if (current.Action == PromptTriggerAction.Code)
+                {
+                    var trace = await codingTrace.AppendAsync(
+                        current.Id,
+                        current.ServerRunId,
+                        current.SessionId,
+                        current.AssistantMessageId,
+                        "connection",
+                        "running",
+                        "Verbindung wird wiederhergestellt",
+                        $"Versuch {attempt + 1} von {maximumReconnectAttempts}",
+                        serverEventId: current.LastEventId,
+                        cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                    await update(new(
+                        GoAiAssistantUpdateKind.CodingTraceChanged,
+                        assistant,
+                        CodingTrace: trace)).ConfigureAwait(false);
+                    await update(new(
+                        GoAiAssistantUpdateKind.Status,
+                        assistant,
+                        Status: "Denkt nach",
+                        Model: current.SelectedModel)).ConfigureAwait(false);
+                }
+                else
+                {
+                    await update(new(
+                        GoAiAssistantUpdateKind.Status,
+                        assistant,
+                        Status: "Verbindung wird wiederhergestellt",
+                        Detail: $"SSE ab Ereignis {current.LastEventId} · Versuch {attempt + 1}/{maximumReconnectAttempts}"))
+                        .ConfigureAwait(false);
+                }
                 RunDiagnostic(logger, current.ServerRunId ?? current.Id.ToString("D"), "stream reconnect", exception);
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             }
@@ -923,22 +968,134 @@ public sealed class GoAiAssistantService(
         var content = assistant.Content;
         var model = localRun.SelectedModel;
         var collectedArtifacts = (await artifacts.ListForMessageAsync(assistant.Id, cancellationToken).ConfigureAwait(false)).ToList();
+
+        async Task TraceCodingAsync(
+            string stage,
+            string status,
+            string title,
+            string? detail = null,
+            string? tool = null,
+            string? target = null,
+            long? durationMilliseconds = null,
+            long? serverEventId = null,
+            CodingProcessConsole? processConsole = null,
+            CancellationToken traceCancellationToken = default)
+        {
+            if (localRun.Action != PromptTriggerAction.Code)
+            {
+                return;
+            }
+
+            var trace = await codingTrace.AppendAsync(
+                localRun.Id,
+                localRun.ServerRunId,
+                localRun.SessionId,
+                localRun.AssistantMessageId,
+                stage,
+                status,
+                title,
+                detail,
+                tool,
+                target,
+                durationMilliseconds,
+                serverEventId,
+                processConsole,
+                traceCancellationToken).ConfigureAwait(false);
+            await update(new(
+                GoAiAssistantUpdateKind.CodingTraceChanged,
+                assistant,
+                CodingTrace: trace)).ConfigureAwait(false);
+        }
+
+        async Task PublishStatusAsync(GoAiAssistantUpdate statusUpdate)
+        {
+            if (localRun.Action == PromptTriggerAction.Code)
+            {
+                statusUpdate = statusUpdate with
+                {
+                    Status = "Denkt nach",
+                    Detail = null,
+                    Model = model,
+                };
+            }
+            await update(statusUpdate).ConfigureAwait(false);
+        }
+
+        var acknowledgedEventId = localRun.LastEventId;
+
         try
         {
-            await foreach (var item in client.StreamRunEventsAsync(localRun.ServerRunId!, localRun.LastEventId, cancellationToken).ConfigureAwait(false))
+            var pendingSubmissions = await toolExecutions
+                .ListPendingSubmissionsAsync(localRun.Id, cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var pending in pendingSubmissions)
             {
-                localRun = localRun with { LastEventId = item.Id, UpdatedAt = DateTimeOffset.UtcNow };
+                if (!string.Equals(pending.ServerRunId, localRun.ServerRunId, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException("Ein gespeichertes Client-Toolergebnis gehört nicht zum aktiven Serverlauf.");
+                }
+                var pendingResult = JsonSerializer.Deserialize<ClientToolResult>(pending.ResultJson!, JsonOptions)
+                    ?? throw new InvalidDataException("Ein gespeichertes Client-Toolergebnis ist ungültig.");
+                await TraceCodingAsync(
+                    "tool",
+                    "running",
+                    "Tool-Ergebnis wird wieder übertragen",
+                    pending.ToolName,
+                    pending.ToolName,
+                    serverEventId: pending.EventId,
+                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                await client.SubmitClientToolResultAsync(pending.ServerRunId, pendingResult, cancellationToken).ConfigureAwait(false);
+                await toolExecutions.MarkSubmittedAsync(pending.ProposalId, CancellationToken.None).ConfigureAwait(false);
+                acknowledgedEventId = Math.Max(acknowledgedEventId, pending.EventId);
+                localRun = localRun with
+                {
+                    LastEventId = acknowledgedEventId,
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                };
+                await runs.UpdateAsync(
+                    localRun.Id,
+                    localRun.ServerRunId,
+                    acknowledgedEventId,
+                    "running",
+                    model,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                await TraceCodingAsync(
+                    "tool",
+                    "completed",
+                    "Tool-Ergebnis wieder übertragen",
+                    pending.ToolName,
+                    pending.ToolName,
+                    serverEventId: pending.EventId,
+                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+
+            await foreach (var item in client.StreamRunEventsAsync(localRun.ServerRunId!, acknowledgedEventId, cancellationToken).ConfigureAwait(false))
+            {
                 switch (item.Type)
                 {
                     case RunEventTypes.QueueChanged:
                         var queue = item.Data.Deserialize<QueueChangedEvent>(JsonOptions);
-                        await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "In Warteschlange", Detail: queue is null ? null : $"Position {queue.Position}")).ConfigureAwait(false);
+                        await TraceCodingAsync(
+                            "queue",
+                            "running",
+                            "GPU-Warteschlange",
+                            queue is null ? null : $"Position {queue.Position}",
+                            serverEventId: item.Id,
+                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                        await PublishStatusAsync(new(GoAiAssistantUpdateKind.Status, assistant, Status: "In Warteschlange", Detail: queue is null ? null : $"Position {queue.Position}")).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ModelSelected:
                     case RunEventTypes.ModelFallback:
                         var selected = item.Data.Deserialize<ModelSelectedEvent>(JsonOptions);
-                        model = selected?.ModelId ?? model;
-                        await update(new(
+                        model = DescribeCodingModel(selected?.ModelId ?? model);
+                        await TraceCodingAsync(
+                            "model",
+                            "running",
+                            selected?.IsFallback == true ? "Fallback-Modell gew\u00E4hlt" : "Coding-Modell gew\u00E4hlt",
+                            model,
+                            serverEventId: item.Id,
+                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                        await PublishStatusAsync(new(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: selected?.IsFallback == true ? "Fallback-Modell" : "Modell gewählt",
@@ -946,8 +1103,15 @@ public sealed class GoAiAssistantService(
                         break;
                     case RunEventTypes.ModelLoading:
                         var loading = item.Data.Deserialize<ModelLoadingEvent>(JsonOptions);
-                        model = loading?.ModelId ?? model;
-                        await update(new(
+                        model = DescribeCodingModel(loading?.ModelId ?? model);
+                        await TraceCodingAsync(
+                            "model",
+                            loading?.State == "loaded" ? "completed" : "running",
+                            loading?.State == "loaded" ? "Coding-Modell geladen" : "Coding-Modell wird geladen",
+                            model,
+                            serverEventId: item.Id,
+                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                        await PublishStatusAsync(new(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: loading?.State == "loaded" ? "Denkt nach" : "Modell wird geladen",
@@ -961,7 +1125,14 @@ public sealed class GoAiAssistantService(
                         var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
                         if (context is not null)
                         {
-                            await update(new(
+                            await TraceCodingAsync(
+                                "context",
+                                "completed",
+                                context.WasCompacted ? "Repositorykontext verdichtet" : "Repositorykontext bereit",
+                                context.Detail ?? $"{context.LoadedFiles:N0} Quelldateien geladen",
+                                serverEventId: item.Id,
+                                traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                            await PublishStatusAsync(new(
                                 GoAiAssistantUpdateKind.Status,
                                 assistant,
                                 Status: context.WasCompacted ? "Kontext verdichtet" : "Repositorykontext bereit",
@@ -975,9 +1146,25 @@ public sealed class GoAiAssistantService(
                         }
                         break;
                     case RunEventTypes.ServerToolStarted:
-                        await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Serverwerkzeug", Detail: StringProperty(item.Data, "tool"), Model: model)).ConfigureAwait(false);
+                        await TraceCodingAsync(
+                            "serverTool",
+                            "running",
+                            "Serverwerkzeug gestartet",
+                            StringProperty(item.Data, "tool"),
+                            tool: StringProperty(item.Data, "tool"),
+                            serverEventId: item.Id,
+                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                        await PublishStatusAsync(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Serverwerkzeug", Detail: StringProperty(item.Data, "tool"), Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ServerToolCompleted:
+                        await TraceCodingAsync(
+                            "serverTool",
+                            "completed",
+                            "Serverwerkzeug abgeschlossen",
+                            StringProperty(item.Data, "tool"),
+                            tool: StringProperty(item.Data, "tool"),
+                            serverEventId: item.Id,
+                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
                         var extracted = ExtractToolResultText(item.Data);
                         if (!string.IsNullOrWhiteSpace(extracted))
                         {
@@ -1001,8 +1188,67 @@ public sealed class GoAiAssistantService(
                         {
                             throw new InvalidDataException("Der Client-Toolvorschlag gehört nicht zum aktiven Serverlauf.");
                         }
-                        await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Lokale Aktion", Detail: proposal.Summary, Model: model)).ConfigureAwait(false);
+                        var target = CodingRunTraceService.ExtractTarget(proposal);
+                        var runningProcessConsole = CodingRunTraceService.CreateProcessConsole(proposal);
+                        await TraceCodingAsync(
+                            "tool",
+                            "running",
+                            runningProcessConsole is null
+                                ? CodingToolTitle(proposal.Name, completed: false)
+                                : "PowerShell-Befehl wird ausgeführt",
+                            proposal.Summary,
+                            proposal.Name,
+                            target,
+                            serverEventId: item.Id,
+                            traceCancellationToken: cancellationToken,
+                            processConsole: runningProcessConsole).ConfigureAwait(false);
+                        await PublishStatusAsync(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Lokale Aktion", Detail: proposal.Summary, Model: model)).ConfigureAwait(false);
+                        var toolStopwatch = Stopwatch.StartNew();
                         var result = await ExecuteClientToolOnceAsync(localRun, item, proposal, cancellationToken).ConfigureAwait(false);
+                        toolStopwatch.Stop();
+                        var completedProcessConsole = CodingRunTraceService.CreateProcessConsole(proposal, result);
+                        var toolCompleted = string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase)
+                            && !string.Equals(completedProcessConsole?.Status, "failed", StringComparison.OrdinalIgnoreCase);
+                        await TraceCodingAsync(
+                            "tool",
+                            toolCompleted ? "completed" : "failed",
+                            runningProcessConsole is null
+                                ? CodingToolTitle(proposal.Name, completed: true)
+                                : "PowerShell-Befehl abgeschlossen",
+                            CodingRunTraceService.DescribeResult(result),
+                            proposal.Name,
+                            target,
+                            toolStopwatch.ElapsedMilliseconds,
+                            item.Id,
+                            completedProcessConsole,
+                            cancellationToken).ConfigureAwait(false);
+                        if (IsSuccessfulWorkspaceMutation(proposal, result))
+                        {
+                            var codingSession = await chats.GetSessionAsync(localRun.SessionId, cancellationToken).ConfigureAwait(false);
+                            var diff = await codingDiffs.RefreshAsync(localRun.Id, codingSession?.WorkspacePath, cancellationToken).ConfigureAwait(false);
+                            if (diff is not null)
+                            {
+                                await TraceCodingAsync(
+                                    "diff",
+                                    "completed",
+                                    "Git-Diff aktualisiert",
+                                    diff.FileCount == 0
+                                        ? "Keine verbleibenden \u00C4nderungen dieses Laufs."
+                                        : $"{diff.FileCount:N0} Dateien \u00B7 +{diff.AddedLines:N0} \u00B7 \u2212{diff.DeletedLines:N0}",
+                                    serverEventId: item.Id,
+                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                                await chats.SetCodeDiffAsync(assistant.Id, diff.Diff, cancellationToken).ConfigureAwait(false);
+                                assistant = assistant with { CodeDiff = diff.Diff, UpdatedAt = DateTimeOffset.UtcNow };
+                                await update(new(
+                                    GoAiAssistantUpdateKind.CodeDiffChanged,
+                                    assistant,
+                                    Status: "Codeänderungen",
+                                    Detail: diff.FileCount == 0
+                                        ? "Keine verbleibenden Änderungen dieses Laufs."
+                                        : $"{diff.FileCount:N0} Dateien · +{diff.AddedLines:N0} · −{diff.DeletedLines:N0}"))
+                                    .ConfigureAwait(false);
+                            }
+                        }
                         await client.SubmitClientToolResultAsync(item.RunId, result, cancellationToken).ConfigureAwait(false);
                         await toolExecutions.MarkSubmittedAsync(proposal.ProposalId, CancellationToken.None).ConfigureAwait(false);
                         break;
@@ -1045,10 +1291,24 @@ public sealed class GoAiAssistantService(
                         var final = (await chats.ListMessagesAsync(assistant.SessionId, CancellationToken.None).ConfigureAwait(false)).Single(value => value.Id == assistant.Id);
                         var session = await chats.GetSessionAsync(assistant.SessionId, CancellationToken.None).ConfigureAwait(false);
                         await recentActivity.RecordAsync($"AI-Sitzung „{session?.Title ?? "Neue Sitzung"}“ bearbeitet", CancellationToken.None).ConfigureAwait(false);
+                        await TraceCodingAsync(
+                            "run",
+                            "completed",
+                            "Coding-Lauf abgeschlossen",
+                            model,
+                            serverEventId: item.Id,
+                            traceCancellationToken: CancellationToken.None).ConfigureAwait(false);
                         await update(new(GoAiAssistantUpdateKind.Completed, final, collectedArtifacts.ToArray(), session, "Fertig", model)).ConfigureAwait(false);
                         return final;
                     case RunEventTypes.RunFailed:
                         var failed = item.Data.Deserialize<RunFailedEvent>(JsonOptions);
+                        await TraceCodingAsync(
+                            "run",
+                            "failed",
+                            "Serverlauf fehlgeschlagen",
+                            failed?.Message,
+                            serverEventId: item.Id,
+                            traceCancellationToken: CancellationToken.None).ConfigureAwait(false);
                         await runs.UpdateAsync(
                             localRun.Id,
                             item.RunId,
@@ -1059,14 +1319,26 @@ public sealed class GoAiAssistantService(
                             CancellationToken.None).ConfigureAwait(false);
                         throw new GoAiRunTerminalException(failed?.Message ?? "Der Serverlauf ist fehlgeschlagen.");
                     case RunEventTypes.RunCancelled:
+                        await TraceCodingAsync(
+                            "run",
+                            "cancelled",
+                            "Coding-Lauf abgebrochen",
+                            serverEventId: item.Id,
+                            traceCancellationToken: CancellationToken.None).ConfigureAwait(false);
                         await runs.UpdateAsync(localRun.Id, item.RunId, item.Id, "cancelled", model, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                         throw new OperationCanceledException(cancellationToken);
                 }
 
+                acknowledgedEventId = item.Id;
+                localRun = localRun with
+                {
+                    LastEventId = acknowledgedEventId,
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                };
                 await runs.UpdateAsync(
                     localRun.Id,
                     item.RunId,
-                    item.Id,
+                    acknowledgedEventId,
                     item.Type == RunEventTypes.RunWaitingForClient ? "waitingForClient" : "running",
                     model,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false);
@@ -1210,29 +1482,31 @@ public sealed class GoAiAssistantService(
 
     internal static string DisplaySpeechProvider(string? provider)
     {
-        if (string.IsNullOrWhiteSpace(provider))
-        {
-            return "Supertonic F5 Ultra";
-        }
-
-        if (provider.Contains("supertonic", StringComparison.OrdinalIgnoreCase))
-        {
-            return "Supertonic F5 Ultra";
-        }
-
-        if (provider.Contains("piper", StringComparison.OrdinalIgnoreCase))
-        {
-            return "Piper Kerstin";
-        }
-
-        if (provider.Contains("windows", StringComparison.OrdinalIgnoreCase)
-            || provider.Contains("katja", StringComparison.OrdinalIgnoreCase))
-        {
-            return "Windows Katja";
-        }
-
-        return provider;
+        return "Supertonic F5 Ultra";
     }
+
+    private static bool IsSuccessfulWorkspaceMutation(ToolProposal proposal, ClientToolResult result) =>
+        proposal.RiskClass == ToolRiskClass.LocalMutation
+        && string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase);
+
+    internal static string CodingToolTitle(string toolName, bool completed) => toolName switch
+    {
+        ClientToolNames.WorkspaceMap => completed ? "Workspace analysiert" : "Workspace wird analysiert",
+        ClientToolNames.FileSystemList => completed ? "Ordner gelesen" : "Ordner wird gelesen",
+        ClientToolNames.FileSystemStat => completed ? "Dateistatus gelesen" : "Dateistatus wird gelesen",
+        ClientToolNames.FileSystemFindFiles => completed ? "Dateien gefunden" : "Dateien werden gesucht",
+        ClientToolNames.FileSystemReadText => completed ? "Datei gelesen" : "Datei wird gelesen",
+        ClientToolNames.FileSystemReadMany => completed ? "Dateien gelesen" : "Dateien werden gelesen",
+        ClientToolNames.FileSystemSearch => completed ? "Quelltext durchsucht" : "Quelltext wird durchsucht",
+        ClientToolNames.FileSystemWriteText => completed ? "Datei geschrieben" : "Datei wird geschrieben",
+        ClientToolNames.FileSystemReplaceText => completed ? "Datei ge\u00E4ndert" : "Datei wird ge\u00E4ndert",
+        ClientToolNames.FileSystemMove => completed ? "Datei verschoben" : "Datei wird verschoben",
+        ClientToolNames.FileSystemProposePatch => completed ? "Patch angewendet" : "Patch wird angewendet",
+        ClientToolNames.FileSystemProposeCreate => completed ? "Datei erstellt" : "Datei wird erstellt",
+        ClientToolNames.FileSystemProposeDelete => completed ? "Datei gel\u00F6scht" : "Datei wird gel\u00F6scht",
+        ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun => completed ? "Pr\u00FCfung ausgef\u00FChrt" : "Pr\u00FCfung wird ausgef\u00FChrt",
+        _ => completed ? "Lokale Aktion abgeschlossen" : "Lokale Aktion wird ausgef\u00FChrt",
+    };
 
     private static string CombineSpeechDetail(string? sourceDetail, string detail) =>
         string.IsNullOrWhiteSpace(sourceDetail) ? detail : $"{sourceDetail} · {detail}";
@@ -1243,763 +1517,8 @@ public sealed class GoAiAssistantService(
             ? null
             : sourceDetail;
 
-    private DialogueDirectionSession? StartDialogueDirection(
-        IReadOnlyList<SpeechSourceUnit> sourceUnits,
-        IReadOnlyList<PreparedSpeechSegment> segments,
-        string selectedGeneral,
-        string? sourceDetail,
-        Func<GoAiSpeechUpdate, Task> update,
-        CancellationToken cancellationToken)
-    {
-        if (!segments.Any(static segment => segment.Delivery == SpeechDelivery.Dialogue))
-        {
-            return null;
-        }
 
-        var session = new DialogueDirectionSession(segments);
-        session.Completion = RunDialogueDirectionSessionAsync(
-            session,
-            sourceUnits,
-            selectedGeneral,
-            sourceDetail,
-            update,
-            cancellationToken);
-        return session;
-    }
 
-    private async Task<DialogueDirectionResult> RunDialogueDirectionSessionAsync(
-        DialogueDirectionSession session,
-        IReadOnlyList<SpeechSourceUnit> sourceUnits,
-        string selectedGeneral,
-        string? sourceDetail,
-        Func<GoAiSpeechUpdate, Task> update,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            await update(new(
-                true,
-                "Sprachausgabe wird erzeugt",
-                sourceDetail,
-                "Supertonic F5 Ultra",
-                DirectionModel: selectedGeneral)).ConfigureAwait(false);
-
-            using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
-            var modelStatus = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
-            var selectedModel = modelStatus.Models.FirstOrDefault(model => model.Loaded
-                && string.Equals(model.Id, selectedGeneral, StringComparison.OrdinalIgnoreCase));
-            if (selectedModel is null)
-            {
-                session.ResolveAllNeutral(cacheable: false);
-                return session.CreateResult();
-            }
-
-            foreach (var batch in BuildDialogueDirectionBatches(sourceUnits, session.SourceSegments))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                IReadOnlyDictionary<int, PreparedSpeechSegment>? prepared = null;
-                for (var attempt = 0; attempt < 2 && prepared is null; attempt++)
-                {
-                    var prompt = CreateDialogueDirectionPrompt(
-                        session.SourceSegments,
-                        batch,
-                        correction: attempt > 0);
-                    var raw = await RunDialogueDirectionBatchAsync(
-                        client,
-                        prompt,
-                        selectedGeneral,
-                        cancellationToken).ConfigureAwait(false);
-                    prepared = ParseDialogueDirectionBatch(raw, session.SourceSegments, batch.SegmentIndexes);
-                }
-
-                if (prepared is null)
-                {
-                    session.ResolveNeutral(batch.SegmentIndexes, cacheable: false);
-                    continue;
-                }
-                foreach (var pair in prepared)
-                {
-                    session.Resolve(pair.Key, pair.Value, cacheable: true);
-                }
-            }
-            session.ResolveAllNeutral(cacheable: false);
-            return session.CreateResult();
-        }
-        catch (OperationCanceledException)
-        {
-            session.Cancel(cancellationToken);
-            throw;
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
-        {
-            _activeServerRunId = null;
-            RunDiagnostic(logger, "dialogue-direction", "dialogue direction fallback", exception);
-            session.ResolveAllNeutral(cacheable: false);
-            return session.CreateResult();
-        }
-        finally
-        {
-            await update(new(
-                true,
-                session.PlaybackStarted
-                    ? "Sprachausgabe wird wiedergegeben"
-                    : "Sprachausgabe wird erzeugt",
-                sourceDetail,
-                "Supertonic F5 Ultra")).ConfigureAwait(false);
-        }
-    }
-
-    internal static IReadOnlyList<DialogueDirectionBatch> BuildDialogueDirectionBatches(
-        IReadOnlyList<SpeechSourceUnit> sourceUnits,
-        IReadOnlyList<PreparedSpeechSegment> segments)
-    {
-        var dialogueIndexes = segments
-            .Select((segment, index) => (segment, index))
-            .Where(static item => item.segment.Delivery == SpeechDelivery.Dialogue)
-            .Select(static item => item.index)
-            .ToArray();
-        if (dialogueIndexes.Length == 0)
-        {
-            return [];
-        }
-
-        var batches = new List<DialogueDirectionBatch>();
-        var current = new List<int>();
-        var characters = 0;
-        foreach (var index in dialogueIndexes)
-        {
-            var next = segments[index].Text.Length;
-            if (current.Count > 0 && (current.Count >= 6 || characters + next > 1_500))
-            {
-                batches.Add(CreateDialogueDirectionBatch(sourceUnits, segments, current));
-                current.Clear();
-                characters = 0;
-            }
-            current.Add(index);
-            characters += next;
-        }
-        if (current.Count > 0)
-        {
-            batches.Add(CreateDialogueDirectionBatch(sourceUnits, segments, current));
-        }
-        return batches;
-    }
-
-    private static DialogueDirectionBatch CreateDialogueDirectionBatch(
-        IReadOnlyList<SpeechSourceUnit> sourceUnits,
-        IReadOnlyList<PreparedSpeechSegment> segments,
-        IReadOnlyList<int> indexes)
-    {
-        var sourceOrder = sourceUnits
-            .Select((unit, index) => (unit.Id, index))
-            .ToDictionary(static item => item.Id, static item => item.index, StringComparer.Ordinal);
-        var positions = indexes
-            .SelectMany(index => segments[index].SourceUnitIds)
-            .Where(sourceOrder.ContainsKey)
-            .Select(id => sourceOrder[id])
-            .Distinct()
-            .Order()
-            .ToArray();
-        var context = positions.Length == 0
-            ? Array.Empty<SpeechSourceUnit>()
-            : sourceUnits
-                .Skip(Math.Max(0, positions[0] - 2))
-                .Take(Math.Min(sourceUnits.Count - Math.Max(0, positions[0] - 2), positions[^1] - positions[0] + 5))
-                .ToArray();
-        return new(indexes.ToArray(), context);
-    }
-
-    private static string CreateDialogueDirectionPrompt(
-        PreparedSpeechSegment[] segments,
-        DialogueDirectionBatch batch,
-        bool correction)
-    {
-        var targets = batch.SegmentIndexes.Select(index => new
-        {
-            id = segments[index].Id,
-            text = segments[index].Text,
-        }).ToArray();
-        var targetIds = batch.SegmentIndexes
-            .SelectMany(index => segments[index].SourceUnitIds)
-            .ToHashSet(StringComparer.Ordinal);
-        var context = batch.ContextUnits.Select(unit => new
-        {
-            role = targetIds.Contains(unit.Id) ? "target" : "context",
-            text = unit.SpeechText.Length <= 350 ? unit.SpeechText : unit.SpeechText[..350],
-        }).ToList();
-        string BuildPrompt() => $$"""
-            {{(correction ? "Die vorige Antwort war ungültig. " : string.Empty)}}Bestimme eine deutlich hörbare, aber inhaltlich passende Sprechregie ausschließlich für die direkten Redezeilen in targets. context dient nur zur Einordnung und darf nicht ausgegeben werden.
-            Antworte nur als JSON: {"segments":[{"id":"s0001","synthesisText":"unveränderter Wortlaut mit anderer Interpunktion","mood":"warm","intensity":0.8,"expressionBefore":null,"expressionAfter":null}]}
-            Regeln: Jede target-ID exakt einmal und in Reihenfolge. synthesisText muss exakt dieselben Unicode-Wörter in derselben Reihenfolge enthalten; erlaubt sind nur andere Satzzeichen, Leerzeichen und Sprechpausen. Keine Wörter ergänzen, entfernen oder ersetzen. mood ist neutral, warm, joyful, tense, sad, relieved, angry, mysterious, fearful oder tender. intensity liegt zwischen 0 und 1. Nutze starke, klar wahrnehmbare Intensitäten. expressionBefore/After ist null, laugh, breath oder sigh und nur bei semantischer Eindeutigkeit. Kein Markdown.
-            targets={{JsonSerializer.Serialize(targets, JsonOptions)}}
-            context={{JsonSerializer.Serialize(context, JsonOptions)}}
-            """;
-
-        var prompt = BuildPrompt();
-        while (prompt.Length > 4_000 && context.Count > 0)
-        {
-            var removeIndex = context.FindIndex(static item => item.role == "context");
-            if (removeIndex < 0) removeIndex = 0;
-            context.RemoveAt(removeIndex);
-            prompt = BuildPrompt();
-        }
-        if (prompt.Length <= 4_000)
-        {
-            return prompt;
-        }
-        var compact = $"Nur JSON mit segments ausgeben. Jede ID exakt einmal. synthesisText behält alle Unicode-Wörter und Symbole exakt in Reihenfolge; nur Satzzeichen und Leerzeichen ändern. mood: neutral|warm|joyful|tense|sad|relieved|angry|mysterious|fearful|tender. intensity: 0..1. expressionBefore/After: null|laugh|breath|sigh. targets={JsonSerializer.Serialize(targets, JsonOptions)}";
-        return compact.Length <= 4_000
-            ? compact
-            : throw new InvalidDataException("Das Dialogpaket überschreitet das sichere Regie-Kontextlimit.");
-    }
-
-    private async Task<string> RunDialogueDirectionBatchAsync(
-        GoAiClient client,
-        string prompt,
-        string selectedGeneral,
-        CancellationToken cancellationToken)
-    {
-        var accepted = await client.CreateRunAsync(new RunRequest(
-            GoAiProtocol.Version,
-            RunMode.General,
-            [new RunMessage("user", [new ContentPart("text", prompt)])],
-            Limits: new RunLimits(
-                MaximumOutputTokens: 1_024,
-                MaximumContextTokens: 8_192,
-                TimeoutSeconds: 180),
-            AllowedServerTools: [],
-            PreferredGeneralModelId: selectedGeneral),
-            $"go-dialogue-direction-{Guid.NewGuid():N}", cancellationToken).ConfigureAwait(false);
-        _activeServerRunId = accepted.RunId;
-        var output = new StringBuilder();
-        try
-        {
-            await foreach (var item in client.StreamRunEventsAsync(
-                accepted.RunId,
-                cancellationToken: cancellationToken).ConfigureAwait(false))
-            {
-                switch (item.Type)
-                {
-                    case RunEventTypes.ModelSelected:
-                    case RunEventTypes.ModelFallback:
-                        var selected = item.Data.Deserialize<ModelSelectedEvent>(JsonOptions)?.ModelId;
-                        if (!string.IsNullOrWhiteSpace(selected)
-                            && !string.Equals(selected, selectedGeneral, StringComparison.OrdinalIgnoreCase))
-                        {
-                            throw new InvalidOperationException("Die Dialogregie hat ein unerwartetes Modell ausgewählt.");
-                        }
-                        break;
-                    case RunEventTypes.TextDelta:
-                        var delta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions);
-                        if (!string.IsNullOrEmpty(delta?.Delta)) output.Append(delta.Delta);
-                        break;
-                    case RunEventTypes.RunFailed:
-                        var failure = item.Data.Deserialize<RunFailedEvent>(JsonOptions);
-                        throw new InvalidOperationException(failure?.Message ?? "Die Dialogregie ist fehlgeschlagen.");
-                    case RunEventTypes.RunCancelled:
-                        throw new OperationCanceledException("Die Dialogregie wurde abgebrochen.", cancellationToken);
-                }
-            }
-            return output.ToString().Trim();
-        }
-        finally
-        {
-            _activeServerRunId = null;
-        }
-    }
-
-    internal static IReadOnlyDictionary<int, PreparedSpeechSegment>? ParseDialogueDirectionBatch(
-        string raw,
-        IReadOnlyList<PreparedSpeechSegment> segments,
-        IReadOnlyList<int> targetIndexes)
-    {
-        try
-        {
-            var json = StripOuterJsonFence(raw);
-            using var document = JsonDocument.Parse(json);
-            if (document.RootElement.ValueKind == JsonValueKind.Object
-                && document.RootElement.TryGetProperty("message", out var message)
-                && message.ValueKind == JsonValueKind.String)
-            {
-                json = StripOuterJsonFence(message.GetString() ?? string.Empty);
-            }
-            var response = JsonSerializer.Deserialize<DialogueDirectionResponse>(json, JsonOptions);
-            if (response?.Segments is null || response.Segments.Count != targetIndexes.Count)
-            {
-                return null;
-            }
-
-            var output = new Dictionary<int, PreparedSpeechSegment>();
-            for (var itemIndex = 0; itemIndex < targetIndexes.Count; itemIndex++)
-            {
-                var segmentIndex = targetIndexes[itemIndex];
-                var source = segments[segmentIndex];
-                var candidate = response.Segments[itemIndex];
-                if (!string.Equals(candidate.Id, source.Id, StringComparison.Ordinal)
-                    || string.IsNullOrWhiteSpace(candidate.SynthesisText)
-                    || !SpeechSourceSegmentation.HasSameSpokenWords(source.Text, candidate.SynthesisText)
-                    || !TryParseSpeechMood(candidate.Mood, out var mood)
-                    || !TryParseSpeechExpression(candidate.ExpressionBefore, out var before)
-                    || !TryParseSpeechExpression(candidate.ExpressionAfter, out var after))
-                {
-                    return null;
-                }
-                var intensity = candidate.Intensity ?? 0;
-                if (!double.IsFinite(intensity) || intensity is < 0 or > 1)
-                {
-                    return null;
-                }
-                output[segmentIndex] = source with
-                {
-                    Mood = mood,
-                    Intensity = intensity,
-                    Speed = SpeechSourceSegmentation.ResolveDialogueSpeed(mood, intensity),
-                    PauseAfterMilliseconds = SpeechSourceSegmentation.ResolveDialoguePause(intensity),
-                    ExpressionBefore = before,
-                    ExpressionAfter = after,
-                    SynthesisText = candidate.SynthesisText.Trim(),
-                    DirectionResolved = true,
-                };
-            }
-            return output;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private async Task<IReadOnlyList<PreparedSpeechSegment>?> PrepareSpeechWithGeneralAiAsync(
-        IReadOnlyList<SpeechSourceUnit> sourceUnits,
-        string selectedGeneral,
-        Func<GoAiSpeechUpdate, Task> update,
-        bool preserveOriginalText,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
-            var modelStatus = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
-            var selectedModel = modelStatus.Models.FirstOrDefault(model => model.Loaded
-                && string.Equals(model.Id, selectedGeneral, StringComparison.OrdinalIgnoreCase));
-            if (selectedModel is null)
-            {
-                return null;
-            }
-            await update(new(
-                true,
-                preserveOriginalText
-                    ? "Sprechregie wird analysiert"
-                    : "Text wird für Sprachausgabe aufbereitet",
-                preserveOriginalText
-                    ? "Direkte Rede, Erzählertext, Stimmung, Tempo und Pausen werden einmalig bestimmt."
-                    : "Vorlesefassung und Sprechregie werden einmalig bestimmt.",
-                selectedGeneral)).ConfigureAwait(false);
-            var output = new List<PreparedSpeechSegment>();
-            foreach (var chunk in ChunkSpeechUnits(sourceUnits, 9_000))
-            {
-                IReadOnlyList<PreparedSpeechSegment>? prepared = null;
-                for (var attempt = 0; attempt < 2 && prepared is null; attempt++)
-                {
-                    var prompt = CreateMappedSpeechPreparationPrompt(
-                        chunk,
-                        correction: attempt > 0,
-                        preserveOriginalText);
-                    var raw = await RunSpeechPreparationAsync(
-                        client,
-                        prompt,
-                        selectedGeneral,
-                        selectedModel.ContextTokens,
-                        update,
-                        preserveOriginalText,
-                        cancellationToken).ConfigureAwait(false);
-                    prepared = ParseMappedSpeechSegments(raw, chunk, preserveOriginalText);
-                }
-                if (prepared is null)
-                {
-                    throw new InvalidDataException("Die AI-Vorlesefassung enthielt keine gültige Zuordnung zum Originaltext.");
-                }
-                output.AddRange(prepared);
-            }
-            return SpeechSourceSegmentation.NormalizePreparedSegments(output);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            _activeServerRunId = null;
-            RunDiagnostic(logger, "speech-preparation", "speech preparation fallback", exception);
-            await update(new(true, "Sprachausgabe", "Lokale Textbereinigung wird verwendet.")).ConfigureAwait(false);
-            return null;
-        }
-    }
-
-    private async Task<string> RunSpeechPreparationAsync(
-        GoAiClient client,
-        string prompt,
-        string selectedGeneral,
-        int contextTokens,
-        Func<GoAiSpeechUpdate, Task> update,
-        bool preserveOriginalText,
-        CancellationToken cancellationToken)
-    {
-        var status = preserveOriginalText
-            ? "Sprechregie wird analysiert"
-            : "Text wird für Sprachausgabe aufbereitet";
-        var detail = preserveOriginalText
-            ? "Direkte Rede erhält eine deutlich ausgeprägte Sprechregie."
-            : "Das Sprachmodell ordnet die Vorlesefassung dem sichtbaren Originaltext zu.";
-        var accepted = await client.CreateRunAsync(new RunRequest(
-            GoAiProtocol.Version,
-            RunMode.General,
-            [new RunMessage("user", [new ContentPart("text", prompt)])],
-            Limits: new RunLimits(
-                MaximumOutputTokens: 8_192,
-                MaximumContextTokens: Math.Clamp(contextTokens, 8_192, 262_144),
-                TimeoutSeconds: 600),
-            AllowedServerTools: [],
-            PreferredGeneralModelId: selectedGeneral),
-            $"go-speech-prep-{Guid.NewGuid():N}", cancellationToken).ConfigureAwait(false);
-        _activeServerRunId = accepted.RunId;
-        var output = new StringBuilder();
-        string? activeModel = selectedGeneral;
-        await foreach (var item in client.StreamRunEventsAsync(accepted.RunId, cancellationToken: cancellationToken).ConfigureAwait(false))
-        {
-            switch (item.Type)
-            {
-                case RunEventTypes.ModelSelected:
-                case RunEventTypes.ModelFallback:
-                    activeModel = item.Data.Deserialize<ModelSelectedEvent>(JsonOptions)?.ModelId ?? activeModel;
-                    await update(new(
-                        true,
-                        Status: status,
-                        Detail: detail,
-                        Model: activeModel)).ConfigureAwait(false);
-                    break;
-                case RunEventTypes.ModelLoading:
-                    var loading = item.Data.Deserialize<ModelLoadingEvent>(JsonOptions);
-                    activeModel = loading?.ModelId ?? activeModel;
-                    await update(new(
-                        true,
-                        Status: loading?.State == "loaded"
-                            ? status
-                            : "Modell wird geladen",
-                        Detail: loading?.State == "loaded"
-                            ? detail
-                            : "Ausgewähltes Modell wird geladen.",
-                        Model: activeModel)).ConfigureAwait(false);
-                    break;
-                case RunEventTypes.ContextChanged:
-                    await update(new(
-                        true,
-                        Status: status,
-                        Detail: detail,
-                        Model: activeModel)).ConfigureAwait(false);
-                    break;
-                case RunEventTypes.TextDelta:
-                    var delta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions);
-                    if (!string.IsNullOrEmpty(delta?.Delta)) output.Append(delta.Delta);
-                    break;
-                case RunEventTypes.RunFailed:
-                    var failure = item.Data.Deserialize<RunFailedEvent>(JsonOptions);
-                    throw new InvalidOperationException(
-                        failure?.Message ?? "Die AI-Aufbereitung für die Sprachausgabe ist fehlgeschlagen.");
-                case RunEventTypes.RunCancelled:
-                    throw new OperationCanceledException(
-                        "Die AI-Aufbereitung für die Sprachausgabe wurde abgebrochen.",
-                        cancellationToken);
-            }
-        }
-        _activeServerRunId = null;
-        return output.ToString().Trim();
-    }
-
-    private static string CreateMappedSpeechPreparationPrompt(
-        IReadOnlyList<SpeechSourceUnit> units,
-        bool correction,
-        bool preserveOriginalText)
-    {
-        var source = JsonSerializer.Serialize(
-            units.Select(static unit => new
-            {
-                id = unit.Id,
-                text = unit.SpeechText,
-                delivery = unit.Delivery.ToString().ToLowerInvariant(),
-            }),
-            JsonOptions);
-        var correctionRule = correction
-            ? "Deine vorherige Ausgabe war ungültig. Halte dieses Mal das JSON-Schema und alle Quell-IDs ausnahmslos ein. "
-            : string.Empty;
-        var textRule = preserveOriginalText
-            ? "Der Text jeder Quelleneinheit muss zeichengetreu und unverändert ausgegeben werden. Erlaubt ist ausschließlich das Ergänzen der Sprechregie in den separaten JSON-Feldern."
-            : "Schreibe die Quelleneinheiten stark in flüssige, natürliche deutsche Vorlesesprache um, als hätte ein Buchautor sie für eine professionelle Lesung verfasst. Schaffe angenehme Übergänge und vollständige, gut sprechbare Sätze. Entferne Layoutreste, Tabellenmarker, technische Artefakte sowie unnötige Meta- und Bedienhinweise. Bewahre Bedeutung, fachlich relevante Aussagen, Zahlen, Einheiten und Reihenfolge. Erfinde keine Fakten.";
-        var preservationRules = preserveOriginalText
-            ? "- Gib exakt ein Segment je Quelleneinheit aus, verwende genau deren eine sourceUnitId und kopiere text unverändert.\n- Fasse keine Einheiten zusammen und teile keine Einheit auf."
-            : "- Ein Segment darf mehrere direkt zusammengehörige Quell-IDs desselben delivery-Typs verbinden.\n- Eine Quell-ID darf für mehrere aufeinanderfolgende Sätze wiederholt werden.";
-        return $$"""
-            {{correctionRule}}{{textRule}}
-
-            Direkte Rede und Erzählertext wurden bereits getrennt. Vermische beide Typen nicht. Bestimme eine
-            deutlich hörbare, inhaltlich passende Sprechregie ausschließlich für delivery=dialogue. Erzählertext
-            bleibt ausnahmslos neutral, ohne Ausdruckstags, Tempoänderung oder künstliche Pause.
-
-            Antworte ausschließlich mit genau diesem JSON-Format, ohne Markdown oder zusätzlichen Text:
-            {"segments":[{"text":"Vorlesesatz","sourceUnitIds":["u0001"],"delivery":"dialogue","mood":"warm","intensity":0.45,"speed":0.96,"pauseAfterMilliseconds":220,"expressionBefore":null,"expressionAfter":null}]}
-
-            Regeln:
-            - Jede ausgegebene Einheit enthält nicht leeren Vorlesetext und mindestens eine vorhandene sourceUnitId.
-            - Verwende jede unten gelieferte Quell-ID mindestens einmal.
-            - IDs und Segmente bleiben in der Reihenfolge der Quelle; unbekannte IDs sind verboten.
-            {{preservationRules}}
-            - delivery ist exakt narration oder dialogue und muss dem gelieferten Typ entsprechen.
-            - mood ist exakt neutral, warm, joyful, tense, sad, relieved, angry, mysterious, fearful oder tender.
-            - intensity liegt zwischen 0.0 und 1.0. Verwende bei emotional eindeutiger direkter Rede kräftige Werte.
-            - speed liegt zwischen 0.82 und 1.32; für narration ist speed exakt 1.0.
-            - pauseAfterMilliseconds ist eine ganze Zahl zwischen 0 und 1500.
-            - expressionBefore und expressionAfter sind null oder exakt laugh, breath oder sigh.
-            - Ausdruckstags sparsam und nur bei semantisch eindeutigem Lachen, Atemholen oder Seufzen einsetzen.
-            - Redeankündigungen wie „sagte Natascha leise“ bleiben narration; nur der Inhalt in Anführungszeichen ist dialogue.
-            - Gib keine Überschrift, Quellenhinweise oder Erklärung der Bearbeitung aus.
-
-            Quelleneinheiten:
-            {{source}}
-            """;
-    }
-
-    internal static IReadOnlyList<PreparedSpeechSegment>? ParseMappedSpeechSegments(
-        string raw,
-        IReadOnlyList<SpeechSourceUnit> units,
-        bool preserveOriginalText = false)
-    {
-        var json = StripOuterJsonFence(raw);
-        try
-        {
-            using var document = JsonDocument.Parse(json);
-            var root = document.RootElement;
-            if (root.ValueKind == JsonValueKind.Object
-                && root.TryGetProperty("message", out var message)
-                && message.ValueKind == JsonValueKind.String)
-            {
-                json = StripOuterJsonFence(message.GetString() ?? string.Empty);
-            }
-            var response = JsonSerializer.Deserialize<MappedSpeechPreparationResponse>(json, JsonOptions);
-            if (response?.Segments is null || response.Segments.Count == 0)
-            {
-                return null;
-            }
-
-            var order = units.Select((unit, index) => (unit.Id, index))
-                .ToDictionary(static item => item.Id, static item => item.index, StringComparer.Ordinal);
-            var covered = new HashSet<string>(StringComparer.Ordinal);
-            var output = new List<PreparedSpeechSegment>();
-            var previousMaximum = -1;
-            foreach (var candidate in response.Segments)
-            {
-                if (string.IsNullOrWhiteSpace(candidate.Text)
-                    || candidate.SourceUnitIds is null
-                    || candidate.SourceUnitIds.Count == 0)
-                {
-                    return null;
-                }
-                var ids = candidate.SourceUnitIds
-                    .Distinct(StringComparer.Ordinal)
-                    .ToArray();
-                if (ids.Any(id => !order.ContainsKey(id)))
-                {
-                    return null;
-                }
-                var sourceDeliveries = ids
-                    .Select(id => units[order[id]].Delivery)
-                    .Distinct()
-                    .ToArray();
-                if (sourceDeliveries.Length != 1
-                    || !TryParseSpeechDelivery(candidate.Delivery, sourceDeliveries[0], out var delivery)
-                    || delivery != sourceDeliveries[0]
-                    || !TryParseSpeechMood(candidate.Mood, out var mood)
-                    || !TryParseSpeechExpression(candidate.ExpressionBefore, out var expressionBefore)
-                    || !TryParseSpeechExpression(candidate.ExpressionAfter, out var expressionAfter))
-                {
-                    return null;
-                }
-                var intensity = candidate.Intensity ?? 0;
-                var speed = candidate.Speed ?? 1.0;
-                var pause = candidate.PauseAfterMilliseconds ?? 0;
-                if (!double.IsFinite(intensity) || intensity is < 0 or > 1
-                    || !double.IsFinite(speed) || speed is < 0.82 or > 1.32
-                    || pause is < 0 or > 1_500)
-                {
-                    return null;
-                }
-                if (preserveOriginalText)
-                {
-                    if (ids.Length != 1
-                        || covered.Contains(ids[0])
-                        || !string.Equals(
-                            candidate.Text.Trim(),
-                            units[order[ids[0]]].SpeechText.Trim(),
-                            StringComparison.Ordinal))
-                    {
-                        return null;
-                    }
-                }
-                var positions = ids.Select(id => order[id]).ToArray();
-                if (!positions.SequenceEqual(positions.Order()))
-                {
-                    return null;
-                }
-                var minimum = positions[0];
-                if (minimum < previousMaximum && positions.Any(position => position != previousMaximum))
-                {
-                    return null;
-                }
-                previousMaximum = Math.Max(previousMaximum, positions[^1]);
-                covered.UnionWith(ids);
-                if (delivery == SpeechDelivery.Narration)
-                {
-                    mood = SpeechMood.Neutral;
-                    intensity = 0;
-                    speed = 1.0;
-                    pause = 0;
-                    expressionBefore = null;
-                    expressionAfter = null;
-                }
-                else
-                {
-                    speed = SpeechSourceSegmentation.ResolveDialogueSpeed(mood, intensity);
-                    pause = SpeechSourceSegmentation.ResolveDialoguePause(intensity);
-                }
-                output.Add(new(
-                    $"s{output.Count + 1:0000}",
-                    candidate.Text.Trim(),
-                    ids,
-                    delivery,
-                    mood,
-                    intensity,
-                    speed,
-                    pause,
-                    expressionBefore,
-                    expressionAfter,
-                    PlaybackBatchId: units[minimum].BlockId));
-            }
-            if (covered.Count != units.Count || units.Any(unit => !covered.Contains(unit.Id)))
-            {
-                return null;
-            }
-            return SpeechSourceSegmentation.NormalizePreparedSegments(output);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static bool TryParseSpeechDelivery(
-        string? value,
-        SpeechDelivery fallback,
-        out SpeechDelivery delivery)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            delivery = fallback;
-            return true;
-        }
-        return Enum.TryParse(value, ignoreCase: true, out delivery)
-            && Enum.IsDefined(delivery);
-    }
-
-    private static bool TryParseSpeechMood(string? value, out SpeechMood mood)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            mood = SpeechMood.Neutral;
-            return true;
-        }
-        return Enum.TryParse(value, ignoreCase: true, out mood)
-            && Enum.IsDefined(mood);
-    }
-
-    private static bool TryParseSpeechExpression(
-        string? value,
-        out SpeechExpression? expression)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            expression = null;
-            return true;
-        }
-        if (Enum.TryParse<SpeechExpression>(value, ignoreCase: true, out var parsed)
-            && Enum.IsDefined(parsed))
-        {
-            expression = parsed;
-            return true;
-        }
-        expression = null;
-        return false;
-    }
-
-    private static string StripOuterJsonFence(string value)
-    {
-        var trimmed = value.Trim();
-        if (!trimmed.StartsWith("```", StringComparison.Ordinal)) return trimmed;
-        var firstLine = trimmed.IndexOf('\n');
-        if (firstLine < 0) return trimmed;
-        trimmed = trimmed[(firstLine + 1)..];
-        var closing = trimmed.LastIndexOf("```", StringComparison.Ordinal);
-        return closing >= 0 ? trimmed[..closing].Trim() : trimmed.Trim();
-    }
-
-    private static List<IReadOnlyList<SpeechSourceUnit>> ChunkSpeechUnits(
-        IReadOnlyList<SpeechSourceUnit> units,
-        int maximumCharacters)
-    {
-        var output = new List<IReadOnlyList<SpeechSourceUnit>>();
-        var current = new List<SpeechSourceUnit>();
-        var characters = 0;
-        foreach (var unit in units)
-        {
-            var next = unit.SpeechText.Length + unit.Id.Length + 32;
-            if (current.Count > 0 && characters + next > maximumCharacters)
-            {
-                output.Add(current.ToArray());
-                current.Clear();
-                characters = 0;
-            }
-            current.Add(unit);
-            characters += next;
-        }
-        if (current.Count > 0) output.Add(current.ToArray());
-        return output;
-    }
-
-    private sealed record MappedSpeechPreparationResponse(
-        IReadOnlyList<MappedSpeechPreparationSegment>? Segments);
-
-    private sealed record MappedSpeechPreparationSegment(
-        string Text,
-        IReadOnlyList<string>? SourceUnitIds,
-        string? Delivery = null,
-        string? Mood = null,
-        double? Intensity = null,
-        double? Speed = null,
-        int? PauseAfterMilliseconds = null,
-        string? ExpressionBefore = null,
-        string? ExpressionAfter = null);
-
-    internal static IReadOnlyList<string> SplitSpeechPreparationChunks(string source, int maximumCharacters)
-    {
-        ArgumentOutOfRangeException.ThrowIfLessThan(maximumCharacters, 1_000);
-        var remaining = source.Trim();
-        if (remaining.Length == 0) return [];
-        var chunks = new List<string>();
-        while (remaining.Length > maximumCharacters)
-        {
-            var boundary = remaining.LastIndexOfAny(['\n', '.', '!', '?'], maximumCharacters - 1, maximumCharacters);
-            if (boundary < maximumCharacters / 2) boundary = maximumCharacters;
-            else boundary++;
-            chunks.Add(remaining[..boundary].Trim());
-            remaining = remaining[boundary..].TrimStart();
-        }
-        if (remaining.Length > 0) chunks.Add(remaining);
-        return chunks;
-    }
 
     private sealed record DocumentSpeechResolution(string? Text, string? Detail, string? Error);
 
@@ -2158,7 +1677,7 @@ public sealed class GoAiAssistantService(
             Status: "Live-Untertitel",
             Detail: "Windows-Systemaudio wird verbunden.")).ConfigureAwait(false);
         await liveCaptions.StartAsync(mode, cancellationToken).ConfigureAwait(false);
-        var message = "Die Live-Untertitel für das Windows-Systemaudio wurden gestartet. Englisch erkannte Abschnitte werden automatisch ins Deutsche übersetzt; verschiedene Stimmen werden als Dialog gegliedert. Die Untertitel laufen parallel zum allgemeinen Chat und können in der Untertitelanzeige beendet werden.";
+        var message = "Die Live-Untertitel für das Windows-Systemaudio wurden gestartet. Sicher erkanntes Deutsch bleibt unverändert; alle anderen Sprachen werden über das aktuell ausgewählte General-AI-Modell ins Deutsche übersetzt. Verschiedene Stimmen werden als Dialog gegliedert. Die Untertitel laufen parallel zum allgemeinen Chat und können in der Untertitelanzeige beendet werden.";
         return await CompleteImmediateAsync(
             assistant,
             message,
@@ -2231,6 +1750,12 @@ public sealed class GoAiAssistantService(
         {
             throw new InvalidOperationException("In den Einstellungen ist kein General-AI-Modell ausgewählt.");
         }
+        var preferredCodeModel = settings.Current.SelectedCodingModel;
+        if (coding && string.IsNullOrWhiteSpace(preferredCodeModel))
+        {
+            throw new InvalidOperationException("In den Einstellungen ist kein Coding-Modell ausgewählt.");
+        }
+        var codingModelDisplayName = DescribeCodingModel(preferredCodeModel);
 
         DocumentRunContext? documentContext = null;
         if (!coding)
@@ -2261,7 +1786,7 @@ public sealed class GoAiAssistantService(
             sessionId,
             historyBeforePrompt,
             originalPrompt,
-            preferredGeneralModel,
+            coding ? preferredCodeModel : preferredGeneralModel,
             coding,
             contextProfile,
             knownContextLength: coding ? 262_144 : documentContext?.ContextLength,
@@ -2271,7 +1796,7 @@ public sealed class GoAiAssistantService(
                 assistant,
                 Status: progress.Status,
                 Detail: progress.Detail,
-                Model: coding ? "Laguna-S-2.1" : preferredGeneralModel,
+                Model: coding ? codingModelDisplayName : preferredGeneralModel,
                 ContextLimit: coding ? 262_144 : documentContext?.ContextLength,
                 ContextWasCompacted: true)).ConfigureAwait(false),
             cancellationToken).ConfigureAwait(false);
@@ -2333,7 +1858,7 @@ public sealed class GoAiAssistantService(
                 GoAiAssistantUpdateKind.Status,
                 assistant,
                 Status: "Repository bereit",
-                Detail: $"{snapshot.Entries.Count:N0} Dateien indiziert · Laguna 262K",
+                Detail: $"{snapshot.Entries.Count:N0} Dateien indiziert · {codingModelDisplayName}",
                 ContextUsed: EstimateRequestTokens(messages, latestParts, map),
                 ContextLimit: 262_144,
                 LoadedFiles: 0)).ConfigureAwait(false);
@@ -2382,6 +1907,7 @@ public sealed class GoAiAssistantService(
             AllowedServerTools: GetAllowedServerTools(action),
             Workspace: workspaceDescriptor,
             PreferredGeneralModelId: coding ? null : preferredGeneralModel,
+            PreferredCodeModelId: coding ? preferredCodeModel : null,
             DocumentContext: documentContext?.Descriptor,
             SessionContext: sessionContext.Descriptor,
             ConversationProfile: audiobook ? ConversationProfile.Audiobook : ConversationProfile.General);
@@ -2858,6 +2384,13 @@ public sealed class GoAiAssistantService(
         return Math.Max(1, (characters + 2) / 3);
     }
 
+    private static string DescribeCodingModel(string? modelId) => modelId switch
+    {
+        "ud" => "DeepSeek-V4-Flash-0731 · UD-IQ2_M",
+        "qwen3-coder-next" => "Qwen3-Coder-Next · Q6_K",
+        _ => string.IsNullOrWhiteSpace(modelId) ? "Coding-Agent" : modelId,
+    };
+
     private static string VisibleFailure(Exception exception) => exception switch
     {
         GoAiRunTerminalException => exception.Message,
@@ -2886,140 +2419,6 @@ public sealed class GoAiAssistantService(
         _gate.Dispose();
     }
 
-    internal sealed record DialogueDirectionBatch(
-        IReadOnlyList<int> SegmentIndexes,
-        IReadOnlyList<SpeechSourceUnit> ContextUnits);
-
-    private sealed record DialogueDirectionResponse(
-        IReadOnlyList<DialogueDirectionItem>? Segments);
-
-    private sealed record DialogueDirectionItem(
-        string Id,
-        string SynthesisText,
-        string? Mood = null,
-        double? Intensity = null,
-        string? ExpressionBefore = null,
-        string? ExpressionAfter = null);
-
-    private sealed record DialogueDirectionResult(
-        IReadOnlyList<PreparedSpeechSegment> Segments,
-        bool Cacheable);
-
-    private sealed class DialogueDirectionSession
-    {
-        private readonly object _gate = new();
-        private readonly Dictionary<int, TaskCompletionSource<PreparedSpeechSegment>> _pending = [];
-        private readonly PreparedSpeechSegment[] _resolved;
-        private bool _cacheable = true;
-        private int _playbackStarted;
-
-        public DialogueDirectionSession(IReadOnlyList<PreparedSpeechSegment> segments)
-        {
-            SourceSegments = segments.ToArray();
-            _resolved = SourceSegments.ToArray();
-            for (var index = 0; index < SourceSegments.Length; index++)
-            {
-                if (SourceSegments[index].Delivery == SpeechDelivery.Dialogue)
-                {
-                    _pending[index] = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                }
-            }
-        }
-
-        public PreparedSpeechSegment[] SourceSegments { get; }
-
-        public Task<DialogueDirectionResult> Completion { get; set; } =
-            Task.FromResult(new DialogueDirectionResult([], false));
-
-        public bool IsCompleted => Completion.IsCompleted;
-
-        public bool PlaybackStarted => Volatile.Read(ref _playbackStarted) != 0;
-
-        public void MarkPlaybackStarted() => Interlocked.Exchange(ref _playbackStarted, 1);
-
-        public ValueTask<PreparedSpeechSegment> ResolveAsync(
-            int index,
-            PreparedSpeechSegment source,
-            CancellationToken cancellationToken)
-        {
-            if (!_pending.TryGetValue(index, out var completion))
-            {
-                return ValueTask.FromResult(source);
-            }
-            return new(completion.Task.WaitAsync(cancellationToken));
-        }
-
-        public void Resolve(int index, PreparedSpeechSegment segment, bool cacheable)
-        {
-            TaskCompletionSource<PreparedSpeechSegment>? completion;
-            lock (_gate)
-            {
-                if (!_pending.TryGetValue(index, out completion) || completion.Task.IsCompleted)
-                {
-                    return;
-                }
-                _resolved[index] = segment;
-                if (!cacheable) _cacheable = false;
-            }
-            completion.TrySetResult(segment);
-        }
-
-        public void ResolveNeutral(IEnumerable<int> indexes, bool cacheable)
-        {
-            foreach (var index in indexes)
-            {
-                if (index < 0 || index >= SourceSegments.Length) continue;
-                var source = SourceSegments[index];
-                Resolve(index, source with
-                {
-                    Mood = SpeechMood.Neutral,
-                    Intensity = 0,
-                    Speed = 1.0,
-                    PauseAfterMilliseconds = 0,
-                    ExpressionBefore = null,
-                    ExpressionAfter = null,
-                    SynthesisText = source.Text,
-                    DirectionResolved = false,
-                }, cacheable);
-            }
-        }
-
-        public void ResolveAllNeutral(bool cacheable)
-        {
-            int[] unresolved;
-            lock (_gate)
-            {
-                unresolved = _pending
-                    .Where(static pair => !pair.Value.Task.IsCompleted)
-                    .Select(static pair => pair.Key)
-                    .ToArray();
-            }
-            if (unresolved.Length > 0)
-            {
-                ResolveNeutral(unresolved, cacheable);
-            }
-        }
-
-        public void Cancel(CancellationToken cancellationToken)
-        {
-            lock (_gate)
-            {
-                _cacheable = false;
-                foreach (var completion in _pending.Values)
-                {
-                    completion.TrySetCanceled(cancellationToken);
-                }
-            }
-        }
-
-        public DialogueDirectionResult CreateResult()
-        {
-            lock (_gate)
-            {
-                return new(_resolved.ToArray(), _cacheable);
-            }
-        }
-    }
 
     private sealed record SpeechSource(
         string Text,

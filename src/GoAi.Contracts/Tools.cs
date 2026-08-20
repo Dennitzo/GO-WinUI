@@ -47,6 +47,7 @@ public static class ClientToolNames
     public const string FileSystemReadMany = "fs.readMany";
     public const string FileSystemSearch = "fs.search";
     public const string FileSystemWriteText = "fs.writeText";
+    public const string FileSystemReplaceText = "fs.replaceText";
     public const string FileSystemMove = "fs.move";
     public const string FileSystemProposePatch = "fs.proposePatch";
     public const string FileSystemProposeCreate = "fs.proposeCreate";

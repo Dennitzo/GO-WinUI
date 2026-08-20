@@ -23,9 +23,9 @@ public sealed partial class ShellViewModel : ObservableObject
     public ShellViewModel()
     {
         AiServices.Add(new(GeneralService, "General AI", "gpt-oss-20b · LM Studio", "\uE950", "General AI - gpt-oss-20b", false, false, "Wird geprüft"));
-        AiServices.Add(new(CodingService, "Coding", "Laguna-S-2.1 · LM Studio", "\uE943", "Coding - Laguna-S-2.1", false, false, "Wird geprüft"));
+        AiServices.Add(new(CodingService, "Coding", "DeepSeek-V4-Flash / Qwen3-Coder-Next · LM Studio", "\uE943", "Coding-Agent", false, false, "Wird geprüft"));
         AiServices.Add(new(SpeechToTextService, "Spracherkennung", "Whisper large-v3 · Docker", "\uE720", "Spracherkennung - Whisper large-v3", false, false, "Wird geprüft"));
-        AiServices.Add(new(TextToSpeechService, "Sprachausgabe", "Supertonic F5 Ultra · GPU 1", "\uE767", "Sprachausgabe - Supertonic F5 Ultra", false, false, "Wird geprüft"));
+        AiServices.Add(new(TextToSpeechService, "Sprachausgabe", "Ausgewählter Provider · GPU 1", "\uE767", "Sprachausgabe - ausgewählter Provider", false, false, "Wird geprüft"));
         AiServices.Add(new(VisionMediaService, "Vision / Medien", "Qwen3-VL + Media Worker", "\uE722", "Vision / Medien - Qwen3-VL", false, false, "Wird geprüft"));
         AiServices.Add(new(ImageService, "Bildgenerierung", "Z-Image-Turbo · Docker", "\uE8B9", "Bildgenerierung - Z-Image-Turbo", false, false, "Wird geprüft"));
         AiServices.Add(new(ResearchService, "Web / YouTube", "SearXNG / YouTube API", "\uE721", "Web / YouTube - SearXNG / YouTube API", false, false, "Wird geprüft"));
@@ -46,13 +46,25 @@ public sealed partial class ShellViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(AiConnectionModeText))]
+    public partial bool IsAiServerReady { get; set; }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AiConnectionModeText))]
+    public partial bool IsAiAvailabilityKnown { get; set; }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AiConnectionModeText))]
     public partial bool IsAiConnectionEnabled { get; set; }
 
     public string AiConnectionModeText => !IsAiConnectionEnabled
         ? "Offline"
-        : IsAiAvailable
-            ? "Online"
-            : "Nicht erreichbar";
+        : !IsAiAvailabilityKnown
+            ? "Wird geprüft"
+            : !IsAiAvailable
+                ? "Nicht erreichbar"
+                : IsAiServerReady
+                    ? "Online"
+                    : "Online · Eingeschränkt";
 
     public ObservableCollection<AiServiceFooterItem> AiServices { get; } = [];
 
@@ -93,8 +105,22 @@ public sealed partial class ShellViewModel : ObservableObject
         RefreshAiServices();
     }
 
+    public void BeginAiAvailabilityCheck()
+    {
+        IsAiAvailabilityKnown = false;
+        IsAiServerReady = false;
+    }
+
+    public void ApplyAiConnectionState(bool gatewayReachable, bool serverReady)
+    {
+        IsAiAvailabilityKnown = true;
+        IsAiAvailable = gatewayReachable;
+        IsAiServerReady = gatewayReachable && serverReady;
+    }
+
     public void ApplyAiAvailabilitySnapshot(
         bool gatewayReachable,
+        bool serverReady,
         GpuStatusSnapshot? gpuStatus,
         ModelStatusSnapshot? modelStatus,
         IReadOnlyList<ServiceStatusSnapshot>? serviceStatus)
@@ -106,10 +132,22 @@ public sealed partial class ShellViewModel : ObservableObject
             return;
         }
 
-        IsAiAvailable = gatewayReachable;
+        ApplyAiConnectionState(gatewayReachable, serverReady);
         SetAiServiceAvailability(gatewayReachable, modelStatus, serviceStatus);
         SetActiveAiRuns(gpuStatus);
     }
+
+    public void ApplyAiAvailabilitySnapshot(
+        bool gatewayReachable,
+        GpuStatusSnapshot? gpuStatus,
+        ModelStatusSnapshot? modelStatus,
+        IReadOnlyList<ServiceStatusSnapshot>? serviceStatus) =>
+        ApplyAiAvailabilitySnapshot(
+            gatewayReachable,
+            gatewayReachable,
+            gpuStatus,
+            modelStatus,
+            serviceStatus);
 
     public void SetClientAiRun(
         string key,

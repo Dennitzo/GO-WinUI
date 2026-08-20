@@ -31,7 +31,7 @@ public sealed class SharedModelWarmupService : BackgroundService
                 _runtime.WriteLog(
                     "Information",
                     "models.startup.warm.completed",
-                    "General AI, Whisper und Sprachausgabe sind dauerhaft vorgeladen; weitere Modelle werden bedarfsgesteuert geladen.");
+                    "Die dauerhaften Sprachdienste sind vorgeladen. Der LM-Studio-Modellzustand wurde ohne unnötigen Modellwechsel für den nächsten Lauf vorbereitet.");
                 return;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

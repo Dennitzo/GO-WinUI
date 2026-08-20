@@ -43,16 +43,34 @@ weiterhin unter `lmstudio-community\...` liegen.
 # Gepinnte Dateien laden, Hashes pruefen und in LM Studio registrieren
 .\windows\download-ai-models.ps1
 
+# Nur Qwen3-Coder-Next Q6_K laden beziehungsweise fortsetzen
+.\windows\download-ai-models.ps1 -OnlyCodingModel -SkipWorkerModels
+
 # Vorhandene Dateien erneut einlesen und den My-Models-Katalog pruefen
 .\windows\refresh-lmstudio-model-catalog.ps1 -PassThru
 ```
 
-Das volle `faster-whisper-large-v3`, ECAPA-Sprechererkennung, Piper MLS Medium (weibliches Profil) und
-Z-Image ist ein Worker-Modell. Es verbleibt unter
+Das volle `faster-whisper-large-v3`, ECAPA-Sprechererkennung, Supertonic F5
+Ultra und Z-Image sind Worker-Modelle. Sie verbleiben unter
 `C:\ProgramData\GO-AI-Server\Models`, weil LM Studio keine STT-,
 Sprechererkennungs-, TTS- oder Diffusions-API bereitstellt. Qwen3-VL, BGE-M3,
-gpt-oss-20b und Laguna werden dagegen ausschliesslich ueber LM Studio verwaltet
+gpt-oss-20b und Qwen3-Coder-Next Q6_K werden dagegen ausschliesslich ueber LM Studio verwaltet
 und ausgefuehrt.
+
+Supertonic F5 Ultra bleibt auf GPU 1 für die gesamte Laufzeit des Speech-
+Containers resident. Es gibt keine Providerwahl und keinen TTS-Fallback. Kann
+Supertonic nicht über CUDA geladen oder ausgeführt werden, wird der Fehler
+sichtbar zurückgegeben. Beim Beenden von GO AI Server beendet die Anwendung den
+Speech-Container; damit wird auch dessen GPU-Speicher vollständig freigegeben.
+
+Alle sichtbaren Nachrichtenprofile, Dokumente und expliziten Texte verwenden
+denselben deterministischen deutschen Sprachplan ohne General-AI-Aufbereitung.
+Absätze werden bis maximal 280 Zeichen an Satzgrenzen gebündelt und über zwei
+fertige Batches vorgepuffert. Innerhalb eines Absatzbatches wird jeder sichtbare
+Satz einzeln mit identischen Supertonic-Einstellungen synthetisiert und danach
+zu einer WAV-Datei verbunden. Exakte Satzgrenzen entstehen deterministisch aus
+den PCM-Samplezahlen; ein zweites Alignmentmodell und geschätzte Zeitgeber sind
+nicht erforderlich.
 
 Whisper wird ausschliesslich durch den Docker-Speech-Worker ausgefuehrt. Eine
 zusaetzliche Whisper-GGUF-Registrierung in LM Studio ist weder lauffaehig noch
@@ -65,7 +83,7 @@ Modells wird sichtbar an den Client zurueckgegeben.
 Der allgemeine Koordinator verwendet `openai/gpt-oss-20b` mit 131.072 Token.
 Dieses Modell darf parallel zum Speech-Worker resident bleiben, damit
 Sprachsteuerung, Live-Untertitel und Whisper-Live-Uebersetzung waehrend eines
-allgemeinen Chats weiterlaufen. Laguna verwendet exklusiv 262.144 Token und
+allgemeinen Chats weiterlaufen. Qwen3-Coder-Next Q6_K verwendet exklusiv 262.144 Token und
 entlaedt fuer einen Code-Lauf alle anderen GPU-Modelle. Vision, Media und
 Bildgenerierung bleiben ebenfalls exklusive Schwerlastprofile.
 

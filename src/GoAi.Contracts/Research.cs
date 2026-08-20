@@ -30,7 +30,7 @@ public sealed record WebFetchResponse(
 
 public sealed record SpeechRequest(
     string Text,
-    string? Voice = "de-DE-Hedda",
+    string? Voice = "de-DE-Female",
     string? Format = "wav",
     double Speed = 1.0);
 
@@ -94,8 +94,66 @@ public sealed record LiveCaptionChunkResponse(
 
 public sealed record SpeechResponse(
     ArtifactDescriptor Artifact,
+    string Provider);
+
+public enum SpeechContentProfile
+{
+    Prepared,
+    Audiobook,
+}
+
+public static class SpeechProviderIds
+{
+    public const string SupertonicF5Cuda = "supertonic-3-f5-cuda";
+}
+
+public enum SpeechAlignmentStatus
+{
+    NotRequested,
+    Deterministic,
+    Failed,
+}
+
+public sealed record SpeechSessionRequest(
+    SpeechContentProfile Profile = SpeechContentProfile.Prepared,
+    string Language = "de");
+
+public sealed record SpeechSessionSnapshot(
+    string SessionId,
+    string State,
+    SpeechContentProfile Profile,
     string Provider,
-    bool IsFallback);
+    bool GeneralModelEjected,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record SpeechParagraphRequest(
+    string Text,
+    int ParagraphIndex,
+    double Speed = 1.0,
+    IReadOnlyList<SpeechParagraphPart>? Parts = null);
+
+public sealed record SpeechParagraphPart(
+    int SegmentIndex,
+    string Text,
+    double Speed = 1.0,
+    int PauseBeforeMilliseconds = 0,
+    int PauseAfterMilliseconds = 0);
+
+public sealed record SpeechParagraphTiming(
+    int SegmentIndex,
+    double StartSeconds,
+    double EndSeconds);
+
+public sealed record SpeechParagraphResponse(
+    ArtifactDescriptor Artifact,
+    string Provider,
+    int ParagraphIndex,
+    double DurationSeconds,
+    int SampleRate,
+    IReadOnlyList<SpeechParagraphTiming>? Timings = null,
+    SpeechAlignmentStatus AlignmentStatus = SpeechAlignmentStatus.NotRequested,
+    double? AlignmentConfidence = null);
 
 public sealed record MediaJobRequest(
     string UploadId,

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Models;
+using GoAi.Server.Core.Workers;
 
 namespace GoAi.Server.Core.Runtime;
 
@@ -18,6 +19,9 @@ public sealed class ServerInitializationService : IHostedService
     private readonly GoAiServerOptions _options;
     private readonly GpuLeaseScheduler _gpuScheduler;
     private readonly GeneralModelSelectionService _generalModels;
+    private readonly CodingModelSelectionService _codingModels;
+    private readonly WorkerApiClient _workers;
+    private readonly LmStudioClient _lmStudio;
 
     public ServerInitializationService(
         GoAiDatabase database,
@@ -27,7 +31,10 @@ public sealed class ServerInitializationService : IHostedService
         ServerRuntimeState runtime,
         GpuLeaseScheduler gpuScheduler,
         IOptions<GoAiServerOptions> options,
-        GeneralModelSelectionService generalModels)
+        GeneralModelSelectionService generalModels,
+        CodingModelSelectionService codingModels,
+        WorkerApiClient workers,
+        LmStudioClient lmStudio)
     {
         _database = database;
         _apiKeys = apiKeys;
@@ -37,12 +44,16 @@ public sealed class ServerInitializationService : IHostedService
         _gpuScheduler = gpuScheduler;
         _options = options.Value;
         _generalModels = generalModels;
+        _codingModels = codingModels;
+        _workers = workers;
+        _lmStudio = lmStudio;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         await _database.InitializeAsync(cancellationToken).ConfigureAwait(false);
         await _generalModels.RestoreAsync(cancellationToken).ConfigureAwait(false);
+        await _codingModels.RestoreAsync(cancellationToken).ConfigureAwait(false);
         await _gpuScheduler.RecoverInterruptedLeasesAsync(cancellationToken).ConfigureAwait(false);
         await _workerKeys.EnsureKeysAsync(cancellationToken).ConfigureAwait(false);
         var bootstrap = await _apiKeys.EnsureBootstrapKeyAsync(cancellationToken).ConfigureAwait(false);
@@ -63,9 +74,41 @@ public sealed class ServerInitializationService : IHostedService
             readiness.Status == "ready" ? "GO AI Server ist bereit." : $"GO AI Server ist nicht bereit: {readiness.Reason}");
     }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
-        _runtime.SetGatewayState("Beendet", "Server wurde beendet.");
-        return Task.CompletedTask;
+        _runtime.SetGatewayState("Wird beendet", "AI-Modelle und Worker-Ressourcen werden entladen.");
+        try
+        {
+            await _workers.ReleaseAllAsync(exceptWorker: null, cancellationToken).ConfigureAwait(false);
+            _runtime.WriteLog(
+                "Information",
+                "workers.released",
+                "Alle geladenen Worker-Modelle wurden entladen.");
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            _runtime.WriteLog(
+                "Warning",
+                "workers.release_failed",
+                $"Worker-Modelle konnten beim Beenden nicht vollständig entladen werden ({exception.GetType().Name}).");
+        }
+
+        try
+        {
+            await _lmStudio.UnloadAllModelsAsync(cancellationToken).ConfigureAwait(false);
+            _runtime.WriteLog(
+                "Information",
+                "lmstudio.models.unloaded",
+                "Alle durch LM Studio geladenen Modellinstanzen wurden entladen; LM Studio selbst bleibt aktiv.");
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            _runtime.WriteLog(
+                "Warning",
+                "lmstudio.models.unload_failed",
+                $"LM-Studio-Modellinstanzen konnten beim Beenden nicht vollständig entladen werden ({exception.GetType().Name}).");
+        }
+
+        _runtime.SetGatewayState("Beendet", "AI-Modelle wurden entladen. LM Studio bleibt aktiv.");
     }
 }

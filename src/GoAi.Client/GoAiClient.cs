@@ -32,8 +32,24 @@ public sealed class GoAiClient : IDisposable
     public Task<HealthSnapshot> GetLiveHealthAsync(CancellationToken cancellationToken = default) =>
         GetAsync<HealthSnapshot>("v1/health/live", cancellationToken);
 
-    public Task<HealthSnapshot> GetReadyHealthAsync(CancellationToken cancellationToken = default) =>
-        GetAsync<HealthSnapshot>("v1/health/ready", cancellationToken);
+    public async Task<HealthSnapshot> GetReadyHealthAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        using var response = await _httpClient.GetAsync("v1/health/ready", cancellationToken).ConfigureAwait(false);
+        // A readiness endpoint intentionally uses HTTP 503 while returning a
+        // valid HealthSnapshot with the exact missing dependency and repair
+        // instruction. Preserve that diagnostic instead of turning a reachable
+        // server into a generic transport failure.
+        if (response.StatusCode != System.Net.HttpStatusCode.ServiceUnavailable)
+        {
+            await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        }
+
+        return await response.Content
+            .ReadFromJsonAsync<HealthSnapshot>(_jsonOptions, cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new JsonException("The server returned no HealthSnapshot payload.");
+    }
 
     public Task<CapabilitySnapshot> GetCapabilitiesAsync(CancellationToken cancellationToken = default) =>
         GetAsync<CapabilitySnapshot>("v1/capabilities", cancellationToken);
@@ -47,6 +63,14 @@ public sealed class GoAiClient : IDisposable
         PostAsync<GeneralModelSelection, GeneralModelSelection>(
             "v1/models/general",
             new GeneralModelSelection(modelId, 0, false),
+            cancellationToken);
+
+    public Task<CodingModelSelection> SelectCodingModelAsync(
+        string modelId,
+        CancellationToken cancellationToken = default) =>
+        PostAsync<CodingModelSelection, CodingModelSelection>(
+            "v1/models/code",
+            new CodingModelSelection(modelId, string.Empty, 0, false),
             cancellationToken);
 
     public Task<GpuStatusSnapshot> GetGpuStatusAsync(CancellationToken cancellationToken = default) =>
@@ -87,6 +111,37 @@ public sealed class GoAiClient : IDisposable
 
     public Task<SpeechResponse> SynthesizeSpeechAsync(SpeechRequest request, CancellationToken cancellationToken = default) =>
         PostAsync<SpeechRequest, SpeechResponse>("v1/audio/speech", request, cancellationToken);
+
+    public Task<SpeechSessionSnapshot> CreateSpeechSessionAsync(
+        SpeechSessionRequest request,
+        CancellationToken cancellationToken = default) =>
+        PostAsync<SpeechSessionRequest, SpeechSessionSnapshot>(
+            "v1/audio/speech/sessions",
+            request,
+            cancellationToken);
+
+    public Task<SpeechParagraphResponse> SynthesizeSpeechParagraphAsync(
+        string sessionId,
+        SpeechParagraphRequest request,
+        CancellationToken cancellationToken = default) =>
+        PostAsync<SpeechParagraphRequest, SpeechParagraphResponse>(
+            $"v1/audio/speech/sessions/{Uri.EscapeDataString(sessionId)}/paragraphs",
+            request,
+            cancellationToken);
+
+    public Task<SpeechSessionSnapshot> EndSpeechSessionAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default) =>
+        PostWithoutBodyAsync<SpeechSessionSnapshot>(
+            $"v1/audio/speech/sessions/{Uri.EscapeDataString(sessionId)}/end",
+            cancellationToken);
+
+    public Task<SpeechSessionSnapshot> CancelSpeechSessionAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default) =>
+        PostWithoutBodyAsync<SpeechSessionSnapshot>(
+            $"v1/audio/speech/sessions/{Uri.EscapeDataString(sessionId)}/cancel",
+            cancellationToken);
 
     public Task<UtteranceIntentResponse> ClassifyUtteranceIntentAsync(
         UtteranceIntentRequest request,
@@ -475,6 +530,20 @@ public sealed class GoAiClient : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         using var response = await _httpClient.PostAsJsonAsync(path, value, _jsonOptions, cancellationToken).ConfigureAwait(false);
+        return await ReadRequiredAsync<TResponse>(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<TResponse> PutAsync<TRequest, TResponse>(
+        string path,
+        TRequest value,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        using var response = await _httpClient.PutAsJsonAsync(
+            path,
+            value,
+            _jsonOptions,
+            cancellationToken).ConfigureAwait(false);
         return await ReadRequiredAsync<TResponse>(response, cancellationToken).ConfigureAwait(false);
     }
 

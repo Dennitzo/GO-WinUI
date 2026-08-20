@@ -1,3 +1,5 @@
+using GoAi.Contracts;
+using GoAi.Server.Core.Audio;
 using GoAi.Server.Core.Models;
 using GoAi.Server.Core.Runtime;
 
@@ -27,12 +29,12 @@ public sealed class GpuLeaseSchedulerTests
     }
 
     [Fact]
-    public async Task GeneralAndSpeechShareCapacityWhileLagunaWaitsExclusively()
+    public async Task SpeechRemainsAvailableWhileQwenCoderOwnsTheLmStudioLane()
     {
         using var context = new TestServerContext();
         using var scheduler = new GpuLeaseScheduler(context.Database, new ServerRuntimeState());
         var general = await scheduler.AcquireAsync("llm-general", "run-general", GpuLeaseMode.Shared);
-        var speech = await scheduler.AcquireAsync("live-caption", "caption-1", GpuLeaseMode.Shared);
+        var speech = await scheduler.AcquireAsync("live-caption", "caption-1", GpuLeaseMode.Speech);
         try
         {
             Assert.Contains(general.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
@@ -42,18 +44,19 @@ public sealed class GpuLeaseSchedulerTests
                 activity => Assert.Equal("live-caption", activity.Workload),
                 activity => Assert.Equal("llm-general", activity.Workload));
 
-            var lagunaTask = scheduler.AcquireAsync("llm-code", "run-code", GpuLeaseMode.Exclusive);
+            var qwenCoderTask = scheduler.AcquireAsync("llm-code", "run-code", GpuLeaseMode.Exclusive);
             await Task.Delay(100);
-            Assert.False(lagunaTask.IsCompleted);
+            Assert.False(qwenCoderTask.IsCompleted);
             Assert.Equal(1, scheduler.QueueLength);
 
             await general.DisposeAsync();
-            await Task.Delay(50);
-            Assert.False(lagunaTask.IsCompleted);
-
-            await speech.DisposeAsync();
-            await using var laguna = await lagunaTask;
-            Assert.Equal(laguna.LeaseId, scheduler.ActiveLease);
+            await using var qwenCoder = await qwenCoderTask;
+            Assert.Contains(qwenCoder.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
+            Assert.Contains(speech.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
+            Assert.Collection(
+                scheduler.ActiveActivities.OrderBy(static activity => activity.Workload),
+                activity => Assert.Equal("live-caption", activity.Workload),
+                activity => Assert.Equal("llm-code", activity.Workload));
         }
         finally
         {
@@ -63,10 +66,27 @@ public sealed class GpuLeaseSchedulerTests
     }
 
     [Theory]
+    [InlineData("Wie wurde die Titelleiste umgesetzt?", UtteranceIntent.Question)]
+    [InlineData("Ändere die Titelleiste in Akzentfarbe", UtteranceIntent.Instruction)]
+    [InlineData("hm", UtteranceIntent.Noise)]
+    public void VoiceIntentCanBeResolvedWithoutGeneralAiDuringCoding(
+        string text,
+        UtteranceIntent expected)
+    {
+        var result = UtteranceIntentService.ClassifyLocallyDuringCoding(text);
+
+        Assert.Equal(expected, result.Intent);
+        if (expected is UtteranceIntent.Question or UtteranceIntent.Instruction)
+        {
+            Assert.Equal(text, result.NormalizedText);
+        }
+    }
+
+    [Theory]
     [InlineData("llm-general", "gpt-oss-20b", "LM Studio")]
-    [InlineData("llm-code", "Laguna-S-2.1", "LM Studio")]
+    [InlineData("llm-code", "Coding-Agent", "LM Studio")]
     [InlineData("live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT")]
-    [InlineData("text-to-speech", "Antwort wird vorgelesen", "Docker · Supertonic F5 Ultra · GPU 1")]
+    [InlineData("text-to-speech", "Antwort wird vorgelesen", "Docker · ausgewählte Sprachausgabe · GPU 1")]
     [InlineData("image-generation", "Bild wird erstellt", "Docker · Image")]
     public void GpuStatusMapsWorkloadsToFooterLabels(
         string workload,

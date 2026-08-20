@@ -21,6 +21,6 @@ GO includes or depends on the following third-party components. Exact versions a
 
 KaTeX is bundled locally under `src/GoWinUI.App/Assets/Web/vendor/katex/0.16.10`; its unmodified MIT license text is retained beside the distribution. The assistant web UI does not load libraries from a CDN.
 
-The pinned Supertonic-3 license is downloaded with the offline model assets to `Models/supertonic-3/LICENSE`. No model files are fetched while the speech worker is running.
+The pinned Supertonic-3 assets are installed offline before deployment. No model files are fetched while a speech worker is running.
 
 Release and source redistributors must preserve this notice, the bundled KaTeX license, and the license/notices shipped by the corresponding NuGet packages.

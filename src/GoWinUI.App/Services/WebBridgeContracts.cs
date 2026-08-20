@@ -12,3 +12,15 @@ public sealed class WebBridgeMessageEventArgs(WebBridgeEnvelope envelope) : Even
 {
     public WebBridgeEnvelope Envelope { get; } = envelope;
 }
+
+public sealed record ReadFromContextTarget(
+    Guid SessionId,
+    Guid MessageId,
+    DateTimeOffset MessageUpdatedAt,
+    string Kind,
+    int BlockIndex);
+
+public sealed class ReadFromContextRequestedEventArgs(ReadFromContextTarget target) : EventArgs
+{
+    public ReadFromContextTarget Target { get; } = target;
+}

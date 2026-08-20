@@ -47,6 +47,25 @@ if (-not $InstallRoot.StartsWith($programFiles, [StringComparison]::OrdinalIgnor
 if ([string]::Equals($DataRoot, [IO.Path]::GetPathRoot($DataRoot), [StringComparison]::OrdinalIgnoreCase)) {
     throw "Unsafe data root: $DataRoot"
 }
+$modelRoot = [IO.Path]::GetFullPath((Join-Path $DataRoot 'Models'))
+$safeModelRoot = $modelRoot.TrimEnd('\') + '\'
+foreach ($obsoleteModelName in @(
+    'piper',
+    'qwen3-tts-12hz-1.7b-voicedesign',
+    'Qwen3-TTS-12Hz-0.6B-Base',
+    'chatterbox-multilingual-v3',
+    'whisperx-align-de',
+    'faster-whisper-large-v3-turbo',
+    'whisper-large-v3-turbo'
+)) {
+    $obsoleteModelRoot = [IO.Path]::GetFullPath((Join-Path $modelRoot $obsoleteModelName))
+    if ($obsoleteModelRoot.StartsWith($safeModelRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        [IO.Path]::GetFileName($obsoleteModelRoot) -ceq $obsoleteModelName -and
+        (Test-Path -LiteralPath $obsoleteModelRoot -PathType Container)) {
+        Remove-Item -LiteralPath $obsoleteModelRoot -Recurse -Force
+        Write-Host "Removed obsolete speech model directory: $obsoleteModelRoot" -ForegroundColor DarkGray
+    }
+}
 if ([string]::IsNullOrWhiteSpace($PortableSource)) {
     $packageRoot = Get-GoRepositoryRoot
     $PortableSource = if (Test-Path -LiteralPath (Join-Path $packageRoot 'GO-AI-Server.exe') -PathType Leaf) {
@@ -228,7 +247,7 @@ foreach ($shortcutPath in $shortcutPaths) {
 
 $listeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue
 $unexpected = @($listeners | Where-Object {
-    $_.LocalPort -in @(7080, 7081, 7082, 7083, 7084, 7085) -and $_.LocalAddress -notin @('127.0.0.1', '::1')
+    $_.LocalPort -in @(7080, 7081, 7082, 7083, 7084, 7085, 7086) -and $_.LocalAddress -notin @('127.0.0.1', '::1')
 })
 if ($unexpected.Count -ne 0) {
     throw 'A GO AI internal port is bound beyond loopback.'
@@ -240,7 +259,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 $lms = Get-Command 'lms' -ErrorAction SilentlyContinue
 if ($null -ne $lms) {
-    & $lms.Source server stop | Out-Null
+    Write-Host 'LM Studio bleibt für andere Anwendungen aktiv; die Server-App entlädt nur Modellinstanzen.'
 }
 
 Write-Host "GO AI Server deployed. Start GO-AI-Server.exe to activate Gateway, LM Studio and Docker services: https://${ExpectedLanIp}:8443" -ForegroundColor Green

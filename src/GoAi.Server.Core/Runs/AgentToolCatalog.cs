@@ -43,6 +43,7 @@ public sealed class AgentToolCatalog
                 ClientToolNames.FileSystemReadMany,
                 ClientToolNames.FileSystemSearch,
                 ClientToolNames.FileSystemWriteText,
+                ClientToolNames.FileSystemReplaceText,
                 ClientToolNames.FileSystemMove,
                 ClientToolNames.FileSystemProposePatch,
                 ClientToolNames.FileSystemProposeCreate,
@@ -176,10 +177,10 @@ public sealed class AgentToolCatalog
                 break;
             case ClientToolNames.FileSystemList:
             case ClientToolNames.FileSystemStat:
-                RequireString(value, "path", 1, 1024);
+                RequireString(value, "path", 0, 1024);
                 break;
             case ClientToolNames.FileSystemFindFiles:
-                OptionalString(value, "path", 1, 1024);
+                OptionalString(value, "path", 0, 1024);
                 RequireStringArray(value, "patterns", 1, 64, 256);
                 OptionalInteger(value, "maximumResults", 1, 5000);
                 break;
@@ -193,7 +194,7 @@ public sealed class AgentToolCatalog
                 OptionalInteger(value, "maximumCharacters", 1024, 4 * 1024 * 1024);
                 break;
             case ClientToolNames.FileSystemSearch:
-                RequireString(value, "path", 1, 1024);
+                RequireString(value, "path", 0, 1024);
                 var hasQuery = value.TryGetProperty("query", out _);
                 var hasQueries = value.TryGetProperty("queries", out _);
                 if (hasQuery == hasQueries)
@@ -212,6 +213,13 @@ public sealed class AgentToolCatalog
                 RequireString(value, "path", 1, 1024);
                 RequireString(value, "content", 0, 4 * 1024 * 1024);
                 OptionalString(value, "expectedSha256", 64, 64);
+                break;
+            case ClientToolNames.FileSystemReplaceText:
+                RequireString(value, "path", 1, 1024);
+                RequireString(value, "oldText", 1, 2 * 1024 * 1024);
+                RequireString(value, "newText", 0, 2 * 1024 * 1024);
+                OptionalString(value, "expectedSha256", 64, 64);
+                OptionalBoolean(value, "replaceAll");
                 break;
             case ClientToolNames.FileSystemMove:
                 RequireString(value, "source", 1, 1024);
@@ -268,13 +276,14 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.DocumentsList, "Liste alle fertig aufbereiteten Dokumente der aktuellen GO-Sitzung mit Dateiname und Seitenzahl.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{},"required":[],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsSearch, "Durchsuche den persistenten lokalen Dokumentindex promptbezogen und liefere Originalbelege mit Dateiname und Seite.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"query":{"type":"string"},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":200000}},"required":["query"],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsReadPages, "Lese einen konkreten Seitenbereich eines Sitzungsdokuments als zitierfähigen Originalbeleg.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"documentId":{"type":"string"},"startPage":{"type":"integer","minimum":1},"endPage":{"type":"integer","minimum":1}},"required":["documentId","startPage","endPage"],"additionalProperties":false}""")),
-            Client(ClientToolNames.FileSystemList, "Liste Einträge innerhalb des freigegebenen Client-Workspace.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
-            Client(ClientToolNames.FileSystemStat, "Lese Dateimetadaten innerhalb des freigegebenen Client-Workspace.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
+            Client(ClientToolNames.FileSystemList, "Liste Einträge innerhalb des freigegebenen Client-Workspace. Verwende . oder einen leeren Pfad für die Workspace-Wurzel.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
+            Client(ClientToolNames.FileSystemStat, "Lese Dateimetadaten innerhalb des freigegebenen Client-Workspace. Verwende . oder einen leeren Pfad für die Workspace-Wurzel.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
             Client(ClientToolNames.FileSystemFindFiles, "Finde mehrere Dateien per Glob oder Dateiname im indexierten Workspace.", ToolRiskClass.ReadOnly, FindFilesSchema()),
             Client(ClientToolNames.FileSystemReadText, "Lese eine ganze Textdatei oder einen bestimmten Zeilenbereich im Workspace.", ToolRiskClass.ReadOnly, ReadTextSchema()),
             Client(ClientToolNames.FileSystemReadMany, "Lese mehrere relevante Dateien oder Zeilenbereiche gebündelt und kontextbegrenzt.", ToolRiskClass.ReadOnly, ReadManySchema()),
-            Client(ClientToolNames.FileSystemSearch, "Suche mehrere Literale oder reguläre Ausdrücke mit Globfiltern und Kontextzeilen im indexierten Workspace.", ToolRiskClass.ReadOnly, FileSearchSchema()),
+            Client(ClientToolNames.FileSystemSearch, "Suche mehrere Literale oder reguläre Ausdrücke mit Globfiltern und Kontextzeilen im indexierten Workspace. Bei queries steht jedes Arrayelement für genau einen Suchbegriff; Pipe-Alternativen sind nur mit matchMode regex zulässig.", ToolRiskClass.ReadOnly, FileSearchSchema()),
             Client(ClientToolNames.FileSystemWriteText, "Schreibe oder überschreibe eine Textdatei atomar im freigegebenen Workspace.", ToolRiskClass.LocalMutation, WriteTextSchema()),
+            Client(ClientToolNames.FileSystemReplaceText, "Ersetze einen exakt gelesenen Textblock atomar in einer vorhandenen Workspace-Datei. Verwende oldText/newText mit unveränderten Zeichen statt HTML-Entities; standardmäßig muss oldText genau einmal vorkommen.", ToolRiskClass.LocalMutation, ReplaceTextSchema()),
             Client(ClientToolNames.FileSystemMove, "Verschiebe eine Datei oder einen Ordner innerhalb des freigegebenen Workspace.", ToolRiskClass.LocalMutation, MoveSchema()),
             Client(ClientToolNames.FileSystemProposePatch, "Schlage einen Patch für eine vorhandene Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "patch"], ("path", "string"), ("patch", "string"))),
             Client(ClientToolNames.FileSystemProposeCreate, "Schlage das Erstellen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "content"], ("path", "string"), ("content", "string"))),
@@ -323,11 +332,15 @@ public sealed class AgentToolCatalog
         """);
 
     private static JsonElement FileSearchSchema() => Parse("""
-        {"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"queries":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string"}},"matchMode":{"type":"string","enum":["literal","regex"]},"includeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"excludeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"maximumResults":{"type":"integer","minimum":1,"maximum":1000},"contextLines":{"type":"integer","minimum":0,"maximum":5}},"required":["path"],"additionalProperties":false}
+        {"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string","description":"Ein einzelner Suchausdruck; im literal-Modus wird der ältere Wert a|b kompatibel in zwei Literale geteilt."},"queries":{"type":"array","minItems":1,"maxItems":64,"description":"Gebündelte Suchbegriffe. Jedes Element enthält genau ein Literal oder genau einen regulären Ausdruck.","items":{"type":"string"}},"matchMode":{"type":"string","enum":["literal","regex"]},"includeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"excludeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"maximumResults":{"type":"integer","minimum":1,"maximum":1000},"contextLines":{"type":"integer","minimum":0,"maximum":5}},"required":["path"],"additionalProperties":false}
         """);
 
     private static JsonElement WriteTextSchema() => Parse("""
         {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"expectedSha256":{"type":"string"}},"required":["path","content"],"additionalProperties":false}
+        """);
+
+    private static JsonElement ReplaceTextSchema() => Parse("""
+        {"type":"object","properties":{"path":{"type":"string"},"oldText":{"type":"string"},"newText":{"type":"string"},"expectedSha256":{"type":"string"},"replaceAll":{"type":"boolean"}},"required":["path","oldText","newText"],"additionalProperties":false}
         """);
 
     private static JsonElement MoveSchema() => Parse("""
@@ -356,7 +369,7 @@ public sealed class AgentToolCatalog
         + name + "\"],\"additionalProperties\":false}");
 
     private static JsonElement ProcessSchema() => Parse("""
-        {"type":"object","properties":{"preset":{"type":"string","enum":["git.status","git.diff","dotnet.build","dotnet.test","repository.build","repository.verify","repository.start","code.run","code.test"]},"target":{"type":"string","description":"Optionaler, stets relativ zum freigegebenen GO-Workspace aufgelöster Dateipfad."}},"required":["preset"],"additionalProperties":false}
+        {"type":"object","properties":{"preset":{"type":"string","enum":["git.status","git.diff","dotnet.build","dotnet.test","repository.build","repository.verify","repository.start","code.run","code.test"]},"target":{"type":"string","description":"Optionaler relativer Datei-, Projekt- oder Solutionpfad. Wird von dotnet.build, dotnet.test, code.run, code.test und unterstützten repository.verify-Abläufen verwendet."}},"required":["preset"],"additionalProperties":false}
         """);
 
     private static JsonElement ProcessRunSchema() => Parse("""

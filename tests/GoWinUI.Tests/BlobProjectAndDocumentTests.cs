@@ -203,7 +203,7 @@ public sealed class BlobProjectAndDocumentTests
             maximumMessageCount: 1);
         var wrongModel = await chats.ListSessionContextPreparationsAsync(
             session.Id,
-            "poolside/laguna-s-2.1",
+            "qwen3-coder-next",
             maximumMessageCount: 1);
 
         Assert.NotNull(restored);
@@ -216,42 +216,6 @@ public sealed class BlobProjectAndDocumentTests
         Assert.Single(reusable);
         Assert.Equal(preparation.CacheKey, reusable[0].CacheKey);
         Assert.Empty(wrongModel);
-    }
-
-    [Fact]
-    public async Task PreparedSpeechIsPersistedForTheSourceMessageAndSession()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Persistente Vorlesefassung");
-        var message = await chats.AddMessageAsync(
-            session.Id,
-            ChatRole.Assistant,
-            "Die fachliche Originalantwort.",
-            MessageStatus.Completed);
-        var preparation = new SpeechPreparation(
-            new string('c', 64),
-            session.Id,
-            message.Id,
-            "AI-Nachricht",
-            new string('d', 64),
-            "openai/gpt-oss-120b",
-            "Die flüssig aufbereitete Vorlesefassung.",
-            DateTimeOffset.UtcNow,
-            "[{\"id\":\"u0001\",\"text\":\"Die fachliche Originalantwort.\"}]",
-            "[{\"id\":\"s0001\",\"text\":\"Vorlesefassung.\",\"sourceUnitIds\":[\"u0001\"]}]");
-
-        await chats.SaveSpeechPreparationAsync(preparation);
-        var restored = await chats.GetSpeechPreparationAsync(preparation.CacheKey);
-
-        Assert.NotNull(restored);
-        Assert.Equal(preparation.SessionId, restored.SessionId);
-        Assert.Equal(preparation.SourceMessageId, restored.SourceMessageId);
-        Assert.Equal(preparation.SourceHash, restored.SourceHash);
-        Assert.Equal(preparation.ModelId, restored.ModelId);
-        Assert.Equal(preparation.PreparedText, restored.PreparedText);
-        Assert.Equal(preparation.SourceUnitsJson, restored.SourceUnitsJson);
-        Assert.Equal(preparation.SegmentsJson, restored.SegmentsJson);
     }
 
     [Fact]

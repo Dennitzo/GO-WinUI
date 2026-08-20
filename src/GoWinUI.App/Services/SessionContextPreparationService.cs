@@ -29,7 +29,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         Guid sessionId,
         IReadOnlyList<ChatMessage> history,
         string currentPrompt,
-        string preferredGeneralModelId,
+        string selectedModelId,
         bool coding,
         SessionContextProfile profile,
         int? knownContextLength,
@@ -47,7 +47,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         var historyRevision = CreateHistoryRevision(eligible);
         var (modelId, contextLength) = await ResolveModelAsync(
             client,
-            preferredGeneralModelId,
+            selectedModelId,
             coding,
             knownContextLength,
             cancellationToken).ConfigureAwait(false);
@@ -579,6 +579,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             SessionId: sessionId.ToString("D"),
             AllowedServerTools: [],
             PreferredGeneralModelId: coding ? null : modelId,
+            PreferredCodeModelId: coding ? modelId : null,
             ConversationProfile: profile == SessionContextProfile.Audiobook
                 ? ConversationProfile.Audiobook
                 : ConversationProfile.General);
@@ -633,14 +634,14 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
 
     private static async Task<(string ModelId, int ContextLength)> ResolveModelAsync(
         GoAiClient client,
-        string preferredGeneralModelId,
+        string selectedModelId,
         bool coding,
         int? knownContextLength,
         CancellationToken cancellationToken)
     {
         if (!coding && knownContextLength is >= 2_048)
         {
-            return (preferredGeneralModelId, knownContextLength.Value);
+            return (selectedModelId, knownContextLength.Value);
         }
         var status = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
         if (!status.ProviderReachable)
@@ -648,14 +649,16 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             throw new InvalidOperationException("Die Modellkontextlänge für den Sitzungsverlauf konnte nicht ermittelt werden.");
         }
         var model = coding
-            ? status.Models.FirstOrDefault(static item => item.Downloaded && item.Role == "code")
+            ? status.Models.FirstOrDefault(item => item.Downloaded
+                && item.Role == "code"
+                && string.Equals(item.Id, selectedModelId, StringComparison.OrdinalIgnoreCase))
             : status.Models.FirstOrDefault(item => item.Downloaded
-                && string.Equals(item.Id, preferredGeneralModelId, StringComparison.OrdinalIgnoreCase));
+                && string.Equals(item.Id, selectedModelId, StringComparison.OrdinalIgnoreCase));
         if (model is null)
         {
             throw new InvalidOperationException(coding
-                ? "Das konfigurierte Laguna-Codingmodell ist nicht verfügbar."
-                : $"Das ausgewählte General-AI-Modell '{preferredGeneralModelId}' ist nicht verfügbar.");
+                ? $"Das ausgewählte Codingmodell '{selectedModelId}' ist nicht verfügbar."
+                : $"Das ausgewählte General-AI-Modell '{selectedModelId}' ist nicht verfügbar.");
         }
         return (model.Id, Math.Max(2_048, knownContextLength ?? model.ContextTokens));
     }

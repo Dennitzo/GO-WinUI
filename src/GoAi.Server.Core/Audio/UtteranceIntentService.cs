@@ -17,6 +17,13 @@ public sealed class UtteranceIntentService
     {
         "äh", "ähm", "hm", "hmm", "mhm", "uh", "um",
     };
+    private static readonly string[] QuestionPrefixes =
+    [
+        "wer ", "was ", "wie ", "wo ", "wann ", "warum ", "wieso ", "weshalb ",
+        "welche ", "welcher ", "welches ", "kann ", "kannst ", "können ",
+        "könnte ", "könntest ", "ist ", "sind ", "hat ", "haben ", "darf ",
+        "soll ", "muss ",
+    ];
 
     private readonly GoAiServerOptions _options;
     private readonly GpuLeaseScheduler _scheduler;
@@ -52,6 +59,15 @@ public sealed class UtteranceIntentService
         {
             return new(UtteranceIntent.Cancel);
         }
+        if (_scheduler.ActiveActivities.Any(static activity =>
+                activity.Mode == GpuLeaseMode.Exclusive
+                && string.Equals(activity.Workload, "llm-code", StringComparison.Ordinal)))
+        {
+            // Qwen owns LM Studio while a coding run is active. Voice input must
+            // remain responsive instead of queuing an otherwise hidden General-AI
+            // intent request behind that potentially long run.
+            return ClassifyLocallyDuringCoding(text);
+        }
 
         await using var lease = await _scheduler.AcquireAsync(
             "voice-intent", null, GpuLeaseMode.Shared, cancellationToken).ConfigureAwait(false);
@@ -74,6 +90,22 @@ public sealed class UtteranceIntentService
             cancellationToken).ConfigureAwait(false);
 
         return Parse(result.Content, text);
+    }
+
+    internal static UtteranceIntentResponse ClassifyLocallyDuringCoding(string text)
+    {
+        var normalized = text.Trim();
+        if (normalized.Length < 3)
+        {
+            return new(UtteranceIntent.Noise);
+        }
+
+        var comparison = normalized.ToLowerInvariant();
+        var intent = normalized.EndsWith('?')
+            || QuestionPrefixes.Any(prefix => comparison.StartsWith(prefix, StringComparison.Ordinal))
+                ? UtteranceIntent.Question
+                : UtteranceIntent.Instruction;
+        return new(intent, normalized);
     }
 
     private static UtteranceIntentResponse Parse(string? content, string original)

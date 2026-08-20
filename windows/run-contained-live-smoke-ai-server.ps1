@@ -8,9 +8,7 @@ param(
     [string] $ProviderDataRoot = 'C:\ProgramData\GO-AI-Server',
 
     [ValidateRange(1024, 65535)]
-    [int] $GatewayPort = 7090,
-
-    [switch] $SkipWindowsTtsFallback
+    [int] $GatewayPort = 7090
 )
 
 Set-StrictMode -Version 2.0
@@ -123,7 +121,6 @@ try {
         RootCertificatePath = (Join-Path $ProviderDataRoot 'Caddy\data\caddy\pki\authorities\local\root.crt')
         SmokeClientPath = $SmokeClientPath
         OutputDirectory = (Join-Path $PSScriptRoot '..\artifacts\go-ai-server\live-smoke-contained')
-        SkipWindowsTtsFallback = $SkipWindowsTtsFallback
     }
     & (Join-Path $PSScriptRoot 'live-smoke-ai-server.ps1') @smokeArguments
 }

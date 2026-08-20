@@ -47,9 +47,8 @@ public interface IChatRepository
         SessionContextProfile profile = SessionContextProfile.General,
         CancellationToken cancellationToken = default);
     Task SaveSessionContextPreparationAsync(SessionContextPreparation preparation, CancellationToken cancellationToken = default);
-    Task<SpeechPreparation?> GetSpeechPreparationAsync(string cacheKey, CancellationToken cancellationToken = default);
-    Task SaveSpeechPreparationAsync(SpeechPreparation preparation, CancellationToken cancellationToken = default);
     Task SetToolExecutionAsync(Guid messageId, ToolExecutionInfo execution, CancellationToken cancellationToken = default);
+    Task SetCodeDiffAsync(Guid messageId, string? codeDiff, CancellationToken cancellationToken = default);
     Task<int> MarkStreamingMessagesInterruptedAsync(CancellationToken cancellationToken = default);
 }
 
@@ -118,6 +117,7 @@ public interface IGoAiRunRepository
 public interface IClientToolExecutionRepository
 {
     Task<ClientToolExecutionRecord?> GetAsync(string proposalId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ClientToolExecutionRecord>> ListPendingSubmissionsAsync(Guid localRunId, CancellationToken cancellationToken = default);
     Task<ClientToolExecutionRecord> BeginAsync(ClientToolExecutionRecord execution, CancellationToken cancellationToken = default);
     Task<ClientToolExecutionRecord> CompleteAsync(string proposalId, string resultJson, CancellationToken cancellationToken = default);
     Task MarkSubmittedAsync(string proposalId, CancellationToken cancellationToken = default);

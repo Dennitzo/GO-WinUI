@@ -52,6 +52,7 @@ public sealed record RunRequest(
     IReadOnlyList<string>? AllowedServerTools = null,
     WorkspaceDescriptor? Workspace = null,
     string? PreferredGeneralModelId = null,
+    string? PreferredCodeModelId = null,
     DocumentContextDescriptor? DocumentContext = null,
     SessionContextDescriptor? SessionContext = null,
     ConversationProfile? ConversationProfile = null);

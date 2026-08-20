@@ -1,5 +1,7 @@
 using GoAi.Server.Core.Configuration;
+using GoAi.Server.Core.Models;
 using GoAi.Server.Core.Runtime;
+using GoAi.Server.Core.Workers;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
 
@@ -18,12 +20,20 @@ internal sealed class ManagedServiceController : IDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ServerRuntimeState _runtime;
     private readonly GoAiServerOptions _options;
+    private readonly WorkerApiClient _workers;
+    private readonly LmStudioClient _lmStudio;
     private bool _disposed;
 
-    public ManagedServiceController(ServerRuntimeState runtime, IOptions<GoAiServerOptions> options)
+    public ManagedServiceController(
+        ServerRuntimeState runtime,
+        IOptions<GoAiServerOptions> options,
+        WorkerApiClient workers,
+        LmStudioClient lmStudio)
     {
         _runtime = runtime;
         _options = options.Value;
+        _workers = workers;
+        _lmStudio = lmStudio;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -86,7 +96,23 @@ internal sealed class ManagedServiceController : IDisposable
                 return;
             }
 
-            _runtime.SetGatewayState("Wird beendet", "AI-Worker werden gestoppt. LM Studio bleibt aktiv.");
+            _runtime.SetGatewayState("Wird beendet", "AI-Modelle werden entladen und Worker gestoppt. LM Studio bleibt aktiv.");
+            try
+            {
+                await _workers.ReleaseAllAsync(exceptWorker: null, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                _runtime.WriteLog("Warning", "services.workers.release_failed", $"Worker-Modelle konnten nicht vollstÃ¤ndig entladen werden ({exception.GetType().Name}).");
+            }
+            try
+            {
+                await _lmStudio.UnloadAllModelsAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                _runtime.WriteLog("Warning", "services.lmstudio.models_unload_failed", $"LM-Studio-Modelle konnten nicht vollstÃ¤ndig entladen werden ({exception.GetType().Name}).");
+            }
             await TryStopDockerServicesAsync(cancellationToken).ConfigureAwait(false);
             _runtime.WriteLog("Information", "services.lmstudio.preserved", "LM Studio bleibt für andere Anwendungen im lokalen Netzwerk aktiv.");
             _runtime.SetGatewayState("Beendet", "GO-AI-Dienste wurden beendet. LM Studio bleibt aktiv.");
