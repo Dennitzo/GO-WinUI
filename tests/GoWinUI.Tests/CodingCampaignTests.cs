@@ -1094,7 +1094,7 @@ public sealed class CodingCampaignTests
     }
 
     [Fact]
-    public async Task RunWithoutChangedCodeLinesIsHiddenAndRetriedWithAProgressCorrection()
+    public async Task RunWithoutChangedCodeLinesIsHiddenAndRetriedWithTheSameAutonomousPrompt()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "no-progress-workspace")).FullName;
@@ -1110,15 +1110,15 @@ public sealed class CodingCampaignTests
         await service.SelectAsync(session.Id, definition.Descriptor.Id);
         var campaign = (await workflows.GetForSessionAsync(session.Id))!;
         await service.RunAsync(session.Id);
-        await agent.WaitForPromptAsync("keine hinzugefÃ¼gte oder entfernte Codezeile", TimeSpan.FromSeconds(5));
         await agent.WaitForRunsAsync(2, TimeSpan.FromSeconds(5));
         await service.StopAsync(session.Id);
 
         var iterations = await workflows.ListIterationsAsync(campaign.Id);
         Assert.Contains(iterations, static iteration => iteration.Status == "completed" && iteration.AssistantMessageId is null);
-        Assert.Contains(agent.Prompts, prompt =>
-            prompt.Contains("Verbindliche Korrektur wegen fehlenden Codefortschritts", StringComparison.Ordinal)
-            && prompt.Contains("globale Dirty Worktree", StringComparison.Ordinal));
+        Assert.True(agent.Prompts.Length >= 2);
+        Assert.Equal(agent.Prompts[0], agent.Prompts[1]);
+        Assert.All(agent.Prompts, prompt =>
+            Assert.DoesNotContain("Verbindliche Korrektur wegen fehlenden Codefortschritts", prompt, StringComparison.Ordinal));
         var visibleReports = (await chats.ListMessagesAsync(session.Id))
             .Count(static message => message.Content.Contains("### Prozessbericht", StringComparison.Ordinal));
         Assert.True(visibleReports < agent.RunCount);
@@ -1418,7 +1418,7 @@ public sealed class CodingCampaignTests
         public int AttemptCount => Volatile.Read(ref _attemptCount);
         public int RunCount => Volatile.Read(ref _runCount);
         public int CancelCount => Volatile.Read(ref _cancelCount);
-        public IReadOnlyList<string> Prompts => _prompts.ToArray();
+        public string[] Prompts => _prompts.ToArray();
         public IReadOnlyList<PromptTriggerAction?> TriggerActions => _triggerActions.ToArray();
         public int FailuresRemaining
         {

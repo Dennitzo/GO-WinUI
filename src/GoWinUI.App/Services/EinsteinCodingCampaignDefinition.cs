@@ -138,12 +138,18 @@ public sealed class EinsteinCodingCampaignDefinition(CodingProofVerifier proofVe
         """;
 
     public string BuildIterationPrompt(int iteration, string challenge) => $$"""
-        Setze den vorhandenen Einstein-Workflow in Iteration {{iteration}} fort. Verwende vorhandenen Code, Fälle,
+        Arbeite im vorhandenen Einstein-Workflow in Iteration {{iteration}}. Verwende vorhandenen Code, Fälle,
         Beweise, fehlgeschlagene Ansätze, Simulationsdaten und Erkenntnisse; beginne kein Parallelprojekt.
         Behandle ausschließlich einstein_cases.json als autoritativen Fallkatalog und erzeuge keine Backup-, Kopie-
         oder Alternativkataloge mit Fallklassifikationen.
 
         Forschungsschwerpunkt: {{challenge}}
+
+        Bestimme das konkrete physikalische Modell, die mathematische Reduktion, das numerische oder symbolische
+        Verfahren und die zu ändernden Dateien selbst anhand des aktuellen Erkenntnisstands. Die im Workflow genannten
+        Modelle sind ein offener Möglichkeitsraum und keine abzuarbeitende Reihenfolge. Du darfst einen vielversprechenden
+        Ansatz über mehrere Iterationen vertiefen oder begründet zu einem anderen Verfahren wechseln. Erzeuge jedoch keine
+        kosmetische Codeänderung als Ersatz für eine fachliche Berechnung, Verifikation oder neue Testabdeckung.
 
         Leite ein anerkanntes exaktes, effektives, semiklassisches oder perturbatives Modell mit Annahmen und
         Gültigkeitsbereich her. Löse eine klar definierte Reduktion analytisch oder numerisch. Prüfe Feldgleichung,

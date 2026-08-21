@@ -180,7 +180,9 @@ public static class TgaAgentPolicies
           noch nicht verfolgte Textdateien in die Prüfung auf; lies und kontrolliere diese ebenso sorgfältig wie verfolgte Diffs.
         - Verwende Git ausschließlich lesend für Status und Diff, solange der Nutzer nicht ausdrücklich um Staging oder einen
           Commit bittet. Führe insbesondere niemals selbstständig `git add`, `git commit`, `git reset`, `git checkout` oder
-          `git clean` aus. Ein grüner Test- oder Buildlauf benötigt keinen veränderten Git-Index.
+          `git restore`, `git stash` oder `git clean` aus. Ein grüner Test- oder Buildlauf benötigt keinen veränderten
+          Git-Index. GO ermittelt Fortschritt gegen einen eigenen unveränderlichen Lauf-Baseline-Snapshot; Staging kann
+          diesen Nachweis nicht verbessern und ist technisch gesperrt.
         - Prüfe vor Git-Status und Diff vorhandene Ignore-Regeln. Das git.status-Preset fasst umfangreiche generierte Verzeichnisse
           wie .venv, node_modules, __pycache__, bin und obj absichtlich zusammen; fordere diese Dateien nicht einzeln an. Fehlen
           passende Ignore-Regeln, ergänze sie. Bereits fremd gestagte oder verfolgte Generatorausgaben werden ohne ausdrückliche

@@ -25,6 +25,12 @@ public sealed class LocalToolBroker(
     private const int MaximumProcessStreamCharacters = 1_900_000;
     private const string EmptyContentSha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
+    private static readonly HashSet<string> ReadOnlyGitCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "blame", "cat-file", "check-attr", "check-ignore", "count-objects", "describe", "diff",
+        "for-each-ref", "grep", "log", "ls-files", "ls-tree", "merge-base", "name-rev", "rev-parse",
+        "shortlog", "show", "show-ref", "status",
+    };
     private readonly AsyncLocal<string?> _executionWorkspace = new();
     private readonly AsyncLocal<Guid?> _executionSession = new();
     private readonly LeanProofService _leanProof = leanProof ?? new LeanProofService();
@@ -2682,6 +2688,7 @@ public sealed class LocalToolBroker(
         var executableIsInsideWorkspace = Path.IsPathFullyQualified(executable)
             && IsWithin(Workspace(), executable);
         ValidatePythonEnvironmentBoundary(executable, arguments, executableIsInsideWorkspace);
+        ValidateGitProcessBoundary(executable, arguments);
         if (name.Equals("powershell.exe", StringComparison.OrdinalIgnoreCase)
             || name.Equals("pwsh.exe", StringComparison.OrdinalIgnoreCase)
             || name.Equals("pwsh", StringComparison.OrdinalIgnoreCase))
@@ -2712,6 +2719,57 @@ public sealed class LocalToolBroker(
             {
                 throw new InvalidOperationException("cmd darf ausschließlich eine .bat- oder .cmd-Datei aus dem Workspace starten.");
             }
+        }
+    }
+
+    internal static void ValidateGitProcessBoundary(string executable, IReadOnlyList<string> arguments)
+    {
+        var name = Path.GetFileName(executable);
+        if (!name.Equals("git", StringComparison.OrdinalIgnoreCase)
+            && !name.Equals("git.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        string? command = null;
+        for (var index = 0; index < arguments.Count; index++)
+        {
+            var argument = arguments[index].Trim();
+            if (argument.Length == 0) continue;
+
+            if (argument is "--version" or "-v" or "--help" or "-h"
+                or "--no-pager" or "--paginate" or "--no-replace-objects"
+                or "--literal-pathspecs" or "--glob-pathspecs" or "--noglob-pathspecs" or "--icase-pathspecs")
+            {
+                continue;
+            }
+
+            if (argument.StartsWith('-'))
+            {
+                throw new InvalidOperationException(
+                    $"Die globale Git-Option '{argument}' ist in process.run nicht erlaubt. "
+                    + "Verwende workingDirectory sowie die typisierten Git-Status- und Diff-Presets.");
+            }
+
+            command = argument;
+            break;
+        }
+
+        if (command is null) return;
+        if (!ReadOnlyGitCommands.Contains(command))
+        {
+            throw new InvalidOperationException(
+                $"Der Git-Unterbefehl '{command}' ist im autonomen Coding-Modus nicht erlaubt. "
+                + "Der Agent darf den echten Git-Index, Referenzen und den Worktree nicht über Git verändern. "
+                + "Dateiänderungen erfolgen über die Dateitools; für Git stehen ausschließlich lesende Befehle zur Verfügung.");
+        }
+
+        if (arguments.Any(static argument =>
+                argument.Equals("--output", StringComparison.OrdinalIgnoreCase)
+                || argument.StartsWith("--output=", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                "Git-Ausgaben dürfen in process.run keine Dateien schreiben. Verwende die erfasste Prozessausgabe oder das Git-Diff-Preset.");
         }
     }
 

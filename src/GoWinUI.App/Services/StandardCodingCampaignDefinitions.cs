@@ -29,7 +29,7 @@ public abstract class StandardCodingCampaignDefinition : ICodingCampaignDefiniti
     public string GetChallenge(int iteration) => Challenges[Math.Abs(iteration) % Challenges.Count];
     public abstract string BuildBootstrapPrompt();
     public virtual string BuildIterationPrompt(int iteration, string challenge) => $$"""
-        Setze den bestehenden Coding-Workflow „{{Descriptor.Title}}“ in Iteration {{iteration}} fort.
+        Arbeite im bestehenden Coding-Workflow „{{Descriptor.Title}}“ in Iteration {{iteration}}.
         Aktueller Schwerpunkt: {{challenge}}
         Verwende vorhandenen Code, Daten, Tests und dokumentierte Fehlschläge. Führe eine fachlich sinnvolle
         Erweiterung aus, aktualisiere Plots und maschinenlesbare Daten atomar, starte alle Prüfungen und behebe Fehler

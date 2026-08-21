@@ -135,6 +135,44 @@ public sealed class LocalToolBrokerValidationTests
             executableIsInsideWorkspace: false);
     }
 
+    [Theory]
+    [InlineData("add", "einstein_engine.py")]
+    [InlineData("reset", "--hard")]
+    [InlineData("restore", "einstein_engine.py")]
+    [InlineData("checkout", "--", "einstein_engine.py")]
+    [InlineData("commit", "-m", "agent change")]
+    [InlineData("stash", "push")]
+    [InlineData("clean", "-fd")]
+    [InlineData("update-index", "--refresh")]
+    public void AutonomousProcessCannotMutateGitState(string command, params string[] arguments)
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            LocalToolBroker.ValidateGitProcessBoundary("git.exe", [command, .. arguments]));
+
+        Assert.Contains("nicht erlaubt", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("diff", "--", "einstein_engine.py")]
+    [InlineData("log", "-5", "--oneline")]
+    [InlineData("show", "HEAD:einstein_engine.py")]
+    [InlineData("grep", "Ricci")]
+    [InlineData("--no-pager", "diff", "--", "einstein_engine.py")]
+    public void ReadOnlyGitInspectionRemainsAvailable(string command, params string[] arguments)
+    {
+        LocalToolBroker.ValidateGitProcessBoundary("git", [command, .. arguments]);
+    }
+
+    [Fact]
+    public void GitCannotRedirectOutputOrSelectAnAlternateRepositoryBoundary()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            LocalToolBroker.ValidateGitProcessBoundary("git", ["diff", "--output=changes.patch"]));
+        Assert.Throws<InvalidOperationException>(() =>
+            LocalToolBroker.ValidateGitProcessBoundary("git", ["-C", "..", "status"]));
+    }
+
     [Fact]
     public void EmptyPythonInvocationCannotMasqueradeAsVerification()
     {

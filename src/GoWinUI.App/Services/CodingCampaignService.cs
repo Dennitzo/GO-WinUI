@@ -43,10 +43,13 @@ public sealed class CodingCampaignService(
     private const int MaximumPublishedTextLength = 750_000;
     private const long MaximumPlotLength = 50L * 1024 * 1024;
     private const string ProcessReportDiffRule = """
-        Behaupte unter **Aktion** ausschlieÃŸlich Ã„nderungen, die du in genau diesem Lauf selbst vorgenommen hast.
-        Bereits zuvor vorhandene Dirty-Worktree-Ã„nderungen, erneut ausgefÃ¼hrte PrÃ¼fungen sowie neu gerenderte Plots,
-        Bilder, PDFs, Logs und andere generierte Ausgaben sind kein Codefortschritt. GO verÃ¶ffentlicht den Bericht nur,
-        wenn der isolierte Lauf-Diff tatsÃ¤chlich hinzugefÃ¼gte oder entfernte Zeilen in einer Quell- oder Testdatei enthÃ¤lt.
+        Behaupte unter **Aktion** ausschließlich Änderungen, die du in genau diesem Lauf selbst vorgenommen hast.
+        Bereits zuvor vorhandene Dirty-Worktree-Änderungen, erneut ausgeführte Prüfungen sowie neu gerenderte Plots,
+        Bilder, PDFs, Logs und andere generierte Ausgaben sind kein Codefortschritt. GO veröffentlicht den Bericht nur,
+        wenn der isolierte Lauf-Diff tatsächlich hinzugefügte oder entfernte Zeilen in einer Quell- oder Testdatei enthält.
+        Rein kosmetische Umbenennungen, Formatierung, Kommentare oder bedeutungslose Variablenextraktionen sind kein
+        fachlicher Fortschritt. Verändere den echten Git-Index niemals; insbesondere sind git add, reset, restore,
+        checkout und commit verboten. GO ermittelt den Lauf-Diff selbst.
         """;
     private const string AutonomousChallenge = "Autonom gewählter nächster Arbeitsschritt";
     private const string ProcessReportInstruction = """
@@ -345,7 +348,6 @@ public sealed class CodingCampaignService(
         var pendingInstruction = initialInstruction;
         var supervisorFailureCount = 0;
         var consecutiveNoProgressSteps = 0;
-        string? noProgressInstruction = null;
         try
         {
             while (!cancellationToken.IsCancellationRequested)
@@ -384,9 +386,7 @@ public sealed class CodingCampaignService(
                         continue;
                     }
 
-                    var challenge = noProgressInstruction is not null
-                        ? "Wirkungslosen Workflow-Schritt korrigieren"
-                        : state.Phase switch
+                    var challenge = state.Phase switch
                     {
                         CodingCampaignPhase.Bootstrap => "Projektgrundlage erstellen",
                         CodingCampaignPhase.Correction => "Validierungsfehler selbstständig beheben",
@@ -406,8 +406,7 @@ public sealed class CodingCampaignService(
                         definition,
                         state,
                         challenge,
-                        pendingInstruction,
-                        noProgressInstruction);
+                        pendingInstruction);
                     var response = await ExecuteAgentRunAsync(
                         state, definition, prompt, challenge, generation, cancellationToken).ConfigureAwait(false);
                     if (!IsCurrentLoop(campaignId, generation)) return;
@@ -421,14 +420,13 @@ public sealed class CodingCampaignService(
                     if (!HasChangedCodeLines(response.CodeDiff))
                     {
                         consecutiveNoProgressSteps++;
-                        noProgressInstruction = BuildNoProgressInstruction(consecutiveNoProgressSteps);
                         await chats.DeleteMessageAsync(response.Id, cancellationToken).ConfigureAwait(false);
 
                         state = await repository.GetAsync(campaignId, cancellationToken).ConfigureAwait(false)
-                            ?? throw new InvalidOperationException("Der gespeicherte Coding-Workflow wurde wÃ¤hrend des Laufs entfernt.");
+                            ?? throw new InvalidOperationException("Der gespeicherte Coding-Workflow wurde während des Laufs entfernt.");
                         state = state with
                         {
-                            CurrentChallenge = "Wirkungslosen Workflow-Schritt korrigieren",
+                            CurrentChallenge = AutonomousChallenge,
                             LastError = null,
                             UpdatedAt = DateTimeOffset.UtcNow,
                         };
@@ -454,7 +452,6 @@ public sealed class CodingCampaignService(
                     // Consume a user instruction only after a completed model run. A transient error therefore retries
                     // the same instruction instead of silently replacing it with an autonomous continuation.
                     pendingInstruction = null;
-                    noProgressInstruction = null;
                     consecutiveNoProgressSteps = 0;
                     state = await repository.GetAsync(campaignId, cancellationToken).ConfigureAwait(false)
                         ?? throw new InvalidOperationException("Der gespeicherte Coding-Workflow wurde während des Laufs entfernt.");
@@ -988,21 +985,16 @@ public sealed class CodingCampaignService(
         ICodingCampaignDefinition definition,
         CodingCampaignState state,
         string challenge,
-        string? instruction,
-        string? noProgressInstruction = null)
+        string? instruction)
     {
         var prompt = state.Phase switch
         {
             CodingCampaignPhase.Bootstrap => definition.BuildBootstrapPrompt(),
             CodingCampaignPhase.Correction when ParseValidationProblems(state.ValidationJson) is { Length: > 0 } issues =>
                 definition.BuildCorrectionPrompt(state.Iteration, challenge, issues),
-            _ => BuildAutonomousContinuationPrompt(definition, state),
+            _ => BuildAutonomousRunPrompt(definition, state),
         };
         prompt += "\n\n" + ProcessReportInstruction + "\n\n" + ProcessReportDiffRule;
-        if (!string.IsNullOrWhiteSpace(noProgressInstruction))
-        {
-            prompt += "\n\nVerbindliche Korrektur wegen fehlenden Codefortschritts:\n" + noProgressInstruction;
-        }
         return string.IsNullOrWhiteSpace(instruction)
             ? prompt
             : prompt + "\n\nZusätzliche aktuelle Nutzeranweisung:\n" + instruction;
@@ -1064,37 +1056,23 @@ public sealed class CodingCampaignService(
             or ".vue" or ".svelte" or ".razor" or ".xaml";
     }
 
-    internal static string BuildNoProgressInstruction(int consecutiveSteps)
-    {
-        var rotation = consecutiveSteps >= 2
-            ? "Verlasse den zuletzt wiederholten Schwerpunkt und wÃ¤hle eine andere offene Code- oder TestlÃ¼cke. "
-            : string.Empty;
-        return $"""
-            Der unmittelbar vorherige Lauf hat keine hinzugefÃ¼gte oder entfernte Codezeile im isolierten Lauf-Diff
-            erzeugt (Stillstand in Folge: {Math.Max(1, consecutiveSteps)}). Wiederhole nicht nur vorhandene Tests,
-            Checker, Generatoren, git status oder git diff. Neu erzeugte Plots, PDFs, Logs und Datendateien erfÃ¼llen
-            diese Anforderung nicht. {rotation}Nimm eine fachlich begrÃ¼ndete Ã„nderung an einer Quell- oder Testdatei
-            vor und prÃ¼fe genau diese Ã„nderung. Der globale Dirty Worktree beweist keinen Fortschritt dieses Laufs.
-            Ist der bisherige Ansatz ausgeschÃ¶pft, erschlieÃŸe eine neue belastbare Fragestellung innerhalb des
-            Workflow-Themas, statt denselben korrekten Stand erneut zu verifizieren.
-            """;
-    }
-
-    private static string BuildAutonomousContinuationPrompt(
+    private static string BuildAutonomousRunPrompt(
         ICodingCampaignDefinition definition,
         CodingCampaignState state) => $$"""
-        Setze den geladenen Coding-Workflow „{{definition.Descriptor.Title}}“ im vorhandenen Workspace autonom und
-        ohne Rückfrage fort. Analysiere zuerst Code, Daten, Lösungen, Beweise, Testresultate und dokumentierte
+        Arbeite im geladenen Coding-Workflow „{{definition.Descriptor.Title}}“ im vorhandenen Workspace autonom und
+        ohne Rückfrage. Analysiere zuerst Code, Daten, Lösungen, Beweise, Testresultate und dokumentierte
         Fehlschläge. Wähle danach selbst den fachlich sinnvollsten noch offenen, nicht redundanten Arbeitsschritt.
         Eine erfolgreich verifizierte Lösung beendet den Workflow nicht: Erschließe anschließend selbstständig die
-        nächste belastbare Fragestellung innerhalb des Workflow-Themas. Repariere bestehende Inkonsistenzen vor neuen
-        Erweiterungen. Verändere keine Abnahmekriterien, erfinde keine Ergebnisse und führe alle passenden Tests,
+        nächste belastbare Fragestellung innerhalb des Workflow-Themas. Du entscheidest anhand des Erkenntnisgewinns,
+        ob du einen bestehenden Ansatz vertiefst, eine Inkonsistenz behebst, ein anderes Verfahren erprobst oder eine
+        neue zulässige Modellreduktion implementierst. Die Themenliste ist ein Möglichkeitsraum und keine Reihenfolge.
+        Verändere keine Abnahmekriterien, erfinde keine Ergebnisse und führe alle passenden Tests,
         Verifikationen, Generatoren und Darstellungsprüfungen aus. Berichte im Ergebnis konkret über den tatsächlich
         gewählten Schritt, die Änderungen und die unabhängige Prüfung.
 
         Verbindliche workflow-spezifische Arbeits- und Abnahmeregeln:
 
-        {{definition.BuildIterationPrompt(state.Iteration, "Wähle den nächsten Schwerpunkt selbst anhand des Workspace-Stands.")}}
+        {{definition.BuildIterationPrompt(state.Iteration, "Wähle Ziel und Verfahren selbst anhand des Workspace-Stands.")}}
         """;
 
     private async Task<ChatSession> RequireCodingSessionAsync(Guid sessionId, CancellationToken cancellationToken)
