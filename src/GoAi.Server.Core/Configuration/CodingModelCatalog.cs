@@ -10,6 +10,7 @@ public static class CodingModelCatalog
 {
     public const string DeepSeekV4FlashId = "ud";
     public const string Qwen3CoderNextId = "qwen3-coder-next";
+    public const string GptOss120BId = "openai/gpt-oss-120b";
     public const string DefaultModelId = DeepSeekV4FlashId;
 
     public static IReadOnlyList<CodingModelProfile> Models { get; } =
@@ -24,6 +25,11 @@ public static class CodingModelCatalog
             "Qwen3-Coder-Next · Q6_K",
             262_144,
             "qwen-coder"),
+        new(
+            GptOss120BId,
+            "gpt-oss-120b · MXFP4",
+            131_072,
+            "gpt-oss-coder"),
     ];
 
     public static bool TryGet(string? modelId, out CodingModelProfile profile)

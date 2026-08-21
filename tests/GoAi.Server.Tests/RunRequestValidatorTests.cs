@@ -1,4 +1,5 @@
 using GoAi.Contracts;
+using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Gateway;
 
 namespace GoAi.Server.Tests;
@@ -63,6 +64,36 @@ public sealed class RunRequestValidatorTests
 
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
             request with { Limits = request.Limits! with { TimeoutSeconds = 14_401 } }));
+    }
+
+    [Theory]
+    [InlineData(CodingModelCatalog.DeepSeekV4FlashId)]
+    [InlineData(CodingModelCatalog.Qwen3CoderNextId)]
+    [InlineData(CodingModelCatalog.GptOss120BId)]
+    public void EveryCatalogCodingModelIsAccepted(string modelId)
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Behebe den Fehler und pr\u00fcfe die \u00c4nderung.")])],
+            ClientCapabilities: ["filesystem", "code", "process"],
+            PreferredCodeModelId: modelId);
+
+        RunRequestValidator.Validate(request);
+    }
+
+    [Fact]
+    public void UnknownCodingModelIsRejected()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Bearbeite das Projekt.")])],
+            PreferredCodeModelId: "unknown-coding-model");
+
+        var error = Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request));
+
+        Assert.Contains("supported coding model", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

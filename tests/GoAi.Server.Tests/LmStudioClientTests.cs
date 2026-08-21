@@ -47,6 +47,40 @@ public sealed class LmStudioClientTests
         Assert.Equal(1, handler.ModelRequests);
     }
 
+    [Fact]
+    public async Task GptOssCanBeAdvertisedAsGeneralAndCodingModelAtTheSameTime()
+    {
+        using var context = new TestServerContext();
+        context.Options.GeneralModelId = "openai/gpt-oss-120b";
+        context.Options.GeneralContextLength = 131_072;
+        var handler = new ModelStatusHandler("""
+            {
+              "models": [{
+                "type": "llm",
+                "key": "openai/gpt-oss-120b",
+                "display_name": "gpt-oss-120b",
+                "loaded_instances": [],
+                "max_context_length": 131072
+              }]
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        var status = await client.GetStatusAsync();
+        var matches = status.Models
+            .Where(model => string.Equals(model.Id, "openai/gpt-oss-120b", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        Assert.Equal(2, matches.Length);
+        Assert.Contains(matches, static model => model.Role == "general" && model.ContextTokens == 131_072);
+        Assert.Contains(matches, static model => model.Role == "code" && model.ContextTokens == 131_072);
+    }
+
     [Theory]
     [InlineData("89504E470D0A1A0A00000000", "image/png")]
     [InlineData("FFD8FFE000104A464946", "image/jpeg")]
@@ -333,7 +367,8 @@ public sealed class LmStudioClientTests
         _ = await client.CompleteChatAsync(
             "qwen3-coder-next",
             [new LmChatMessage("user", "Ändere die Datei und teste sie.")],
-            []);
+            [],
+            modelRole: "code");
 
         using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
         var root = request.RootElement;
@@ -367,7 +402,8 @@ public sealed class LmStudioClientTests
         _ = await client.CompleteChatAsync(
             "ud",
             [new LmChatMessage("user", "Analysiere und ändere das Projekt.")],
-            []);
+            [],
+            modelRole: "code");
 
         using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
         var root = request.RootElement;
@@ -375,6 +411,74 @@ public sealed class LmStudioClientTests
         Assert.Equal(0.95, root.GetProperty("top_p").GetDouble(), 3);
         Assert.False(root.TryGetProperty("top_k", out _));
         Assert.False(root.TryGetProperty("reasoning", out _));
+    }
+
+    [Fact]
+    public async Task GptOssCoderUsesOfficialSamplingAndHighReasoningProfile()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {
+              "status": "completed",
+              "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "Erledigt" }]
+              }],
+              "usage": { "input_tokens": 20, "output_tokens": 4 }
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.CompleteChatAsync(
+            "openai/gpt-oss-120b",
+            [new LmChatMessage("user", "Behebe den Fehler und prüfe die Änderung.")],
+            [],
+            modelRole: "code");
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        var root = request.RootElement;
+        Assert.Equal(1.0, root.GetProperty("temperature").GetDouble(), 3);
+        Assert.Equal(1.0, root.GetProperty("top_p").GetDouble(), 3);
+        Assert.Equal("high", root.GetProperty("reasoning").GetProperty("effort").GetString());
+        Assert.False(root.TryGetProperty("top_k", out _));
+    }
+
+    [Fact]
+    public async Task GptOssGeneralRoleKeepsTheExistingLowReasoningProfile()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {
+              "status": "completed",
+              "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "Antwort" }]
+              }],
+              "usage": { "input_tokens": 20, "output_tokens": 4 }
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.CompleteChatAsync(
+            "openai/gpt-oss-120b",
+            [new LmChatMessage("user", "Erkläre die Gleichung.")],
+            [],
+            modelRole: "general");
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        var root = request.RootElement;
+        Assert.Equal(0.2, root.GetProperty("temperature").GetDouble(), 3);
+        Assert.Equal("low", root.GetProperty("reasoning").GetProperty("effort").GetString());
     }
 
     [Fact]
@@ -613,7 +717,7 @@ public sealed class LmStudioClientTests
         }
     }
 
-    private sealed class ModelStatusHandler : HttpMessageHandler
+    private sealed class ModelStatusHandler(string responseJson = "{\"models\":[]}") : HttpMessageHandler
     {
         private int _modelRequests;
 
@@ -632,10 +736,7 @@ public sealed class LmStudioClientTests
             await Task.Delay(25, cancellationToken);
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(
-                    "{\"models\":[]}",
-                    Encoding.UTF8,
-                    "application/json"),
+                Content = new StringContent(responseJson, Encoding.UTF8, "application/json"),
             };
         }
     }

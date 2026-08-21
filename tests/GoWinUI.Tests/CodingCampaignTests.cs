@@ -267,6 +267,47 @@ public sealed class CodingCampaignTests
         Assert.Contains("live_progress", correction, StringComparison.Ordinal);
         Assert.Contains("sorry", iteration, StringComparison.Ordinal);
         Assert.Contains("complexified_spacetime", iteration, StringComparison.Ordinal);
+        Assert.Contains("nichtrotierenden", iteration, StringComparison.Ordinal);
+        Assert.Contains("Reihenentwicklung", iteration, StringComparison.Ordinal);
+        Assert.Contains("Komplexität vor dem Start", iteration, StringComparison.Ordinal);
+        Assert.Contains("schneller Vorabtest", iteration, StringComparison.Ordinal);
+        Assert.Contains("Tensor niemals selbst auf null", iteration, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EinsteinValidationRejectsVacuousZeroTensorAndUnconditionalBianchiChecks()
+    {
+        var workspace = CreateTemporaryWorkspace();
+        try
+        {
+            var proofs = Directory.CreateDirectory(Path.Combine(workspace, "proofs"));
+            File.WriteAllText(
+                Path.Combine(proofs.FullName, "bianchi_identity_check.py"),
+                """
+                import numpy as np
+
+                def test_schwarzschild_bianchi():
+                    einstein_covariant = np.zeros((4, 4))
+                    return einstein_covariant
+
+                def test_minkowski_bianchi():
+                    einstein_covariant = np.zeros((4, 4))
+                    return einstein_covariant
+
+                def test_kerr_bianchi():
+                    return []  # Keine weiteren Pruefungen noetig
+                """);
+            var issues = new List<string>();
+
+            EinsteinCodingCampaignDefinition.ValidateNoVacuousTensorCheckers(workspace, issues);
+
+            Assert.Contains(issues, issue => issue.Contains("selbst auf null", StringComparison.Ordinal));
+            Assert.Contains(issues, issue => issue.Contains("bedingungslos", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
     }
 
     [Fact]
@@ -1075,26 +1116,11 @@ public sealed class CodingCampaignTests
         Assert.Contains(agent.Prompts, prompt =>
             prompt.Contains("Validierungsfehler", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(agent.Prompts, prompt =>
-            prompt.Contains("Wähle danach selbst", StringComparison.Ordinal));
+            prompt.Contains("Verfahren, Architektur und betroffene Dateien", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void WorkflowProgressRequiresChangedSourceOrTestLines()
-    {
-        Assert.True(CodingCampaignService.HasChangedCodeLines(
-            "diff --git a/einstein_engine.py b/einstein_engine.py\n--- a/einstein_engine.py\n+++ b/einstein_engine.py\n@@ -1 +1 @@\n-old\n+new\n"));
-        Assert.True(CodingCampaignService.HasChangedCodeLines(
-            "diff --git a/tests/solver.test.ts b/tests/solver.test.ts\n--- a/tests/solver.test.ts\n+++ b/tests/solver.test.ts\n@@ -1,0 +1 @@\n+test('solver', verify);\n"));
-        Assert.False(CodingCampaignService.HasChangedCodeLines(
-            "diff --git a/visualizations/kerr.png b/visualizations/kerr.png\nBinary files differ\n"));
-        Assert.False(CodingCampaignService.HasChangedCodeLines(
-            "diff --git a/einstein_cases.json b/einstein_cases.json\n--- a/einstein_cases.json\n+++ b/einstein_cases.json\n@@ -1 +1 @@\n-old\n+new\n"));
-        Assert.False(CodingCampaignService.HasChangedCodeLines(
-            "diff --git a/solutions/kerr.md b/solutions/kerr.md\n--- a/solutions/kerr.md\n+++ b/solutions/kerr.md\n@@ -1,0 +1 @@\n+Kerr\n"));
-    }
-
-    [Fact]
-    public async Task RunWithoutChangedCodeLinesIsHiddenAndRetriedWithTheSameAutonomousPrompt()
+    public async Task RunWithoutChangedCodeLinesIsPublishedAndValidatedNormally()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "no-progress-workspace")).FullName;
@@ -1114,14 +1140,13 @@ public sealed class CodingCampaignTests
         await service.StopAsync(session.Id);
 
         var iterations = await workflows.ListIterationsAsync(campaign.Id);
-        Assert.Contains(iterations, static iteration => iteration.Status == "completed" && iteration.AssistantMessageId is null);
+        Assert.Contains(iterations, static iteration => iteration.Status == "completed" && iteration.AssistantMessageId is not null);
         Assert.True(agent.Prompts.Length >= 2);
-        Assert.Equal(agent.Prompts[0], agent.Prompts[1]);
         Assert.All(agent.Prompts, prompt =>
-            Assert.DoesNotContain("Verbindliche Korrektur wegen fehlenden Codefortschritts", prompt, StringComparison.Ordinal));
+            Assert.DoesNotContain("isolierte Lauf-Diff", prompt, StringComparison.Ordinal));
         var visibleReports = (await chats.ListMessagesAsync(session.Id))
             .Count(static message => message.Content.Contains("### Prozessbericht", StringComparison.Ordinal));
-        Assert.True(visibleReports < agent.RunCount);
+        Assert.Equal(agent.RunCount, visibleReports);
     }
 
     [Fact]
@@ -1148,7 +1173,13 @@ public sealed class CodingCampaignTests
         Assert.Equal(CodingCampaignStatus.Running, running.Status);
         Assert.True(running.Iteration >= 7);
         Assert.All(agent.Prompts.Skip(1), prompt =>
-            Assert.Contains("Eine erfolgreich verifizierte Lösung beendet den Workflow nicht", prompt, StringComparison.Ordinal));
+        {
+            Assert.Contains("Eine erfolgreich verifizierte Lösung beendet den Workflow nicht", prompt, StringComparison.Ordinal);
+            Assert.Contains("Wähle selbst ein fachlich sinnvolles, noch offenes Ziel", prompt, StringComparison.Ordinal);
+            Assert.DoesNotContain("Quell- oder Testcode", prompt, StringComparison.Ordinal);
+            Assert.Contains("Verfahren, Architektur und betroffene Dateien", prompt, StringComparison.Ordinal);
+            Assert.Contains("Ein Git-Diff ist Nachvollziehbarkeit, aber keine Voraussetzung", prompt, StringComparison.Ordinal);
+        });
 
         var processMessages = (await chats.ListMessagesAsync(session.Id))
             .Where(static message =>

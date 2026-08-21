@@ -80,7 +80,9 @@ public sealed class ShellViewModelTests
         Assert.All(viewModel.AiServices, static item => Assert.True(item.IsReachable));
         Assert.All(viewModel.AiServices, static item => Assert.Equal("Bereit", item.StateLabel));
         Assert.Contains(viewModel.AiServices, static item =>
-            item.DisplayName == "Coding" && item.Runtime.Contains("Qwen3-Coder-Next", StringComparison.Ordinal));
+            item.DisplayName == "Coding"
+            && item.Runtime.Contains("Qwen3-Coder-Next", StringComparison.Ordinal)
+            && item.Runtime.Contains("gpt-oss-120b", StringComparison.Ordinal));
     }
 
     [Fact]

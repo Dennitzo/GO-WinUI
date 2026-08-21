@@ -11,9 +11,13 @@ den aktuellen beziehungsweise letzten Lauf.
 .\windows\run-coding-agent-live-test.ps1 `
   -Scenario Einstein `
   -Workspace 'C:\Users\AMD\Documents\GitHub\QwenCoderEinstein-Test' `
-  -Model qwen3-coder-next `
+  -Model openai/gpt-oss-120b `
   -Continuous
 ```
+
+Als Coding-Modell sind `ud` (DeepSeek V4 Flash), `qwen3-coder-next` und
+`openai/gpt-oss-120b` zulässig. GO verwendet für alle drei denselben
+Workspace-, Tool-, Diff- und Verifikationsvertrag.
 
 Weitere Szenarien sind `Coding`, `Excel` und `Physics`. Ein vorhandener
 Physik-Workspace wird mit `-ContinueExisting` weiterverwendet. Mit

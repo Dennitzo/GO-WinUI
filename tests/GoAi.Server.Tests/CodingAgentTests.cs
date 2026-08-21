@@ -12,6 +12,8 @@ public sealed class CodingAgentTests
     private static readonly string[] DotNetTestArguments = ["test"];
     private static readonly string[] OtherDotNetTestArguments = ["test", "tests/Other.Tests/Other.Tests.csproj"];
     private static readonly string[] PythonPytestArguments = ["-m", "pytest", "tests", "-q"];
+    private static readonly string[] CheckerArguments = ["proofs/check.py"];
+    private static readonly string[] FastCheckerArguments = ["proofs/check_fast.py"];
 
     [Theory]
     [InlineData(0, false)]
@@ -24,6 +26,31 @@ public sealed class CodingAgentTests
     public void MutationProgressGuidanceIsDeterministicAndPeriodic(int rounds, bool expected)
     {
         Assert.Equal(expected, RunProcessor.ShouldAddCodingMutationProgressGuidance(rounds));
+    }
+
+    [Theory]
+    [InlineData(ClientToolNames.ProcessRun, 5, 0, false)]
+    [InlineData(ClientToolNames.ProcessRun, 6, 0, true)]
+    [InlineData(ClientToolNames.ProcessRunPreset, 12, 0, true)]
+    [InlineData(ClientToolNames.ProcessRun, 12, 1, false)]
+    [InlineData(ClientToolNames.FileSystemReadText, 12, 0, false)]
+    public void MutationRunsCannotRemainInAProcessOnlyLoop(
+        string toolName,
+        int roundsWithoutMutation,
+        int mutatedPathCount,
+        bool expected)
+    {
+        var call = new LmToolCall(
+            "call-1",
+            toolName,
+            JsonSerializer.SerializeToElement(new { }));
+
+        Assert.Equal(
+            expected,
+            RunProcessor.ShouldBlockPreMutationProcessCall(
+                call,
+                roundsWithoutMutation,
+                mutatedPathCount));
     }
 
     [Fact]
@@ -118,6 +145,24 @@ public sealed class CodingAgentTests
             [new RunMessage("user", [new ContentPart("text", prompt)])]);
 
         Assert.Equal(expected, RunProcessor.ClassifyCodingRequest(request));
+    }
+
+    [Fact]
+    public void WorkspaceDescriptorCannotHideTheUsersMutationIntent()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage(
+                "user",
+                [
+                    new ContentPart("text", "Behebe die Ursachen in Code und Tests."),
+                    new ContentPart(
+                        "text",
+                        "[GO_WORKSPACE]\nDer gebundene Workspace ist aktiv. Verwende relative Pfade ab '.'."),
+                ])]);
+
+        Assert.Equal(CodingRequestIntent.Mutation, RunProcessor.ClassifyCodingRequest(request));
     }
 
     [Fact]
@@ -248,6 +293,53 @@ public sealed class CodingAgentTests
         Assert.NotEqual(RunProcessor.CreateToolFingerprint(failed), RunProcessor.CreateToolFingerprint(corrected));
     }
 
+    [Fact]
+    public void ProcessFingerprintCannotBeBypassedByRelabellingTheSameCommandPurpose()
+    {
+        var failedTest = new LmToolCall(
+            "call-1",
+            ClientToolNames.ProcessRun,
+            JsonSerializer.SerializeToElement(new
+            {
+                executable = "py",
+                arguments = CheckerArguments,
+                workingDirectory = ".",
+                purpose = "test",
+                startMode = "wait",
+            }));
+        var relabelledAsStart = failedTest with
+        {
+            Id = "call-2",
+            Arguments = JsonSerializer.SerializeToElement(new
+            {
+                purpose = "start",
+                startMode = "wait",
+                workingDirectory = ".",
+                arguments = CheckerArguments,
+                executable = "PY.EXE",
+            }),
+        };
+        var correctedCommand = failedTest with
+        {
+            Id = "call-3",
+            Arguments = JsonSerializer.SerializeToElement(new
+            {
+                executable = "py",
+                arguments = FastCheckerArguments,
+                workingDirectory = ".",
+                purpose = "test",
+                startMode = "wait",
+            }),
+        };
+
+        Assert.Equal(
+            RunProcessor.CreateToolFingerprint(failedTest),
+            RunProcessor.CreateToolFingerprint(relabelledAsStart));
+        Assert.NotEqual(
+            RunProcessor.CreateToolFingerprint(failedTest),
+            RunProcessor.CreateToolFingerprint(correctedCommand));
+    }
+
     [Theory]
     [InlineData(ClientToolNames.WorkspaceMap)]
     [InlineData(ClientToolNames.FileSystemList)]
@@ -331,6 +423,7 @@ public sealed class CodingAgentTests
         Assert.Contains("Ändere Produktdaten niemals nur, damit eine zu enge", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Ein Prüforakel muss vom geprüften Produktcode unabhängig sein", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Statusfeld ist selbst kein Nachweis", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Zielgröße nicht selbst als erwarteten Null-", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Numerische Verifikation muss geschlossen fehlschlagen", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("niemals in ein Nullresiduum", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("Button.Flyout", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);

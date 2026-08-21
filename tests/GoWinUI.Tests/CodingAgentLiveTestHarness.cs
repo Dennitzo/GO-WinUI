@@ -52,9 +52,12 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
         this.scenario = scenario;
         this.workspace = workspace;
         this.modelId = modelId;
-        modelDisplayName = string.Equals(modelId, "ud", StringComparison.OrdinalIgnoreCase)
-            ? "DeepSeek-V4-Flash-0731"
-            : "Qwen3-Coder-Next";
+        modelDisplayName = modelId.ToLowerInvariant() switch
+        {
+            "ud" => "DeepSeek-V4-Flash-0731",
+            "openai/gpt-oss-120b" => "gpt-oss-120b",
+            _ => "Qwen3-Coder-Next",
+        };
 
         http = new HttpClient
         {

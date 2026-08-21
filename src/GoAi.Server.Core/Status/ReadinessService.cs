@@ -74,6 +74,7 @@ public sealed class ReadinessService
             .Where(model => requiredModelIds.Contains(model.Id))
             .Where(static model => !model.Downloaded)
             .Select(static model => model.Id)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (missingRequired.Length > 0)
         {

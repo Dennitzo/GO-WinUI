@@ -303,7 +303,7 @@ public sealed partial class LmStudioClient : IDisposable
             ["input"] = input,
             ["stream"] = true,
         };
-        ApplySamplingProfile(body, modelId, includeReasoning: true);
+        ApplySamplingProfile(body, modelId, includeReasoning: true, modelRole: "general");
         using var request = await CreateRequestAsync(HttpMethod.Post, "v1/responses", body, cancellationToken).ConfigureAwait(false);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
         using var response = await _httpClient.SendAsync(
@@ -356,11 +356,26 @@ public sealed partial class LmStudioClient : IDisposable
         }
     }
 
+    public Task<LmChatResult> CompleteChatAsync(
+        string modelId,
+        IReadOnlyList<LmChatMessage> messages,
+        IReadOnlyList<LmToolDefinition> tools,
+        int maximumOutputTokens,
+        CancellationToken cancellationToken) =>
+        CompleteChatAsync(
+            modelId,
+            messages,
+            tools,
+            maximumOutputTokens,
+            modelRole: "general",
+            cancellationToken);
+
     public async Task<LmChatResult> CompleteChatAsync(
         string modelId,
         IReadOnlyList<LmChatMessage> messages,
         IReadOnlyList<LmToolDefinition> tools,
         int maximumOutputTokens = 8_192,
+        string modelRole = "general",
         CancellationToken cancellationToken = default)
     {
         await BeginModelOperationAsync(cancellationToken).ConfigureAwait(false);
@@ -387,7 +402,7 @@ public sealed partial class LmStudioClient : IDisposable
             ["max_output_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
             ["store"] = false,
         };
-        ApplySamplingProfile(body, modelId, includeReasoning: true);
+        ApplySamplingProfile(body, modelId, includeReasoning: true, modelRole);
         if (toolPayload.Length > 0)
         {
             body["tools"] = toolPayload;
@@ -408,6 +423,7 @@ public sealed partial class LmStudioClient : IDisposable
                 messages,
                 tools,
                 maximumOutputTokens,
+                modelRole,
                 cancellationToken).ConfigureAwait(false);
         }
         catch (HttpRequestException exception) when (
@@ -419,6 +435,7 @@ public sealed partial class LmStudioClient : IDisposable
                 messages,
                 tools,
                 maximumOutputTokens,
+                modelRole,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -943,8 +960,13 @@ public sealed partial class LmStudioClient : IDisposable
         };
         definitions.AddRange(CodingModelCatalog.Models.Select(static profile =>
             (profile.Id, "code", profile.ContextLength, (string?)profile.DisplayName)));
+        // One physical LM Studio model can intentionally serve more than one
+        // logical role. Keep both descriptors so the settings page can offer
+        // gpt-oss-120b independently as General AI and as Coding AI.
         definitions = definitions
-            .DistinctBy(static definition => definition.Id, StringComparer.OrdinalIgnoreCase)
+            .DistinctBy(
+                static definition => $"{definition.Id}\0{definition.Role}",
+                StringComparer.OrdinalIgnoreCase)
             .ToList();
         var configured = definitions.Select(definition =>
         {
@@ -1056,6 +1078,7 @@ public sealed partial class LmStudioClient : IDisposable
         IReadOnlyList<LmChatMessage> messages,
         IReadOnlyList<LmToolDefinition> tools,
         int maximumOutputTokens,
+        string modelRole,
         CancellationToken cancellationToken)
     {
         var body = new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -1065,7 +1088,7 @@ public sealed partial class LmStudioClient : IDisposable
             ["stream"] = false,
             ["max_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
         };
-        ApplySamplingProfile(body, modelId, includeReasoning: false);
+        ApplySamplingProfile(body, modelId, includeReasoning: false, modelRole);
         if (tools.Count > 0)
         {
             body["tools"] = tools.Select(static tool => new
@@ -1205,13 +1228,28 @@ public sealed partial class LmStudioClient : IDisposable
     private static void ApplySamplingProfile(
         Dictionary<string, object?> body,
         string modelId,
-        bool includeReasoning)
+        bool includeReasoning,
+        string modelRole)
     {
-        if (CodingModelCatalog.TryGet(modelId, out var codingProfile))
+        if (string.Equals(modelRole, "code", StringComparison.OrdinalIgnoreCase)
+            && CodingModelCatalog.TryGet(modelId, out var codingProfile))
         {
-            // Both supported coding agents use their published exploratory profile
-            // and must not receive gpt-oss-specific reasoning options.
             body["temperature"] = 1.0;
+            if (string.Equals(codingProfile.SamplingProfile, "gpt-oss-coder", StringComparison.Ordinal))
+            {
+                // OpenAI recommends temperature=1 and top_p=1 for gpt-oss.
+                // High reasoning is reserved for the coding role; the same
+                // physical model keeps the existing low-effort general profile.
+                body["top_p"] = 1.0;
+                if (includeReasoning)
+                {
+                    body["reasoning"] = new { effort = "high" };
+                }
+                return;
+            }
+
+            // Qwen and DeepSeek use their published exploratory agent profile
+            // and must not receive gpt-oss-specific reasoning options.
             body["top_p"] = 0.95;
             if (string.Equals(codingProfile.SamplingProfile, "qwen-coder", StringComparison.Ordinal))
             {

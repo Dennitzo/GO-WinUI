@@ -324,6 +324,30 @@ public sealed class RunProcessor : BackgroundService
                         continue;
                     }
                     if (codingRun
+                        && codingIntent == CodingRequestIntent.Mutation
+                        && string.IsNullOrWhiteSpace(pendingProposalId)
+                        && ShouldBlockPreMutationProcessCall(
+                            call,
+                            consecutiveRoundsWithoutMutation,
+                            mutatedPaths.Count))
+                    {
+                        messages.Add(new LmChatMessage(
+                            "tool",
+                            JsonSerializer.Serialize(new
+                            {
+                                status = "failed",
+                                errorCode = "coding.mutation_required_before_more_processes",
+                                message = "Die begrenzte Ausgangsanalyse ist abgeschlossen. Weitere Prozess-, Test-, Build- oder Generatoraufrufe sind erst nach einer erfolgreichen Workspace-Änderung zulässig.",
+                            }, GoAiProtocol.CreateJsonOptions()),
+                            ToolCallId: call.Id));
+                        messages.Add(new LmChatMessage(
+                            "system",
+                            "Der Änderungsauftrag befindet sich ohne Workspace-Mutation in einer Prozessschleife. Nutze jetzt die bereits geladene Evidenz und führe den selbst gewählten fachlichen Schritt mit einem nativen Dateitool aus. Weitere Tests, Builds, Starts, Git-Prüfungen und Generatoren werden bis zur ersten echten Workspace-Änderung nicht ausgeführt."));
+                        nextToolIndex++;
+                        await SaveCheckpointAsync().ConfigureAwait(false);
+                        continue;
+                    }
+                    if (codingRun
                         && string.IsNullOrWhiteSpace(pendingProposalId)
                         && IsVacuousVerificationCall(call))
                     {
@@ -674,6 +698,7 @@ public sealed class RunProcessor : BackgroundService
                     modelMessages,
                     modelTools,
                     maximumOutputTokens,
+                    selection.Role,
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -1571,12 +1596,19 @@ public sealed class RunProcessor : BackgroundService
     internal static CodingRequestIntent ClassifyCodingRequest(RunRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var prompt = request.Messages
-            .LastOrDefault(static message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))?
-            .Content
-            .Where(static part => !string.IsNullOrWhiteSpace(part.Text))
-            .Select(static part => part.Text!.Trim())
-            .LastOrDefault() ?? string.Empty;
+        // A GO coding request can contain the actual prompt followed by a
+        // technical workspace descriptor. Classifying only the final content
+        // part therefore turns mutation requests into read-only analyses.
+        // Keep the last user turn authoritative, but inspect all of its text
+        // parts so appended context cannot hide the user's intent.
+        var prompt = string.Join(
+            '\n',
+            request.Messages
+                .LastOrDefault(static message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))?
+                .Content
+                .Where(static part => !string.IsNullOrWhiteSpace(part.Text))
+                .Select(static part => part.Text!.Trim())
+            ?? []);
         if (CodingMutationIntentRegex.IsMatch(prompt))
         {
             return CodingRequestIntent.Mutation;
@@ -1722,6 +1754,14 @@ public sealed class RunProcessor : BackgroundService
         && textMutationCountsSinceProcess.TryGetValue(path, out var mutations)
         && mutations >= CodingTextMutationLimitBeforeVerification;
 
+    internal static bool ShouldBlockPreMutationProcessCall(
+        LmToolCall call,
+        int consecutiveRoundsWithoutMutation,
+        int mutatedPathCount) =>
+        mutatedPathCount == 0
+        && consecutiveRoundsWithoutMutation >= CodingMutationProgressGuidanceThreshold
+        && call.Name is ClientToolNames.ProcessRun or ClientToolNames.ProcessRunPreset;
+
     internal static bool IsVacuousVerificationCall(LmToolCall call)
     {
         if (call.Name != ClientToolNames.ProcessRun
@@ -1794,8 +1834,42 @@ public sealed class RunProcessor : BackgroundService
             GoAiProtocol.CreateJsonOptions());
     }
 
-    internal static string CreateToolFingerprint(LmToolCall call) =>
-        call.Name + ":" + call.Arguments.GetRawText();
+    internal static string CreateToolFingerprint(LmToolCall call)
+    {
+        if (call.Name == ClientToolNames.ProcessRun)
+        {
+            // `purpose` classifies the observation for the verification state; it does not change the process being
+            // executed. Coding models must therefore not be able to replay an identical failed command merely by
+            // relabelling it from test to start (or vice versa). Keep execution-relevant options in the identity so a
+            // genuinely corrected timeout, working directory or start mode remains a distinct attempt.
+            var executable = Path.GetFileNameWithoutExtension(StringArgument(call.Arguments, "executable") ?? string.Empty)
+                .Trim()
+                .ToLowerInvariant();
+            var arguments = ReadOrderedStringArrayArgument(call.Arguments, "arguments");
+            var workingDirectory = (StringArgument(call.Arguments, "workingDirectory") ?? ".")
+                .Replace('\\', '/')
+                .Trim();
+            var startMode = (StringArgument(call.Arguments, "startMode") ?? "wait")
+                .Trim()
+                .ToLowerInvariant();
+            int? timeoutSeconds = call.Arguments.TryGetProperty("timeoutSeconds", out var timeout)
+                && timeout.TryGetInt32(out var parsedTimeout)
+                    ? parsedTimeout
+                    : null;
+            return call.Name + ":" + JsonSerializer.Serialize(
+                new
+                {
+                    executable,
+                    arguments,
+                    workingDirectory,
+                    startMode,
+                    timeoutSeconds,
+                },
+                GoAiProtocol.CreateJsonOptions());
+        }
+
+        return call.Name + ":" + call.Arguments.GetRawText();
+    }
 
     internal static void InvalidateToolFingerprintsAfterMutation(
         HashSet<string> successfulToolFingerprints,

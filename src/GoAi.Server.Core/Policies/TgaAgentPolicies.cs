@@ -156,6 +156,19 @@ public static class TgaAgentPolicies
           geliefertes `passed`-, `verified`- oder Statusfeld ist selbst kein Nachweis. Prüfe fachliche Formeln vor dem Codieren
           an einfachen Grenzfällen, Symmetrien und mindestens einem bekannten Referenzpunkt, damit der Checker keine falsche
           Identität als Sollwert festschreibt.
+        - Ein Checker darf die zu beweisende Zielgröße nicht selbst als erwarteten Null-, Identitäts- oder Konstantwert
+          konstruieren und anschließend nur diesen eingesetzten Wert weiterverarbeiten. Ein trivialer Nullfall ist höchstens
+          ein zusätzlicher Sanity-Check. Die eigentliche Prüfung muss die Zielgröße aus unabhängigen Eingaben oder der zu
+          prüfenden Implementierung berechnen und mindestens eine gezielte Negativkontrolle enthalten, die bei einer fachlich
+          relevanten Störung nachweislich fehlschlägt. Leere Erfolgslisten und bedingungslose Erfolgsrückgaben sind kein Beleg.
+        - Behandle eine aus Erinnerung rekonstruierte, gekürzte oder perturbative Formel niemals als exakte Referenz. Notiere
+          vor ihrer Implementierung Definitionsbereich und Dimensionen und prüfe mindestens den einfachsten bekannten Grenzfall,
+          einen symmetriebedingten Spezialfall sowie eine unabhängige Quelle oder Herleitung. Schlägt eine dieser Vorprüfungen
+          fehl, korrigiere zuerst das Prüforakel; starte damit keine teure Rechnung.
+        - Schätze vor einer symbolischen oder kombinatorischen Berechnung deren Schleifen-, Tensor- und Ausdruckskomplexität.
+          Vermeide unbeschränkte Brute-Force-Kontraktionen und wiederholtes `simplify` in hochdimensionalen Schleifen, wenn eine
+          mathematisch äquivalente Reduktion, Symmetrie, Sparsität, Komponentenwahl oder gestufte numerische Gegenprobe möglich
+          ist. Jeder teure Checker braucht einen kleinen, schnell fehlschlagenden Referenztest vor der Hauptrechnung.
 
         Autonome Änderungen und Prozesse:
         - Ein abgesendeter Coding-Prompt autorisiert notwendige Datei- und Prozessaktionen im gebundenen Workspace.

@@ -7,6 +7,7 @@ public sealed class LmStudioCliModelLoaderTests
     [Theory]
     [InlineData("ud", 262_144)]
     [InlineData("qwen3-coder-next", 262_144)]
+    [InlineData("openai/gpt-oss-120b", 131_072)]
     public void CodingLoadArgumentsRequireMaximumGpuOffload(string modelId, int contextLength)
     {
         var arguments = LmStudioCliModelLoader.CreateLoadArguments(modelId, contextLength);
@@ -18,7 +19,7 @@ public sealed class LmStudioCliModelLoaderTests
                 "--gpu",
                 "max",
                 "--context-length",
-                "262144",
+                contextLength.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 "--parallel",
                 "1",
                 "--identifier",

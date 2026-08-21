@@ -38,7 +38,8 @@ public sealed class ModelRouter
         }
         var model = status.Models.FirstOrDefault(candidate =>
             candidate.Downloaded
-            && string.Equals(candidate.Id, selected.ModelId, StringComparison.OrdinalIgnoreCase))
+            && string.Equals(candidate.Id, selected.ModelId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(candidate.Role, selected.Role, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException(
                 $"The selected {selected.Role} model '{selected.ModelId}' is not available.");
         return selected with { ContextLength = Math.Max(2_048, model.ContextTokens) };

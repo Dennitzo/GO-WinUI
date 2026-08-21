@@ -156,7 +156,8 @@ public sealed class EinsteinCodingCampaignDefinition(CodingProofVerifier proofVe
         Bianchi-Identität, Erhaltungssätze, Dimensionen, bekannte Grenzfälle und mindestens zwei reguläre Residuenpunkte
         unabhängig. Klassifiziere ehrlich als verified, approximation oder undetermined.
 
-        Erzeuge oder aktualisiere reproduzierbare, fallbezogene Daten, Plots und Simulationen. Verwende stabile,
+        Erzeuge oder aktualisiere reproduzierbare, fallbezogene Daten, Plots und Simulationen, wenn der selbst gewählte
+        Ansatz neue oder geänderte Daten hervorbringt. Rendere unveränderte Fälle nicht lediglich als Beschäftigung neu. Verwende stabile,
         fachlich beschreibende Dateinamen. Erzeuge oder reaktiviere unter keinen Umständen Dateien, Funktionen oder
         Verweise namens live_progress. Ein verified-Fall benötigt ein
         ausführliches Dokument unter solutions/ sowie mindestens einen
@@ -179,11 +180,25 @@ public sealed class EinsteinCodingCampaignDefinition(CodingProofVerifier proofVe
         Schrittlisten oder Zeitstempel sind keine Evidenz. Prüfe auch alle neu angelegten, noch nicht von Git verfolgten
         Dateien in Status und Diff. Erzeuge updatedAt aus der tatsächlichen UTC-Systemzeit während des Prozesslaufs.
 
-        Führe alle Tests, Syntax-/Buildprüfung, Ergebnis- und Grafikgenerierung, Beweischecker, CLI-Smoke und git diff
-        aus. Behebe Laufzeit-, Logik- und Darstellungsfehler selbstständig und dokumentiere auch fehlgeschlagene Ansätze.
+        Wähle anhand des fachlichen Stands selbst, ob der nächste belastbare Schritt Quellcode, Tests, Falldaten,
+        Beweise, Lösungsdokumente oder eine reine Untersuchung betrifft. Führe bei Änderungen danach die dafür
+        relevanten Tests, Syntax-/Buildprüfung, Ergebnis- oder Grafikgenerierung, Beweischecker und einen begrenzten
+        CLI-Smoke aus. Ein Git-Diff oder eine Quellcodeänderung ist keine Voraussetzung für einen gültigen Schritt.
+        Behebe Laufzeit-, Logik- und Darstellungsfehler selbstständig und dokumentiere auch fehlgeschlagene Ansätze.
         Jeder Checker muss jeden von ihm ausgegebenen Soll-/Ist-Vergleich tatsächlich prüfen und bei einer Abweichung mit
         einem Fehlercode enden. Ein nur ausgedruckter Erwartungswert ist keine Verifikation; insbesondere müssen berechnete
         Krümmungsinvarianten symbolisch oder an unabhängigen regulären Punkten gegen die Referenz geprüft werden.
+        Setze in einem Bianchi-, Einstein- oder Krümmungschecker den zu prüfenden Tensor niemals selbst auf null, um danach
+        sein Nullresiduum zu bestätigen. Ein Vakuum-Nulltensor ist nur ein zusätzlicher Sanity-Check. Berechne die relevante
+        Größe aus Metrik und Verbindung oder aus einer unabhängigen Implementierung und ergänze eine Negativkontrolle, die
+        bei einer gezielten physikalisch relevanten Störung sicher fehlschlägt. Ein Zweig mit leerer Fehlerliste ohne eigene
+        Auswertung ist nicht bestanden.
+        Bevor du eine Krümmungs- oder Tensoridentität als Referenz codierst, prüfe ihre Dimension, ihren bekannten nichtrotierenden
+        beziehungsweise flachen Grenzfall und einen symmetriebedingten Spezialfall unabhängig. Eine Reihenentwicklung oder aus
+        Erinnerung verkürzte Formel darf nicht als exakte Invariante bezeichnet werden. Schätze außerdem die symbolische
+        Komplexität vor dem Start: Nutze Tensor-Symmetrien, Sparsität, reduzierte Identitäten und begrenzte Gegenproben anstelle
+        einer unbeschränkten vollständigen Indexkontraktion mit `simplify` in jeder inneren Schleife. Ein schneller Vorabtest
+        des Referenzwerts muss vor der teuren Rechnung fehlschlagen können.
         Alle JSON-Artefakte müssen striktes RFC-8259-JSON ohne NaN oder Infinity sein. Verwende exakt validityDomain,
         evaluationPoint, einsteinResidual und bianchiResidual. Für Tensorprüfungen darfst du weder vor dem
         Differenzieren numerisch substituieren noch den Ricci-Skalar mit Matrix.trace bilden.
@@ -272,6 +287,7 @@ public sealed class EinsteinCodingCampaignDefinition(CodingProofVerifier proofVe
         ValidateNoGenericProgressArtifacts(workspacePath, issues);
         ValidateNoDuplicateCaseCatalogs(workspacePath, issues);
         ValidateSimulationJson(workspacePath, issues);
+        ValidateNoVacuousTensorCheckers(workspacePath, issues);
 
         return new(issues.Count == 0, issues, proofs);
     }
@@ -703,6 +719,71 @@ public sealed class EinsteinCodingCampaignDefinition(CodingProofVerifier proofVe
                 $"Widersprüchlicher Fallkatalog ist nicht erlaubt: {relative}. "
                 + "einstein_cases.json ist die einzige autoritative Klassifikationsquelle.");
         }
+    }
+
+    internal static void ValidateNoVacuousTensorCheckers(string workspacePath, List<string> issues)
+    {
+        var proofsDirectory = Path.Combine(workspacePath, "proofs");
+        if (!Directory.Exists(proofsDirectory))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(proofsDirectory, "*.py", SearchOption.AllDirectories))
+        {
+            var fileName = Path.GetFileName(path);
+            string source;
+            try
+            {
+                source = File.ReadAllText(path);
+            }
+            catch (IOException exception)
+            {
+                issues.Add($"{fileName} konnte für die Checkerprüfung nicht gelesen werden: {exception.Message}");
+                continue;
+            }
+
+            if (!fileName.Contains("bianchi", StringComparison.OrdinalIgnoreCase)
+                && !source.Contains("Bianchi", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var normalized = source.Replace(" ", string.Empty, StringComparison.Ordinal)
+                .Replace("\t", string.Empty, StringComparison.Ordinal);
+            var assignedZeroEinsteinTensors = CountOccurrences(
+                normalized,
+                "einstein_covariant=np.zeros(");
+            if (assignedZeroEinsteinTensors >= 2)
+            {
+                var relative = Path.GetRelativePath(workspacePath, path).Replace('\\', '/');
+                issues.Add(
+                    $"{relative} setzt den zu prüfenden Einstein-Tensor wiederholt selbst auf null. "
+                    + "Das prüft nur einen konstruierten Sollwert und keine aus der Metrik berechnete Bianchi-Identität. "
+                    + "Berechne den Tensor unabhängig und ergänze eine Negativkontrolle, die bei einer gestörten Verbindung oder Metrik fehlschlägt.");
+            }
+
+            if (source.Contains("test_kerr_bianchi", StringComparison.Ordinal)
+                && source.Contains("return []  # Keine weiteren", StringComparison.Ordinal))
+            {
+                var relative = Path.GetRelativePath(workspacePath, path).Replace('\\', '/');
+                issues.Add(
+                    $"{relative} meldet den Kerr-Bianchi-Zweig ohne eigene Auswertung bedingungslos als erfolgreich. "
+                    + "Eine leere Fehlerliste ist kein unabhängiger Nachweis; implementiere eine echte Berechnung oder kennzeichne den Zweig ausdrücklich als ungeprüft.");
+            }
+        }
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        var offset = 0;
+        while ((offset = text.IndexOf(value, offset, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            offset += value.Length;
+        }
+        return count;
     }
 
     private static void RequireCaseString(JsonElement item, string id, string name, List<string> issues)

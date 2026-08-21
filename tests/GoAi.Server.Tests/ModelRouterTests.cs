@@ -36,6 +36,23 @@ public sealed class ModelRouterTests
     }
 
     [Fact]
+    public void ExplicitCodeModeCanUseGptOss120BIndependentlyFromGeneralRouting()
+    {
+        using var context = new TestServerContext();
+        var router = new ModelRouter(context.WrappedOptions);
+        var request = CreateRequest(RunMode.Code, "Behebe den Fehler im Projekt.") with
+        {
+            PreferredCodeModelId = "openai/gpt-oss-120b",
+        };
+
+        var selection = router.Select(request);
+
+        Assert.Equal("code", selection.Role);
+        Assert.Equal("openai/gpt-oss-120b", selection.ModelId);
+        Assert.Equal(131_072, selection.ContextLength);
+    }
+
+    [Fact]
     public void AutoRoutesCodeAttachmentToQwenCoder()
     {
         using var context = new TestServerContext();
