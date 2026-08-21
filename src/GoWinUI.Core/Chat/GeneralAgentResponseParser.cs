@@ -82,7 +82,7 @@ public static class GeneralAgentResponseParser
             if (trimmed.Length == 0
                 || trimmed == "---"
                 || trimmed.Contains('|', StringComparison.Ordinal)
-                || TryExtractLegacySessionTitle(trimmed, out _)
+                || ChatContentSanitizer.ContainsReservedMarker(trimmed)
                 || lines.Count > 0 && trimmed.StartsWith('#'))
             {
                 continue;
@@ -230,43 +230,11 @@ public static class GeneralAgentResponseParser
         return string.Empty;
     }
 
-    private static string CleanVisibleMessage(string content) => string.Join('\n',
-        (content ?? string.Empty).ReplaceLineEndings("\n")
-            .Split('\n')
-            .Where(static line => !TryExtractLegacySessionTitle(line, out _)))
-        .Trim();
+    private static string CleanVisibleMessage(string content) =>
+        ChatContentSanitizer.Sanitize(content).Trim();
 
-    private static string? ExtractLegacySessionTitle(string content)
-    {
-        foreach (var line in (content ?? string.Empty).ReplaceLineEndings("\n").Split('\n'))
-        {
-            if (TryExtractLegacySessionTitle(line, out var title))
-            {
-                return title;
-            }
-        }
-        return null;
-    }
-
-    private static bool TryExtractLegacySessionTitle(string line, out string title)
-    {
-        title = string.Empty;
-        var normalized = (line ?? string.Empty)
-            .Replace('\u00A0', ' ')
-            .Replace("\\_", "_", StringComparison.Ordinal)
-            .Trim()
-            .TrimStart('*', '_', '`', '#', ' ');
-        const string prefix = "GO_SESSION_TITLE:";
-        if (!normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        title = normalized[prefix.Length..]
-            .Trim()
-            .Trim('*', '_', '`', ' ', '\u00A0');
-        return true;
-    }
+    private static string? ExtractLegacySessionTitle(string content) =>
+        ChatContentSanitizer.TryExtractLegacyTitle(content, out var title) ? title : null;
 
     private static string PlainText(string line)
     {

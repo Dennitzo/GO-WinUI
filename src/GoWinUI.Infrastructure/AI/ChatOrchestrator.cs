@@ -38,12 +38,11 @@ public sealed partial class ChatOrchestrator(
             _ = await chats.GetSessionAsync(sessionId, linked.Token).ConfigureAwait(false)
                 ?? throw new KeyNotFoundException($"Sitzung '{sessionId}' wurde nicht gefunden.");
             var history = await chats.ListMessagesAsync(sessionId, linked.Token).ConfigureAwait(false);
-            _ = await chats.AddMessageAsync(
-                sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed,
+            var turn = await chats.AddTurnAsync(
+                sessionId,
+                prompt.Trim(),
                 cancellationToken: linked.Token).ConfigureAwait(false);
-            assistant = await chats.AddMessageAsync(
-                sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
-                cancellationToken: linked.Token).ConfigureAwait(false);
+            assistant = turn.AssistantMessage;
 
             var pages = new List<DocumentPage>();
             foreach (var document in await documents.ListAsync(sessionId, linked.Token).ConfigureAwait(false))

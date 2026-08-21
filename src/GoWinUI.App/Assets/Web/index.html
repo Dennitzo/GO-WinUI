@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://go-preview.local data: blob:; media-src 'self' https://go-preview.local; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
   <title>GO AI Assistent</title>
   <link rel="stylesheet" href="vendor/katex/0.16.10/katex.min.css">
-  <link rel="stylesheet" href="styles.css?v=20260821-1">
+  <link rel="stylesheet" href="styles.css?v=20260821-2">
 </head>
 <body>
   <div id="app-shell" class="app-shell">
@@ -66,6 +66,18 @@
           </header>
           <p id="live-caption-transcript" class="live-caption__transcript">Warte auf Windows-Systemaudio …</p>
           <p id="live-caption-error" class="live-caption__error" hidden></p>
+        </section>
+        <section id="coding-workspace" class="coding-workspace" aria-label="Coding-Werkzeuge" hidden>
+          <header class="coding-workspace__header">
+            <button id="coding-workspace-toggle" class="coding-workspace__toggle" type="button" aria-expanded="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l-6-6 6-6M15 6l6 6-6 6"/></svg>
+              <strong>Coding</strong>
+              <span id="coding-workspace-status" class="coding-workspace__status">Bereit</span>
+              <svg class="coding-workspace__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+            </button>
+            <button id="coding-workspace-close" class="coding-workspace__close" type="button" title="Coding deaktivieren" aria-label="Coding deaktivieren">×</button>
+          </header>
+          <div id="coding-workspace-content" class="coding-workspace__content" hidden></div>
         </section>
         <div id="context-strip" class="context-strip" hidden>
           <div id="active-tool-chips" class="active-tool-chips"></div>
@@ -244,9 +256,9 @@
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
   <script src="vendor/katex/0.16.10/katex.min.js?v=20260814-3"></script>
-  <script src="bridge.js?v=20260821-1"></script>
+  <script src="bridge.js?v=20260821-2"></script>
   <script src="voice.js?v=20260819-1"></script>
   <script src="markdown.js?v=20260821-1"></script>
-  <script src="app.js?v=20260821-1"></script>
+  <script src="app.js?v=20260821-3"></script>
 </body>
 </html>

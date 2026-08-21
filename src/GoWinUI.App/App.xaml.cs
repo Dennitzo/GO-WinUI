@@ -198,11 +198,14 @@ public partial class App : Application
             var database = GetService<IGoDatabase>();
             await database.InitializeAsync();
             _ = await GetService<IChatRepository>().MarkStreamingMessagesInterruptedAsync();
+            _ = await GetService<CodingRunTraceService>().ImportLegacyAsync();
+            _ = await GetService<IChatRepository>().DeleteEmptyTerminalMessagesAsync();
             var settings = GetService<SettingsCoordinator>();
             await settings.InitializeAsync();
             await settings.UpdateAsync(static current => current);
             await GetService<CodingCampaignService>().PrepareForClientStartAsync();
             await GetService<GoAiAssistantService>().StopPersistedCampaignRunsAtStartupAsync();
+            _ = await GetService<ICodingRunRepository>().MarkRunningInterruptedAsync();
             _ = await GetService<GoAiConnectionService>().TryProvisionLocalHostAsync();
 
             var shell = GetService<ShellViewModel>();

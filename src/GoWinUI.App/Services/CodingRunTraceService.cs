@@ -1,36 +1,15 @@
 using GoAi.Contracts;
+using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace GoWinUI.App.Services;
-
-public sealed record CodingProcessConsole(
-    string OperationId,
-    string Command,
-    string WorkingDirectory,
-    string Purpose,
-    string Status,
-    int? ExitCode = null,
-    string? StandardOutput = null,
-    string? StandardError = null);
-
-public sealed record CodingRunTraceEntry(
-    long Sequence,
-    DateTimeOffset Timestamp,
-    string Stage,
-    string Status,
-    string Title,
-    string? Detail = null,
-    string? Tool = null,
-    string? Target = null,
-    long? DurationMilliseconds = null,
-    long? ServerEventId = null,
-    CodingProcessConsole? ProcessConsole = null);
 
 internal sealed record CodingRunTraceRecord(
     Guid LocalRunId,
@@ -40,9 +19,8 @@ internal sealed record CodingRunTraceRecord(
     CodingRunTraceEntry Entry);
 
 /// <summary>
-/// Persists the execution trace for real coding runs. Process entries include
-/// bounded command output for the PowerShell panel. Failures here must never
-/// interrupt the agent.
+/// Persists the execution trace for real coding runs in SQLite. Existing JSONL
+/// files are accepted only by the one-time idempotent legacy importer.
 /// </summary>
 public sealed class CodingRunTraceService
 {
@@ -59,12 +37,17 @@ public sealed class CodingRunTraceService
         new EventId(5350, nameof(TraceWriteFailed)),
         "Coding trace for message {MessageId} could not be persisted");
     private readonly string _traceDirectory;
+    private readonly ICodingRunRepository _repository;
     private readonly ILogger<CodingRunTraceService> _logger;
-    private readonly ConcurrentDictionary<Guid, TraceState> _states = new();
+    private readonly ConcurrentDictionary<Guid, long> _sequences = new();
 
-    public CodingRunTraceService(GoInfrastructureOptions options, ILogger<CodingRunTraceService> logger)
+    public CodingRunTraceService(
+        GoInfrastructureOptions options,
+        ICodingRunRepository repository,
+        ILogger<CodingRunTraceService> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
+        _repository = repository;
         _logger = logger;
         _traceDirectory = Path.Combine(options.DataDirectory, "CodingRuns", "Traces");
     }
@@ -78,22 +61,7 @@ public sealed class CodingRunTraceService
         string? workspacePath,
         CancellationToken cancellationToken = default)
     {
-        var state = new TraceState(localRunId, sessionId, messageId);
-        _states[messageId] = state;
-        try
-        {
-            Directory.CreateDirectory(_traceDirectory);
-            var path = TracePath(messageId);
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch (Exception exception) when (IsDiagnosticIoFailure(exception))
-        {
-            TraceWriteFailed(_logger, messageId.ToString("D"), exception);
-        }
-
+        _sequences[messageId] = 0;
         return await AppendAsync(
             localRunId,
             null,
@@ -108,7 +76,7 @@ public sealed class CodingRunTraceService
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
-    public Task<CodingRunTraceEntry> AppendAsync(
+    public async Task<CodingRunTraceEntry> AppendAsync(
         Guid localRunId,
         string? serverRunId,
         Guid sessionId,
@@ -124,44 +92,43 @@ public sealed class CodingRunTraceService
         CodingProcessConsole? processConsole = null,
         CancellationToken cancellationToken = default)
     {
-        var state = _states.GetOrAdd(messageId, _ => LoadState(localRunId, sessionId, messageId));
-        return AppendCoreAsync(
-            state,
-            serverRunId,
-            stage,
-            status,
-            title,
-            detail,
-            tool,
-            target,
+        if (!_sequences.ContainsKey(messageId))
+        {
+            var existing = await _repository.ListForMessageAsync(messageId, cancellationToken).ConfigureAwait(false);
+            _sequences.TryAdd(messageId, existing.Count == 0 ? 0 : existing.Max(static entry => entry.Sequence));
+        }
+        var sequence = _sequences.AddOrUpdate(messageId, 1, static (_, current) => current + 1);
+        var entry = new CodingRunTraceEntry(
+            sequence,
+            DateTimeOffset.UtcNow,
+            Limit(stage, 40),
+            Limit(status, 40),
+            Limit(title, 160),
+            LimitNullable(detail, 320),
+            LimitNullable(tool, 120),
+            LimitNullable(target, 320),
             durationMilliseconds,
             serverEventId,
-            processConsole,
-            cancellationToken);
+            processConsole);
+        return await _repository.AppendAsync(
+            localRunId, serverRunId, sessionId, messageId, entry, cancellationToken).ConfigureAwait(false);
     }
 
-    public IReadOnlyList<CodingRunTraceEntry> GetForMessage(Guid messageId)
-    {
-        if (_states.TryGetValue(messageId, out var existing))
-        {
-            lock (existing.SyncRoot)
-            {
-                return existing.Entries.ToArray();
-            }
-        }
+    public Task<IReadOnlyList<CodingRunTraceEntry>> GetForMessageAsync(
+        Guid messageId,
+        CancellationToken cancellationToken = default) =>
+        _repository.ListForMessageAsync(messageId, cancellationToken);
 
-        var loaded = LoadState(Guid.Empty, Guid.Empty, messageId);
-        if (loaded.Entries.Count == 0)
-        {
-            return Array.Empty<CodingRunTraceEntry>();
-        }
+    public Task<CodingRunSnapshot?> GetLatestForSessionAsync(
+        Guid sessionId,
+        CancellationToken cancellationToken = default) =>
+        _repository.GetLatestForSessionAsync(sessionId, cancellationToken);
 
-        _states.TryAdd(messageId, loaded);
-        lock (loaded.SyncRoot)
-        {
-            return loaded.Entries.ToArray();
-        }
-    }
+    public Task SetCodeDiffAsync(
+        Guid localRunId,
+        string? codeDiff,
+        CancellationToken cancellationToken = default) =>
+        _repository.SetCodeDiffAsync(localRunId, codeDiff, cancellationToken);
 
     internal static string? ExtractTarget(ToolProposal proposal)
     {
@@ -389,80 +356,20 @@ public sealed class CodingRunTraceService
         return null;
     }
 
-    private async Task<CodingRunTraceEntry> AppendCoreAsync(
-        TraceState state,
-        string? serverRunId,
-        string stage,
-        string status,
-        string title,
-        string? detail,
-        string? tool,
-        string? target,
-        long? durationMilliseconds,
-        long? serverEventId,
-        CodingProcessConsole? processConsole,
-        CancellationToken cancellationToken)
+    public async Task<int> ImportLegacyAsync(CancellationToken cancellationToken = default)
     {
-        CodingRunTraceEntry entry;
-        lock (state.SyncRoot)
+        if (!Directory.Exists(_traceDirectory))
         {
-            entry = new CodingRunTraceEntry(
-                ++state.Sequence,
-                DateTimeOffset.UtcNow,
-                Limit(stage, 40),
-                Limit(status, 40),
-                Limit(title, 160),
-                LimitNullable(detail, 320),
-                LimitNullable(tool, 120),
-                LimitNullable(target, 320),
-                durationMilliseconds,
-                serverEventId,
-                processConsole);
-            state.Entries.Add(entry);
+            return 0;
         }
 
-        try
+        var imported = 0;
+        foreach (var path in Directory.EnumerateFiles(_traceDirectory, "*.jsonl", SearchOption.TopDirectoryOnly))
         {
-            Directory.CreateDirectory(_traceDirectory);
-            var record = new CodingRunTraceRecord(
-                state.LocalRunId,
-                serverRunId,
-                state.SessionId,
-                state.MessageId,
-                entry);
-            var line = JsonSerializer.Serialize(record, JsonOptions) + Environment.NewLine;
-            await state.FileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                await File.AppendAllTextAsync(
-                    TracePath(state.MessageId),
-                    line,
-                    new UTF8Encoding(false),
-                    cancellationToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                state.FileGate.Release();
-            }
-        }
-        catch (Exception exception) when (IsDiagnosticIoFailure(exception))
-        {
-            TraceWriteFailed(_logger, state.MessageId.ToString("D"), exception);
-        }
-
-        return entry;
-    }
-
-    private TraceState LoadState(Guid localRunId, Guid sessionId, Guid messageId)
-    {
-        var entries = new List<CodingRunTraceEntry>();
-        var resolvedLocalRunId = localRunId;
-        var resolvedSessionId = sessionId;
-        try
-        {
-            var path = TracePath(messageId);
-            if (File.Exists(path))
-            {
+                var records = new List<CodingRunTraceRecord>();
                 foreach (var line in File.ReadLines(path))
                 {
                     if (string.IsNullOrWhiteSpace(line))
@@ -470,25 +377,49 @@ public sealed class CodingRunTraceService
                         continue;
                     }
                     var record = JsonSerializer.Deserialize<CodingRunTraceRecord>(line, JsonOptions);
-                    if (record is null || record.MessageId != messageId)
+                    if (record is not null)
+                    {
+                        records.Add(record);
+                    }
+                }
+
+                foreach (var group in records.GroupBy(static record => new
+                         {
+                             record.LocalRunId,
+                             record.ServerRunId,
+                             record.SessionId,
+                             record.MessageId,
+                         }))
+                {
+                    var entries = group.Select(static record => record.Entry)
+                        .GroupBy(static entry => entry.Sequence)
+                        .Select(static values => values.Last())
+                        .OrderBy(static entry => entry.Sequence)
+                        .ToArray();
+                    if (entries.Length == 0)
                     {
                         continue;
                     }
-                    resolvedLocalRunId = record.LocalRunId;
-                    resolvedSessionId = record.SessionId;
-                    entries.Add(record.Entry);
+                    await _repository.ImportAsync(
+                        group.Key.LocalRunId,
+                        group.Key.ServerRunId,
+                        group.Key.SessionId,
+                        group.Key.MessageId,
+                        entries,
+                        cancellationToken).ConfigureAwait(false);
+                    _sequences[group.Key.MessageId] = entries[^1].Sequence;
+                    imported++;
                 }
+
+                File.Move(path, path + ".imported", overwrite: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or SqliteException)
+            {
+                TraceWriteFailed(_logger, Path.GetFileNameWithoutExtension(path), exception);
             }
         }
-        catch (Exception exception) when (IsDiagnosticIoFailure(exception) || exception is JsonException)
-        {
-            TraceWriteFailed(_logger, messageId.ToString("D"), exception);
-        }
-
-        return new TraceState(resolvedLocalRunId, resolvedSessionId, messageId, entries);
+        return imported;
     }
-
-    private string TracePath(Guid messageId) => Path.Combine(_traceDirectory, $"{messageId:N}.jsonl");
 
     private static string NormalizeTarget(string value)
     {
@@ -544,26 +475,4 @@ public sealed class CodingRunTraceService
         return lines.Length == 0 ? null : string.Join('\n', lines);
     }
 
-    private static bool IsDiagnosticIoFailure(Exception exception) =>
-        exception is IOException or UnauthorizedAccessException or NotSupportedException;
-
-    private sealed class TraceState
-    {
-        public TraceState(Guid localRunId, Guid sessionId, Guid messageId, List<CodingRunTraceEntry>? entries = null)
-        {
-            LocalRunId = localRunId;
-            SessionId = sessionId;
-            MessageId = messageId;
-            Entries = entries ?? [];
-            Sequence = Entries.Count == 0 ? 0 : Entries.Max(static entry => entry.Sequence);
-        }
-
-        public Guid LocalRunId { get; }
-        public Guid SessionId { get; }
-        public Guid MessageId { get; }
-        public object SyncRoot { get; } = new();
-        public SemaphoreSlim FileGate { get; } = new(1, 1);
-        public List<CodingRunTraceEntry> Entries { get; }
-        public long Sequence { get; set; }
-    }
 }

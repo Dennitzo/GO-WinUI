@@ -3,7 +3,7 @@
 
   const version = 1;
   const allowedOutbound = new Set([
-    "app.ready", "chat.send", "chat.cancel", "session.create", "session.open",
+    "app.ready", "conversation.refresh", "chat.send", "chat.cancel", "session.create", "session.open",
     "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick",
     "document.remove", "workflow.list", "workflow.insert", "workflow.create",
     "campaign.list", "campaign.select", "campaign.run", "campaign.stop",
@@ -16,7 +16,8 @@
     "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "session.tool", "ui.sessionPane", "external.open"
   ]);
   const allowedInbound = new Set([
-    "state.snapshot", "chat.started", "chat.delta", "chat.completed",
+    "state.snapshot", "conversation.snapshot", "conversation.messageCommitted", "conversation.messageRemoved",
+    "coding.snapshotCommitted", "chat.message", "chat.removed", "chat.started", "chat.delta", "chat.completed",
     "chat.cancelled", "chat.failed", "chat.codeDiff", "chat.codingTrace", "session.changed", "workflow.snapshot",
     "workflow.changed", "workflow.draft", "document.changed", "status.changed", "speech.status", "speech.progress", "theme.changed",
     "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",

@@ -448,6 +448,12 @@ public sealed class SqliteChatArtifactRepository(
                     INSERT INTO chat_artifacts
                         (id, message_id, blob_id, server_artifact_id, file_name, content_type, sha256, length, provider, metadata_json, created_at)
                     VALUES($id, $message, $blob, $server, $name, $type, $sha, $length, $provider, $metadata, $created);
+                    UPDATE chat_messages
+                    SET revision=revision+1,updated_at=$created
+                    WHERE id=$message;
+                    UPDATE chat_sessions
+                    SET conversation_revision=conversation_revision+1,updated_at=$created
+                    WHERE id=(SELECT session_id FROM chat_messages WHERE id=$message);
                     """;
                 command.Parameters.AddWithValue("$id", artifact.Id.ToString("D"));
                 command.Parameters.AddWithValue("$message", artifact.MessageId.ToString("D"));
@@ -481,7 +487,7 @@ public sealed class SqliteChatArtifactRepository(
         return (await ReadAsync(command, cancellationToken).ConfigureAwait(false)).SingleOrDefault();
     }
 
-    private static async Task<IReadOnlyList<ChatArtifact>> ReadAsync(SqliteCommand command, CancellationToken cancellationToken)
+    internal static async Task<IReadOnlyList<ChatArtifact>> ReadAsync(SqliteCommand command, CancellationToken cancellationToken)
     {
         var items = new List<ChatArtifact>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -497,7 +503,7 @@ public sealed class SqliteChatArtifactRepository(
         return items;
     }
 
-    private const string SelectSql = """
+    internal const string SelectSql = """
         SELECT a.id, a.message_id, a.blob_id, a.server_artifact_id, a.file_name, a.content_type,
                a.sha256, a.length, a.provider, a.created_at, a.metadata_json
         FROM chat_artifacts a

@@ -18,8 +18,8 @@ public sealed class AssistantCoordinator(
     IPromptTriggerRepository promptTriggers,
     IAssistantAttachmentRepository attachments,
     IChatArtifactRepository artifacts,
+    IConversationSnapshotRepository conversationSnapshots,
     GoAiAssistantService? goAi,
-    CodingRunTraceService codingTrace,
     SettingsCoordinator settings,
     RecentActivityService recentActivity,
     MicrophoneTranscriptionService? microphone = null,
@@ -198,10 +198,13 @@ public sealed class AssistantCoordinator(
 
     public async Task<object> BuildSnapshotAsync(CancellationToken cancellationToken = default)
     {
-        var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
+        var activeSession = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
+        var conversation = await conversationSnapshots.GetAsync(activeSession.Id, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die aktive Chat-Sitzung wurde nicht gefunden.");
+        var session = conversation.Session;
         var sessions = await chats.ListSessionsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
-        var messages = await chats.ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false);
-        var artifactItems = await artifacts.ListForSessionAsync(session.Id, cancellationToken).ConfigureAwait(false);
+        var messages = conversation.Messages;
+        var artifactItems = conversation.Artifacts;
         var workflowItems = await workflows.ListAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         var documentItems = await documents.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var attachmentItems = await attachments.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
@@ -209,6 +212,7 @@ public sealed class AssistantCoordinator(
         var campaignSnapshot = campaigns is null
             ? new CodingCampaignUiSnapshot([], null)
             : await campaigns.GetSnapshotAsync(session.Id, cancellationToken).ConfigureAwait(false);
+        var codingRun = conversation.CodingRun;
         var pages = new List<DocumentPage>();
         foreach (var document in documentItems)
         {
@@ -236,6 +240,8 @@ public sealed class AssistantCoordinator(
             workflows = workflowItems.Select(ToWorkflowDto),
             codingCampaignDefinitions = campaignSnapshot.Definitions,
             codingCampaign = campaignSnapshot.ActiveCampaign,
+            conversationRevision = session.ConversationRevision,
+            codingRun = codingRun is null ? null : ToCodingRunDto(codingRun),
             documents = documentItems.Select(ToDocumentDto),
             attachments = attachmentItems.Select(ToAttachmentDto),
             documentGroupStatus,
@@ -260,6 +266,72 @@ public sealed class AssistantCoordinator(
                 : Path.GetFileName(session.WorkspacePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
             isSessionPaneOpen = settings.Current.IsAssistantSessionPaneOpen,
         };
+    }
+
+    private async Task<object> BuildConversationSnapshotAsync(
+        Guid sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        var conversation = await conversationSnapshots.GetAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die Chat-Sitzung wurde nicht gefunden.");
+        return new
+        {
+            activeSessionId = sessionId,
+            conversationRevision = conversation.Session.ConversationRevision,
+            messages = conversation.Messages.Select(message => ToMessageDto(
+                message,
+                conversation.Artifacts.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
+            codingRun = conversation.CodingRun is null ? null : ToCodingRunDto(conversation.CodingRun),
+        };
+    }
+
+    private async Task EmitCommittedMessageAsync(
+        Guid messageId,
+        Func<string, object, string?, Task> emit,
+        string requestId)
+    {
+        var messageReference = await chats.GetMessageAsync(
+            messageId,
+            includeInternal: true,
+            cancellationToken: CancellationToken.None).ConfigureAwait(false);
+        if (messageReference is null)
+        {
+            return;
+        }
+        var conversation = await conversationSnapshots.GetAsync(
+            messageReference.SessionId,
+            CancellationToken.None).ConfigureAwait(false);
+        var message = conversation?.Messages.FirstOrDefault(candidate => candidate.Id == messageId);
+        if (conversation is null || message is null)
+        {
+            return;
+        }
+        await emit("conversation.messageCommitted", new
+        {
+            sessionId = message.SessionId,
+            conversationRevision = conversation.Session.ConversationRevision,
+            message = ToMessageDto(
+                message,
+                conversation.Artifacts.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null),
+        }, requestId).ConfigureAwait(false);
+    }
+
+    private async Task EmitCodingSnapshotAsync(
+        Guid sessionId,
+        Func<string, object, string?, Task> emit,
+        string requestId)
+    {
+        var conversation = await conversationSnapshots.GetAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        if (conversation is null)
+        {
+            return;
+        }
+        await emit("coding.snapshotCommitted", new
+        {
+            sessionId,
+            conversationRevision = conversation.Session.ConversationRevision,
+            codingRun = conversation.CodingRun is null ? null : ToCodingRunDto(conversation.CodingRun),
+        }, requestId).ConfigureAwait(false);
     }
 
     public async Task HandleAsync(
@@ -307,6 +379,16 @@ public sealed class AssistantCoordinator(
             case "session.open":
                 await OpenSessionAsync(GetRequiredGuid(envelope.Payload, "sessionId"), emit, envelope.RequestId, cancellationToken);
                 break;
+            case "conversation.refresh":
+            {
+                var requestedSessionId = GetOptionalGuid(envelope.Payload, "sessionId")
+                    ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
+                await emit(
+                    "conversation.snapshot",
+                    await BuildConversationSnapshotAsync(requestedSessionId, cancellationToken).ConfigureAwait(false),
+                    envelope.RequestId).ConfigureAwait(false);
+                break;
+            }
             case "session.rename":
                 await RenameSessionAsync(
                     GetRequiredGuid(envelope.Payload, "sessionId"),
@@ -943,16 +1025,16 @@ public sealed class AssistantCoordinator(
         switch (update.Kind)
         {
             case GoAiAssistantUpdateKind.MessageAdded:
-                await emit("chat.message", new
-                {
-                    message = ToMessageDto(update.Message, artifactsForMessage),
-                }, requestId).ConfigureAwait(false);
+                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
                 break;
             case GoAiAssistantUpdateKind.MessageRemoved:
-                await emit("chat.removed", new
+                await emit("conversation.messageRemoved", new
                 {
                     messageId = update.Message.Id,
                     sessionId = update.Message.SessionId,
+                    conversationRevision = await chats.GetConversationRevisionAsync(
+                        update.Message.SessionId,
+                        CancellationToken.None).ConfigureAwait(false),
                 }, requestId).ConfigureAwait(false);
                 break;
             case GoAiAssistantUpdateKind.Started:
@@ -968,6 +1050,10 @@ public sealed class AssistantCoordinator(
                 var precedingUserArtifacts = precedingUserMessage is null
                     ? null
                     : await artifacts.ListForMessageAsync(precedingUserMessage.Id, CancellationToken.None).ConfigureAwait(false);
+                await emit(
+                    "conversation.snapshot",
+                    await BuildConversationSnapshotAsync(update.Message.SessionId, CancellationToken.None).ConfigureAwait(false),
+                    requestId).ConfigureAwait(false);
                 await emit("chat.started", new
                 {
                     userMessage = precedingUserMessage is null
@@ -985,6 +1071,7 @@ public sealed class AssistantCoordinator(
                 }, requestId).ConfigureAwait(false);
                 break;
             case GoAiAssistantUpdateKind.Delta:
+                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
                 await emit("chat.delta", new
                 {
                     messageId = update.Message.Id,
@@ -1007,10 +1094,14 @@ public sealed class AssistantCoordinator(
                 }, requestId).ConfigureAwait(false);
                 break;
             case GoAiAssistantUpdateKind.ArtifactsChanged:
+                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
+                break;
             case GoAiAssistantUpdateKind.DocumentsChanged:
                 await emit("session.changed", await BuildSnapshotAsync(CancellationToken.None), requestId).ConfigureAwait(false);
                 break;
             case GoAiAssistantUpdateKind.CodeDiffChanged:
+                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
+                await EmitCodingSnapshotAsync(update.Message.SessionId, emit, requestId).ConfigureAwait(false);
                 await emit("chat.codeDiff", new
                 {
                     messageId = update.Message.Id,
@@ -1022,16 +1113,11 @@ public sealed class AssistantCoordinator(
             case GoAiAssistantUpdateKind.CodingTraceChanged:
                 if (update.CodingTrace is not null)
                 {
-                    await emit("chat.codingTrace", new
-                    {
-                        messageId = update.Message.Id,
-                        sessionId = update.Message.SessionId,
-                        entry = update.CodingTrace,
-                        entries = codingTrace.GetForMessage(update.Message.Id),
-                    }, requestId).ConfigureAwait(false);
+                    await EmitCodingSnapshotAsync(update.Message.SessionId, emit, requestId).ConfigureAwait(false);
                 }
                 break;
             case GoAiAssistantUpdateKind.Completed:
+                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
                 await emit("chat.completed", new
                 {
                     message = ToMessageDto(update.Message, artifactsForMessage),
@@ -1041,6 +1127,7 @@ public sealed class AssistantCoordinator(
                 }, requestId).ConfigureAwait(false);
                 break;
             case GoAiAssistantUpdateKind.Cancelled:
+                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
                 await emit("chat.cancelled", new
                 {
                     message = ToMessageDto(update.Message, artifactsForMessage),
@@ -1048,6 +1135,7 @@ public sealed class AssistantCoordinator(
                 }, requestId).ConfigureAwait(false);
                 break;
             case GoAiAssistantUpdateKind.Failed:
+                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
                 await emit("chat.failed", new
                 {
                     message = ToMessageDto(update.Message, artifactsForMessage),
@@ -1142,6 +1230,7 @@ public sealed class AssistantCoordinator(
                 await recentActivity.RecordAsync(
                     $"AI-Sitzung „{updatedSession.Title}“ bearbeitet",
                     CancellationToken.None).ConfigureAwait(false);
+                await EmitCommittedMessageAsync(completed.Id, emit, envelope.RequestId).ConfigureAwait(false);
                 await emit(EventTypeFor(completed.Status), new
                 {
                     message = ToMessageDto(completed),
@@ -1164,6 +1253,10 @@ public sealed class AssistantCoordinator(
                     .LastOrDefault(message => message.Role == ChatRole.Assistant);
             }
 
+            if (final is not null)
+            {
+                await EmitCommittedMessageAsync(final.Id, emit, envelope.RequestId).ConfigureAwait(false);
+            }
             await emit("chat.cancelled", new { message = final is null ? null : ToMessageDto(final) }, envelope.RequestId);
         }
         catch (Exception exception)
@@ -1175,6 +1268,10 @@ public sealed class AssistantCoordinator(
                     .LastOrDefault(message => message.Role == ChatRole.Assistant);
             }
 
+            if (final is not null)
+            {
+                await EmitCommittedMessageAsync(final.Id, emit, envelope.RequestId).ConfigureAwait(false);
+            }
             await emit("chat.failed", new
             {
                 message = final is null ? null : ToMessageDto(final),
@@ -1190,7 +1287,7 @@ public sealed class AssistantCoordinator(
         }
     }
 
-    private static async Task<bool> EmitStreamUpdateAsync(
+    private async Task<bool> EmitStreamUpdateAsync(
         ChatStreamUpdate update,
         bool started,
         Func<string, object, string?, Task> emit,
@@ -1199,6 +1296,10 @@ public sealed class AssistantCoordinator(
         if (!started)
         {
             started = true;
+            await emit(
+                "conversation.snapshot",
+                await BuildConversationSnapshotAsync(update.SessionId, CancellationToken.None).ConfigureAwait(false),
+                requestId).ConfigureAwait(false);
             await emit("chat.started", new
             {
                 message = new
@@ -1220,6 +1321,7 @@ public sealed class AssistantCoordinator(
 
         if (update.Status == MessageStatus.Streaming)
         {
+            await EmitCommittedMessageAsync(update.MessageId, emit, requestId).ConfigureAwait(false);
             await emit("chat.delta", new
             {
                 messageId = update.MessageId,
@@ -1406,11 +1508,11 @@ public sealed class AssistantCoordinator(
         session.WorkspaceFingerprint,
         session.IsPinned,
         session.PinnedAt,
+        session.ConversationRevision,
     };
 
-    private object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null)
+    private static object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null)
     {
-        var messageCodingTrace = codingTrace.GetForMessage(message.Id);
         return new
         {
             id = message.Id,
@@ -1424,14 +1526,26 @@ public sealed class AssistantCoordinator(
             message.ContextSummary,
             contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
             codeDiff = message.CodeDiff,
-            codingTrace = messageCodingTrace,
-            suppressInChat = message.Role == ChatRole.Assistant
-                && message.Status == MessageStatus.Failed
-                && messageCodingTrace.Count > 0,
+            message.Revision,
             tool = message.ToolExecution,
             artifacts = (messageArtifacts ?? []).Select(ToArtifactDto),
         };
     }
+
+    private static object ToCodingRunDto(CodingRunSnapshot run) => new
+    {
+        id = run.Id,
+        localRunId = run.LocalRunId,
+        run.ServerRunId,
+        run.SessionId,
+        run.MessageId,
+        run.Status,
+        codeDiff = run.CodeDiff,
+        run.StartedAt,
+        run.UpdatedAt,
+        run.Revision,
+        entries = run.Entries,
+    };
 
     private static object ToArtifactDto(ChatArtifact artifact) => new
     {

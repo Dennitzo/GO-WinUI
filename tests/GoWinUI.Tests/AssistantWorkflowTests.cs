@@ -31,7 +31,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("\"session.tool\"", bridge, StringComparison.Ordinal);
 
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.Contains("bridge.js?v=20260821-1", html, StringComparison.Ordinal);
+        Assert.Contains("bridge.js?v=20260821-2", html, StringComparison.Ordinal);
 
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         Assert.Contains("post(\"session.tool\"", app, StringComparison.Ordinal);
@@ -67,9 +67,9 @@ public sealed class AssistantWorkflowTests
         Assert.InRange(AssistantPage.PdfA4HeightInches, 11.692, 11.693);
         Assert.InRange(AssistantPage.PdfBookMarginLeftInches, .944, .946);
         Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
-        Assert.Contains("styles.css?v=20260821-1", html, StringComparison.Ordinal);
+        Assert.Contains("styles.css?v=20260821-2", html, StringComparison.Ordinal);
         Assert.Contains("markdown.js?v=20260821-1", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260821-1", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260821-3", html, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
@@ -146,7 +146,8 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("microphone-frequency", html, StringComparison.Ordinal);
         Assert.DoesNotContain("voice-feedback", html, StringComparison.Ordinal);
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("voice-listening-preview", app, StringComparison.Ordinal);
+        Assert.Contains("voice-context-chip", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("voice-listening-preview", app, StringComparison.Ordinal);
         Assert.Contains("Ich höre zu", app, StringComparison.Ordinal);
         Assert.Contains("const hasContent = Boolean(caption.isActive);", app, StringComparison.Ordinal);
         Assert.DoesNotContain("caption.isActive || caption.error", app, StringComparison.Ordinal);
@@ -166,18 +167,18 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void ScreenClipEventsRenderProgressInChatAndComposerContext()
+    public void ScreenClipEventsRenderOnlyInTheComposerContext()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
 
-        Assert.Contains("createScreenClipProgressMessage", app, StringComparison.Ordinal);
-        Assert.Contains("data-screen-clip-progress", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("createScreenClipProgressMessage", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-screen-clip-progress", app, StringComparison.Ordinal);
         Assert.Contains("Video aufnehmen · ${formatClipTime(elapsed)}", app, StringComparison.Ordinal);
         Assert.Contains("post(\"screenClip.stop\"", app, StringComparison.Ordinal);
         Assert.Contains("post(\"screenClip.cancel\"", app, StringComparison.Ordinal);
-        Assert.Contains(".screen-clip-progress", styles, StringComparison.Ordinal);
+        Assert.DoesNotContain(".screen-clip-progress", styles, StringComparison.Ordinal);
         Assert.Contains(".screen-clip-chip", styles, StringComparison.Ordinal);
     }
 
@@ -1361,6 +1362,36 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public async Task OpeningSessionsAlwaysEmitsTheExactVisibleDatabaseRowsForThatSession()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var first = await chats.CreateSessionAsync("Erste Sitzung");
+        var firstTurn = await chats.AddTurnAsync(first.Id, "Erste Frage");
+        await chats.UpdateMessageAsync(firstTurn.AssistantMessage.Id, "Erste Antwort", MessageStatus.Completed);
+        var second = await chats.CreateSessionAsync("Zweite Sitzung");
+        var secondTurn = await chats.AddTurnAsync(second.Id, "Zweite Frage");
+        await chats.UpdateMessageAsync(secondTurn.AssistantMessage.Id, "Zweite Antwort", MessageStatus.Completed);
+        await settings.UpdateAsync(current => current with { ActiveSessionId = first.Id });
+        using var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+
+        var secondSnapshot = await OpenAndCaptureSnapshotAsync(coordinator, second.Id);
+        var firstSnapshot = await OpenAndCaptureSnapshotAsync(coordinator, first.Id);
+
+        Assert.Equal(
+            new[] { secondTurn.UserMessage.Id, secondTurn.AssistantMessage.Id },
+            secondSnapshot.GetProperty("messages").EnumerateArray()
+                .Select(static message => message.GetProperty("id").GetGuid()).ToArray());
+        Assert.Equal(
+            new[] { firstTurn.UserMessage.Id, firstTurn.AssistantMessage.Id },
+            firstSnapshot.GetProperty("messages").EnumerateArray()
+                .Select(static message => message.GetProperty("id").GetGuid()).ToArray());
+        Assert.Equal("Erste Antwort", firstSnapshot.GetProperty("messages")[1].GetProperty("content").GetString());
+    }
+
+    [Fact]
     public async Task SessionActionsUseTheNewDefaultTitleAndUpdateRecentActivity()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -1415,10 +1446,8 @@ public sealed class AssistantWorkflowTests
             environment.Get<IPromptTriggerRepository>(),
             environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(),
+            environment.Get<IConversationSnapshotRepository>(),
             null,
-            new CodingRunTraceService(
-                environment.Get<GoInfrastructureOptions>(),
-                NullLogger<CodingRunTraceService>.Instance),
             settings,
             recentActivity);
 
@@ -1434,6 +1463,30 @@ public sealed class AssistantWorkflowTests
             Guid.NewGuid().ToString("D"),
             payloadDocument.RootElement.Clone());
         await coordinator.HandleAsync(envelope, static (_, _, _) => Task.CompletedTask);
+    }
+
+    private static async Task<JsonElement> OpenAndCaptureSnapshotAsync(
+        AssistantCoordinator coordinator,
+        Guid sessionId)
+    {
+        using var payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(new { sessionId }));
+        var envelope = new WebBridgeEnvelope(
+            AssistantWebBridge.ProtocolVersion,
+            "session.open",
+            Guid.NewGuid().ToString("D"),
+            payloadDocument.RootElement.Clone());
+        JsonElement? snapshot = null;
+        await coordinator.HandleAsync(
+            envelope,
+            (type, payload, _) =>
+            {
+                if (type is "state.snapshot" or "session.changed")
+                {
+                    snapshot = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+                }
+                return Task.CompletedTask;
+            });
+        return snapshot ?? throw new InvalidOperationException("Der Sitzungs-Snapshot wurde nicht emittiert.");
     }
 
     private sealed class UnexpectedLmStudioClient : ILmStudioClient

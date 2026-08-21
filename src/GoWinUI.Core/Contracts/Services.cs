@@ -30,7 +30,13 @@ public interface IChatRepository
         CancellationToken cancellationToken = default);
     Task SetPinnedAsync(Guid id, bool isPinned, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ChatMessage>> ListMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    Task<long> GetConversationRevisionAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<ChatMessage?> GetMessageAsync(Guid messageId, bool includeInternal = false, CancellationToken cancellationToken = default);
+    Task<ChatTurn> AddTurnAsync(
+        Guid sessionId,
+        string userContent,
+        MessageContentProfile assistantContentProfile = MessageContentProfile.General,
+        CancellationToken cancellationToken = default);
     Task<ChatMessage> AddMessageAsync(
         Guid sessionId,
         ChatRole role,
@@ -50,6 +56,7 @@ public interface IChatRepository
     Task SetMessageVisibilityAsync(Guid messageId, ChatMessageVisibility visibility, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
     Task<int> DeleteInternalMessagesAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
+    Task<int> DeleteEmptyTerminalMessagesAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
     Task UpdateMessageAsync(Guid messageId, string content, MessageStatus status, string? errorMessage = null, CancellationToken cancellationToken = default);
     Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default);
     Task<SessionContextPreparation?> GetSessionContextPreparationAsync(string cacheKey, CancellationToken cancellationToken = default);
@@ -63,6 +70,40 @@ public interface IChatRepository
     Task SetToolExecutionAsync(Guid messageId, ToolExecutionInfo execution, CancellationToken cancellationToken = default);
     Task SetCodeDiffAsync(Guid messageId, string? codeDiff, CancellationToken cancellationToken = default);
     Task<int> MarkStreamingMessagesInterruptedAsync(CancellationToken cancellationToken = default);
+}
+
+public interface ICodingRunRepository
+{
+    Task<CodingRunTraceEntry> AppendAsync(
+        Guid localRunId,
+        string? serverRunId,
+        Guid sessionId,
+        Guid messageId,
+        CodingRunTraceEntry entry,
+        CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CodingRunTraceEntry>> ListForMessageAsync(
+        Guid messageId,
+        CancellationToken cancellationToken = default);
+    Task<CodingRunSnapshot?> GetLatestForSessionAsync(
+        Guid sessionId,
+        CancellationToken cancellationToken = default);
+    Task SetCodeDiffAsync(
+        Guid localRunId,
+        string? codeDiff,
+        CancellationToken cancellationToken = default);
+    Task<int> MarkRunningInterruptedAsync(CancellationToken cancellationToken = default);
+    Task ImportAsync(
+        Guid localRunId,
+        string? serverRunId,
+        Guid sessionId,
+        Guid messageId,
+        IReadOnlyList<CodingRunTraceEntry> entries,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IConversationSnapshotRepository
+{
+    Task<ConversationSnapshot?> GetAsync(Guid sessionId, CancellationToken cancellationToken = default);
 }
 
 public interface IWorkflowRepository

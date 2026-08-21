@@ -28,7 +28,8 @@ public sealed record ChatSession(
     string? WorkspaceFingerprint = null,
     bool IsPinned = false,
     DateTimeOffset? PinnedAt = null,
-    PersistentToolAction? PersistentToolAction = null);
+    PersistentToolAction? PersistentToolAction = null,
+    long ConversationRevision = 0);
 
 public sealed record ChatMessage(
     Guid Id,
@@ -43,7 +44,52 @@ public sealed record ChatMessage(
     string? ContextSummary = null,
     MessageContentProfile ContentProfile = MessageContentProfile.General,
     string? CodeDiff = null,
-    ChatMessageVisibility Visibility = ChatMessageVisibility.Visible);
+    ChatMessageVisibility Visibility = ChatMessageVisibility.Visible,
+    long Revision = 1);
+
+public sealed record ChatTurn(ChatMessage UserMessage, ChatMessage AssistantMessage);
+
+public sealed record CodingProcessConsole(
+    string OperationId,
+    string Command,
+    string WorkingDirectory,
+    string Purpose,
+    string Status,
+    int? ExitCode = null,
+    string? StandardOutput = null,
+    string? StandardError = null);
+
+public sealed record CodingRunTraceEntry(
+    long Sequence,
+    DateTimeOffset Timestamp,
+    string Stage,
+    string Status,
+    string Title,
+    string? Detail = null,
+    string? Tool = null,
+    string? Target = null,
+    long? DurationMilliseconds = null,
+    long? ServerEventId = null,
+    CodingProcessConsole? ProcessConsole = null);
+
+public sealed record CodingRunSnapshot(
+    Guid Id,
+    Guid LocalRunId,
+    string? ServerRunId,
+    Guid SessionId,
+    Guid? MessageId,
+    string Status,
+    string? CodeDiff,
+    DateTimeOffset StartedAt,
+    DateTimeOffset UpdatedAt,
+    long Revision,
+    IReadOnlyList<CodingRunTraceEntry> Entries);
+
+public sealed record ConversationSnapshot(
+    ChatSession Session,
+    IReadOnlyList<ChatMessage> Messages,
+    IReadOnlyDictionary<Guid, IReadOnlyList<ChatArtifact>> Artifacts,
+    CodingRunSnapshot? CodingRun);
 
 public sealed record CodingCampaignState(
     Guid Id,

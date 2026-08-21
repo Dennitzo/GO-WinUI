@@ -1,5 +1,7 @@
 using GoAi.Contracts;
 using GoWinUI.App.Services;
+using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Text.Json;
@@ -8,27 +10,28 @@ namespace GoWinUI.Tests;
 
 public sealed class CodingRunTraceServiceTests
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly string[] PhysicsSmokeArguments = ["physics_solver.py", "--smoke"];
     private static readonly string[] DotNetTestArguments = ["test"];
 
     [Fact]
     public async Task TraceIsPersistedAndReloadedByAssistantMessage()
     {
-        var root = Path.Combine(Path.GetTempPath(), "GO-CodingTraceTests", Guid.NewGuid().ToString("N"));
-        try
-        {
-            var options = new GoInfrastructureOptions { DataDirectory = root };
-            var localRunId = Guid.NewGuid();
-            var sessionId = Guid.NewGuid();
-            var messageId = Guid.NewGuid();
-            var first = new CodingRunTraceService(options, NullLogger<CodingRunTraceService>.Instance);
+        await using var environment = await TestEnvironment.CreateAsync();
+        var options = environment.Get<GoInfrastructureOptions>();
+        var repository = environment.Get<ICodingRunRepository>();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Coding");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, string.Empty, MessageStatus.Streaming);
+        var localRunId = Guid.NewGuid();
+        var first = new CodingRunTraceService(options, repository, NullLogger<CodingRunTraceService>.Instance);
 
-            await first.StartAsync(localRunId, sessionId, messageId, @"C:\Workspace\Demo");
+            await first.StartAsync(localRunId, session.Id, message.Id, @"C:\Workspace\Demo");
             await first.AppendAsync(
                 localRunId,
                 "run-123",
-                sessionId,
-                messageId,
+                session.Id,
+                message.Id,
                 "tool",
                 "completed",
                 "Datei gelesen",
@@ -38,63 +41,96 @@ public sealed class CodingRunTraceServiceTests
                 42,
                 7);
 
-            var reloaded = new CodingRunTraceService(options, NullLogger<CodingRunTraceService>.Instance);
-            var entries = reloaded.GetForMessage(messageId);
+            var reloaded = new CodingRunTraceService(options, repository, NullLogger<CodingRunTraceService>.Instance);
+            var entries = await reloaded.GetForMessageAsync(message.Id);
 
             Assert.Equal(2, entries.Count);
             Assert.Equal("Coding-Lauf gestartet", entries[0].Title);
             Assert.Equal("src/MainWindow.xaml", entries[1].Target);
             Assert.Equal(42, entries[1].DurationMilliseconds);
-            Assert.True(File.Exists(Path.Combine(root, "CodingRuns", "Traces", $"{messageId:N}.jsonl")));
-        }
-        finally
-        {
-            if (Directory.Exists(root))
-            {
-                Directory.Delete(root, recursive: true);
-            }
-        }
+            Assert.False(File.Exists(Path.Combine(environment.Directory, "CodingRuns", "Traces", $"{message.Id:N}.jsonl")));
+            Assert.NotNull(await repository.GetLatestForSessionAsync(session.Id));
     }
 
     [Fact]
     public async Task TraceRetainsEveryEntryWhileOnlyTheWebViewViewportIsLimited()
     {
-        var root = Path.Combine(Path.GetTempPath(), "GO-CodingTraceTests", Guid.NewGuid().ToString("N"));
-        try
-        {
-            var options = new GoInfrastructureOptions { DataDirectory = root };
-            var localRunId = Guid.NewGuid();
-            var sessionId = Guid.NewGuid();
-            var messageId = Guid.NewGuid();
-            var first = new CodingRunTraceService(options, NullLogger<CodingRunTraceService>.Instance);
+        await using var environment = await TestEnvironment.CreateAsync();
+        var options = environment.Get<GoInfrastructureOptions>();
+        var repository = environment.Get<ICodingRunRepository>();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Coding");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, string.Empty, MessageStatus.Streaming);
+        var localRunId = Guid.NewGuid();
+        var first = new CodingRunTraceService(options, repository, NullLogger<CodingRunTraceService>.Instance);
 
-            await first.StartAsync(localRunId, sessionId, messageId, @"C:\Workspace\Demo");
+            await first.StartAsync(localRunId, session.Id, message.Id, @"C:\Workspace\Demo");
             for (var index = 0; index < 1_010; index++)
             {
                 await first.AppendAsync(
                     localRunId,
                     "run-all-entries",
-                    sessionId,
-                    messageId,
+                    session.Id,
+                    message.Id,
                     "tool",
                     "completed",
                     $"Schritt {index + 1}");
             }
 
-            var reloaded = new CodingRunTraceService(options, NullLogger<CodingRunTraceService>.Instance);
-            var entries = reloaded.GetForMessage(messageId);
+            var reloaded = new CodingRunTraceService(options, repository, NullLogger<CodingRunTraceService>.Instance);
+            var entries = await reloaded.GetForMessageAsync(message.Id);
 
             Assert.Equal(1_011, entries.Count);
             Assert.Equal("Coding-Lauf gestartet", entries[0].Title);
             Assert.Equal("Schritt 1010", entries[^1].Title);
-        }
-        finally
-        {
-            if (Directory.Exists(root))
-            {
-                Directory.Delete(root, recursive: true);
-            }
-        }
+    }
+
+    [Fact]
+    public async Task LegacyJsonlImportIsIdempotentAndSQLiteBecomesTheOnlyUiSource()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var options = environment.Get<GoInfrastructureOptions>();
+        var repository = environment.Get<ICodingRunRepository>();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Legacy-Import");
+        var message = await chats.AddMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            "### Prozessbericht\n\nImportiert.",
+            MessageStatus.Completed);
+        var localRunId = Guid.NewGuid();
+        var traceDirectory = Path.Combine(environment.Directory, "CodingRuns", "Traces");
+        Directory.CreateDirectory(traceDirectory);
+        var record = new CodingRunTraceRecord(
+            localRunId,
+            "run-legacy",
+            session.Id,
+            message.Id,
+            new CodingRunTraceEntry(
+                1,
+                DateTimeOffset.UtcNow,
+                "run",
+                "completed",
+                "Legacy-Lauf importiert"));
+        var tracePath = Path.Combine(traceDirectory, $"{message.Id:N}.jsonl");
+        await File.WriteAllTextAsync(
+            tracePath,
+            JsonSerializer.Serialize(record, JsonOptions) + Environment.NewLine);
+        var service = new CodingRunTraceService(options, repository, NullLogger<CodingRunTraceService>.Instance);
+
+        Assert.Equal(1, await service.ImportLegacyAsync());
+        var first = await repository.GetLatestForSessionAsync(session.Id);
+        Assert.NotNull(first);
+        Assert.Single(first.Entries);
+        var revision = first.Revision;
+        Assert.False(File.Exists(tracePath));
+        Assert.True(File.Exists(tracePath + ".imported"));
+
+        Assert.Equal(0, await service.ImportLegacyAsync());
+        var second = await repository.GetLatestForSessionAsync(session.Id);
+        Assert.NotNull(second);
+        Assert.Equal(revision, second.Revision);
+        Assert.Single(second.Entries);
     }
 
     [Fact]
@@ -118,13 +154,13 @@ public sealed class CodingRunTraceServiceTests
     [Fact]
     public async Task PowerShellConsoleIsPersistedAndReloadedWithOutput()
     {
-        var root = Path.Combine(Path.GetTempPath(), "GO-CodingTraceTests", Guid.NewGuid().ToString("N"));
-        try
-        {
-            var options = new GoInfrastructureOptions { DataDirectory = root };
-            var localRunId = Guid.NewGuid();
-            var sessionId = Guid.NewGuid();
-            var messageId = Guid.NewGuid();
+        await using var environment = await TestEnvironment.CreateAsync();
+        var options = environment.Get<GoInfrastructureOptions>();
+        var repository = environment.Get<ICodingRunRepository>();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Coding");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, string.Empty, MessageStatus.Streaming);
+        var localRunId = Guid.NewGuid();
             var proposal = Proposal(
                 ClientToolNames.ProcessRun,
                 ToolRiskClass.Process,
@@ -146,14 +182,14 @@ public sealed class CodingRunTraceServiceTests
                 }),
                 null,
                 null);
-            var first = new CodingRunTraceService(options, NullLogger<CodingRunTraceService>.Instance);
+            var first = new CodingRunTraceService(options, repository, NullLogger<CodingRunTraceService>.Instance);
 
-            await first.StartAsync(localRunId, sessionId, messageId, @"C:\Workspace\Demo");
+            await first.StartAsync(localRunId, session.Id, message.Id, @"C:\Workspace\Demo");
             await first.AppendAsync(
                 localRunId,
                 "run-console",
-                sessionId,
-                messageId,
+                session.Id,
+                message.Id,
                 "tool",
                 "running",
                 "Programm wird gestartet",
@@ -161,29 +197,21 @@ public sealed class CodingRunTraceServiceTests
             await first.AppendAsync(
                 localRunId,
                 "run-console",
-                sessionId,
-                messageId,
+                session.Id,
+                message.Id,
                 "tool",
                 "completed",
                 "Programmstart abgeschlossen",
                 processConsole: CodingRunTraceService.CreateProcessConsole(proposal, result));
 
-            var reloaded = new CodingRunTraceService(options, NullLogger<CodingRunTraceService>.Instance);
-            var console = reloaded.GetForMessage(messageId)[^1].ProcessConsole;
+            var reloaded = new CodingRunTraceService(options, repository, NullLogger<CodingRunTraceService>.Instance);
+            var console = (await reloaded.GetForMessageAsync(message.Id))[^1].ProcessConsole;
 
             Assert.NotNull(console);
             Assert.Equal("completed", console.Status);
             Assert.Equal(0, console.ExitCode);
             Assert.Contains("physics_solver.py --smoke", console.Command, StringComparison.Ordinal);
             Assert.Contains("Smoke-Test erfolgreich", console.StandardOutput, StringComparison.Ordinal);
-        }
-        finally
-        {
-            if (Directory.Exists(root))
-            {
-                Directory.Delete(root, recursive: true);
-            }
-        }
     }
 
     [Fact]
@@ -263,24 +291,31 @@ public sealed class CodingRunTraceServiceTests
     }
 
     [Fact]
-    public void WebViewRendersTheLiveCodingTraceExpandedAndAcceptsHostUpdates()
+    public void WebViewUsesCommittedDatabaseSnapshotsAndAGroupedComposerWorkspace()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
+        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
         var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
 
-        Assert.Contains("case \"chat.codingTrace\"", app, StringComparison.Ordinal);
-        Assert.Contains("case \"chat.codeDiff\"", app, StringComparison.Ordinal);
-        Assert.Contains("currentCodingRun: null", app, StringComparison.Ordinal);
-        Assert.Contains("function ensureCurrentCodingRun(payload)", app, StringComparison.Ordinal);
-        Assert.Contains("function mergeCodingTraceEntries(message, entries)", app, StringComparison.Ordinal);
-        Assert.Contains("const liveRun = state.currentCodingRun?.sessionId === state.activeSessionId", app, StringComparison.Ordinal);
-        Assert.Contains("Array.isArray(payload.entries)", app, StringComparison.Ordinal);
-        Assert.Contains("state.currentCodingRun.status = state.codingCampaign.status === \"faulted\" ? \"failed\" : \"cancelled\"", app, StringComparison.Ordinal);
+        Assert.Contains("conversationRevision: 0", app, StringComparison.Ordinal);
+        Assert.Contains("codingRun: null", app, StringComparison.Ordinal);
+        Assert.Contains("case \"conversation.snapshot\"", app, StringComparison.Ordinal);
+        Assert.Contains("case \"conversation.messageCommitted\"", app, StringComparison.Ordinal);
+        Assert.Contains("case \"conversation.messageRemoved\"", app, StringComparison.Ordinal);
+        Assert.Contains("case \"coding.snapshotCommitted\"", app, StringComparison.Ordinal);
+        Assert.Contains("function requestConversationRefresh()", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"conversation.refresh\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("currentCodingRun", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("ensureCurrentCodingRun", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("mergeCodingTraceEntries", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("state.messages.push(nextMessage)", app, StringComparison.Ordinal);
         Assert.Contains("state.codingCampaign = { ...state.codingCampaign, status: \"stopping\" }", app, StringComparison.Ordinal);
         Assert.Contains("post(\"campaign.stop\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
         Assert.Contains("\"campaign.list\", \"campaign.select\", \"campaign.run\", \"campaign.stop\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("\"app.ready\", \"conversation.refresh\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("\"conversation.snapshot\", \"conversation.messageCommitted\", \"conversation.messageRemoved\"", bridge, StringComparison.Ordinal);
         Assert.Contains("function createCodingTrace(message, force = false)", app, StringComparison.Ordinal);
         Assert.Contains("function createPowerShellPanel(message, force = false)", app, StringComparison.Ordinal);
         Assert.Contains("function createCodeDiff(message, force = false)", app, StringComparison.Ordinal);
@@ -294,29 +329,31 @@ public sealed class CodingRunTraceServiceTests
         Assert.Contains("createCodingTrace(panelMessage, true)", app, StringComparison.Ordinal);
         Assert.Contains("createPowerShellPanel(panelMessage, true)", app, StringComparison.Ordinal);
         Assert.Contains("createCodeDiff(panelMessage, true)", app, StringComparison.Ordinal);
-        Assert.Contains("function createCurrentCodingPanels()", app, StringComparison.Ordinal);
-        Assert.Contains("elements.messageList.append(currentCodingPanels)", app, StringComparison.Ordinal);
+        Assert.Contains("function renderCodingWorkspace()", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("elements.messageList.append(currentCodingPanels)", app, StringComparison.Ordinal);
+        Assert.Contains("id=\"coding-workspace\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"coding-workspace-toggle\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"coding-workspace-close\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("body.classList.add(\"message-body--coding\")", app, StringComparison.Ordinal);
         Assert.Contains("Coding-Ablauf", app, StringComparison.Ordinal);
-        Assert.Contains("details.open = !state.closedCodingTraces.has", app, StringComparison.Ordinal);
-        Assert.Contains("details.open = !state.closedPowerShellPanels.has", app, StringComparison.Ordinal);
-        Assert.Contains("function collapseCompletedCodingPanels(message, force = false)", app, StringComparison.Ordinal);
-        Assert.Contains("collapseCompletedCodingPanels(payload.message, true)", app, StringComparison.Ordinal);
-        Assert.Contains("details.open = !state.closedCodeDiffs.has", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("document.createElement(\"details\")", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("collapseCompletedCodingPanels", app, StringComparison.Ordinal);
         Assert.Contains("for (const entry of visibleEntries)", app, StringComparison.Ordinal);
         Assert.Contains("Coding-Modell wird geladen", app, StringComparison.Ordinal);
         Assert.Contains("list.scrollTop = list.scrollHeight", app, StringComparison.Ordinal);
-        Assert.Contains("function attachCodingPanelMaximize(details, summary, label, panelKind)", app, StringComparison.Ordinal);
+        Assert.Contains("function attachCodingPanelMaximize(panel, header, label, panelKind)", app, StringComparison.Ordinal);
         Assert.Contains("codingPanelMaximizeIcon", app, StringComparison.Ordinal);
         Assert.Contains("state.maximizedCodingPanelKind === panelKind", app, StringComparison.Ordinal);
         Assert.Contains("captureMaximizedCodingPanelScroll();", app, StringComparison.Ordinal);
+        Assert.Contains("function maximizedCodingPanelUsesAutoScroll(panelKind)", app, StringComparison.Ordinal);
+        Assert.Contains("panelKind === \"trace\" || panelKind === \"powershell\"", app, StringComparison.Ordinal);
+        Assert.Contains("? panel.scrollHeight", app, StringComparison.Ordinal);
+        Assert.Contains(": state.maximizedCodingPanelScrollTop", app, StringComparison.Ordinal);
         Assert.Contains("overflow: auto !important", styles, StringComparison.Ordinal);
         Assert.Contains("position: sticky", styles, StringComparison.Ordinal);
-        Assert.Contains("if (shouldSuppressMessageInChat(message)) continue;", app, StringComparison.Ordinal);
-        Assert.Contains("if (message?.suppressInChat) return true;", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("shouldSuppressMessageInChat", app, StringComparison.Ordinal);
         Assert.Contains("filterPowerShellOutput(item.standardError)", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("message.codingTrace.splice", app, StringComparison.Ordinal);
-        Assert.Contains("\"chat.codeDiff\", \"chat.codingTrace\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("\"coding.snapshotCommitted\"", bridge, StringComparison.Ordinal);
         Assert.Contains(".message-coding-trace", styles, StringComparison.Ordinal);
         Assert.Contains("--coding-panel-viewport-height: 210px", styles, StringComparison.Ordinal);
         Assert.Contains(".message-coding-trace__list { box-sizing: border-box; height: var(--coding-panel-viewport-height); max-height: var(--coding-panel-viewport-height)", styles, StringComparison.Ordinal);
@@ -326,10 +363,10 @@ public sealed class CodingRunTraceServiceTests
         Assert.Contains("grid-template-columns: repeat(2, minmax(0, 1fr))", styles, StringComparison.Ordinal);
         Assert.Contains(".message-coding-panels > .message-code-diff { grid-column: 1 / -1; }", styles, StringComparison.Ordinal);
         Assert.Contains(".coding-panel--maximized", styles, StringComparison.Ordinal);
-        Assert.Contains(".current-coding-workspace", styles, StringComparison.Ordinal);
+        Assert.Contains(".coding-workspace", styles, StringComparison.Ordinal);
         Assert.Contains("opacity: 1; pointer-events: auto", styles, StringComparison.Ordinal);
 
-        var currentPanels = app[app.IndexOf("function createCurrentCodingPanels()", StringComparison.Ordinal)..];
+        var currentPanels = app[app.IndexOf("function renderCodingWorkspace()", StringComparison.Ordinal)..];
         var traceIndex = currentPanels.IndexOf("createCodingTrace(panelMessage, true)", StringComparison.Ordinal);
         var powerShellIndex = currentPanels.IndexOf("createPowerShellPanel(panelMessage, true)", StringComparison.Ordinal);
         var diffIndex = currentPanels.IndexOf("createCodeDiff(panelMessage, true)", StringComparison.Ordinal);

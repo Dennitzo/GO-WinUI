@@ -567,18 +567,16 @@ public sealed class CodingAgentTests
     [InlineData("GO_SESSION_TITLE: Fertig")]
     [InlineData("GO_SESSION_TITLE: Fertig\n\nDie Anzeige wurde angepasst. Tests sind erfolgreich.")]
     [InlineData("GO_SESSION_TITLE: Fertig\n\nLass mich das korrigieren:\n<tool_call><function=fs_readText></function></tool_call>")]
-    public void CodingFinalRejectsMissingMetadataEmptyMessagesAndPseudoTools(string response)
+    public void CodingFinalRejectsMissingProcessReportsEmptyMessagesAndPseudoTools(string response)
     {
         Assert.False(RunProcessor.IsValidCodingFinalResponse(response));
     }
 
     [Fact]
-    public void CodingFinalAcceptsAConcreteTitledSummary()
+    public void CodingFinalAcceptsAConcreteProcessReportWithoutTechnicalTitle()
     {
         Assert.True(RunProcessor.IsValidCodingFinalResponse(
             """
-            GO_SESSION_TITLE: Laufzeitanzeige verbessert
-
             ### Prozessbericht
             **Gegenstand:** Laufzeitanzeige des Clients.
             **Aktion:** Die Anzeige wurde angepasst.

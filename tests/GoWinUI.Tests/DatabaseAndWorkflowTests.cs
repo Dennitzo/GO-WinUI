@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using Microsoft.Data.Sqlite;
@@ -96,6 +98,133 @@ public sealed class DatabaseAndWorkflowTests
     }
 
     [Fact]
+    public async Task ChatTurnAndEveryCommittedMutationAdvanceDatabaseRevisions()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var repository = environment.Get<IChatRepository>();
+        var session = await repository.CreateSessionAsync("Revisionslauf");
+
+        var turn = await repository.AddTurnAsync(
+            session.Id,
+            "Prüfe den Workspace.",
+            MessageContentProfile.General);
+
+        Assert.Equal(1, await repository.GetConversationRevisionAsync(session.Id));
+        Assert.Equal(1, turn.UserMessage.Revision);
+        Assert.Equal(1, turn.AssistantMessage.Revision);
+        Assert.Equal(
+            new[] { turn.UserMessage.Id, turn.AssistantMessage.Id },
+            (await repository.ListMessagesAsync(session.Id)).Select(static message => message.Id).ToArray());
+
+        await repository.UpdateMessageAsync(
+            turn.AssistantMessage.Id,
+            "### Prozessbericht\n\nDer Workspace wurde geprüft.",
+            MessageStatus.Completed);
+
+        Assert.Equal(2, await repository.GetConversationRevisionAsync(session.Id));
+        Assert.Equal(2, (await repository.GetMessageAsync(turn.AssistantMessage.Id))?.Revision);
+    }
+
+    [Fact]
+    public async Task DurableChatBoundaryRemovesLegacyTitleMarkersAndEmptyTerminalCards()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var repository = environment.Get<IChatRepository>();
+        var session = await repository.CreateSessionAsync("Bereinigung");
+        var visible = await repository.AddMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            "GO_SESSION_TITLE: Unsichtbarer Titel\n\n### Prozessbericht\n**Aktion:** **GO\\_SESSION\\_TITLE:** Sichtbarer Inhalt",
+            MessageStatus.Completed);
+        _ = await repository.AddMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            string.Empty,
+            MessageStatus.Failed);
+
+        var stored = await repository.GetMessageAsync(visible.Id);
+        Assert.NotNull(stored);
+        Assert.DoesNotContain("SESSION", stored.Content, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("**Aktion:** Sichtbarer Inhalt", stored.Content, StringComparison.Ordinal);
+        Assert.Equal(1, await repository.DeleteEmptyTerminalMessagesAsync());
+        Assert.Single(await repository.ListMessagesAsync(session.Id));
+    }
+
+    [Fact]
+    public async Task ConversationSnapshotReadsVisibleMessagesArtifactsAndCodingDataFromOneDatabaseRevision()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var artifacts = environment.Get<IChatArtifactRepository>();
+        var codingRuns = environment.Get<ICodingRunRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Konsistenter Snapshot");
+        var turn = await chats.AddTurnAsync(session.Id, "Passe die Datei an.");
+        await chats.UpdateMessageAsync(
+            turn.AssistantMessage.Id,
+            "### Prozessbericht\n\nDie Datei wurde angepasst.",
+            MessageStatus.Completed);
+        _ = await chats.AddInternalMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            "Interner Versuch",
+            MessageStatus.Completed);
+
+        var artifactBytes = Encoding.UTF8.GetBytes("Vorschauinhalt");
+        var artifactSha = Convert.ToHexString(SHA256.HashData(artifactBytes)).ToLowerInvariant();
+        await using (var content = new MemoryStream(artifactBytes, writable: false))
+        {
+            _ = await artifacts.ImportAsync(
+                turn.AssistantMessage.Id,
+                "artifact-test",
+                "fortschritt.txt",
+                "text/plain",
+                artifactSha,
+                artifactBytes.LongLength,
+                "coding-test",
+                null,
+                content);
+        }
+
+        var localRunId = Guid.NewGuid();
+        _ = await codingRuns.AppendAsync(
+            localRunId,
+            "run-test",
+            session.Id,
+            turn.AssistantMessage.Id,
+            new CodingRunTraceEntry(
+                1,
+                DateTimeOffset.UtcNow,
+                "tool",
+                "completed",
+                "Datei geändert"));
+        await codingRuns.SetCodeDiffAsync(localRunId, "diff --git a/demo.cs b/demo.cs\n+neu\n");
+
+        var snapshot = await snapshots.GetAsync(session.Id);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(await chats.GetConversationRevisionAsync(session.Id), snapshot.Session.ConversationRevision);
+        Assert.Equal(
+            new[] { turn.UserMessage.Id, turn.AssistantMessage.Id },
+            snapshot.Messages.Select(static message => message.Id).ToArray());
+        Assert.Single(snapshot.Artifacts[turn.AssistantMessage.Id]);
+        Assert.Equal("fortschritt.txt", snapshot.Artifacts[turn.AssistantMessage.Id][0].FileName);
+        Assert.NotNull(snapshot.CodingRun);
+        Assert.Single(snapshot.CodingRun.Entries);
+        Assert.Contains("demo.cs", snapshot.CodingRun.CodeDiff, StringComparison.Ordinal);
+        Assert.Contains(
+            "demo.cs",
+            snapshot.Messages.Single(message => message.Id == turn.AssistantMessage.Id).CodeDiff,
+            StringComparison.Ordinal);
+
+        Assert.Equal(1, await codingRuns.MarkRunningInterruptedAsync());
+        var interrupted = await snapshots.GetAsync(session.Id);
+        Assert.NotNull(interrupted?.CodingRun);
+        Assert.Equal("interrupted", interrupted.CodingRun.Status);
+        Assert.Equal(0, await codingRuns.MarkRunningInterruptedAsync());
+    }
+
+    [Fact]
     public async Task CurrentSchemaPersistsAudiobookStateCodeDiffAndRemovesLegacySpeechCache()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -124,7 +253,7 @@ public sealed class DatabaseAndWorkflowTests
 
         await chats.SetCodeDiffAsync(message.Id, "diff --git a/demo.cs b/demo.cs\n+added\n");
 
-        Assert.Equal(24, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
+        Assert.Equal(25, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
         await using (var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
         {
             await connection.OpenAsync();

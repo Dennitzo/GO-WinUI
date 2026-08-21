@@ -13,7 +13,7 @@ public sealed class ProtocolTests
     public void TgaPoliciesRemainValidUtf8GermanText()
     {
         Assert.Contains("für die TGA-Fachplanung", TgaAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
-        Assert.Contains("höchstens sechs Wörtern", TgaAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
+        Assert.Contains("keine technische Titelzeile", TgaAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
         Assert.DoesNotContain("Ã", TgaAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
         Assert.DoesNotContain("Ã", TgaAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
         Assert.Contains("eintausendfünfhundert bis", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);

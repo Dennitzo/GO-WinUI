@@ -192,25 +192,42 @@ public sealed class GoAiAssistantService(
             var contentProfile = action == PromptTriggerAction.Audiobook
                 ? MessageContentProfile.Audiobook
                 : MessageContentProfile.General;
-            if (persistUserMessage)
+            ChatMessage assistant;
+            if (persistUserMessage && !internalAssistantMessage)
             {
-                var user = await chats.AddMessageAsync(
-                    sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed,
-                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+                var turn = await chats.AddTurnAsync(
+                    sessionId,
+                    prompt.Trim(),
+                    contentProfile,
+                    _activeCancellation.Token).ConfigureAwait(false);
                 sessionAttachments = await BindCapturedMediaToMessageAsync(
-                    user,
+                    turn.UserMessage,
                     sessionAttachments,
                     _activeCancellation.Token).ConfigureAwait(false);
+                assistant = turn.AssistantMessage;
             }
-            var assistant = internalAssistantMessage
-                ? await chats.AddInternalMessageAsync(
-                    sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
-                    contentProfile,
-                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false)
-                : await chats.AddMessageAsync(
-                    sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
-                    contentProfile,
-                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+            else
+            {
+                if (persistUserMessage)
+                {
+                    var user = await chats.AddMessageAsync(
+                        sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed,
+                        cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+                    sessionAttachments = await BindCapturedMediaToMessageAsync(
+                        user,
+                        sessionAttachments,
+                        _activeCancellation.Token).ConfigureAwait(false);
+                }
+                assistant = internalAssistantMessage
+                    ? await chats.AddInternalMessageAsync(
+                        sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
+                        contentProfile,
+                        cancellationToken: _activeCancellation.Token).ConfigureAwait(false)
+                    : await chats.AddMessageAsync(
+                        sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
+                        contentProfile,
+                        cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+            }
             var contextLimit = action == PromptTriggerAction.Code ? 262_144 : 131_072;
             await update(new(
                 GoAiAssistantUpdateKind.Started,
@@ -1237,7 +1254,7 @@ public sealed class GoAiAssistantService(
             if (diff is null) return;
 
             var finalDiff = string.IsNullOrWhiteSpace(diff.Diff) ? null : diff.Diff;
-            await chats.SetCodeDiffAsync(assistant.Id, finalDiff, CancellationToken.None).ConfigureAwait(false);
+            await codingTrace.SetCodeDiffAsync(localRun.Id, finalDiff, CancellationToken.None).ConfigureAwait(false);
             assistant = assistant with { CodeDiff = finalDiff, UpdatedAt = DateTimeOffset.UtcNow };
             await TraceCodingAsync(
                 "diff",
@@ -1474,7 +1491,7 @@ public sealed class GoAiAssistantService(
                                         : $"{diff.FileCount:N0} Dateien \u00B7 +{diff.AddedLines:N0} \u00B7 \u2212{diff.DeletedLines:N0}",
                                     serverEventId: item.Id,
                                     traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                                await chats.SetCodeDiffAsync(assistant.Id, diff.Diff, cancellationToken).ConfigureAwait(false);
+                                await codingTrace.SetCodeDiffAsync(localRun.Id, diff.Diff, cancellationToken).ConfigureAwait(false);
                                 assistant = assistant with { CodeDiff = diff.Diff, UpdatedAt = DateTimeOffset.UtcNow };
                                 await update(new(
                                     GoAiAssistantUpdateKind.CodeDiffChanged,

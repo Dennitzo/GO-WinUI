@@ -563,7 +563,7 @@ public sealed class RunProcessor : BackgroundService
                     "system",
                     "Prüfe jetzt das letzte Diff- und Verifikationsergebnis. Wenn noch eine konkrete Korrektur erforderlich ist, "
                     + "führe sie mit einem echten nativen Tool-Call aus und verifiziere danach erneut. Andernfalls liefere jetzt "
-                    + "die abschließende GO_SESSION_TITLE-Antwort. Danach folgen `### Prozessbericht` und die Felder "
+                    + "die abschließende sichtbare Antwort. Beginne mit `### Prozessbericht` und den Feldern "
                     + "`Gegenstand`, `Aktion`, `Annahmen`, `Annahmenänderung` und `Prüfung`; benenne Annahmenänderungen "
                     + "mit alter Annahme, neuer Annahme und belegbarem Grund. Ergänze relevante relative Dateipfade und die "
                     + "tatsächlich ausgeführte Verifikation. Schreibe niemals XML-, Pseudo- oder Beispiel-Toolaufrufe als Antworttext."));
@@ -716,7 +716,7 @@ public sealed class RunProcessor : BackgroundService
                         "Die letzte Modellantwort war leer und wird nicht als Fehler des Workspace gewertet. Setze den Lauf jetzt fort. "
                         + (verificationRequired && missingStages.Length > 0
                             ? $"Noch fehlende Verifikationsstufen: {missingStages}. Führe die nächste fehlende Stufe mit einem nativen Tool-Call aus."
-                            : "Nutze einen nativen Tool-Call, falls noch Arbeit erforderlich ist; andernfalls liefere die gültige GO_SESSION_TITLE-Abschlussantwort.")));
+                            : "Nutze einen nativen Tool-Call, falls noch Arbeit erforderlich ist; andernfalls liefere den gültigen sichtbaren Prozessbericht.")));
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     continue;
                 }
@@ -809,8 +809,8 @@ public sealed class RunProcessor : BackgroundService
                     messages.Add(new LmChatMessage(
                         "system",
                         "Diese Ausgabe ist kein gültiger Abschluss. Ein notwendiger Arbeitsschritt muss jetzt als nativer strukturierter "
-                        + "Tool-Call erfolgen, nicht als XML oder normaler Text. Ist die Arbeit bereits fertig, antworte exakt mit "
-                        + "GO_SESSION_TITLE: Kurzer Titel, einer Leerzeile, `### Prozessbericht` und den Feldern "
+                        + "Tool-Call erfolgen, nicht als XML oder normaler Text. Ist die Arbeit bereits fertig, beginne exakt mit "
+                        + "`### Prozessbericht` und den Feldern "
                         + "`Gegenstand`, `Aktion`, `Annahmen`, `Annahmenänderung` und `Prüfung`. Danach darf eine knappe "
                         + "Ergebniszusammenfassung folgen."));
                     await SaveCheckpointAsync().ConfigureAwait(false);
@@ -1541,13 +1541,7 @@ public sealed class RunProcessor : BackgroundService
     internal static bool IsValidCodingFinalResponse(string content)
     {
         var normalized = content.Trim();
-        if (!normalized.StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        var firstLineEnd = normalized.IndexOfAny(['\r', '\n']);
-        if (firstLineEnd < 0 || string.IsNullOrWhiteSpace(normalized[firstLineEnd..]))
+        if (!normalized.StartsWith("### Prozessbericht", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
@@ -1635,8 +1629,6 @@ public sealed class RunProcessor : BackgroundService
                 _ => stage,
             }));
         return $"""
-            GO_SESSION_TITLE: Coding-Auftrag abgeschlossen
-
             ### Prozessbericht
 
             **Gegenstand:** Verifizierter Coding-Auftrag im gebundenen Workspace.
@@ -1666,15 +1658,9 @@ public sealed class RunProcessor : BackgroundService
         }
         if (normalized.Length > 0)
         {
-            var firstLineEnd = normalized.IndexOfAny(['\r', '\n']);
-            var summary = normalized.StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase)
-                && firstLineEnd >= 0
-                    ? normalized[firstLineEnd..].Trim()
-                    : normalized;
+            var summary = normalized;
             var stages = string.Join(", ", verificationStages.Order(StringComparer.Ordinal));
             var titled = $"""
-                GO_SESSION_TITLE: Coding-Auftrag abgeschlossen
-
                 ### Prozessbericht
 
                 **Gegenstand:** Coding-Auftrag im gebundenen Workspace.
@@ -2113,23 +2099,6 @@ public sealed class RunProcessor : BackgroundService
     private static AgentFinalResponse ParseFinalResponse(string generated, RunRequest request)
     {
         var normalized = generated.Trim();
-        const string titlePrefix = "GO_SESSION_TITLE:";
-        var firstLineEnd = normalized.IndexOfAny(['\r', '\n']);
-        var firstLine = firstLineEnd >= 0 ? normalized[..firstLineEnd] : normalized;
-        if (firstLine.StartsWith(titlePrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            var title = firstLine[titlePrefix.Length..].Trim();
-            var message = firstLineEnd >= 0
-                ? normalized[firstLineEnd..].TrimStart('\r', '\n').Trim()
-                : string.Empty;
-            if (!string.IsNullOrWhiteSpace(message))
-            {
-                return new AgentFinalResponse(
-                    message,
-                    SanitizeTitle(title, GetLatestUserText(request)));
-            }
-        }
-
         if (normalized.StartsWith("```", StringComparison.Ordinal))
         {
             var firstFenceLineEnd = normalized.IndexOf('\n');
@@ -2166,7 +2135,7 @@ public sealed class RunProcessor : BackgroundService
         }
 
         return new AgentFinalResponse(
-            generated,
+            normalized,
             SanitizeTitle(string.Empty, GetLatestUserText(request)));
     }
 

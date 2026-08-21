@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using GoWinUI.Core.Chat;
 using GoWinUI.Core.Contracts;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
@@ -9,7 +10,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 24;
+    public const int CurrentSchemaVersion = 25;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -72,6 +73,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationTwentyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentyFourAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -880,6 +882,111 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
                     ON chat_messages(session_id,visibility,created_at);
                 INSERT INTO schema_migrations(version,applied_at) VALUES(24,$now);
                 """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyFiveAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=25;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_sessions
+                    ADD COLUMN conversation_revision INTEGER NOT NULL DEFAULT 0 CHECK(conversation_revision>=0);
+                ALTER TABLE chat_messages
+                    ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1);
+
+                UPDATE chat_sessions
+                SET conversation_revision=(
+                    SELECT COUNT(*) FROM chat_messages message WHERE message.session_id=chat_sessions.id
+                );
+
+                CREATE TABLE coding_runs(
+                    id TEXT PRIMARY KEY,
+                    local_run_id TEXT NOT NULL UNIQUE,
+                    server_run_id TEXT NULL,
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    message_id TEXT NULL REFERENCES chat_messages(id) ON DELETE SET NULL,
+                    status TEXT NOT NULL,
+                    code_diff TEXT NULL,
+                    started_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1)
+                ) STRICT;
+                CREATE INDEX idx_coding_runs_session_updated
+                    ON coding_runs(session_id,updated_at DESC,id DESC);
+                CREATE INDEX idx_coding_runs_message
+                    ON coding_runs(message_id) WHERE message_id IS NOT NULL;
+
+                CREATE TABLE coding_run_entries(
+                    run_id TEXT NOT NULL REFERENCES coding_runs(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL CHECK(sequence>=1),
+                    timestamp TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    detail TEXT NULL,
+                    tool TEXT NULL,
+                    target TEXT NULL,
+                    duration_milliseconds INTEGER NULL,
+                    server_event_id INTEGER NULL,
+                    process_operation_id TEXT NULL,
+                    process_command TEXT NULL,
+                    process_working_directory TEXT NULL,
+                    process_purpose TEXT NULL,
+                    process_status TEXT NULL,
+                    process_exit_code INTEGER NULL,
+                    process_stdout TEXT NULL,
+                    process_stderr TEXT NULL,
+                    PRIMARY KEY(run_id,sequence)
+                ) STRICT;
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            command.CommandText = """
+                SELECT id,content,context_summary
+                FROM chat_messages
+                WHERE content LIKE '%SESSION%TITLE%' COLLATE NOCASE
+                   OR context_summary LIKE '%SESSION%TITLE%' COLLATE NOCASE;
+                """;
+            var sanitizedRows = new List<(string Id, string Content, string? ContextSummary)>();
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    sanitizedRows.Add((
+                        reader.GetString(0),
+                        ChatContentSanitizer.Sanitize(reader.GetString(1)),
+                        reader.IsDBNull(2) ? null : ChatContentSanitizer.Sanitize(reader.GetString(2))));
+                }
+            }
+
+            foreach (var row in sanitizedRows)
+            {
+                command.Parameters.Clear();
+                command.CommandText = """
+                    UPDATE chat_messages
+                    SET content=$content,context_summary=$summary,revision=revision+1,updated_at=$now
+                    WHERE id=$id;
+                    """;
+                command.Parameters.AddWithValue("$id", row.Id);
+                command.Parameters.AddWithValue("$content", row.Content);
+                command.Parameters.AddWithValue("$summary", (object?)row.ContextSummary ?? DBNull.Value);
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.Parameters.Clear();
+            command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(25,$now);";
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }

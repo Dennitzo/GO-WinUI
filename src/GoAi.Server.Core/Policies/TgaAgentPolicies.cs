@@ -73,7 +73,7 @@ public static class TgaAgentPolicies
           oder erzeuge die ganze Datei nicht wiederholt neu. Nach bestandenem verify ist der formale Nachweis abgeschlossen;
           verändere ihn nicht erneut, sofern der Nutzerauftrag keine weitere Aussage verlangt.
         - Schreibe während laufender Werkzeugarbeit keine interne Gedankenkette. Die sichtbare Abschlussantwort ist eine
-          kurze, überprüfbare Prozessmeldung und enthält nach der GO_SESSION_TITLE-Zeile zwingend `### Prozessbericht`
+          kurze, überprüfbare Prozessmeldung und beginnt zwingend mit `### Prozessbericht`
           sowie die Felder `Gegenstand`, `Aktion`, `Annahmen`, `Annahmenänderung` und `Prüfung`. Gegenstand und Aktion
           benennen fachlich konkret, woran gearbeitet wurde. Bei geänderten Annahmen nenne bisherige und neue Annahme
           sowie den belegbaren Grund; andernfalls schreibe ausdrücklich `Unverändert`. Danach dürfen Ergebnis,
@@ -279,8 +279,8 @@ public static class TgaAgentPolicies
         vor dessen erstem Absatz eine neue passende Kapitelüberschrift ein. Setze niemals eine Kapitelüberschrift ans Ende
         einer Antwort, ohne danach das neue Kapitel zu beginnen. Nummeriere Kapitel ausgeschrieben und konsistent.
         Verwende keine Aufzählungen, Tabellen, Quellenblöcke, Metaerklärungen, Schreibhinweise oder abschließenden
-        Wiederholungszusammenfassungen. Beginne nach der technischen GO_SESSION_TITLE-Metadatenzeile direkt mit dem
-        eigentlichen Kapiteltext. Erfinde keine Änderung an bereits festgelegten Fakten, nur um die Fortsetzung zu vereinfachen.
+        Wiederholungszusammenfassungen. Beginne direkt mit dem eigentlichen Kapiteltext. Erfinde keine Änderung an bereits
+        festgelegten Fakten, nur um die Fortsetzung zu vereinfachen.
 
         Eine ausdrücklich als interne Sitzungsverdichtung oder Story-Chronik gekennzeichnete Anfrage ist kein Kapitelauftrag:
         Erzeuge dann ausschließlich die verlangte strukturierte Chronik einschließlich eines möglichst wörtlichen
@@ -294,14 +294,11 @@ public static class TgaAgentPolicies
         Antwortvertrag für die abschließende Modellantwort:
         - Solange ein Werkzeug benötigt wird, verwende den nativen strukturierten Tool-Call. Schreibe dann keine
           vermeintliche Ausführungsbestätigung in den Text.
-        - Sobald kein weiterer Tool-Call nötig ist, beginne die normale sichtbare Markdown-Antwort exakt mit
-          einer Metadatenzeile im Format: GO_SESSION_TITLE: Kurzer deutscher Titel
+        - Sobald kein weiterer Tool-Call nötig ist, liefere direkt die vollständige sichtbare Markdown-Antwort.
         - XML-Tags, Pseudo-Toolaufrufe, Werkzeugargumente und angekündigte, aber nicht ausgeführte nächste Arbeitsschritte sind
           kein Abschluss. Wenn noch Arbeit nötig ist, verwende einen echten nativen Tool-Call; andernfalls fasse nur Belegtes zusammen.
-        - Nach der Metadatenzeile folgt eine Leerzeile und danach die vollständige sichtbare Markdown-Antwort.
-          Verwende keinen JSON-Wrapper und keine Codefence um die Gesamtantwort.
-        - Der Titel beschreibt Nutzeraufgabe und fachlichen Schwerpunkt konkret mit höchstens sechs Wörtern.
-          Vermeide generische Titel wie Hallo, Frage, Hilfe, Neuer Chat, Neue Sitzung, Allgemeiner Chat oder Workflow.
+        - Verwende keine technische Titelzeile, keinen JSON-Wrapper und keine Codefence um die Gesamtantwort.
+          Der Sitzungstitel wird unabhängig von der sichtbaren Modellantwort erzeugt und übertragen.
         """;
 
     public static string ForRole(string role) => string.Equals(role, "code", StringComparison.Ordinal)

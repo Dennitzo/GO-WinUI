@@ -812,8 +812,9 @@ public sealed class CodingCampaignTests
         Assert.Contains("Workflow laden", script, StringComparison.Ordinal);
         Assert.DoesNotContain("Coding-Kampagnen", script, StringComparison.Ordinal);
         Assert.Contains("case \"chat.message\":", script, StringComparison.Ordinal);
-        Assert.Contains("shouldSuppressMessageInChat(message)", script, StringComparison.Ordinal);
-        Assert.Contains("content.includes(\"### Prozessbericht\")", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("shouldSuppressMessageInChat", script, StringComparison.Ordinal);
+        Assert.Contains("case \"conversation.messageCommitted\":", script, StringComparison.Ordinal);
+        Assert.Contains("requestConversationRefresh();", script, StringComparison.Ordinal);
     }
 
     [Fact]

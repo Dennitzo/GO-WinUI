@@ -50,8 +50,8 @@ public sealed class CodingCampaignService(
         """;
     private const string AutonomousChallenge = "Autonom gewählter nächster Arbeitsschritt";
     private const string ProcessReportInstruction = """
-        Verfasse für diesen AI-Lauf eine kurze fachliche Prozessmeldung als sichtbare Abschlussantwort. Verwende nach
-        der technischen GO_SESSION_TITLE-Zeile exakt diese Struktur:
+        Verfasse für diesen AI-Lauf eine kurze fachliche Prozessmeldung als sichtbare Abschlussantwort. Beginne exakt
+        mit dieser Struktur und füge keine technische Titel- oder Metadatenzeile davor ein:
 
         ### Prozessbericht
         **Gegenstand:** Konkretes untersuchtes Modell, Bauteil, Programmteil oder Problem.

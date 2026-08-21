@@ -149,6 +149,32 @@ public sealed class ChatAndContextTests
         Assert.StartsWith("### Prozessbericht", response.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("## **GO_SESSION_TITLE:** Technischer Titel\n\nSichtbarer Text")]
+    [InlineData("**Aktion:** **GO\\_SESSION\\_TITLE:** Arbeitsstand\n\nCode wurde geändert.")]
+    [InlineData("Vorwort GO_SESSION_TITLE:\u00A0Zwischentitel\n\nErgebnis")]
+    [InlineData("**Annahmen:** GO_SESSION_TITLE: A **GO_SESSION_TITLE:** B")]
+    public void CentralChatBoundaryRemovesEveryLegacyTitleMarkerVariant(string content)
+    {
+        var sanitized = ChatContentSanitizer.Sanitize(content);
+
+        Assert.False(ChatContentSanitizer.ContainsReservedMarker(sanitized));
+        Assert.NotEmpty(sanitized);
+    }
+
+    [Fact]
+    public void ProductionCSharpNeverEmitsTheReservedLegacyTitleToken()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var offenders = Directory
+            .EnumerateFiles(Path.Combine(repositoryRoot, "src"), "*.cs", SearchOption.AllDirectories)
+            .Where(path => File.ReadAllText(path).Contains("GO_SESSION_TITLE", StringComparison.Ordinal))
+            .Select(path => Path.GetRelativePath(repositoryRoot, path))
+            .ToArray();
+
+        Assert.Empty(offenders);
+    }
+
     [Fact]
     public void WorkflowMetadataConvertsMarkdownToShortPlainText()
     {
@@ -170,5 +196,18 @@ public sealed class ChatAndContextTests
 
         Assert.False(response.IsStructured);
         Assert.Equal("Einstieg in die TGA-Fachplanung", response.SessionTitle);
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "GO.slnx")))
+            {
+                return directory.FullName;
+            }
+        }
+
+        throw new DirectoryNotFoundException("Das GO-Repository wurde aus dem Testausgabeverzeichnis nicht gefunden.");
     }
 }

@@ -16,7 +16,7 @@ public sealed class AssistantWebBridge : IDisposable
     private const int MaximumOutgoingMessageLength = 16_777_216;
     private static readonly HashSet<string> AllowedIncomingTypes = new(StringComparer.Ordinal)
     {
-        "app.ready", "chat.send", "chat.cancel", "session.create", "session.open",
+        "app.ready", "conversation.refresh", "chat.send", "chat.cancel", "session.create", "session.open",
         "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick",
         "document.remove", "attachment.remove", "workflow.list", "workflow.insert", "workflow.create",
         "workflow.update", "workflow.delete",
@@ -34,7 +34,8 @@ public sealed class AssistantWebBridge : IDisposable
         "workflow.changed", "workflow.draft", "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
         "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
         "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady", "host.error",
-        "campaign.snapshot", "campaign.changed",
+        "campaign.snapshot", "campaign.changed", "conversation.snapshot", "conversation.messageCommitted",
+        "conversation.messageRemoved", "coding.snapshotCommitted",
     };
     private static readonly HashSet<string> ReadableBlockKinds = new(StringComparer.Ordinal)
     {
