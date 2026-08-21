@@ -82,6 +82,48 @@ public sealed class RunRepositoryTests
         Assert.Equal("completed", (await repository.GetClientToolResultAsync(proposal.ProposalId))?.Status);
     }
 
+    [Theory]
+    [InlineData(RunState.Running)]
+    [InlineData(RunState.WaitingForClient)]
+    public async Task PersistedClientToolResultAtomicallyQueuesItsPendingContinuation(RunState initialState)
+    {
+        using var context = new TestServerContext();
+        var repository = new RunRepository(context.Database, new RunEventNotifier());
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Build")])]);
+        var run = await repository.CreateAsync(request, null);
+        using var arguments = System.Text.Json.JsonDocument.Parse("""{"preset":"dotnet.build"}""");
+        using var resultJson = System.Text.Json.JsonDocument.Parse("""{"exitCode":0}""");
+        var proposal = new ToolProposal(
+            "proposal-" + Guid.NewGuid().ToString("N"),
+            run.Snapshot.RunId,
+            ClientToolNames.ProcessRunPreset,
+            arguments.RootElement.Clone(),
+            ToolRiskClass.Process,
+            "Build ausführen",
+            DateTimeOffset.UtcNow.AddMinutes(10));
+        var checkpoint = new AgentRunCheckpoint(
+            [],
+            1,
+            1,
+            0,
+            0,
+            PendingProposalId: proposal.ProposalId,
+            PendingToolCallId: "call-1");
+        var result = new ClientToolResult(proposal.ProposalId, "completed", resultJson.RootElement.Clone());
+
+        await repository.SaveToolProposalAsync(proposal);
+        await repository.SaveCheckpointAsync(run.Snapshot.RunId, checkpoint);
+        await repository.UpdateStateAsync(run.Snapshot.RunId, initialState);
+        Assert.True(await repository.SaveClientToolResultAsync(run.Snapshot.RunId, result));
+
+        Assert.True(await repository.TryQueueClientToolContinuationAsync(run.Snapshot.RunId, proposal.ProposalId));
+        Assert.Equal(RunState.Queued, (await repository.GetAsync(run.Snapshot.RunId))?.State);
+        Assert.False(await repository.TryQueueClientToolContinuationAsync(run.Snapshot.RunId, proposal.ProposalId));
+    }
+
     [Fact]
     public async Task InterruptedRunCanBeIdempotentlyRequeuedButKeyCannotChangeRequest()
     {

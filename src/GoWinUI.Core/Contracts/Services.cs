@@ -30,6 +30,7 @@ public interface IChatRepository
         CancellationToken cancellationToken = default);
     Task SetPinnedAsync(Guid id, bool isPinned, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ChatMessage>> ListMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    Task<ChatMessage?> GetMessageAsync(Guid messageId, bool includeInternal = false, CancellationToken cancellationToken = default);
     Task<ChatMessage> AddMessageAsync(
         Guid sessionId,
         ChatRole role,
@@ -37,6 +38,18 @@ public interface IChatRepository
         MessageStatus status,
         MessageContentProfile contentProfile = MessageContentProfile.General,
         CancellationToken cancellationToken = default);
+    Task<ChatMessage> AddInternalMessageAsync(
+        Guid sessionId,
+        ChatRole role,
+        string content,
+        MessageStatus status,
+        MessageContentProfile contentProfile = MessageContentProfile.General,
+        CancellationToken cancellationToken = default) =>
+        AddMessageAsync(sessionId, role, content, status, contentProfile, cancellationToken);
+    Task DeleteMessageAsync(Guid messageId, CancellationToken cancellationToken = default);
+    Task SetMessageVisibilityAsync(Guid messageId, ChatMessageVisibility visibility, CancellationToken cancellationToken = default) =>
+        Task.CompletedTask;
+    Task<int> DeleteInternalMessagesAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
     Task UpdateMessageAsync(Guid messageId, string content, MessageStatus status, string? errorMessage = null, CancellationToken cancellationToken = default);
     Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default);
     Task<SessionContextPreparation?> GetSessionContextPreparationAsync(string cacheKey, CancellationToken cancellationToken = default);
@@ -178,6 +191,29 @@ public interface IDocumentIngestor
     Task SaveEvidenceAsync(Guid messageId, IReadOnlyList<DocumentContextHit> evidence, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<string>> GetEvidenceCitationsAsync(Guid messageId, CancellationToken cancellationToken = default);
     Task RemoveAsync(Guid documentId, CancellationToken cancellationToken = default);
+}
+
+public interface ICodingCampaignRepository
+{
+    Task<CodingCampaignState?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<CodingCampaignState?> GetForSessionAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CodingCampaignState>> ListAsync(CancellationToken cancellationToken = default);
+    Task SaveAsync(CodingCampaignState campaign, CancellationToken cancellationToken = default);
+    Task SaveIterationAsync(CodingCampaignIteration iteration, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CodingCampaignIteration>> ListIterationsAsync(Guid campaignId, CancellationToken cancellationToken = default);
+    Task<bool> IsSolutionPublishedAsync(
+        Guid campaignId,
+        string relativePath,
+        string contentSha256,
+        CancellationToken cancellationToken = default);
+    Task SaveSolutionPublicationAsync(
+        Guid campaignId,
+        string relativePath,
+        string contentSha256,
+        Guid messageId,
+        DateTimeOffset publishedAt,
+        CancellationToken cancellationToken = default);
+    Task DeleteForSessionAsync(Guid sessionId, CancellationToken cancellationToken = default);
 }
 
 public interface ILmStudioClient

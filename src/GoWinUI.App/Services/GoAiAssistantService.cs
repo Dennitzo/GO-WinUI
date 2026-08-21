@@ -14,6 +14,8 @@ namespace GoWinUI.App.Services;
 
 public enum GoAiAssistantUpdateKind
 {
+    MessageAdded,
+    MessageRemoved,
     Started,
     Delta,
     Status,
@@ -64,12 +66,31 @@ internal sealed class GoAiStreamDisconnectedException(string message, Exception 
 internal sealed class GoAiRunTerminalException(string message)
     : InvalidOperationException(message);
 
+public interface ICodingCampaignAgent
+{
+    bool IsRunning { get; }
+    Task<ChatMessage> SendAsync(
+        Guid sessionId,
+        string prompt,
+        PromptTriggerMatch? trigger,
+        Func<GoAiAssistantUpdate, Task> update,
+        CancellationToken cancellationToken = default);
+    Task<ChatMessage> SendWorkflowStepAsync(
+        Guid sessionId,
+        string prompt,
+        PromptTriggerMatch? trigger,
+        Func<GoAiAssistantUpdate, Task> update,
+        CancellationToken cancellationToken = default);
+    Task CancelCurrentAndWaitAsync(CancellationToken cancellationToken = default);
+}
+
 public sealed class GoAiAssistantService(
     GoAiConnectionService connection,
     IChatRepository chats,
     IAssistantAttachmentRepository attachments,
     IChatArtifactRepository artifacts,
     IGoAiRunRepository runs,
+    ICodingCampaignRepository codingCampaigns,
     IClientToolExecutionRepository toolExecutions,
     IBinaryObjectStore blobs,
     IDocumentIngestor documents,
@@ -83,7 +104,7 @@ public sealed class GoAiAssistantService(
     MicrophoneTranscriptionService microphone,
     SettingsCoordinator settings,
     RecentActivityService recentActivity,
-    ILogger<GoAiAssistantService> logger) : IDisposable
+    ILogger<GoAiAssistantService> logger) : ICodingCampaignAgent, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
     private static readonly Action<ILogger, string, string, Exception?> RunDiagnostic = LoggerMessage.Define<string, string>(
@@ -91,9 +112,13 @@ public sealed class GoAiAssistantService(
         new EventId(5300, nameof(RunDiagnostic)),
         "GO AI Client run {RunId}: {State}.");
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _speechGate = new(1, 1);
     private CancellationTokenSource? _activeCancellation;
+    private CancellationTokenSource? _activeSpeechCancellation;
     private string? _activeServerRunId;
+    private string? _activeSessionId;
     private int _explicitCancellation;
+    private int _startupCampaignRunsStopped;
     private int _speechActive;
     private int _disposed;
 
@@ -101,12 +126,43 @@ public sealed class GoAiAssistantService(
 
     public bool IsSpeaking => Volatile.Read(ref _speechActive) != 0;
 
-    public async Task<ChatMessage> SendAsync(
+    public Guid? ActiveSessionId =>
+        Guid.TryParse(Volatile.Read(ref _activeSessionId), out var sessionId)
+            ? sessionId
+            : null;
+
+    public Task<ChatMessage> SendAsync(
         Guid sessionId,
         string prompt,
         PromptTriggerMatch? trigger,
         Func<GoAiAssistantUpdate, Task> update,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        SendCoreAsync(
+            sessionId, prompt, trigger, update,
+            persistUserMessage: true,
+            internalAssistantMessage: false,
+            cancellationToken);
+
+    public Task<ChatMessage> SendWorkflowStepAsync(
+        Guid sessionId,
+        string prompt,
+        PromptTriggerMatch? trigger,
+        Func<GoAiAssistantUpdate, Task> update,
+        CancellationToken cancellationToken = default) =>
+        SendCoreAsync(
+            sessionId, prompt, trigger, update,
+            persistUserMessage: false,
+            internalAssistantMessage: true,
+            cancellationToken);
+
+    private async Task<ChatMessage> SendCoreAsync(
+        Guid sessionId,
+        string prompt,
+        PromptTriggerMatch? trigger,
+        Func<GoAiAssistantUpdate, Task> update,
+        bool persistUserMessage,
+        bool internalAssistantMessage,
+        CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (trigger?.Trigger.Action == PromptTriggerAction.TextToSpeech)
@@ -118,6 +174,7 @@ public sealed class GoAiAssistantService(
             throw new InvalidOperationException("Es läuft bereits ein GO-AI-Auftrag.");
         }
         Interlocked.Exchange(ref _explicitCancellation, 0);
+        Volatile.Write(ref _activeSessionId, sessionId.ToString("D"));
         _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
         {
@@ -135,17 +192,25 @@ public sealed class GoAiAssistantService(
             var contentProfile = action == PromptTriggerAction.Audiobook
                 ? MessageContentProfile.Audiobook
                 : MessageContentProfile.General;
-            var user = await chats.AddMessageAsync(
-                sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed,
-                cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
-            sessionAttachments = await BindCapturedMediaToMessageAsync(
-                user,
-                sessionAttachments,
-                _activeCancellation.Token).ConfigureAwait(false);
-            var assistant = await chats.AddMessageAsync(
-                sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
-                contentProfile,
-                cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+            if (persistUserMessage)
+            {
+                var user = await chats.AddMessageAsync(
+                    sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed,
+                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+                sessionAttachments = await BindCapturedMediaToMessageAsync(
+                    user,
+                    sessionAttachments,
+                    _activeCancellation.Token).ConfigureAwait(false);
+            }
+            var assistant = internalAssistantMessage
+                ? await chats.AddInternalMessageAsync(
+                    sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
+                    contentProfile,
+                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false)
+                : await chats.AddMessageAsync(
+                    sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
+                    contentProfile,
+                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
             var contextLimit = action == PromptTriggerAction.Code ? 262_144 : 131_072;
             await update(new(
                 GoAiAssistantUpdateKind.Started,
@@ -183,8 +248,8 @@ public sealed class GoAiAssistantService(
             }
             catch (OperationCanceledException)
             {
-                var current = (await chats.ListMessagesAsync(sessionId, CancellationToken.None).ConfigureAwait(false))
-                    .Single(item => item.Id == assistant.Id);
+                var current = await chats.GetMessageAsync(assistant.Id, includeInternal: true, cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                    ?? assistant;
                 await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Cancelled, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 var cancelled = current with { Status = MessageStatus.Cancelled, UpdatedAt = DateTimeOffset.UtcNow };
                 await update(new(GoAiAssistantUpdateKind.Cancelled, cancelled, Status: "Abgebrochen")).ConfigureAwait(false);
@@ -192,14 +257,14 @@ public sealed class GoAiAssistantService(
             }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
-                var current = (await chats.ListMessagesAsync(sessionId, CancellationToken.None).ConfigureAwait(false))
-                    .Single(item => item.Id == assistant.Id);
+                var current = await chats.GetMessageAsync(assistant.Id, includeInternal: true, cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                    ?? assistant;
                 var visible = string.IsNullOrWhiteSpace(current.Content)
                     ? VisibleFailure(exception)
                     : current.Content;
                 await chats.UpdateMessageAsync(assistant.Id, visible, MessageStatus.Failed, exception.Message, CancellationToken.None).ConfigureAwait(false);
-                var failed = (await chats.ListMessagesAsync(sessionId, CancellationToken.None).ConfigureAwait(false))
-                    .Single(item => item.Id == assistant.Id);
+                var failed = await chats.GetMessageAsync(assistant.Id, includeInternal: true, cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                    ?? current with { Content = visible, Status = MessageStatus.Failed, Error = exception.Message };
                 await update(new(GoAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Fehlgeschlagen")).ConfigureAwait(false);
                 return failed;
             }
@@ -207,6 +272,7 @@ public sealed class GoAiAssistantService(
         finally
         {
             _activeServerRunId = null;
+            Volatile.Write(ref _activeSessionId, null);
             _activeCancellation?.Dispose();
             _activeCancellation = null;
             _gate.Release();
@@ -224,11 +290,14 @@ public sealed class GoAiAssistantService(
                 return;
             }
             Interlocked.Exchange(ref _explicitCancellation, 0);
+            Volatile.Write(ref _activeSessionId, run.SessionId.ToString("D"));
             _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             try
             {
-                var message = (await chats.ListMessagesAsync(run.SessionId, _activeCancellation.Token).ConfigureAwait(false))
-                    .SingleOrDefault(item => item.Id == run.AssistantMessageId);
+                var message = await chats.GetMessageAsync(
+                    run.AssistantMessageId,
+                    includeInternal: true,
+                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
                 if (message is null || string.IsNullOrWhiteSpace(run.ServerRunId))
                 {
                     continue;
@@ -247,9 +316,106 @@ public sealed class GoAiAssistantService(
             finally
             {
                 _activeServerRunId = null;
+                Volatile.Write(ref _activeSessionId, null);
                 _activeCancellation?.Dispose();
                 _activeCancellation = null;
                 _gate.Release();
+            }
+        }
+    }
+
+    public async Task StopPersistedCampaignRunsAtStartupAsync(CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.CompareExchange(ref _startupCampaignRunsStopped, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var campaignSessionIds = (await codingCampaigns.ListAsync(cancellationToken).ConfigureAwait(false))
+                .Select(static campaign => campaign.SessionId)
+                .ToHashSet();
+            if (campaignSessionIds.Count == 0)
+            {
+                return;
+            }
+
+            var staleRuns = (await runs.ListResumableAsync(cancellationToken).ConfigureAwait(false))
+                .Where(run => campaignSessionIds.Contains(run.SessionId))
+                .ToArray();
+            var serverRunIds = new List<string>(staleRuns.Length);
+            foreach (var run in staleRuns)
+            {
+                await runs.UpdateAsync(
+                    run.Id,
+                    run.ServerRunId,
+                    run.LastEventId,
+                    "cancelled",
+                    run.SelectedModel,
+                    "client.workflow_stopped_on_start",
+                    CancellationToken.None).ConfigureAwait(false);
+
+                var message = await chats.GetMessageAsync(
+                    run.AssistantMessageId,
+                    includeInternal: true,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                if (message?.Status is MessageStatus.Pending or MessageStatus.Streaming or MessageStatus.Interrupted)
+                {
+                    var content = string.IsNullOrWhiteSpace(message.Content)
+                        ? "Der Coding-Workflow ist geladen und startet gestoppt. Senden startet ihn erneut."
+                        : message.Content;
+                    await chats.UpdateMessageAsync(
+                        message.Id,
+                        content,
+                        MessageStatus.Cancelled,
+                        "Der Workflow wurde beim Clientstart gestoppt.",
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+
+                if (!string.IsNullOrWhiteSpace(run.ServerRunId))
+                {
+                    serverRunIds.Add(run.ServerRunId);
+                }
+            }
+
+            if (serverRunIds.Count > 0)
+            {
+                _ = CancelPersistedServerRunsAsync(serverRunIds);
+            }
+        }
+        catch
+        {
+            Interlocked.Exchange(ref _startupCampaignRunsStopped, 0);
+            throw;
+        }
+    }
+
+    private async Task CancelPersistedServerRunsAsync(IReadOnlyList<string> serverRunIds)
+    {
+        using var timeout = new CancellationTokenSource();
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        try
+        {
+            using var client = await connection.CreateClientAsync(timeout.Token).ConfigureAwait(false);
+            foreach (var serverRunId in serverRunIds)
+            {
+                try
+                {
+                    await client.CancelRunAsync(serverRunId, timeout.Token).ConfigureAwait(false);
+                    RunDiagnostic(logger, serverRunId, "cancelled during stopped workflow startup", null);
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                {
+                    RunDiagnostic(logger, serverRunId, $"startup cancel request failed ({exception.GetType().Name})", exception);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            foreach (var serverRunId in serverRunIds)
+            {
+                RunDiagnostic(logger, serverRunId, $"startup cancel connection failed ({exception.GetType().Name})", exception);
             }
         }
     }
@@ -278,6 +444,20 @@ public sealed class GoAiAssistantService(
         await CancelCurrentAsync(CancellationToken.None).ConfigureAwait(false);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         _gate.Release();
+    }
+
+    public async Task CancelSpeechAsync(CancellationToken cancellationToken = default)
+    {
+        var speechCancellation = Volatile.Read(ref _activeSpeechCancellation);
+        try
+        {
+            speechCancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The playback completed between reading and cancelling its token.
+        }
+        await microphone.StopSpeechAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task ValidateSpeechStartAsync(
@@ -309,12 +489,13 @@ public sealed class GoAiAssistantService(
         var playbackId = Guid.NewGuid();
         long playbackEventSequence = 0;
 
-        // Automatic voice playback can arrive while the just-completed chat callback still
-        // owns the gate. Waiting here preserves ordering without creating a prompt queue.
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // Read-aloud is an independent media operation. In particular, it must not acquire
+        // the chat/run gate: coding campaigns can continue while an already persisted
+        // process report is spoken.
+        await _speechGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         Interlocked.Exchange(ref _speechActive, 1);
-        Interlocked.Exchange(ref _explicitCancellation, 0);
-        _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var speechCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _activeSpeechCancellation = speechCancellation;
         try
         {
             await update(new(
@@ -328,7 +509,7 @@ public sealed class GoAiAssistantService(
                 sourceMessageId,
                 startAnchor,
                 expectedMessageUpdatedAt,
-                _activeCancellation.Token).ConfigureAwait(false);
+                speechCancellation.Token).ConfigureAwait(false);
             var speechStatusDetail = VisibleSpeechSourceDetail(source.Detail);
             var cleanedSource = MicrophoneTranscriptionService.PrepareSpeechText(source.Text);
             if (string.IsNullOrWhiteSpace(cleanedSource))
@@ -432,7 +613,7 @@ public sealed class GoAiAssistantService(
                             playback.State)).ConfigureAwait(false);
                     },
                     profile: SpeechContentProfile.Prepared,
-                    cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+                    cancellationToken: speechCancellation.Token).ConfigureAwait(false);
             if (progress is not null)
             {
                 await progress(new(
@@ -491,10 +672,12 @@ public sealed class GoAiAssistantService(
         finally
         {
             Interlocked.Exchange(ref _speechActive, 0);
-            _activeServerRunId = null;
-            _activeCancellation?.Dispose();
-            _activeCancellation = null;
-            _gate.Release();
+            if (ReferenceEquals(_activeSpeechCancellation, speechCancellation))
+            {
+                _activeSpeechCancellation = null;
+            }
+            speechCancellation.Dispose();
+            _speechGate.Release();
         }
     }
 
@@ -513,11 +696,9 @@ public sealed class GoAiAssistantService(
                 ?? throw new InvalidOperationException("Die ausgewählte AI-Nachricht wurde nicht gefunden.");
             if (startAnchor is null)
             {
-                if (selected.Role != ChatRole.Assistant
-                    || selected.Status != MessageStatus.Completed
-                    || string.IsNullOrWhiteSpace(selected.Content))
+                if (!IsReadableSpeechMessage(selected))
                 {
-                    throw new InvalidOperationException("Die ausgewählte abgeschlossene AI-Nachricht wurde nicht gefunden.");
+                    throw new InvalidOperationException("Die ausgewählte gespeicherte AI-Nachricht kann nicht vorgelesen werden.");
                 }
             }
             else
@@ -598,12 +779,7 @@ public sealed class GoAiAssistantService(
         SpeechStartAnchor anchor)
     {
         if (message.SessionId != sessionId
-            || message.Role != ChatRole.Assistant
-            || message.Status is not (MessageStatus.Completed
-                or MessageStatus.Cancelled
-                or MessageStatus.Interrupted
-                or MessageStatus.Failed)
-            || string.IsNullOrWhiteSpace(message.Content))
+            || !IsReadableSpeechMessage(message))
         {
             throw new InvalidOperationException("Diese AI-Nachricht kann nicht ab der gewählten Stelle vorgelesen werden.");
         }
@@ -616,6 +792,14 @@ public sealed class GoAiAssistantService(
             SpeechSourceSegmentation.CreateUnits(message.Content),
             anchor);
     }
+
+    internal static bool IsReadableSpeechMessage(ChatMessage message) =>
+        message.Role == ChatRole.Assistant
+        && message.Status is (MessageStatus.Completed
+            or MessageStatus.Cancelled
+            or MessageStatus.Interrupted
+            or MessageStatus.Failed)
+        && !string.IsNullOrWhiteSpace(message.Content);
 
     internal static IReadOnlyList<SpeechSourceUnit> SelectSpeechUnitsFromAnchor(
         IReadOnlyList<SpeechSourceUnit> sourceUnits,
@@ -904,20 +1088,32 @@ public sealed class GoAiAssistantService(
     {
         const int maximumReconnectAttempts = 5;
         var current = localRun;
-        for (var attempt = 0; ; attempt++)
+        var consecutiveReconnectAttempts = 0;
+        var lastObservedEventId = current.LastEventId;
+        while (true)
         {
             try
             {
                 return await StreamRunAsync(current, assistant, update, cancellationToken, suppliedClient).ConfigureAwait(false);
             }
-            catch (GoAiStreamDisconnectedException exception) when (
-                attempt < maximumReconnectAttempts
-                && !cancellationToken.IsCancellationRequested)
+            catch (GoAiStreamDisconnectedException exception) when (!cancellationToken.IsCancellationRequested)
             {
                 current = await runs.GetAsync(localRun.Id, CancellationToken.None).ConfigureAwait(false) ?? current;
-                assistant = (await chats.ListMessagesAsync(current.SessionId, CancellationToken.None).ConfigureAwait(false))
-                    .SingleOrDefault(item => item.Id == current.AssistantMessageId) ?? assistant;
-                var delay = TimeSpan.FromMilliseconds(500 * Math.Pow(2, attempt));
+                consecutiveReconnectAttempts = ReconnectAttemptsAfterProgress(
+                    consecutiveReconnectAttempts,
+                    lastObservedEventId,
+                    current.LastEventId);
+                if (consecutiveReconnectAttempts >= maximumReconnectAttempts)
+                {
+                    throw;
+                }
+
+                assistant = await chats.GetMessageAsync(
+                    current.AssistantMessageId,
+                    includeInternal: true,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false) ?? assistant;
+                var attemptNumber = consecutiveReconnectAttempts + 1;
+                var delay = TimeSpan.FromMilliseconds(500 * Math.Pow(2, consecutiveReconnectAttempts));
                 if (current.Action == PromptTriggerAction.Code)
                 {
                     var trace = await codingTrace.AppendAsync(
@@ -928,7 +1124,7 @@ public sealed class GoAiAssistantService(
                         "connection",
                         "running",
                         "Verbindung wird wiederhergestellt",
-                        $"Versuch {attempt + 1} von {maximumReconnectAttempts}",
+                        $"Versuch {attemptNumber} von {maximumReconnectAttempts}",
                         serverEventId: current.LastEventId,
                         cancellationToken: CancellationToken.None).ConfigureAwait(false);
                     await update(new(
@@ -947,14 +1143,22 @@ public sealed class GoAiAssistantService(
                         GoAiAssistantUpdateKind.Status,
                         assistant,
                         Status: "Verbindung wird wiederhergestellt",
-                        Detail: $"SSE ab Ereignis {current.LastEventId} · Versuch {attempt + 1}/{maximumReconnectAttempts}"))
+                        Detail: $"SSE ab Ereignis {current.LastEventId} · Versuch {attemptNumber}/{maximumReconnectAttempts}"))
                         .ConfigureAwait(false);
                 }
                 RunDiagnostic(logger, current.ServerRunId ?? current.Id.ToString("D"), "stream reconnect", exception);
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                lastObservedEventId = current.LastEventId;
+                consecutiveReconnectAttempts++;
             }
         }
     }
+
+    internal static int ReconnectAttemptsAfterProgress(
+        int consecutiveReconnectAttempts,
+        long previousEventId,
+        long currentEventId) =>
+        currentEventId > previousEventId ? 0 : consecutiveReconnectAttempts;
 
     private async Task<ChatMessage> StreamRunAsync(
         GoAiRunRecord localRun,
@@ -1019,6 +1223,39 @@ public sealed class GoAiAssistantService(
                 };
             }
             await update(statusUpdate).ConfigureAwait(false);
+        }
+
+        async Task RefreshFinalCodingDiffAsync(long? serverEventId)
+        {
+            if (localRun.Action != PromptTriggerAction.Code) return;
+
+            var codingSession = await chats.GetSessionAsync(localRun.SessionId, CancellationToken.None).ConfigureAwait(false);
+            var diff = await codingDiffs.RefreshAsync(
+                localRun.Id,
+                codingSession?.WorkspacePath,
+                CancellationToken.None).ConfigureAwait(false);
+            if (diff is null) return;
+
+            var finalDiff = string.IsNullOrWhiteSpace(diff.Diff) ? null : diff.Diff;
+            await chats.SetCodeDiffAsync(assistant.Id, finalDiff, CancellationToken.None).ConfigureAwait(false);
+            assistant = assistant with { CodeDiff = finalDiff, UpdatedAt = DateTimeOffset.UtcNow };
+            await TraceCodingAsync(
+                "diff",
+                "completed",
+                "Finaler Lauf-Diff geprÃ¼ft",
+                diff.FileCount == 0
+                    ? "Keine CodeÃ¤nderungen dieses Laufs."
+                    : $"{diff.FileCount:N0} Dateien Â· +{diff.AddedLines:N0} Â· âˆ’{diff.DeletedLines:N0}",
+                serverEventId: serverEventId,
+                traceCancellationToken: CancellationToken.None).ConfigureAwait(false);
+            await update(new(
+                GoAiAssistantUpdateKind.CodeDiffChanged,
+                assistant,
+                Status: "CodeÃ¤nderungen",
+                Detail: diff.FileCount == 0
+                    ? "Keine CodeÃ¤nderungen dieses Laufs."
+                    : $"{diff.FileCount:N0} Dateien Â· +{diff.AddedLines:N0} Â· âˆ’{diff.DeletedLines:N0}"))
+                .ConfigureAwait(false);
         }
 
         var acknowledgedEventId = localRun.LastEventId;
@@ -1288,7 +1525,12 @@ public sealed class GoAiAssistantService(
                             await chats.RenameSessionAsync(assistant.SessionId, parsedResponse.SessionTitle, CancellationToken.None).ConfigureAwait(false);
                         }
                         await runs.UpdateAsync(localRun.Id, item.RunId, item.Id, "completed", model, cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                        var final = (await chats.ListMessagesAsync(assistant.SessionId, CancellationToken.None).ConfigureAwait(false)).Single(value => value.Id == assistant.Id);
+                        await RefreshFinalCodingDiffAsync(item.Id).ConfigureAwait(false);
+                        var final = await chats.GetMessageAsync(
+                            assistant.Id,
+                            includeInternal: true,
+                            cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                            ?? throw new InvalidOperationException("Die AI-Nachricht des abgeschlossenen Laufs fehlt.");
                         var session = await chats.GetSessionAsync(assistant.SessionId, CancellationToken.None).ConfigureAwait(false);
                         await recentActivity.RecordAsync($"AI-Sitzung „{session?.Title ?? "Neue Sitzung"}“ bearbeitet", CancellationToken.None).ConfigureAwait(false);
                         await TraceCodingAsync(
@@ -1356,7 +1598,12 @@ public sealed class GoAiAssistantService(
                 await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Completed, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 await chats.SetMessageContextSummaryAsync(assistant.Id, snapshotResponse.ContextSummary, CancellationToken.None).ConfigureAwait(false);
                 await runs.UpdateAsync(localRun.Id, snapshot.RunId, snapshot.LastEventId, "completed", snapshot.SelectedModel, cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                var final = (await chats.ListMessagesAsync(assistant.SessionId, CancellationToken.None).ConfigureAwait(false)).Single(value => value.Id == assistant.Id);
+                await RefreshFinalCodingDiffAsync(snapshot.LastEventId).ConfigureAwait(false);
+                var final = await chats.GetMessageAsync(
+                    assistant.Id,
+                    includeInternal: true,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("Die AI-Nachricht des abgeschlossenen Laufs fehlt.");
                 await update(new(GoAiAssistantUpdateKind.Completed, final, collectedArtifacts.ToArray(), await chats.GetSessionAsync(assistant.SessionId, CancellationToken.None), "Fertig", snapshot.SelectedModel)).ConfigureAwait(false);
                 return final;
             }
@@ -1505,6 +1752,7 @@ public sealed class GoAiAssistantService(
         ClientToolNames.FileSystemProposeCreate => completed ? "Datei erstellt" : "Datei wird erstellt",
         ClientToolNames.FileSystemProposeDelete => completed ? "Datei gel\u00F6scht" : "Datei wird gel\u00F6scht",
         ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun => completed ? "Pr\u00FCfung ausgef\u00FChrt" : "Pr\u00FCfung wird ausgef\u00FChrt",
+        ClientToolNames.LeanProof => completed ? "Lean-Beweis geprüft" : "Lean-Beweis wird geprüft",
         _ => completed ? "Lokale Aktion abgeschlossen" : "Lokale Aktion wird ausgef\u00FChrt",
     };
 
@@ -1715,7 +1963,11 @@ public sealed class GoAiAssistantService(
         var contextSummary = GeneralAgentResponseParser.CreateContextSummary(null, content);
         await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Completed, cancellationToken: cancellationToken).ConfigureAwait(false);
         await chats.SetMessageContextSummaryAsync(assistant.Id, contextSummary, cancellationToken).ConfigureAwait(false);
-        var final = (await chats.ListMessagesAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false)).Single(item => item.Id == assistant.Id);
+        var final = await chats.GetMessageAsync(
+            assistant.Id,
+            includeInternal: true,
+            cancellationToken: cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die AI-Nachricht des abgeschlossenen Laufs fehlt.");
         var session = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
         await recentActivity.RecordAsync($"AI-Sitzung „{session?.Title ?? "Neue Sitzung"}“ bearbeitet", CancellationToken.None).ConfigureAwait(false);
         await update(new(GoAiAssistantUpdateKind.Completed, final, resultArtifacts, session, "Fertig", provider)).ConfigureAwait(false);
@@ -2416,7 +2668,10 @@ public sealed class GoAiAssistantService(
         }
         _activeCancellation?.Cancel();
         _activeCancellation?.Dispose();
+        _activeSpeechCancellation?.Cancel();
+        _activeSpeechCancellation?.Dispose();
         _gate.Dispose();
+        _speechGate.Dispose();
     }
 
 

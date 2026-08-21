@@ -51,6 +51,9 @@ public sealed class CodingRunTraceService
     private static readonly Regex AnsiEscapeRegex = new(
         "\\x1B(?:[@-_]|\\[[0-?]*[ -/]*[@-~])",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex BenignGitLineEndingWarningRegex = new(
+        "warning:\\s+in the working copy of ['\"][^'\"\\r\\n]+['\"],\\s+(?:LF|CRLF) will be replaced by (?:LF|CRLF) the next time Git touches it\\.?",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
     private static readonly Action<ILogger, string, Exception?> TraceWriteFailed = LoggerMessage.Define<string>(
         LogLevel.Warning,
         new EventId(5350, nameof(TraceWriteFailed)),
@@ -244,10 +247,11 @@ public sealed class CodingRunTraceService
                 || exitCode is not null and not 0
                     ? "failed"
                     : "completed";
-        var standardOutput = result is null ? null : ReadString(result.Result, "standardOutput");
-        var standardError = result is null ? null : ReadString(result.Result, "standardError");
-        if (string.IsNullOrWhiteSpace(standardError)
-            && result is not null
+        var standardOutput = result is null ? null : FilterConsoleNoise(ReadString(result.Result, "standardOutput"));
+        var standardError = result is null ? null : FilterConsoleNoise(ReadString(result.Result, "standardError"));
+        if (result is not null
+            && !string.Equals(status, "completed", StringComparison.Ordinal)
+            && string.IsNullOrWhiteSpace(standardError)
             && !string.IsNullOrWhiteSpace(result.Message))
         {
             standardError = result.Message;
@@ -523,6 +527,22 @@ public sealed class CodingRunTraceService
 
     private static string? LimitConsoleNullable(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : LimitConsole(value);
+
+    internal static string? FilterConsoleNoise(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var filtered = BenignGitLineEndingWarningRegex.Replace(value, string.Empty)
+            .ReplaceLineEndings("\n");
+        var lines = filtered.Split('\n')
+            .Select(static line => line.TrimEnd())
+            .Where(static line => line.Length > 0)
+            .ToArray();
+        return lines.Length == 0 ? null : string.Join('\n', lines);
+    }
 
     private static bool IsDiagnosticIoFailure(Exception exception) =>
         exception is IOException or UnauthorizedAccessException or NotSupportedException;

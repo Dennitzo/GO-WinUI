@@ -14,6 +14,8 @@ namespace GoAi.Server.Core.Runs;
 public sealed class RunProcessor : BackgroundService
 {
     internal const int ReservedCodingVerificationRounds = 12;
+    internal const int CodingMutationProgressGuidanceThreshold = 6;
+    internal const int CodingTextMutationLimitBeforeVerification = 3;
     private static readonly string[] CodingVerificationStageOrder = ["test", "build", "start", "review"];
     private static readonly string[] GeneratedArtifactDirectoryPrefixes =
     [
@@ -221,6 +223,14 @@ public sealed class RunProcessor : BackgroundService
         var successfulReadFingerprints = new HashSet<string>(checkpoint.SuccessfulReadFingerprints ?? [], StringComparer.Ordinal);
         var successfulReadRanges = (checkpoint.SuccessfulReadRanges ?? []).ToList();
         var successfulToolFingerprints = new HashSet<string>(checkpoint.SuccessfulToolFingerprints ?? [], StringComparer.Ordinal);
+        var consecutiveRedundantVerifications = checkpoint.ConsecutiveRedundantVerifications;
+        var consecutiveRoundsWithoutMutation = checkpoint.ConsecutiveRoundsWithoutMutation;
+        var failedReplaceTargetCounts = new Dictionary<string, int>(
+            checkpoint.FailedReplaceTargetCounts ?? new Dictionary<string, int>(),
+            StringComparer.OrdinalIgnoreCase);
+        var textMutationCountsSinceProcess = new Dictionary<string, int>(
+            checkpoint.TextMutationCountsSinceProcess ?? new Dictionary<string, int>(),
+            StringComparer.OrdinalIgnoreCase);
 
         while (roundCount < maximumModelRounds)
         {
@@ -267,6 +277,68 @@ public sealed class RunProcessor : BackgroundService
                             "system",
                             $"Werkzeugstillstand erkannt: Der identische fehlgeschlagene Aufruf von {call.Name} bleibt gesperrt. "
                             + "Das Werkzeug selbst steht weiterhin mit korrigierten Argumenten zur Verfügung. Nutze die konkrete Fehlermeldung und lies bei Bedarf den aktuellen Zielzustand erneut."));
+                        nextToolIndex++;
+                        await SaveCheckpointAsync().ConfigureAwait(false);
+                        continue;
+                    }
+                    if (codingRun
+                        && string.IsNullOrWhiteSpace(pendingProposalId)
+                        && ShouldBlockRepeatedReplaceText(call, failedReplaceTargetCounts))
+                    {
+                        var target = StringArgument(call.Arguments, "path") ?? "die Zieldatei";
+                        messages.Add(new LmChatMessage(
+                            "tool",
+                            JsonSerializer.Serialize(new
+                            {
+                                status = "failed",
+                                errorCode = "coding.replace_target_no_progress",
+                                message = $"fs.replaceText wurde für {target} nach zwei abgewiesenen Ersetzungsblöcken gesperrt. Lies die vollständige aktuelle Textdatei und aktualisiere sie einmal kohärent mit fs.writeText und expectedSha256.",
+                            }, GoAiProtocol.CreateJsonOptions()),
+                            ToolCallId: call.Id));
+                        messages.Add(new LmChatMessage(
+                            "system",
+                            $"Ersetzungsstillstand für {target}: Rate keine weitere oldText-Variante. Lies die vollständige Datei genau einmal und verwende anschließend fs.writeText mit dem gelesenen vollständigen Inhalt und dessen aktuellem expectedSha256."));
+                        nextToolIndex++;
+                        await SaveCheckpointAsync().ConfigureAwait(false);
+                        continue;
+                    }
+                    if (codingRun
+                        && string.IsNullOrWhiteSpace(pendingProposalId)
+                        && ShouldRequireProcessBeforeAnotherTextMutation(call, textMutationCountsSinceProcess))
+                    {
+                        var target = StringArgument(call.Arguments, "path") ?? "die Zieldatei";
+                        messages.Add(new LmChatMessage(
+                            "tool",
+                            JsonSerializer.Serialize(new
+                            {
+                                status = "failed",
+                                errorCode = "coding.mutation_target_thrashing",
+                                message = $"{target} wurde seit dem letzten Prozesslauf bereits {CodingTextMutationLimitBeforeVerification} Mal geändert. Führe jetzt zuerst eine reale Parser-, Test-, Build- oder Laufzeitprüfung aus und werte ihr Ergebnis aus.",
+                            }, GoAiProtocol.CreateJsonOptions()),
+                            ToolCallId: call.Id));
+                        messages.Add(new LmChatMessage(
+                            "system",
+                            $"Mutationsstillstand für {target}: Eine weitere Textänderung ist erst nach einem echten process.run- oder process.runPreset-Ergebnis zulässig. Prüfe den aktuellen Stand fachlich; kosmetisches Umschreiben ist kein Fortschritt."));
+                        nextToolIndex++;
+                        await SaveCheckpointAsync().ConfigureAwait(false);
+                        continue;
+                    }
+                    if (codingRun
+                        && string.IsNullOrWhiteSpace(pendingProposalId)
+                        && IsVacuousVerificationCall(call))
+                    {
+                        messages.Add(new LmChatMessage(
+                            "tool",
+                            JsonSerializer.Serialize(new
+                            {
+                                status = "failed",
+                                errorCode = "coding.vacuous_verification",
+                                message = "Der vorgeschlagene Inline-Test deaktiviert seine eigene Prüflogik und wird nicht ausgeführt. Verwende echte Assertions oder einen von Exit-Code ungleich null signalisierten Soll-/Ist-Vergleich.",
+                            }, GoAiProtocol.CreateJsonOptions()),
+                            ToolCallId: call.Id));
+                        messages.Add(new LmChatMessage(
+                            "system",
+                            "Vakuöse Verifikation erkannt: Konstrukte wie `and False`, `or True`, `if False` oder `assert True` dürfen keine Prüfung wirkungslos machen. Prüfe berechnete Istwerte tatsächlich gegen unabhängig hergeleitete Sollwerte und lasse jede Abweichung den Prozess fehlschlagen."));
                         nextToolIndex++;
                         await SaveCheckpointAsync().ConfigureAwait(false);
                         continue;
@@ -336,8 +408,9 @@ public sealed class RunProcessor : BackgroundService
                     if (codingRun
                         && string.IsNullOrWhiteSpace(pendingProposalId)
                         && verificationRequired
-                        && IsRedundantVerificationCall(call, verificationStages))
+                        && IsRedundantVerificationCall(call, verificationStages, successfulToolFingerprints))
                     {
+                        consecutiveRedundantVerifications++;
                         messages.Add(new LmChatMessage(
                             "tool",
                             JsonSerializer.Serialize(new
@@ -352,8 +425,24 @@ public sealed class RunProcessor : BackgroundService
                             "system",
                             "Redundante Verifikation unterdrückt. Nutze die vorhandenen erfolgreichen Ergebnisse und fahre mit einer noch fehlenden Stufe oder der Abschlussantwort fort."));
                         nextToolIndex++;
+                        if (ShouldForceCodingFinalizationAfterRedundantVerification(
+                                consecutiveRedundantVerifications,
+                                VerificationComplete(),
+                                CodingCompletionBlocker(
+                                    codingIntent,
+                                    successfulToolFingerprints.Count,
+                                    evidencePaths.Count,
+                                    mutatedPaths.Count)))
+                        {
+                            await CompleteRunAsync(CreateVerifiedCodingFallbackResponse(mutatedPaths, verificationStages)).ConfigureAwait(false);
+                            return;
+                        }
                         await SaveCheckpointAsync().ConfigureAwait(false);
                         continue;
+                    }
+                    if (codingRun)
+                    {
+                        consecutiveRedundantVerifications = 0;
                     }
                     if (!string.IsNullOrWhiteSpace(pendingProposalId))
                     {
@@ -422,6 +511,16 @@ public sealed class RunProcessor : BackgroundService
 
                 activeCalls = null;
                 nextToolIndex = 0;
+                if (codingRun
+                    && codingIntent == CodingRequestIntent.Mutation
+                    && ShouldAddCodingMutationProgressGuidance(consecutiveRoundsWithoutMutation))
+                {
+                    messages.Add(new LmChatMessage(
+                        "system",
+                        $"Fortschrittskontrolle: Der Änderungsauftrag besitzt nach {consecutiveRoundsWithoutMutation} Modellrunden noch keine erfolgreiche Workspace-Mutation. "
+                        + "Die bereits gelesene Evidenz reicht jetzt für eine konkrete Entscheidung aus. Wähle den fachlich sinnvollsten offenen Schritt und führe die gezielte Workspace-Änderung mit einem nativen Dateitool aus. "
+                        + "Vorbereitende Inspektions-, Test- oder Generatoraufrufe ersetzen diese Änderung nicht. Falls genau eine zwingende Information fehlt, lade sie gebündelt mit fs.readMany; beginne keine weitere breite Repositoryanalyse."));
+                }
                 await SaveCheckpointAsync().ConfigureAwait(false);
             }
 
@@ -462,10 +561,12 @@ public sealed class RunProcessor : BackgroundService
             {
                 messages.Add(new LmChatMessage(
                     "system",
-                    "PrÃ¼fe jetzt das letzte Diff- und Verifikationsergebnis. Wenn noch eine konkrete Korrektur erforderlich ist, "
-                    + "fÃ¼hre sie mit einem echten nativen Tool-Call aus und verifiziere danach erneut. Andernfalls liefere jetzt "
-                    + "die abschlieÃŸende GO_SESSION_TITLE-Antwort mit Ergebnis, relevanten relativen Dateipfaden und der tatsÃ¤chlich "
-                    + "ausgefÃ¼hrten Verifikation. Schreibe niemals XML-, Pseudo- oder Beispiel-Toolaufrufe als Antworttext."));
+                    "Prüfe jetzt das letzte Diff- und Verifikationsergebnis. Wenn noch eine konkrete Korrektur erforderlich ist, "
+                    + "führe sie mit einem echten nativen Tool-Call aus und verifiziere danach erneut. Andernfalls liefere jetzt "
+                    + "die abschließende GO_SESSION_TITLE-Antwort. Danach folgen `### Prozessbericht` und die Felder "
+                    + "`Gegenstand`, `Aktion`, `Annahmen`, `Annahmenänderung` und `Prüfung`; benenne Annahmenänderungen "
+                    + "mit alter Annahme, neuer Annahme und belegbarem Grund. Ergänze relevante relative Dateipfade und die "
+                    + "tatsächlich ausgeführte Verifikation. Schreibe niemals XML-, Pseudo- oder Beispiel-Toolaufrufe als Antworttext."));
                 finalSynthesisRequested = true;
                 await SaveCheckpointAsync().ConfigureAwait(false);
             }
@@ -542,11 +643,6 @@ public sealed class RunProcessor : BackgroundService
                 .Select(static tool => tool.ToLmDefinition())
                 .ToArray();
             LmChatResult response;
-            await _repository.AppendEventAsync(
-                runId,
-                RunEventTypes.ModelLoading,
-                new ModelLoadingEvent(selection.ModelId, "loading", contextLength, contextLength),
-                cancellationToken).ConfigureAwait(false);
             var leaseMode = string.Equals(selection.Role, "general", StringComparison.Ordinal)
                 ? GpuLeaseMode.Shared
                 : GpuLeaseMode.Exclusive;
@@ -556,15 +652,23 @@ public sealed class RunProcessor : BackgroundService
                 leaseMode,
                 cancellationToken).ConfigureAwait(false))
             {
-                _ = await _workers.PrepareLmModelAsync(
+                var preparation = await _workers.PrepareLmModelWithStatusAsync(
                     selection.ModelId,
                     contextLength,
+                    async token => await _repository.AppendEventAsync(
+                        runId,
+                        RunEventTypes.ModelLoading,
+                        new ModelLoadingEvent(selection.ModelId, "loading", contextLength, contextLength),
+                        token).ConfigureAwait(false),
                     cancellationToken).ConfigureAwait(false);
-                await _repository.AppendEventAsync(
-                    runId,
-                    RunEventTypes.ModelLoading,
-                    new ModelLoadingEvent(selection.ModelId, "loaded", contextLength, contextLength),
-                    cancellationToken).ConfigureAwait(false);
+                if (!preparation.WasAlreadyLoaded)
+                {
+                    await _repository.AppendEventAsync(
+                        runId,
+                        RunEventTypes.ModelLoading,
+                        new ModelLoadingEvent(selection.ModelId, "loaded", contextLength, contextLength),
+                        cancellationToken).ConfigureAwait(false);
+                }
                 response = await _lmStudio.CompleteChatAsync(
                     selection.ModelId,
                     modelMessages,
@@ -660,10 +764,10 @@ public sealed class RunProcessor : BackgroundService
                     messages.Add(new LmChatMessage(
                         "system",
                         verificationFailed
-                            ? "Die letzte Verifikation ist fehlgeschlagen. Eine Abschlussantwort ist noch nicht zulÃ¤ssig. "
+                            ? "Die letzte Verifikation ist fehlgeschlagen. Eine Abschlussantwort ist noch nicht zulässig. "
                                 + "Analysiere das unmittelbar vorherige Prozessresultat, lies die betroffenen Quellen, behebe die Ursache und starte danach die projektgeeigneten Test-, Build-/Validierungs- und Laufzeitprüfungen erneut."
-                            : "Nach der letzten DateiÃ¤nderung fehlt noch eine erfolgreiche Verifikationsstufe. "
-                                + "FÃ¼hre jetzt die fehlenden projektgeeigneten Stufen mit process.run (purpose test, build und start) aus. "
+                            : "Nach der letzten Dateiänderung fehlt noch eine erfolgreiche Verifikationsstufe. "
+                                + "Führe jetzt die fehlenden projektgeeigneten Stufen mit process.run (purpose test, build und start) aus. "
                                 + "Wenn das Repository keine solche Stufe besitzt, belege den externen Blocker konkret."));
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     continue;
@@ -704,9 +808,11 @@ public sealed class RunProcessor : BackgroundService
                     messages.Add(new LmChatMessage("assistant", response.Content));
                     messages.Add(new LmChatMessage(
                         "system",
-                        "Diese Ausgabe ist kein gÃ¼ltiger Abschluss. Ein notwendiger Arbeitsschritt muss jetzt als nativer strukturierter "
+                        "Diese Ausgabe ist kein gültiger Abschluss. Ein notwendiger Arbeitsschritt muss jetzt als nativer strukturierter "
                         + "Tool-Call erfolgen, nicht als XML oder normaler Text. Ist die Arbeit bereits fertig, antworte exakt mit "
-                        + "GO_SESSION_TITLE: Kurzer Titel, einer Leerzeile und einer knappen Ergebnis- und Verifikationszusammenfassung."));
+                        + "GO_SESSION_TITLE: Kurzer Titel, einer Leerzeile, `### Prozessbericht` und den Feldern "
+                        + "`Gegenstand`, `Aktion`, `Annahmen`, `Annahmenänderung` und `Prüfung`. Danach darf eine knappe "
+                        + "Ergebniszusammenfassung folgen."));
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     continue;
                 }
@@ -721,6 +827,10 @@ public sealed class RunProcessor : BackgroundService
                     codingRun
                         ? $"Der Coding-Agent hat das Werkzeuglimit von {maximumToolCalls} Aufrufen erreicht."
                         : $"Der Agent hat das Werkzeuglimit von {maximumToolCalls} Aufrufen erreicht.");
+            }
+            if (codingRun && codingIntent == CodingRequestIntent.Mutation)
+            {
+                consecutiveRoundsWithoutMutation++;
             }
             messages.Add(new LmChatMessage("assistant", response.Content, response.ToolCalls));
             activeCalls = response.ToolCalls.ToArray();
@@ -816,15 +926,14 @@ public sealed class RunProcessor : BackgroundService
             messages.Add(new LmChatMessage(
                 "system",
                 "Suchstillstand erkannt: Wiederhole keine semantisch gleiche fs.search-Anfrage. "
-                + "Nutze die Repositorykarte, fs.findFiles und anschlieÃŸend fs.readMany mit konkreten Pfaden. "
-                + "Wenn bereits Evidenz geladen wurde, synthetisiere daraus eine Antwort oder einen gezielten nÃ¤chsten Schritt."));
+                + "Nutze die Repositorykarte, fs.findFiles und anschließend fs.readMany mit konkreten Pfaden. "
+                + "Wenn bereits Evidenz geladen wurde, synthetisiere daraus eine Antwort oder einen gezielten nächsten Schritt."));
             consecutiveEmptySearches = 0;
         }
 
         void ObserveClientToolResult(LmToolCall call, ClientToolResult result)
         {
-            var completed = string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase)
-                && string.IsNullOrWhiteSpace(result.ErrorCode);
+            var completed = IsSuccessfulClientToolResult(call, result);
             if (completed)
             {
                 _ = successfulToolFingerprints.Add(CreateToolFingerprint(call));
@@ -832,14 +941,38 @@ public sealed class RunProcessor : BackgroundService
             if (!completed && codingRun)
             {
                 _ = failedToolFingerprints.Add(CreateToolFingerprint(call));
+                if (call.Name == ClientToolNames.LeanProof)
+                {
+                    messages.Add(new LmChatMessage(
+                        "system",
+                        "Die Lean-Prüfung ist fachlich fehlgeschlagen, auch wenn der lokale API-Aufruf technisch abgeschlossen wurde. "
+                        + "Werte passed, diagnostics, forbiddenConstructs und message aus. Ändere nur die konkret gemeldete Ursache und rufe dieselbe Prüfung erst nach einer Quelländerung erneut auf. "
+                        + "Der Dateiname erzeugt keinen Namespace; theoremName muss exakt dem deklarierten Namen entsprechen. Verwende weder process.run für lean/lake noch wiederholtes Löschen und Neuerstellen der Datei."));
+                }
                 if (call.Name is ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun)
                 {
+                    var verificationFailureGuidance = verificationRequired
+                        ? " Der fehlgeschlagene Aufruf war Teil der Verifikation. Werte die früheste konkrete Diagnose und jede Soll-/Ist-Abweichung aus, "
+                          + "behebe die fachliche oder technische Ursache in Implementierung und Checker und führe danach die relevante Prüfung erneut aus. "
+                          + "Schwäche weder Assertions noch Toleranzen und ersetze berechnete Ergebnisse nicht durch erwartete Konstanten."
+                        : string.Empty;
                     messages.Add(new LmChatMessage(
                         "system",
                         "Der Prozessaufruf ist fehlgeschlagen. Wiederhole nicht dieselbe Kombination. "
                         + "Bei code.test muss target ein vorhandener relativer Testquell-, Projekt- oder Solutionpfad sein; ermittle ihn bei Bedarf mit fs.findFiles. "
-                        + "Alternativ verwende process.run mit einem realen Programm, einer getrennten Argumentliste und dem passenden purpose."));
+                        + "Alternativ verwende process.run mit einem realen Programm, einer getrennten Argumentliste und dem passenden purpose. "
+                        + "executable enthält nur den Programmnamen, zum Beispiel py; jeder Bestandteil wie -3.11, -m und pytest ist ein eigener arguments-Eintrag. "
+                        + "Nutze keine cmd-/PowerShell-Hülle und keine Ausgabeumleitung."
+                        + verificationFailureGuidance));
                 }
+            }
+            else if (completed
+                     && call.Name == ClientToolNames.LeanProof
+                     && string.Equals(StringArgument(call.Arguments, "operation"), "verify", StringComparison.Ordinal))
+            {
+                messages.Add(new LmChatMessage(
+                    "system",
+                    "proof.lean verify ist für das exakt benannte Theorem einschließlich Axiomprüfung bestanden. Der formale Nachweis ist abgeschlossen. Verändere die geprüfte Datei nicht erneut; führe nur noch eine ausstehende Diff-Prüfung aus und liefere dann die Abschlussantwort."));
             }
             if (call.Name == ClientToolNames.FileSystemSearch)
             {
@@ -874,6 +1007,31 @@ public sealed class RunProcessor : BackgroundService
                 or ClientToolNames.FileSystemProposeCreate
                 or ClientToolNames.FileSystemProposeDelete)
             {
+                if (call.Name == ClientToolNames.FileSystemReplaceText
+                    && StringArgument(call.Arguments, "path") is { Length: > 0 } replaceTarget)
+                {
+                    if (completed)
+                    {
+                        _ = failedReplaceTargetCounts.Remove(replaceTarget);
+                    }
+                    else
+                    {
+                        failedReplaceTargetCounts[replaceTarget] =
+                            failedReplaceTargetCounts.GetValueOrDefault(replaceTarget) + 1;
+                        if (failedReplaceTargetCounts[replaceTarget] >= 2)
+                        {
+                            messages.Add(new LmChatMessage(
+                                "system",
+                                $"Zwei fs.replaceText-Blöcke für {replaceTarget} wurden abgewiesen. Verwende für dieses Ziel in diesem Lauf keine weitere Ersetzungsvariante; lies die vollständige Datei und aktualisiere sie einmal mit fs.writeText und aktuellem expectedSha256."));
+                        }
+                    }
+                }
+                else if (completed
+                    && call.Name == ClientToolNames.FileSystemWriteText
+                    && StringArgument(call.Arguments, "path") is { Length: > 0 } writtenTarget)
+                {
+                    _ = failedReplaceTargetCounts.Remove(writtenTarget);
+                }
                 if (!completed)
                 {
                     if (call.Name == ClientToolNames.FileSystemProposePatch)
@@ -882,11 +1040,30 @@ public sealed class RunProcessor : BackgroundService
                             "system",
                             "Der Unified-Diff wurde lokal abgewiesen. Wiederhole ihn nicht. Lies den aktuellen Zielbereich erneut und verwende fs.replaceText mit einem eindeutigen oldText/newText-Block. Übermittle C#-, XAML- und XML-Zeichen wörtlich, nicht HTML-kodiert."));
                     }
+                    if (call.Name == ClientToolNames.FileSystemReplaceText)
+                    {
+                        messages.Add(new LmChatMessage(
+                            "system",
+                            CreateReplaceFailureGuidance(result.Message)));
+                    }
                     return;
+                }
+                if ((call.Name is ClientToolNames.FileSystemWriteText or ClientToolNames.FileSystemReplaceText)
+                    && StringArgument(call.Arguments, "path") is { Length: > 0 } textMutationTarget)
+                {
+                    textMutationCountsSinceProcess[textMutationTarget] =
+                        textMutationCountsSinceProcess.GetValueOrDefault(textMutationTarget) + 1;
                 }
                 var currentMutationPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 CollectMutationPaths(call.Arguments, result.Result, currentMutationPaths);
                 mutatedPaths.UnionWith(currentMutationPaths);
+                if (currentMutationPaths.Count > 0)
+                {
+                    consecutiveRoundsWithoutMutation = 0;
+                    InvalidateToolFingerprintsAfterMutation(
+                        successfulToolFingerprints,
+                        failedToolFingerprints);
+                }
                 if (currentMutationPaths.Count > 0
                     && currentMutationPaths.All(static path => !RequiresCodingVerification(path)))
                 {
@@ -902,26 +1079,37 @@ public sealed class RunProcessor : BackgroundService
                 return;
             }
 
-            if (call.Name is not (ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun)
-                || !verificationRequired)
+            if (call.Name is not (ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun or ClientToolNames.LeanProof))
             {
                 return;
             }
 
             var requestedVerificationStages = VerificationStagesForCall(call);
-            if (requestedVerificationStages.Count == 0)
+            if (requestedVerificationStages.Count > 0)
+            {
+                // A recognized parser, test, build or runtime check is useful even when it fails: its diagnostics
+                // justify the next repair. Arbitrary inspect/no-op processes must not reset the mutation-thrash guard.
+                textMutationCountsSinceProcess.Clear();
+            }
+            if (!verificationRequired || requestedVerificationStages.Count == 0)
             {
                 return;
             }
 
-            var processSucceeded = completed
+            var verificationSucceeded = completed
                 && result.Result.ValueKind == JsonValueKind.Object
                 && result.Result.TryGetProperty("exitCode", out var exitCode)
                 && exitCode.TryGetInt32(out var code)
                 && code == 0;
-            if (!processSucceeded)
+            if (!verificationSucceeded)
             {
-                verificationStages.Clear();
+                // A failed review, test or build invalidates only the stages that this
+                // concrete call attempted. Independent evidence (for example a passed
+                // kernel-checked Lean proof) must survive a later git/review failure.
+                foreach (var stage in requestedVerificationStages)
+                {
+                    _ = verificationStages.Remove(stage);
+                }
                 verificationFailed = true;
                 finalSynthesisRequested = false;
                 return;
@@ -963,8 +1151,34 @@ public sealed class RunProcessor : BackgroundService
                     .OrderBy(static item => item.Path, StringComparer.OrdinalIgnoreCase)
                     .ThenBy(static item => item.StartLine)
                     .ToArray(),
-                successfulToolFingerprints.Order(StringComparer.Ordinal).ToArray()),
+                successfulToolFingerprints.Order(StringComparer.Ordinal).ToArray(),
+                consecutiveRedundantVerifications,
+                consecutiveRoundsWithoutMutation,
+                failedReplaceTargetCounts
+                    .OrderBy(static item => item.Key, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.OrdinalIgnoreCase),
+                textMutationCountsSinceProcess
+                    .OrderBy(static item => item.Key, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.OrdinalIgnoreCase)),
             cancellationToken);
+    }
+
+    internal static string CreateReplaceFailureGuidance(string? failureMessage)
+    {
+        const string retryMechanics =
+            "Untersuche die Datei nicht mit process.run oder Shell-Hilfsskripten und versuche nicht mehrere geratene oldText-Varianten. "
+            + "Lies den betroffenen Bereich genau einmal neu. Für eine kleine lokale Änderung verwende danach den unveränderten gelesenen Block; "
+            + "bei einer größeren Strukturänderung lies die vollständige Textdatei und aktualisiere sie einmal kohärent mit fs.writeText und aktuellem expectedSha256.";
+
+        if (failureMessage?.Contains("zwischenzeitlich geändert", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return "fs.replaceText wurde wegen einer veralteten Dateirevision sicher abgewiesen. "
+                + "Bewerte nach dem erneuten Lesen zuerst, ob die beabsichtigte Änderung gegenüber Nutzerauftrag, bestehendem Produktverhalten und maßgeblichen Abnahmekriterien noch fachlich erforderlich ist. "
+                + "Übertrage eine veraltete Änderung nicht mechanisch auf den neuen Inhalt und ändere keine gültigen Produktdaten oder Referenzwerte, nur um einen neu geschriebenen Checker grün zu machen. "
+                + retryMechanics;
+        }
+
+        return "fs.replaceText hat den angeforderten eindeutigen Textblock nicht sicher ersetzt. " + retryMechanics;
     }
 
     private async Task ProcessImageGenerationAsync(
@@ -1160,8 +1374,17 @@ public sealed class RunProcessor : BackgroundService
 
     internal static bool IsRedundantVerificationCall(
         LmToolCall call,
-        IReadOnlySet<string> completedStages)
+        IReadOnlySet<string> completedStages,
+        IReadOnlySet<string>? successfulToolFingerprints = null)
     {
+        // Presets are canonical stage operations. Direct process calls are not: two different smoke commands can both
+        // be required (for example, regenerate an artifact and then validate it). Suppress a direct process only when
+        // the exact command fingerprint already completed since the last mutation.
+        if (call.Name == ClientToolNames.ProcessRun)
+        {
+            return successfulToolFingerprints?.Contains(CreateToolFingerprint(call)) == true;
+        }
+
         var requestedStages = VerificationStagesForCall(call);
         return requestedStages.Count > 0
             && requestedStages.All(completedStages.Contains);
@@ -1169,6 +1392,18 @@ public sealed class RunProcessor : BackgroundService
 
     internal static IReadOnlyList<string> VerificationStagesForCall(LmToolCall call)
     {
+        if (call.Name == ClientToolNames.LeanProof)
+        {
+            return StringArgument(call.Arguments, "operation") switch
+            {
+                "check" or "build" => ["build"],
+                "axioms" => ["test"],
+                // verify compiles the file and then checks the named theorem's kernel-visible
+                // axiom dependencies. A standalone proof has no separate runtime to start.
+                "verify" => ["test", "build", "start"],
+                _ => [],
+            };
+        }
         if (call.Name == ClientToolNames.ProcessRunPreset)
         {
             return StringArgument(call.Arguments, "preset") switch
@@ -1212,6 +1447,29 @@ public sealed class RunProcessor : BackgroundService
             return stages;
         }
         return [];
+    }
+
+    internal static bool IsSuccessfulClientToolResult(LmToolCall call, ClientToolResult result)
+    {
+        if (!string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase)
+            || !string.IsNullOrWhiteSpace(result.ErrorCode))
+        {
+            return false;
+        }
+        if (call.Name == ClientToolNames.LeanProof)
+        {
+            return result.Result.ValueKind == JsonValueKind.Object
+                && result.Result.TryGetProperty("passed", out var passed)
+                && passed.ValueKind == JsonValueKind.True;
+        }
+        if (call.Name is ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun)
+        {
+            return result.Result.ValueKind == JsonValueKind.Object
+                && result.Result.TryGetProperty("exitCode", out var exitCode)
+                && exitCode.TryGetInt32(out var code)
+                && code == 0;
+        }
+        return true;
     }
 
     internal static bool IsTestCommand(string executable, IReadOnlyList<string> arguments) =>
@@ -1294,6 +1552,21 @@ public sealed class RunProcessor : BackgroundService
             return false;
         }
 
+        string[] requiredProcessReportMarkers =
+        [
+            "### Prozessbericht",
+            "**Gegenstand:**",
+            "**Aktion:**",
+            "**Annahmen:**",
+            "**Annahmenänderung:**",
+            "**Prüfung:**",
+        ];
+        if (requiredProcessReportMarkers.Any(marker =>
+                !normalized.Contains(marker, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
         string[] pseudoToolMarkers =
         [
             "<tool_call", "</tool_call", "<function=", "</function>", "<parameter=", "</parameter>",
@@ -1364,12 +1637,20 @@ public sealed class RunProcessor : BackgroundService
         return $"""
             GO_SESSION_TITLE: Coding-Auftrag abgeschlossen
 
-            Die Workspace-Änderungen wurden ausgeführt und erfolgreich verifiziert. Das Coding-Modell lieferte danach keine verwertbare Abschlussformulierung; GO hat deshalb diese belegbasierte Zusammenfassung erstellt.
+            ### Prozessbericht
+
+            **Gegenstand:** Verifizierter Coding-Auftrag im gebundenen Workspace.
+
+            **Aktion:** Die registrierten Workspace-Änderungen wurden ausgeführt und geprüft. Das Coding-Modell lieferte danach keine verwertbare Prozessbeschreibung; GO verwendet deshalb diese belegbasierte Zusammenfassung.
+
+            **Annahmen:** Es wurde keine fachliche Annahmenänderung durch das Modell dokumentiert.
+
+            **Annahmenänderung:** Unverändert beziehungsweise nicht gemeldet.
+
+            **Prüfung:** {stages}.
 
             Geänderte Dateien:
             {fileSection}
-
-            Erfolgreiche Prüfungen: {stages}.
             """;
     }
 
@@ -1383,10 +1664,29 @@ public sealed class RunProcessor : BackgroundService
         {
             return normalized;
         }
-        if (normalized.Length > 0
-            && !normalized.StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase))
+        if (normalized.Length > 0)
         {
-            var titled = $"GO_SESSION_TITLE: Coding-Auftrag abgeschlossen{Environment.NewLine}{Environment.NewLine}{normalized}";
+            var firstLineEnd = normalized.IndexOfAny(['\r', '\n']);
+            var summary = normalized.StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase)
+                && firstLineEnd >= 0
+                    ? normalized[firstLineEnd..].Trim()
+                    : normalized;
+            var stages = string.Join(", ", verificationStages.Order(StringComparer.Ordinal));
+            var titled = $"""
+                GO_SESSION_TITLE: Coding-Auftrag abgeschlossen
+
+                ### Prozessbericht
+
+                **Gegenstand:** Coding-Auftrag im gebundenen Workspace.
+
+                **Aktion:** {summary}
+
+                **Annahmen:** Es wurde keine zusätzliche fachliche Annahmenänderung gemeldet.
+
+                **Annahmenänderung:** Unverändert.
+
+                **Prüfung:** {stages}.
+                """;
             if (IsValidCodingFinalResponse(titled))
             {
                 return titled;
@@ -1407,6 +1707,68 @@ public sealed class RunProcessor : BackgroundService
         && !coreVerificationComplete
         && hasIntegratedVerifier
         && roundCount >= Math.Max(1, maximumModelRounds - ReservedCodingVerificationRounds);
+
+    internal static bool ShouldForceCodingFinalizationAfterRedundantVerification(
+        int consecutiveRedundantVerifications,
+        bool verificationComplete,
+        string? completionBlocker) =>
+        consecutiveRedundantVerifications >= 2
+        && verificationComplete
+        && completionBlocker is null;
+
+    internal static bool ShouldAddCodingMutationProgressGuidance(int consecutiveRoundsWithoutMutation) =>
+        consecutiveRoundsWithoutMutation >= CodingMutationProgressGuidanceThreshold
+        && (consecutiveRoundsWithoutMutation - CodingMutationProgressGuidanceThreshold) % 3 == 0;
+
+    internal static bool ShouldBlockRepeatedReplaceText(
+        LmToolCall call,
+        IReadOnlyDictionary<string, int> failedReplaceTargetCounts) =>
+        call.Name == ClientToolNames.FileSystemReplaceText
+        && StringArgument(call.Arguments, "path") is { Length: > 0 } path
+        && failedReplaceTargetCounts.TryGetValue(path, out var failures)
+        && failures >= 2;
+
+    internal static bool ShouldRequireProcessBeforeAnotherTextMutation(
+        LmToolCall call,
+        IReadOnlyDictionary<string, int> textMutationCountsSinceProcess) =>
+        (call.Name is ClientToolNames.FileSystemWriteText or ClientToolNames.FileSystemReplaceText)
+        && StringArgument(call.Arguments, "path") is { Length: > 0 } path
+        && textMutationCountsSinceProcess.TryGetValue(path, out var mutations)
+        && mutations >= CodingTextMutationLimitBeforeVerification;
+
+    internal static bool IsVacuousVerificationCall(LmToolCall call)
+    {
+        if (call.Name != ClientToolNames.ProcessRun
+            || !string.Equals(StringArgument(call.Arguments, "purpose"), "test", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var executable = Path.GetFileNameWithoutExtension(
+            StringArgument(call.Arguments, "executable") ?? string.Empty);
+        if (!executable.Equals("python", StringComparison.OrdinalIgnoreCase)
+            && !executable.Equals("python3", StringComparison.OrdinalIgnoreCase)
+            && !executable.Equals("py", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var arguments = ReadOrderedStringArrayArgument(call.Arguments, "arguments");
+        var inlineCodeIndex = Array.FindIndex(
+            arguments,
+            static argument => argument.Equals("-c", StringComparison.OrdinalIgnoreCase));
+        if (inlineCodeIndex < 0 || inlineCodeIndex + 1 >= arguments.Length)
+        {
+            return false;
+        }
+
+        var code = arguments[inlineCodeIndex + 1];
+        string[] disabledChecks =
+        [
+            " and false", " or true", "if false", "if 0:", "assert true",
+        ];
+        return disabledChecks.Any(pattern => code.Contains(pattern, StringComparison.OrdinalIgnoreCase));
+    }
 
     internal static string CreateSearchFingerprint(JsonElement arguments)
     {
@@ -1448,6 +1810,27 @@ public sealed class RunProcessor : BackgroundService
 
     internal static string CreateToolFingerprint(LmToolCall call) =>
         call.Name + ":" + call.Arguments.GetRawText();
+
+    internal static void InvalidateToolFingerprintsAfterMutation(
+        HashSet<string> successfulToolFingerprints,
+        HashSet<string> failedToolFingerprints)
+    {
+        // Successful process results and failed read/process attempts describe the workspace revision that existed
+        // before the mutation. Keeping them would suppress the exact verification command that must now be rerun, or
+        // keep a previously missing file unreadable after it was created. Failed mutation calls remain blocked because
+        // their expected hashes/text ranges are stale and replaying them verbatim is still unsafe.
+        successfulToolFingerprints.Clear();
+        _ = failedToolFingerprints.RemoveWhere(fingerprint =>
+            !IsMutationToolFingerprint(fingerprint));
+    }
+
+    private static bool IsMutationToolFingerprint(string fingerprint) =>
+        fingerprint.StartsWith(ClientToolNames.FileSystemWriteText + ":", StringComparison.Ordinal)
+        || fingerprint.StartsWith(ClientToolNames.FileSystemReplaceText + ":", StringComparison.Ordinal)
+        || fingerprint.StartsWith(ClientToolNames.FileSystemMove + ":", StringComparison.Ordinal)
+        || fingerprint.StartsWith(ClientToolNames.FileSystemProposePatch + ":", StringComparison.Ordinal)
+        || fingerprint.StartsWith(ClientToolNames.FileSystemProposeCreate + ":", StringComparison.Ordinal)
+        || fingerprint.StartsWith(ClientToolNames.FileSystemProposeDelete + ":", StringComparison.Ordinal);
 
     internal static bool IsStableWorkspaceRead(string name) => name is
         ClientToolNames.WorkspaceMap or
@@ -1701,15 +2084,15 @@ public sealed class RunProcessor : BackgroundService
                 Retryable: true),
             JsonException => (
                 Code: "provider.invalid_response",
-                Message: "Der AI-Anbieter hat eine ungÃ¼ltige strukturierte Antwort geliefert.",
+                Message: "Der AI-Anbieter hat eine ungültige strukturierte Antwort geliefert.",
                 Retryable: false),
             TimeoutException => (
                 Code: "run.timeout",
-                Message: "Der AI-Lauf hat sein Zeitlimit erreicht. Bereits ausgefÃ¼hrte Workspace-Ã„nderungen wurden nicht zurÃ¼ckgesetzt.",
+                Message: "Der AI-Lauf hat sein Zeitlimit erreicht. Bereits ausgeführte Workspace-Änderungen wurden nicht zurückgesetzt.",
                 Retryable: true),
             InvalidOperationException => (
                 Code: "run.invalid_operation",
-                Message: "Der AI-Lauf konnte eine erforderliche Operation nicht ausfÃ¼hren.",
+                Message: "Der AI-Lauf konnte eine erforderliche Operation nicht ausführen.",
                 Retryable: false),
             _ => (
                 Code: "run.failed",

@@ -141,6 +141,12 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        await CodingWorkflowMessageJournal.AppendAsync(
+            workspace,
+            "task",
+            $"Coding-Workflow · {scenario} · Aufgabe",
+            prompt,
+            cancellationToken).ConfigureAwait(false);
         var index = await repositoryIndex.GetSnapshotAsync(workspace, cancellationToken).ConfigureAwait(false);
         var descriptor = new WorkspaceDescriptor(
             Path.GetFileName(index.Root),
@@ -289,6 +295,17 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
             assistantTextSha256 = ComputeSha256(output),
             workspaceRevision = finalIndex.RevisionFingerprint,
         }, accepted.RunId);
+        var journalResult = !string.IsNullOrWhiteSpace(output)
+            ? output
+            : failure is not null
+                ? $"Der Coding-Lauf ist fehlgeschlagen: {failure.ErrorCode} · {failure.Message}"
+                : $"Der Coding-Lauf endete mit Status {completed.State}.";
+        await CodingWorkflowMessageJournal.AppendAsync(
+            workspace,
+            completed.State == RunState.Completed ? "result" : "error",
+            $"Coding-Workflow · {scenario} · Ergebnis",
+            journalResult,
+            CancellationToken.None).ConfigureAwait(false);
         return new CodingAgentLiveRunObservation(
             completed,
             failure,

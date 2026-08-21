@@ -6,10 +6,11 @@
     "app.ready", "chat.send", "chat.cancel", "session.create", "session.open",
     "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick",
     "document.remove", "workflow.list", "workflow.insert", "workflow.create",
+    "campaign.list", "campaign.select", "campaign.run", "campaign.stop",
     "workflow.update", "workflow.delete",
     "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
     "attachment.remove",
-    "artifact.save", "artifact.preview", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
+    "artifact.save", "artifact.preview", "artifact.open", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
     "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
     "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.toggleSpeechPause", "microphone.stop", "microphone.cancel",
     "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "session.tool", "ui.sessionPane", "external.open"
@@ -20,7 +21,7 @@
     "workflow.changed", "workflow.draft", "document.changed", "status.changed", "speech.status", "speech.progress", "theme.changed",
     "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
     "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady",
-    "host.error"
+    "campaign.snapshot", "campaign.changed", "host.error"
   ]);
 
   function newRequestId() {

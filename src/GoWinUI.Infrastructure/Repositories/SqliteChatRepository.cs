@@ -140,8 +140,8 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,code_diff
-            FROM chat_messages WHERE session_id=$id ORDER BY created_at,id;
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,code_diff,visibility
+            FROM chat_messages WHERE session_id=$id AND visibility='visible' ORDER BY created_at,id;
             """;
         command.Parameters.AddWithValue("$id", sessionId.ToString("D"));
         var result = new List<ChatMessage>();
@@ -154,25 +154,49 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         return result;
     }
 
-    public async Task<ChatMessage> AddMessageAsync(
+    public Task<ChatMessage> AddMessageAsync(
         Guid sessionId,
         ChatRole role,
         string content,
         MessageStatus status,
         MessageContentProfile contentProfile = MessageContentProfile.General,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        AddMessageCoreAsync(
+            sessionId, role, content, status, contentProfile,
+            ChatMessageVisibility.Visible, cancellationToken);
+
+    public Task<ChatMessage> AddInternalMessageAsync(
+        Guid sessionId,
+        ChatRole role,
+        string content,
+        MessageStatus status,
+        MessageContentProfile contentProfile = MessageContentProfile.General,
+        CancellationToken cancellationToken = default) =>
+        AddMessageCoreAsync(
+            sessionId, role, content, status, contentProfile,
+            ChatMessageVisibility.Internal, cancellationToken);
+
+    private async Task<ChatMessage> AddMessageCoreAsync(
+        Guid sessionId,
+        ChatRole role,
+        string content,
+        MessageStatus status,
+        MessageContentProfile contentProfile,
+        ChatMessageVisibility visibility,
+        CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
         var message = new ChatMessage(
             Guid.NewGuid(), sessionId, role, content ?? string.Empty, status, now, now,
-            ContentProfile: contentProfile);
+            ContentProfile: contentProfile,
+            Visibility: visibility);
         await database.WriteAsync(async (connection, transaction, token) =>
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = """
-                INSERT INTO chat_messages(id,session_id,role,content,status,created_at,updated_at,content_profile)
-                VALUES($id,$session,$role,$content,$status,$now,$now,$profile);
+                INSERT INTO chat_messages(id,session_id,role,content,status,created_at,updated_at,content_profile,visibility)
+                VALUES($id,$session,$role,$content,$status,$now,$now,$profile,$visibility);
                 UPDATE chat_sessions SET updated_at=$now WHERE id=$session;
                 """;
             command.Parameters.AddWithValue("$id", message.Id.ToString("D"));
@@ -181,11 +205,69 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             command.Parameters.AddWithValue("$content", message.Content);
             command.Parameters.AddWithValue("$status", SqliteMapping.EnumName(status));
             command.Parameters.AddWithValue("$profile", SqliteMapping.EnumName(contentProfile));
+            command.Parameters.AddWithValue("$visibility", SqliteMapping.EnumName(visibility));
             command.Parameters.AddWithValue("$now", now.ToDb());
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
         return message;
     }
+
+    public Task DeleteMessageAsync(Guid messageId, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "DELETE FROM chat_messages WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
+    public Task SetMessageVisibilityAsync(
+        Guid messageId,
+        ChatMessageVisibility visibility,
+        CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE chat_messages SET visibility=$visibility,updated_at=$now WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+            command.Parameters.AddWithValue("$visibility", SqliteMapping.EnumName(visibility));
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
+    public Task<int> DeleteInternalMessagesAsync(CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                DELETE FROM chat_messages
+                WHERE visibility='internal'
+                   OR (
+                       (
+                           id IN (
+                               SELECT assistant_message_id
+                               FROM coding_campaign_iterations
+                               WHERE assistant_message_id IS NOT NULL
+                           )
+                           OR (
+                               session_id IN (SELECT session_id FROM coding_campaigns)
+                               AND role='assistant'
+                               AND status<>'completed'
+                           )
+                       )
+                       AND trim(content)=''
+                       AND trim(COALESCE(code_diff,''))=''
+                       AND NOT EXISTS(
+                           SELECT 1 FROM chat_artifacts artifact
+                           WHERE artifact.message_id=chat_messages.id
+                       )
+                   );
+                """;
+            return await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
 
     public Task UpdateMessageAsync(Guid messageId, string content, MessageStatus status, string? errorMessage = null, CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
@@ -343,6 +425,24 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         return result;
     }
 
+    public async Task<ChatMessage?> GetMessageAsync(
+        Guid messageId,
+        bool includeInternal = false,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,code_diff,visibility
+            FROM chat_messages
+            WHERE id=$id AND ($includeInternal=1 OR visibility='visible');
+            """;
+        command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+        command.Parameters.AddWithValue("$includeInternal", includeInternal ? 1 : 0);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadMessage(reader) : null;
+    }
+
     public Task SaveSessionContextPreparationAsync(
         SessionContextPreparation preparation,
         CancellationToken cancellationToken = default)
@@ -427,5 +527,6 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12)),
         reader.IsDBNull(13) ? null : reader.GetString(13),
         reader.IsDBNull(14) ? MessageContentProfile.General : reader.ReadEnum<MessageContentProfile>(14),
-        reader.IsDBNull(15) ? null : reader.GetString(15));
+        reader.IsDBNull(15) ? null : reader.GetString(15),
+        reader.IsDBNull(16) ? ChatMessageVisibility.Visible : reader.ReadEnum<ChatMessageVisibility>(16));
 }

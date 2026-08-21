@@ -48,7 +48,6 @@
             </VisualState.StateTriggers>
             <VisualState.Setters>
               <Setter Target="WorkspaceSubtitle.Visibility" Value="Visible" />
-              <Setter Target="TitleStatus.Visibility" Value="Visible" />
             </VisualState.Setters>
           </VisualState>
           <VisualState x:Name="CompactTitleBar">
@@ -57,16 +56,10 @@
             </VisualState.StateTriggers>
             <VisualState.Setters>
               <Setter Target="WorkspaceSubtitle.Visibility" Value="Collapsed" />
-              <Setter Target="TitleStatus.Visibility" Value="Collapsed" />
             </VisualState.Setters>
           </VisualState>
         </VisualStateGroup>
       </VisualStateManager.VisualStateGroups>
-
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="*" />
-        <ColumnDefinition Width="Auto" />
-      </Grid.ColumnDefinitions>
 
       <Grid
         MinWidth="0"
@@ -90,44 +83,6 @@
           TextTrimming="CharacterEllipsis" />
       </Grid>
 
-      <StackPanel
-        x:Name="TitleStatus"
-        Grid.Column="1"
-        HorizontalAlignment="Right"
-        VerticalAlignment="Center"
-        Orientation="Horizontal"
-        Spacing="8">
-        <Border
-          BorderBrush="{ThemeResource GoWarningBrush}"
-          Style="{StaticResource GoStatusPillStyle}">
-          <StackPanel Orientation="Horizontal" Spacing="8">
-            <Ellipse
-              Width="8"
-              Height="8"
-              Fill="{ThemeResource GoWarningBrush}" />
-            <TextBlock
-              MaxWidth="170"
-              Foreground="{ThemeResource GoWarningBrush}"
-              Text="{x:Bind ViewModel.DatabaseStatus, Mode=OneWay}"
-              TextTrimming="CharacterEllipsis" />
-          </StackPanel>
-        </Border>
-        <Border
-          BorderBrush="{ThemeResource GoWarningBrush}"
-          Style="{StaticResource GoStatusPillStyle}">
-          <StackPanel Orientation="Horizontal" Spacing="8">
-            <Ellipse
-              Width="8"
-              Height="8"
-              Fill="{ThemeResource GoWarningBrush}" />
-            <TextBlock
-              MaxWidth="170"
-              Foreground="{ThemeResource GoWarningBrush}"
-              Text="{x:Bind ViewModel.AiConnectionModeText, Mode=OneWay}"
-              TextTrimming="CharacterEllipsis" />
-          </StackPanel>
-        </Border>
-      </StackPanel>
     </Grid>
 
     <Border

@@ -20,9 +20,7 @@ public sealed partial class LmStudioClient : IDisposable
     private readonly LmStudioCliModelLoader? _cliModelLoader;
     private readonly SemaphoreSlim _modelOperationGate = new(1, 1);
     private readonly SemaphoreSlim _statusGate = new(1, 1);
-    private readonly object _idleTimerSync = new();
     private readonly object _statusCacheSync = new();
-    private CancellationTokenSource? _idleUnloadCancellation;
     private ModelStatusSnapshot? _cachedStatus;
     private DateTimeOffset _statusCacheExpiresAt;
     private static readonly TimeSpan StatusCacheDuration = TimeSpan.FromSeconds(15);
@@ -44,7 +42,11 @@ public sealed partial class LmStudioClient : IDisposable
         _logger = logger;
         _cliModelLoader = cliModelLoader;
         _httpClient.BaseAddress = EnsureTrailingSlash(_options.LmStudioUri);
-        _httpClient.Timeout = TimeSpan.FromMinutes(30);
+        // Coding requests, especially with the large DeepSeek profile and a long
+        // prompt prefix, can legitimately take longer than 30 minutes. The run
+        // processor already owns the authoritative timeout and cancellation token,
+        // so a second HttpClient timeout must not terminate an otherwise healthy run.
+        _httpClient.Timeout = Timeout.InfiniteTimeSpan;
     }
 
     public async Task<ModelStatusSnapshot> GetStatusAsync(CancellationToken cancellationToken = default)
@@ -93,6 +95,17 @@ public sealed partial class LmStudioClient : IDisposable
     public async Task<string> EnsureModelLoadedAsync(
         string modelId,
         int contextLength,
+        CancellationToken cancellationToken = default) =>
+        (await EnsureModelPreparedAsync(
+            modelId,
+            contextLength,
+            loadingStarted: null,
+            cancellationToken).ConfigureAwait(false)).InstanceId;
+
+    internal async Task<LmStudioModelPreparation> EnsureModelPreparedAsync(
+        string modelId,
+        int contextLength,
+        Func<CancellationToken, Task>? loadingStarted,
         CancellationToken cancellationToken = default)
     {
         await BeginModelOperationAsync(cancellationToken).ConfigureAwait(false);
@@ -112,15 +125,25 @@ public sealed partial class LmStudioClient : IDisposable
                 ? loadedInstances[0]
                 : null;
             var isEmbedding = string.Equals(selected.Type, "embedding", StringComparison.OrdinalIgnoreCase);
-            await UnloadIncompatibleModelsAsync(status.Models, modelId, cancellationToken).ConfigureAwait(false);
-            if (loaded is not null
-                && HasRequiredConfiguration(loaded, expectedContextLength, isEmbedding)
-                && (!isCodingModel
-                    || _cliModelLoader is null
-                    || _cliModelLoader.IsKnownMaximumGpuLoad(modelId, expectedContextLength)))
+            var canReuseLoadedInstance = loaded is not null
+                && HasRequiredConfiguration(loaded, expectedContextLength, isEmbedding);
+
+            if (!canReuseLoadedInstance && loadingStarted is not null)
             {
+                await loadingStarted(cancellationToken).ConfigureAwait(false);
+            }
+
+            await UnloadIncompatibleModelsAsync(status.Models, modelId, cancellationToken).ConfigureAwait(false);
+            if (canReuseLoadedInstance)
+            {
+                // LM Studio is the authoritative source for actual residency and the
+                // effective context/load profile. A process marker is useful for
+                // diagnostics, but it must never force an otherwise compatible,
+                // already resident coding model through an unload/reload cycle.
                 InvalidateStatusCache();
-                return loaded.ModelInstanceId ?? loaded.Id ?? modelId;
+                return new LmStudioModelPreparation(
+                    loaded!.ModelInstanceId ?? loaded.Id ?? modelId,
+                    WasAlreadyLoaded: true);
             }
 
             if (loaded is not null)
@@ -140,7 +163,6 @@ public sealed partial class LmStudioClient : IDisposable
                     HasRequiredConfiguration(instance, expectedContextLength, isEmbedding: false));
                 if (refreshedInstance is null)
                 {
-                    _cliModelLoader.ClearMarker();
                     if (refreshedModel is not null)
                     {
                         await UnloadModelInstancesAsync([refreshedModel], cancellationToken).ConfigureAwait(false);
@@ -150,11 +172,12 @@ public sealed partial class LmStudioClient : IDisposable
                 }
 
                 InvalidateStatusCache();
-                return refreshedInstance.ModelInstanceId ?? refreshedInstance.Id ?? modelId;
+                return new LmStudioModelPreparation(
+                    refreshedInstance.ModelInstanceId ?? refreshedInstance.Id ?? modelId,
+                    WasAlreadyLoaded: false);
             }
-            // The installed LM Studio load API rejects a `ttl` property. Explicit
-            // loads are released by this client's own ModelTtlSeconds idle timer;
-            // inference requests still carry LM Studio's supported JIT TTL.
+            // Explicit loads intentionally have no TTL. The selected model remains
+            // resident until a later AI request asks for an incompatible target.
             object body = isEmbedding
                 ? new
                 {
@@ -171,12 +194,14 @@ public sealed partial class LmStudioClient : IDisposable
                     offload_kv_cache_to_gpu = true,
                     echo_load_config = true,
                 };
-            return await LoadModelWithRetryAsync(
-                modelId,
-                body,
-                expectedContextLength,
-                isEmbedding,
-                cancellationToken).ConfigureAwait(false);
+            return new LmStudioModelPreparation(
+                await LoadModelWithRetryAsync(
+                    modelId,
+                    body,
+                    expectedContextLength,
+                    isEmbedding,
+                    cancellationToken).ConfigureAwait(false),
+                WasAlreadyLoaded: false);
         }
         finally
         {
@@ -195,7 +220,6 @@ public sealed partial class LmStudioClient : IDisposable
         finally
         {
             InvalidateStatusCache();
-            CancelIdleUnload();
             _modelOperationGate.Release();
         }
     }
@@ -279,7 +303,6 @@ public sealed partial class LmStudioClient : IDisposable
             ["input"] = input,
             ["stream"] = true,
         };
-        AddOptionalModelTtl(body, modelId);
         ApplySamplingProfile(body, modelId, includeReasoning: true);
         using var request = await CreateRequestAsync(HttpMethod.Post, "v1/responses", body, cancellationToken).ConfigureAwait(false);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
@@ -343,13 +366,11 @@ public sealed partial class LmStudioClient : IDisposable
         await BeginModelOperationAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-        var instructions = string.Join(
-            "\n\n",
-            messages
-                .Where(static message => string.Equals(message.Role, "system", StringComparison.OrdinalIgnoreCase))
-                .Select(static message => message.Content)
-                .Where(static content => !string.IsNullOrWhiteSpace(content)));
-        var input = CreateResponsesInput(messages);
+        var primarySystemMessageIndex = FindPrimarySystemMessageIndex(messages);
+        var instructions = primarySystemMessageIndex >= 0
+            ? messages[primarySystemMessageIndex].Content ?? string.Empty
+            : string.Empty;
+        var input = CreateResponsesInput(messages, primarySystemMessageIndex);
         var toolPayload = tools.Select(static tool => new
         {
             type = "function",
@@ -366,7 +387,6 @@ public sealed partial class LmStudioClient : IDisposable
             ["max_output_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
             ["store"] = false,
         };
-        AddOptionalModelTtl(body, modelId);
         ApplySamplingProfile(body, modelId, includeReasoning: true);
         if (toolPayload.Length > 0)
         {
@@ -502,7 +522,7 @@ public sealed partial class LmStudioClient : IDisposable
             throw new ArgumentOutOfRangeException(nameof(inputs));
         }
 
-        var body = new { model = modelId, input = inputs, ttl = _options.ModelTtlSeconds };
+        var body = new { model = modelId, input = inputs };
         using var request = await CreateRequestAsync(HttpMethod.Post, "v1/embeddings", body, cancellationToken).ConfigureAwait(false);
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -568,7 +588,6 @@ public sealed partial class LmStudioClient : IDisposable
             },
             stream = false,
             temperature = 0.1,
-            ttl = _options.ModelTtlSeconds,
         };
         using var request = await CreateRequestAsync(HttpMethod.Post, "v1/chat/completions", body, cancellationToken).ConfigureAwait(false);
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
@@ -610,7 +629,6 @@ public sealed partial class LmStudioClient : IDisposable
     private async Task BeginModelOperationAsync(CancellationToken cancellationToken)
     {
         await _modelOperationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        CancelIdleUnload();
     }
 
     private void EndModelOperation()
@@ -618,67 +636,6 @@ public sealed partial class LmStudioClient : IDisposable
         // Model residency is coordinated explicitly by WorkerOrchestrator. The
         // permanent General/STT/TTS set must never disappear because of idleness.
         _modelOperationGate.Release();
-    }
-
-    private void CancelIdleUnload()
-    {
-        lock (_idleTimerSync)
-        {
-            _idleUnloadCancellation?.Cancel();
-            _idleUnloadCancellation = null;
-        }
-    }
-
-    private void ScheduleIdleUnload()
-    {
-        var cancellation = new CancellationTokenSource();
-        lock (_idleTimerSync)
-        {
-            _idleUnloadCancellation?.Cancel();
-            _idleUnloadCancellation = cancellation;
-        }
-
-        _ = UnloadAfterIdleAsync(cancellation);
-    }
-
-    private async Task UnloadAfterIdleAsync(CancellationTokenSource cancellation)
-    {
-        try
-        {
-            await Task.Delay(TimeSpan.FromSeconds(_options.ModelTtlSeconds), cancellation.Token).ConfigureAwait(false);
-            await _modelOperationGate.WaitAsync(cancellation.Token).ConfigureAwait(false);
-            try
-            {
-                lock (_idleTimerSync)
-                {
-                    if (!ReferenceEquals(_idleUnloadCancellation, cancellation))
-                    {
-                        return;
-                    }
-
-                    _idleUnloadCancellation = null;
-                }
-
-                var status = await GetRawModelsAsync(cancellation.Token).ConfigureAwait(false);
-                await UnloadModelInstancesAsync(status.Models, cancellation.Token).ConfigureAwait(false);
-                LogIdleModelsUnloaded(_options.ModelTtlSeconds);
-            }
-            finally
-            {
-                _modelOperationGate.Release();
-            }
-        }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-        {
-        }
-        catch (Exception exception) when (exception is HttpRequestException or JsonException)
-        {
-            LogIdleUnloadFailed(exception);
-        }
-        finally
-        {
-            cancellation.Dispose();
-        }
     }
 
     private static bool HasRequiredConfiguration(
@@ -721,27 +678,9 @@ public sealed partial class LmStudioClient : IDisposable
 
     public void Dispose()
     {
-        lock (_idleTimerSync)
-        {
-            _idleUnloadCancellation?.Cancel();
-            _idleUnloadCancellation = null;
-        }
-
         _modelOperationGate.Dispose();
         _statusGate.Dispose();
     }
-
-    [LoggerMessage(
-        EventId = 3101,
-        Level = LogLevel.Information,
-        Message = "LM Studio models were unloaded after {ttlSeconds} idle seconds.")]
-    private partial void LogIdleModelsUnloaded(int ttlSeconds);
-
-    [LoggerMessage(
-        EventId = 3102,
-        Level = LogLevel.Warning,
-        Message = "LM Studio idle unload failed.")]
-    private partial void LogIdleUnloadFailed(Exception exception);
 
     [LoggerMessage(
         EventId = 3103,
@@ -837,12 +776,29 @@ public sealed partial class LmStudioClient : IDisposable
         return !string.IsNullOrWhiteSpace(token);
     }
 
-    private static object[] CreateResponsesInput(IReadOnlyList<LmChatMessage> messages)
+    private static int FindPrimarySystemMessageIndex(IReadOnlyList<LmChatMessage> messages)
+    {
+        for (var index = 0; index < messages.Count; index++)
+        {
+            if (string.Equals(messages[index].Role, "system", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(messages[index].Content))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static object[] CreateResponsesInput(
+        IReadOnlyList<LmChatMessage> messages,
+        int primarySystemMessageIndex)
     {
         var input = new List<object>();
-        foreach (var message in messages)
+        for (var messageIndex = 0; messageIndex < messages.Count; messageIndex++)
         {
-            if (string.Equals(message.Role, "system", StringComparison.OrdinalIgnoreCase))
+            var message = messages[messageIndex];
+            if (messageIndex == primarySystemMessageIndex)
             {
                 continue;
             }
@@ -873,6 +829,21 @@ public sealed partial class LmStudioClient : IDisposable
                     type = "function_call_output",
                     call_id = message.ToolCallId,
                     output = message.Content ?? string.Empty,
+                });
+                continue;
+            }
+
+            if (string.Equals(message.Role, "system", StringComparison.OrdinalIgnoreCase))
+            {
+                // LM Studio may fold every system-role input into the leading
+                // instruction block. A runtime repair hint added after a tool
+                // failure would then invalidate the entire prompt cache. Keep
+                // the immutable first system message in `instructions` and
+                // represent later server-authored guidance chronologically.
+                input.Add(new
+                {
+                    role = "user",
+                    content = "[GO_RUNTIME_GUIDANCE]\n" + (message.Content ?? string.Empty),
                 });
                 continue;
             }
@@ -928,10 +899,6 @@ public sealed partial class LmStudioClient : IDisposable
                     cancellationToken).ConfigureAwait(false);
                 using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
                 response.EnsureSuccessStatusCode();
-                if (CodingModelCatalog.TryGet(model.Key, out _))
-                {
-                    _cliModelLoader?.ClearMarker();
-                }
                 InvalidateStatusCache();
             }
         }
@@ -1098,7 +1065,6 @@ public sealed partial class LmStudioClient : IDisposable
             ["stream"] = false,
             ["max_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
         };
-        AddOptionalModelTtl(body, modelId);
         ApplySamplingProfile(body, modelId, includeReasoning: false);
         if (tools.Count > 0)
         {
@@ -1181,8 +1147,10 @@ public sealed partial class LmStudioClient : IDisposable
     private static object[] CreateChatCompletionMessages(IReadOnlyList<LmChatMessage> messages)
     {
         var result = new List<object>(messages.Count);
-        foreach (var message in messages)
+        var primarySystemMessageIndex = FindPrimarySystemMessageIndex(messages);
+        for (var messageIndex = 0; messageIndex < messages.Count; messageIndex++)
         {
+            var message = messages[messageIndex];
             if (message.ToolCalls is { Count: > 0 })
             {
                 result.Add(new
@@ -1210,6 +1178,17 @@ public sealed partial class LmStudioClient : IDisposable
                     role = "tool",
                     tool_call_id = message.ToolCallId,
                     content = message.Content ?? string.Empty,
+                });
+                continue;
+            }
+
+            if (messageIndex != primarySystemMessageIndex
+                && string.Equals(message.Role, "system", StringComparison.OrdinalIgnoreCase))
+            {
+                result.Add(new
+                {
+                    role = "user",
+                    content = "[GO_RUNTIME_GUIDANCE]\n" + (message.Content ?? string.Empty),
                 });
                 continue;
             }
@@ -1245,15 +1224,6 @@ public sealed partial class LmStudioClient : IDisposable
         if (includeReasoning)
         {
             body["reasoning"] = new { effort = "low" };
-        }
-    }
-
-    private void AddOptionalModelTtl(Dictionary<string, object?> body, string modelId)
-    {
-        if (!string.Equals(modelId, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase)
-            && !CodingModelCatalog.TryGet(modelId, out _))
-        {
-            body["ttl"] = _options.ModelTtlSeconds;
         }
     }
 

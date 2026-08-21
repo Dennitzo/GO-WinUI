@@ -1,3 +1,5 @@
+using GoAi.Contracts;
+
 namespace GoWinUI.Tests;
 
 public sealed class QwenCoderLiveTests
@@ -51,5 +53,47 @@ public sealed class QwenCoderLiveTests
             "live-coding",
             timeout.Token);
         CodingAgentLiveTestHarness.AssertSuccessful(observation, modelId);
+    }
+
+    [Fact]
+    [Trait("Category", "Live")]
+    public async Task SelectedCoderCanIterativelyVerifyASmallLeanTheorem()
+    {
+        var requestedWorkspace = Environment.GetEnvironmentVariable(WorkspaceEnvironmentVariable);
+        if (string.IsNullOrWhiteSpace(requestedWorkspace)
+            || !string.Equals(Environment.GetEnvironmentVariable("GO_AI_LIVE_LEAN_AGENT_TEST"), "1", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var workspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(requestedWorkspace));
+        var modelId = Environment.GetEnvironmentVariable(ModelEnvironmentVariable)?.Trim();
+        if (string.IsNullOrWhiteSpace(modelId)) modelId = "qwen3-coder-next";
+        using var timeout = new CancellationTokenSource(TimeSpan.FromHours(2));
+        var sessionId = $"live-lean-{Guid.NewGuid():N}";
+        await using var harness = await CodingAgentLiveTestHarness.CreateAsync(
+            "lean-proof-tool",
+            workspace,
+            modelId,
+            sessionId,
+            timeout.Token);
+        var observation = await harness.ExecuteAsync(
+            sessionId,
+            """
+            Lege unter proofs/live-tool/ eine kleine Lean-Datei mit einem zunächst absichtlich fehlerhaften,
+            anschließend korrigierten Theorem über natürliche Zahlen an. Prüfe die Zwischendiagnose und das korrigierte,
+            vollständig qualifizierte Theorem mit proof.lean. Verwende abschließend verify, behebe alle Diagnosen und
+            behaupte den formalen Beweis nur, wenn Kompilierung und Axiomprüfung bestanden sind. Verwende weder sorry
+            noch admit, eigene Axiome oder Lean.trustCompiler.
+            """,
+            "live-lean",
+            timeout.Token);
+
+        CodingAgentLiveTestHarness.AssertSuccessful(
+            observation,
+            modelId,
+            requireMutation: true,
+            requireVerification: false);
+        Assert.Contains(ClientToolNames.LeanProof, observation.ToolNames);
     }
 }

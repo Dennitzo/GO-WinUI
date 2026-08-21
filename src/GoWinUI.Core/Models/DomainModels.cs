@@ -4,6 +4,7 @@ namespace GoWinUI.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
+public enum ChatMessageVisibility { Visible, Internal }
 public enum AssistantMode { General, Code }
 public enum PersistentToolAction { Code, BricsCad, Audiobook }
 public enum MessageContentProfile { General, Audiobook }
@@ -12,6 +13,8 @@ public enum ProjectStatus { Active, Archived }
 public enum AssetCategory { Pdf, Drawing, Image, Meeting, Other, Cpdb, Ifc }
 public enum AppTheme { System, Light, Dark }
 public enum WindowDisplayState { Normal, Maximized }
+public enum CodingCampaignStatus { Running, Faulted, Stopped }
+public enum CodingCampaignPhase { Bootstrap, Iteration, Correction, Validation }
 
 public sealed record ChatSession(
     Guid Id,
@@ -39,7 +42,39 @@ public sealed record ChatMessage(
     ToolExecutionInfo? ToolExecution = null,
     string? ContextSummary = null,
     MessageContentProfile ContentProfile = MessageContentProfile.General,
-    string? CodeDiff = null);
+    string? CodeDiff = null,
+    ChatMessageVisibility Visibility = ChatMessageVisibility.Visible);
+
+public sealed record CodingCampaignState(
+    Guid Id,
+    Guid SessionId,
+    string DefinitionId,
+    string Title,
+    string WorkspacePath,
+    string WorkspaceFingerprint,
+    string ModelId,
+    CodingCampaignStatus Status,
+    CodingCampaignPhase Phase,
+    int Iteration,
+    string? CurrentChallenge,
+    string? LastError,
+    string ValidationJson,
+    int RestartCount,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record CodingCampaignIteration(
+    Guid Id,
+    Guid CampaignId,
+    int Iteration,
+    CodingCampaignPhase Phase,
+    string Challenge,
+    Guid? AssistantMessageId,
+    string Status,
+    string? Error,
+    string ValidationJson,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
 
 public sealed record SessionContextPreparation(
     string CacheKey,

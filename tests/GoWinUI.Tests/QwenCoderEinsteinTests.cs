@@ -1,11 +1,11 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Text.Json;
+using GoWinUI.App.Services;
 
 namespace GoWinUI.Tests;
 
 /// <summary>
-/// Fortsetzbare Coding-Agent-Kampagne zu Einsteins Feldgleichungen und physikalisch
+/// Fortsetzbarer Coding-Agent-Workflow zu Einsteins Feldgleichungen und physikalisch
 /// begründeten Erweiterungen. Der Dauermodus wird bewusst über eine Umgebungsvariable
 /// aktiviert und läuft bis Ctrl+C. Das Modelltraining selbst wird nicht verändert;
 /// Erkenntnisse bleiben über Quellcode, Herleitungen, Versuchshistorie, Tests und
@@ -69,43 +69,40 @@ public sealed class QwenCoderEinsteinTests
             modelId,
             sessionId,
             timeout.Token);
-        await using var dashboard = CodingArtifactLiveDashboard.Start(
-            workspace,
-            harness.Record,
-            timeout.Token);
-        harness.Record("campaign.configuration", new
+        var campaign = new EinsteinCodingCampaignDefinition(new CodingProofVerifier());
+        harness.Record("workflow.configuration", new
         {
             continuous,
             iterationLimit,
             challengeCount = Challenges.Length,
-            liveDashboard = dashboard.Url.AbsoluteUri,
+            chatOutput = "AI-Nachrichten, Lösungen und neuester PNG-Plot werden bei Ausführung über GO veröffentlicht.",
         });
 
-        if (!HasFoundation(workspace))
+        if (!campaign.HasFoundation(workspace))
         {
             var bootstrap = await harness.ExecuteAsync(
                 sessionId,
-                BuildBootstrapPrompt(),
+                campaign.BuildBootstrapPrompt(),
                 "live-einstein-bootstrap",
                 timeout.Token);
             CodingAgentLiveTestHarness.AssertSuccessful(bootstrap, modelId);
         }
 
-        var startingAttempt = ReadAttemptCount(workspace);
+        var startingAttempt = campaign.ReadIteration(workspace);
         for (var localIteration = 0; localIteration < iterationLimit; localIteration++)
         {
             timeout.Token.ThrowIfCancellationRequested();
             var absoluteIteration = startingAttempt + localIteration;
-            var challenge = Challenges[absoluteIteration % Challenges.Length];
+            var challenge = campaign.GetChallenge(absoluteIteration);
             harness.Record("iteration.started", new { absoluteIteration, challenge });
             var observation = await harness.ExecuteAsync(
                 sessionId,
-                BuildIterationPrompt(absoluteIteration, challenge),
+                campaign.BuildIterationPrompt(absoluteIteration, challenge),
                 $"live-einstein-{absoluteIteration}",
                 timeout.Token);
             CodingAgentLiveTestHarness.AssertSuccessful(observation, modelId);
 
-            var issues = CollectEinsteinIssues(workspace);
+            var issues = (await campaign.ValidateAsync(workspace, timeout.Token)).Issues.ToList();
             harness.Record("iteration.validation", new
             {
                 absoluteIteration,
@@ -116,11 +113,11 @@ public sealed class QwenCoderEinsteinTests
             {
                 var correction = await harness.ExecuteAsync(
                     sessionId,
-                    BuildCorrectionPrompt(absoluteIteration, issues),
+                    campaign.BuildCorrectionPrompt(absoluteIteration, challenge, issues),
                     $"live-einstein-correction-{absoluteIteration}",
                     timeout.Token);
                 CodingAgentLiveTestHarness.AssertSuccessful(correction, modelId);
-                issues = CollectEinsteinIssues(workspace);
+                issues = (await campaign.ValidateAsync(workspace, timeout.Token)).Issues.ToList();
                 harness.Record("iteration.revalidation", new
                 {
                     absoluteIteration,
@@ -187,18 +184,17 @@ public sealed class QwenCoderEinsteinTests
         - einstein_attempts.json mit schemaVersion und einer fortschreibbaren attempts-Liste,
         - einstein_analysis.md als fachliches Forschungsprotokoll,
         - visualize_einstein.py als reproduzierbarer Plot- und Simulationsgenerator,
-        - solutions/ mit einem ausführlichen Markdown-Lösungsdokument je verifiziertem Fall,
-        - visualizations/ mit erzeugten PNG- oder SVG-Grafiken,
-        - simulation_data/ mit den zugehörigen maschinenlesbaren Daten,
-        - simulation_data/live_progress.json als atomar aktualisierten Live-Fortschritt.
+        - solutions/ mit ausführlichen Markdown-Dokumenten für verifizierte Lösungen sowie klar gekennzeichnete
+          offene oder approximative Untersuchungen,
+        - visualizations/ mit erzeugten PNG-Grafiken,
+        - simulation_data/ mit den zugehörigen maschinenlesbaren Daten.
 
-        Lange symbolische oder numerische Rechnungen müssen beobachtbar bleiben. Aktualisiere live_progress.json bei
-        Beginn, bei jedem fachlich sinnvollen Zwischenstand und beim Abschluss. Das Objekt enthält mindestens status,
-        caseId, phase, step, totalSteps, updatedAt und metrics. status ist running, completed oder failed. Schreibe die
-        Datei atomar über eine temporäre Datei und Umbenennen, damit die Liveansicht nie halbes JSON liest. Aktualisiere
-        während iterativer Simulationen zusätzlich visualizations/live_progress.png oder .svg mit den bisher
-        berechneten Punkten. Verwende ein headless Backend für die Erzeugung; GO öffnet und aktualisiert die Dateien
-        über eine separate Liveansicht. Berechnungen dürfen dafür nicht künstlich verlangsamt werden.
+        Dateien, Funktionen und Verweise namens live_progress sind verboten. Erzeuge ausschließlich fachlich benannte
+        Fallplots und fallbezogene Simulationsdaten.
+
+        Erzeuge für jeden untersuchten Fall eigene, aussagekräftig benannte Daten- und Plotdateien. Verwende ein
+        headless Matplotlib-Backend. GO veröffentlicht jeden neuen oder geänderten fachlichen Plot einmalig als
+        AI-Chatnachricht.
 
         Jeder Fall in einstein_cases.json enthält mindestens id, title, theoryDomain, approximationLevel,
         classification, equations, assumptions, validityDomain, maxEinsteinResidual, maxBianchiResidual,
@@ -220,8 +216,9 @@ public sealed class QwenCoderEinsteinTests
         Herleitung, umgeformte Feldgleichungen, Rand- und Anfangsbedingungen, analytische beziehungsweise numerische
         Lösung, unabhängige Prüfungen, Residuen und Fehlerschranken, Interpretation, Grenzen sowie exakt ausführbare
         Reproduktionsschritte enthalten. Verweise auf zugehörige Simulationsdaten und Grafiken. Erzeuge kein
-        Lösungsdokument für ein bloß vermutetes oder noch undetermined Resultat und erkläre eine kontrollierte
-        Näherung niemals stillschweigend zur exakten Lösung.
+        Für ein noch undetermined Resultat darfst du ein Dokument als „Offene Untersuchung“ anlegen; diese
+        Klassifizierung bleibt informative Metadaten und löst keinen Korrekturzwang aus. Kennzeichne kontrollierte
+        Näherungen als „Näherungsuntersuchung“ und erkläre sie niemals stillschweigend zur exakten Lösung.
 
         Beginne mit Minkowski und Schwarzschild als exakten Referenzen und ergänze danach ein erstes gültiges Modell
         aus Quantenfeldtheorie in gekrümmter Raumzeit, schwarzer-Loch-Thermodynamik oder der Niederenergie-Grenze der
@@ -266,18 +263,17 @@ public sealed class QwenCoderEinsteinTests
         Grafik und ihre Daten tatsächlich neu; Beispiele sind Tensorresiduen über dem Gitter, Krümmungsinvarianten,
         Horizont- oder Kausalstruktur, Geodäten, Phasenräume oder zeitliche kosmologische Entwicklung.
 
-        Setze simulation_data/live_progress.json vor Beginn dieser Iteration auf running und aktualisiere phase, step,
-        totalSteps, metrics und updatedAt bei aussagekräftigen Rechenschritten. Überschreibe parallel den Live-Plot
-        visualizations/live_progress.png oder .svg mit dem jeweils vorhandenen Datenstand. Verwende atomare
-        Dateiersetzung und setze den Status erst nach erfolgreicher Prüfung aller Ergebnisartefakte auf completed.
-        Bei einem Fehler schreibe failed samt technischer Phase, bevor du den Fehler selbstständig behebst und den
-        Lauf erneut ausführst.
+        Verwende für jedes Ergebnis stabile, fachlich beschreibende Namen in simulation_data/ und visualizations/.
+        Erzeuge oder reaktiviere keine Dateien, Funktionen oder Verweise namens live_progress.
+        Prüfe alle Ergebnisartefakte und behebe Fehler selbstständig, bevor du den Fall klassifizierst.
 
         Wird der untersuchte Fall nach allen unabhängigen Prüfungen als verified klassifiziert, erstelle oder
         aktualisiere zusätzlich sein eigenes ausführliches Markdown-Dokument unter solutions/ und trage dessen
         relativen Pfad als solutionDocument im Fall ein. Die Datei muss die vollständige Herleitung, Annahmen,
         Gültigkeitsdomäne, Randbedingungen, Lösung, Residuen, Fehlerschranken, Interpretation und reproduzierbare
-        Befehle einschließlich der zugehörigen Plot- und Simulationsartefakte enthalten.
+        Befehle einschließlich der zugehörigen Plot- und Simulationsartefakte enthalten. Verwende KaTeX-kompatible
+        LaTeX-Begrenzer und setze mathematische Ausdrücke nicht in Markdown-Codezäune, damit GO die Lösungsdatei
+        unmittelbar als korrekt gerenderte Chatnachricht und als gleichnamige PDF veröffentlichen kann.
 
         Führe anschließend alle Tests, Syntax-/Buildprüfung, Ergebnis- und Grafikgenerierung, einen begrenzten
         CLI-Smoke sowie git diff aus. Prüfe erzeugte JSON-, Daten- und Bildartefakte erneut und behebe Folgefehler
@@ -286,7 +282,7 @@ public sealed class QwenCoderEinsteinTests
         """;
 
     private static string BuildCorrectionPrompt(int iteration, IReadOnlyList<string> issues) => """
-        Die unabhängige Abnahme der Einstein-Kampagne hat nach Iteration
+        Die unabhängige Abnahme des Einstein-Workflows hat nach Iteration
         """ + iteration + """
         folgende konkrete Mängel gefunden:
 
@@ -297,8 +293,7 @@ public sealed class QwenCoderEinsteinTests
         kennzeichne jede effektive, semiklassische, perturbative oder numerische Näherung samt Gültigkeitsbereich.
         Erzeuge beziehungsweise korrigiere für jeden verified-Fall auch das referenzierte detaillierte Dokument unter
         solutions/. Regeneriere Daten und Grafiken, führe alle Tests, Syntax-/Buildprüfung, CLI-Smoke und git diff aus
-        und behebe Folgefehler selbstständig. Repariere ebenfalls den atomaren Live-Fortschritt und stelle sicher,
-        dass simulation_data/live_progress.json sowie der zugehörige Live-Plot den korrigierten Abschlussstand zeigen.
+        und behebe Folgefehler selbstständig. Verwende ausschließlich fallbezogene Daten- und Plotdateien.
         """;
 
     private static bool HasFoundation(string workspace) =>
@@ -399,11 +394,11 @@ public sealed class QwenCoderEinsteinTests
         var visualizationDirectory = Path.Combine(workspace, "visualizations");
         var visualizations = Directory.Exists(visualizationDirectory)
             ? Directory.EnumerateFiles(visualizationDirectory, "*", SearchOption.AllDirectories)
-                .Where(path => Path.GetExtension(path) is ".png" or ".svg")
+                .Where(path => Path.GetExtension(path) is ".png")
                 .Where(path => new FileInfo(path).Length > 1_024)
                 .ToArray()
             : [];
-        AddIf(visualizations.Length == 0, "Es wurde keine belastbare PNG- oder SVG-Visualisierung erzeugt.");
+        AddIf(visualizations.Length == 0, "Es wurde keine belastbare PNG-Visualisierung erzeugt.");
         var simulationDirectory = Path.Combine(workspace, "simulation_data");
         var simulationFiles = Directory.Exists(simulationDirectory)
             ? Directory.EnumerateFiles(simulationDirectory, "*", SearchOption.AllDirectories)
@@ -411,10 +406,6 @@ public sealed class QwenCoderEinsteinTests
                 .ToArray()
             : [];
         AddIf(simulationFiles.Length == 0, "Maschinenlesbare Simulations- oder Plotdaten fehlen.");
-        ValidateLiveProgress(
-            Path.Combine(simulationDirectory, "live_progress.json"),
-            visualizationDirectory,
-            issues);
         return issues;
 
         void RequireFile(string path, string message)
@@ -430,74 +421,6 @@ public sealed class QwenCoderEinsteinTests
             {
                 issues.Add(message);
             }
-        }
-    }
-
-    private static void ValidateLiveProgress(
-        string progressPath,
-        string visualizationDirectory,
-        List<string> issues)
-    {
-        if (!File.Exists(progressPath))
-        {
-            issues.Add("simulation_data/live_progress.json für die Liveansicht fehlt.");
-            return;
-        }
-        try
-        {
-            using var document = JsonDocument.Parse(File.ReadAllText(progressPath));
-            var root = document.RootElement;
-            var status = ReadString(root, "status");
-            if (status != "completed")
-            {
-                issues.Add("Der Live-Fortschritt besitzt nach dem Lauf nicht den Status completed.");
-            }
-            foreach (var propertyName in new[] { "caseId", "phase", "updatedAt" })
-            {
-                if (string.IsNullOrWhiteSpace(ReadString(root, propertyName)))
-                {
-                    issues.Add($"Der Live-Fortschritt enthält kein {propertyName}.");
-                }
-            }
-            if (ReadString(root, "updatedAt") is { Length: > 0 } updatedAt
-                && !DateTimeOffset.TryParse(
-                    updatedAt,
-                    CultureInfo.InvariantCulture,
-                    DateTimeStyles.RoundtripKind,
-                    out _))
-            {
-                issues.Add("updatedAt im Live-Fortschritt ist kein gültiger ISO-8601-Zeitpunkt.");
-            }
-            if (!root.TryGetProperty("step", out var stepValue)
-                || !stepValue.TryGetInt32(out var step)
-                || !root.TryGetProperty("totalSteps", out var totalValue)
-                || !totalValue.TryGetInt32(out var totalSteps)
-                || step < 0
-                || totalSteps <= 0
-                || step < totalSteps)
-            {
-                issues.Add("Der abgeschlossene Live-Fortschritt besitzt keine schlüssigen step/totalSteps-Werte.");
-            }
-            if (!root.TryGetProperty("metrics", out var metrics)
-                || metrics.ValueKind != JsonValueKind.Object
-                || !metrics.EnumerateObject().Any())
-            {
-                issues.Add("Der Live-Fortschritt enthält keine berechneten Zwischen- oder Abschlussmetriken.");
-            }
-        }
-        catch (JsonException exception)
-        {
-            issues.Add($"simulation_data/live_progress.json ist ungültig: {exception.Message}");
-        }
-
-        var livePlot = new[]
-        {
-            Path.Combine(visualizationDirectory, "live_progress.png"),
-            Path.Combine(visualizationDirectory, "live_progress.svg"),
-        }.FirstOrDefault(path => File.Exists(path) && new FileInfo(path).Length > 1_024);
-        if (livePlot is null)
-        {
-            issues.Add("Ein belastbarer visualizations/live_progress.png- oder SVG-Liveplot fehlt.");
         }
     }
 

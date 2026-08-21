@@ -72,6 +72,30 @@ public sealed class DatabaseAndWorkflowTests
     }
 
     [Fact]
+    public async Task InternalCampaignMessagesStayOutOfHistoryUntilPromoted()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var repository = environment.Get<IChatRepository>();
+        var session = await repository.CreateSessionAsync("Interner Coding-Lauf");
+        var scratch = await repository.AddInternalMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            "Interner Zwischenstand",
+            MessageStatus.Streaming);
+
+        Assert.Empty(await repository.ListMessagesAsync(session.Id));
+        Assert.Equal(ChatMessageVisibility.Internal, (await repository.GetMessageAsync(scratch.Id, includeInternal: true))?.Visibility);
+
+        await repository.UpdateMessageAsync(scratch.Id, "### Prozessbericht\n\nCode wurde geändert.", MessageStatus.Completed);
+        await repository.SetCodeDiffAsync(scratch.Id, "diff --git a/demo.cs b/demo.cs\n+neu\n");
+        await repository.SetMessageVisibilityAsync(scratch.Id, ChatMessageVisibility.Visible);
+
+        var visible = Assert.Single(await repository.ListMessagesAsync(session.Id));
+        Assert.Equal(scratch.Id, visible.Id);
+        Assert.Equal(ChatMessageVisibility.Visible, visible.Visibility);
+    }
+
+    [Fact]
     public async Task CurrentSchemaPersistsAudiobookStateCodeDiffAndRemovesLegacySpeechCache()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -100,7 +124,7 @@ public sealed class DatabaseAndWorkflowTests
 
         await chats.SetCodeDiffAsync(message.Id, "diff --git a/demo.cs b/demo.cs\n+added\n");
 
-        Assert.Equal(21, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
+        Assert.Equal(24, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
         await using (var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
         {
             await connection.OpenAsync();

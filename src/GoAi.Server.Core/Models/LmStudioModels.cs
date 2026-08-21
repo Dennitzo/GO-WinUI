@@ -36,6 +36,10 @@ internal sealed record LmStudioLoadResponse(
     [property: JsonPropertyName("load_time_seconds")] double LoadTimeSeconds,
     [property: JsonPropertyName("load_config")] LmStudioLoadConfig? LoadConfig);
 
+internal sealed record LmStudioModelPreparation(
+    string InstanceId,
+    bool WasAlreadyLoaded);
+
 public sealed record LmChatMessage(
     string Role,
     string? Content = null,

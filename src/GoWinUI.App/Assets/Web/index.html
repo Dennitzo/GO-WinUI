@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://go-preview.local data: blob:; media-src 'self' https://go-preview.local; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
   <title>GO AI Assistent</title>
   <link rel="stylesheet" href="vendor/katex/0.16.10/katex.min.css">
-  <link rel="stylesheet" href="styles.css?v=20260819-3">
+  <link rel="stylesheet" href="styles.css?v=20260821-1">
 </head>
 <body>
   <div id="app-shell" class="app-shell">
@@ -77,6 +77,9 @@
             <button id="composer-speech-pause" class="composer-speech-status__pause" type="button" title="Pausieren" aria-label="Pausieren" disabled>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path id="composer-speech-pause-icon" d="M8 5v14M16 5v14"/></svg>
             </button>
+            <button id="composer-speech-stop" class="composer-speech-status__stop" type="button" title="Vorlesen stoppen" aria-label="Vorlesen stoppen" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+            </button>
           </div>
         </div>
 
@@ -117,7 +120,7 @@
 
               <button id="open-workflows" class="tool-button" type="button" title="Workflow wählen">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
-                <span>Workflows</span>
+                <span id="workflows-button-label">Workflows</span>
               </button>
 
               <button id="workspace-button" class="tool-button" type="button" title="Workspace-Ordner freigeben">
@@ -160,7 +163,7 @@
       <header class="workflow-window-titlebar">
         <div>
           <h2 id="workflow-dialog-title">Workflows</h2>
-          <p>Gespeicherte Abläufe auswählen und verwalten</p>
+          <p id="workflow-dialog-subtitle">Gespeicherte Abläufe auswählen und verwalten</p>
         </div>
         <button id="close-workflows" class="icon-button" type="button" aria-label="Workflows schließen">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
@@ -241,9 +244,9 @@
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
   <script src="vendor/katex/0.16.10/katex.min.js?v=20260814-3"></script>
-  <script src="bridge.js?v=20260820-1"></script>
+  <script src="bridge.js?v=20260821-1"></script>
   <script src="voice.js?v=20260819-1"></script>
-  <script src="markdown.js?v=20260814-3"></script>
-  <script src="app.js?v=20260820-2"></script>
+  <script src="markdown.js?v=20260821-1"></script>
+  <script src="app.js?v=20260821-1"></script>
 </body>
 </html>

@@ -12,6 +12,8 @@ namespace GoAi.Server.Core.Workers;
 
 public sealed class WorkerOrchestrator : IDisposable
 {
+    internal const string ResidentSpeechWorkerName = "speech";
+
     private readonly WorkerApiClient _workers;
     private readonly LmStudioClient _lmStudio;
     private readonly GpuLeaseScheduler _scheduler;
@@ -20,10 +22,6 @@ public sealed class WorkerOrchestrator : IDisposable
     private readonly ServerRuntimeState _runtime;
     private readonly SemaphoreSlim _resourceTransitionGate = new(1, 1);
     private readonly ConcurrentDictionary<string, SpeechSessionState> _speechSessions = new(StringComparer.Ordinal);
-    private int _liveCaptionResourcesHeld;
-    private int _speechOperations;
-    private int _sharedRuntimeReady;
-    private int _generalModelEjectedForSpeech;
 
     public WorkerOrchestrator(
         WorkerApiClient workers,
@@ -46,22 +44,13 @@ public sealed class WorkerOrchestrator : IDisposable
         string? runId = null,
         CancellationToken cancellationToken = default)
     {
-        Interlocked.Increment(ref _speechOperations);
         await using var lease = await _scheduler.AcquireAsync(
             "speech-to-text",
             runId,
             GpuLeaseMode.Speech,
             cancellationToken).ConfigureAwait(false);
         await PrepareWorkerAsync("speech", cancellationToken).ConfigureAwait(false);
-        try
-        {
-            return await _workers.TranscribeAsync(request, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            Interlocked.Decrement(ref _speechOperations);
-            await TryReleaseSpeechResourcesIfIdleAsync(CancellationToken.None).ConfigureAwait(false);
-        }
+        return await _workers.TranscribeAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<TranscriptionResponse> TranscribeLiveCaptionAsync(
@@ -72,7 +61,6 @@ public sealed class WorkerOrchestrator : IDisposable
         string? previousContext,
         CancellationToken cancellationToken = default)
     {
-        Interlocked.Exchange(ref _liveCaptionResourcesHeld, 1);
         await using var lease = await _scheduler.AcquireAsync(
             "live-caption",
             sessionId,
@@ -92,23 +80,14 @@ public sealed class WorkerOrchestrator : IDisposable
         string sessionId,
         CancellationToken cancellationToken = default)
     {
-        Interlocked.Exchange(ref _liveCaptionResourcesHeld, 1);
-        try
-        {
-            await using var lease = await _scheduler.AcquireAsync(
-                "live-caption-warmup",
-                sessionId,
-                GpuLeaseMode.Speech,
-                cancellationToken).ConfigureAwait(false);
-            await PrepareWorkerAsync("speech", cancellationToken).ConfigureAwait(false);
-            _ = await _workers.LoadSpeechComponentAsync("stt", cancellationToken).ConfigureAwait(false);
-            _ = await _workers.LoadSpeechComponentAsync("speaker", cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            Interlocked.Exchange(ref _liveCaptionResourcesHeld, 0);
-            throw;
-        }
+        await using var lease = await _scheduler.AcquireAsync(
+            "live-caption-warmup",
+            sessionId,
+            GpuLeaseMode.Speech,
+            cancellationToken).ConfigureAwait(false);
+        await PrepareWorkerAsync("speech", cancellationToken).ConfigureAwait(false);
+        _ = await _workers.LoadSpeechComponentAsync("stt", cancellationToken).ConfigureAwait(false);
+        _ = await _workers.LoadSpeechComponentAsync("speaker", cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<(IReadOnlyList<TranscriptionSegment> Segments, string ModelId)> TranslateCaptionSegmentsAsync(
@@ -168,12 +147,6 @@ public sealed class WorkerOrchestrator : IDisposable
             modelId);
     }
 
-    public async Task ReleaseLiveCaptionResourcesAsync()
-    {
-        Interlocked.Exchange(ref _liveCaptionResourcesHeld, 0);
-        await TryReleaseSpeechResourcesIfIdleAsync(CancellationToken.None).ConfigureAwait(false);
-    }
-
     public async Task WarmSpeechResourcesAsync(CancellationToken cancellationToken = default)
     {
         await using var lease = await _scheduler.AcquireAsync("speech-startup-warmup", "server-startup", GpuLeaseMode.Speech, cancellationToken).ConfigureAwait(false);
@@ -185,45 +158,6 @@ public sealed class WorkerOrchestrator : IDisposable
             "Information",
             "speech.warm",
             "Whisper, ECAPA und Supertonic F5 Ultra wurden dauerhaft vorgewärmt.");
-    }
-
-    public async Task WarmSharedLmModelsAsync(CancellationToken cancellationToken = default)
-    {
-        await using var lease = await _scheduler.AcquireAsync(
-            "shared-model-startup-warmup",
-            "server-startup",
-            GpuLeaseMode.Shared,
-            cancellationToken).ConfigureAwait(false);
-        var status = await _lmStudio.GetStatusAsync(cancellationToken).ConfigureAwait(false);
-        var loadedSpecialist = FindLoadedSpecialistModel(status);
-        if (loadedSpecialist is not null)
-        {
-            Volatile.Write(ref _sharedRuntimeReady, 0);
-            _runtime.WriteLog(
-                "Information",
-                "models.startup.specialist.preserved",
-                $"Das bereits geladene {loadedSpecialist.Role}-Modell '{loadedSpecialist.Id}' bleibt nach dem Serverneustart erhalten. General AI wird erst bei einem General-Lauf geladen.");
-            return;
-        }
-        _ = await PrepareLmModelAsync(
-            _options.GeneralModelId,
-            _options.GeneralContextLength,
-            cancellationToken).ConfigureAwait(false);
-        _runtime.WriteLog(
-            "Information",
-            "models.shared.warm",
-            "Das Generalmodell wurde dauerhaft für die gemeinsame GPU-Lane vorgeladen.");
-    }
-
-    internal static ModelRuntimeStatus? FindLoadedSpecialistModel(ModelStatusSnapshot status)
-    {
-        if (!status.ProviderReachable)
-        {
-            return null;
-        }
-        return status.Models.FirstOrDefault(static model =>
-            model.Loaded
-            && string.Equals(model.Role, "code", StringComparison.OrdinalIgnoreCase));
     }
 
     public async Task WarmAuxiliaryWorkersAsync(CancellationToken cancellationToken = default)
@@ -244,10 +178,14 @@ public sealed class WorkerOrchestrator : IDisposable
 
     public async Task WarmAllStartupResourcesAsync(CancellationToken cancellationToken = default)
     {
-        await WarmSharedLmModelsAsync(cancellationToken).ConfigureAwait(false);
-        // Speech-, Media-, Vision-, image and embedding models are loaded only
-        // for their concrete operation and released afterwards. This leaves the
-        // complete dual-GPU lane available to either supported coding model.
+        await WarmSpeechResourcesAsync(cancellationToken).ConfigureAwait(false);
+        // Only speech input, speaker separation and TTS are resident for the
+        // GO AI Server lifetime. Startup never selects an LM Studio model: an
+        // already loaded model is preserved and the next AI run chooses its target.
+        _runtime.WriteLog(
+            "Information",
+            "models.startup.on_demand",
+            "LM-Studio-Modelle werden ausschließlich durch konkrete AI-Läufe geladen; der vorhandene Modellzustand bleibt unverändert.");
     }
 
     public async Task<SpeechSessionSnapshot> BeginSpeechSessionAsync(
@@ -333,21 +271,9 @@ public sealed class WorkerOrchestrator : IDisposable
         await state.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (Volatile.Read(ref _generalModelEjectedForSpeech) == 1
-                && _speechSessions.IsEmpty)
-            {
-                await using var exclusive = await _scheduler.AcquireAsync(
-                    "text-to-speech-general-restore",
-                    sessionId,
-                    GpuLeaseMode.Exclusive,
-                    cancellationToken).ConfigureAwait(false);
-                await RestoreGeneralAfterSpeechAsync(cancellationToken).ConfigureAwait(false);
-                Interlocked.Exchange(ref _generalModelEjectedForSpeech, 0);
-            }
             state.State = cancelled ? "cancelled" : "completed";
             state.UpdatedAt = DateTimeOffset.UtcNow;
             var snapshot = state.Snapshot();
-            await TryReleaseSpeechResourcesIfIdleAsync(CancellationToken.None).ConfigureAwait(false);
             return snapshot;
         }
         finally
@@ -430,35 +356,16 @@ public sealed class WorkerOrchestrator : IDisposable
         bool forceSegmentSynthesis,
         CancellationToken cancellationToken)
     {
-        try
-        {
-            await using var lease = await _scheduler.AcquireAsync(
-                "text-to-speech",
-                state.SessionId,
-                GpuLeaseMode.Speech,
-                cancellationToken).ConfigureAwait(false);
-            return await _workers.SynthesizeParagraphAsync(
-                state.SessionId,
-                request,
-                forceSegmentSynthesis,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (HttpRequestException exception) when (
-            !cancellationToken.IsCancellationRequested
-            && exception.StatusCode == System.Net.HttpStatusCode.InsufficientStorage)
-        {
-            await using var exclusive = await _scheduler.AcquireAsync(
-                "text-to-speech-vram-recovery",
-                state.SessionId,
-                GpuLeaseMode.Exclusive,
-                cancellationToken).ConfigureAwait(false);
-            await EjectGeneralModelForSpeechAsync(state, cancellationToken).ConfigureAwait(false);
-            return await _workers.SynthesizeParagraphAsync(
-                state.SessionId,
-                request,
-                forceSegmentSynthesis,
-                cancellationToken).ConfigureAwait(false);
-        }
+        await using var lease = await _scheduler.AcquireAsync(
+            "text-to-speech",
+            state.SessionId,
+            GpuLeaseMode.Speech,
+            cancellationToken).ConfigureAwait(false);
+        return await _workers.SynthesizeParagraphAsync(
+            state.SessionId,
+            request,
+            forceSegmentSynthesis,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private void DeleteWorkerArtifact(string relativePath)
@@ -557,28 +464,37 @@ public sealed class WorkerOrchestrator : IDisposable
     public async Task<string> PrepareLmModelAsync(
         string modelId,
         int contextLength,
+        CancellationToken cancellationToken = default) =>
+        (await PrepareLmModelWithStatusAsync(
+            modelId,
+            contextLength,
+            loadingStarted: null,
+            cancellationToken).ConfigureAwait(false)).InstanceId;
+
+    internal async Task<LmStudioModelPreparation> PrepareLmModelWithStatusAsync(
+        string modelId,
+        int contextLength,
+        Func<CancellationToken, Task>? loadingStarted,
         CancellationToken cancellationToken = default)
     {
-        var sharedModel = IsSharedLmModel(modelId);
         await _resourceTransitionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (sharedModel)
+            if (CodingModelCatalog.TryGet(modelId, out _)
+                || string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase))
             {
-                var instance = string.Equals(modelId, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase)
-                    ? (await EnsureSharedLmModelsLoadedAsync(cancellationToken).ConfigureAwait(false)).General
-                    : await _lmStudio.EnsureModelLoadedAsync(modelId, contextLength, cancellationToken).ConfigureAwait(false);
-                Volatile.Write(ref _sharedRuntimeReady, 1);
-                return instance;
+                // Heavy LM Studio targets replace optional worker allocations,
+                // while the resident speech stack remains available.
+                await _workers.ReleaseAllAsync(
+                    exceptWorker: ResidentSpeechWorkerName,
+                    cancellationToken).ConfigureAwait(false);
             }
 
-            Volatile.Write(ref _sharedRuntimeReady, 0);
-            // Coding and specialist models receive the complete GPU lane. Worker
-            // processes stay online, but all optional model allocations are freed.
-            await _workers.ReleaseAllAsync(exceptWorker: null, cancellationToken).ConfigureAwait(false);
-            return await _lmStudio.EnsureModelLoadedAsync(
+            return await _lmStudio.EnsureModelPreparedAsync(
                 modelId,
                 contextLength,
+                loadingStarted,
                 cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -587,67 +503,16 @@ public sealed class WorkerOrchestrator : IDisposable
         }
     }
 
-    public async Task RestoreGeneralModelAsync(CancellationToken cancellationToken = default)
-    {
-        await _resourceTransitionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            await _lmStudio.UnloadModelsExceptAsync([_options.GeneralModelId], cancellationToken).ConfigureAwait(false);
-            _ = await _lmStudio.EnsureModelLoadedAsync(
-                _options.GeneralModelId,
-                _options.GeneralContextLength,
-                cancellationToken).ConfigureAwait(false);
-            Volatile.Write(ref _sharedRuntimeReady, 1);
-        }
-        finally
-        {
-            _resourceTransitionGate.Release();
-        }
-    }
-
-    private async Task PrepareWorkerAsync(string workerName, CancellationToken cancellationToken)
+    private static async Task PrepareWorkerAsync(string workerName, CancellationToken cancellationToken)
     {
         _ = workerName switch
         {
             "speech" or "media" or "image" => workerName,
             _ => throw new ArgumentOutOfRangeException(nameof(workerName)),
         };
-        if (string.Equals(workerName, "speech", StringComparison.Ordinal))
-        {
-            // Speech uses a separate worker and GPU lane. Loading or invoking it
-            // must not restore General AI and thereby eject an active coding model.
-            return;
-        }
-        if (Volatile.Read(ref _sharedRuntimeReady) == 1)
-        {
-            return;
-        }
-
-        await _resourceTransitionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            if (Volatile.Read(ref _sharedRuntimeReady) == 1)
-            {
-                return;
-            }
-
-            try
-            {
-                _ = await EnsureSharedLmModelsLoadedAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (
-                !cancellationToken.IsCancellationRequested
-                && (exception is HttpRequestException or TaskCanceledException))
-            {
-                _runtime.WriteLog("Warning", "lmstudio.shared.unavailable", "Die gemeinsamen LM-Studio-Modelle konnten beim GPU-Wechsel nicht geladen werden.");
-                return;
-            }
-            Volatile.Write(ref _sharedRuntimeReady, 1);
-        }
-        finally
-        {
-            _resourceTransitionGate.Release();
-        }
+        // Worker preparation is intentionally independent of LM Studio. Media,
+        // image and speech work must not cause an implicit General-AI transition.
+        await Task.CompletedTask.ConfigureAwait(false);
     }
 
     private async Task TryReleaseWorkerAsync(string workerName, CancellationToken cancellationToken)
@@ -660,104 +525,6 @@ public sealed class WorkerOrchestrator : IDisposable
             exception is HttpRequestException or TaskCanceledException or IOException)
         {
             // An unavailable optional worker cannot hold GPU memory.
-        }
-    }
-
-    private bool IsSharedLmModel(string modelId) =>
-        !CodingModelCatalog.TryGet(modelId, out _)
-        && !string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
-        && !string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase);
-
-    private async Task TryReleaseSpeechResourcesIfIdleAsync(CancellationToken cancellationToken)
-    {
-        if (Volatile.Read(ref _liveCaptionResourcesHeld) != 0
-            || Volatile.Read(ref _speechOperations) != 0
-            || !_speechSessions.IsEmpty)
-        {
-            return;
-        }
-
-        await TryReleaseWorkerAsync("speech", cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task<(string General, string Vision, string Embedding)> EnsureSharedLmModelsLoadedAsync(
-        CancellationToken cancellationToken)
-    {
-        var general = await _lmStudio.EnsureModelLoadedAsync(
-            _options.GeneralModelId,
-            _options.GeneralContextLength,
-            cancellationToken).ConfigureAwait(false);
-        return (general, string.Empty, string.Empty);
-    }
-
-    private async Task EjectGeneralModelForSpeechAsync(
-        SpeechSessionState state,
-        CancellationToken cancellationToken)
-    {
-        await _resourceTransitionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            if (Volatile.Read(ref _generalModelEjectedForSpeech) == 1)
-            {
-                state.GeneralModelEjected = true;
-                return;
-            }
-
-            if (!state.GeneralModelEjected)
-            {
-                var unloaded = await _lmStudio.UnloadModelAsync(
-                        _options.GeneralModelId,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                state.GeneralModelEjected = unloaded;
-                Volatile.Write(ref _sharedRuntimeReady, 0);
-                if (unloaded)
-                {
-                    Interlocked.Exchange(ref _generalModelEjectedForSpeech, 1);
-                    _runtime.WriteLog(
-                        "Information",
-                        "speech.general.ejected",
-                        "General AI wurde wegen VRAM-Druck für Supertonic vorübergehend entladen.");
-                }
-            }
-        }
-        finally
-        {
-            _resourceTransitionGate.Release();
-        }
-    }
-
-    private async Task RestoreGeneralAfterSpeechAsync(CancellationToken cancellationToken)
-    {
-        await _resourceTransitionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var status = await _lmStudio.GetStatusAsync(cancellationToken).ConfigureAwait(false);
-            var conflictingModelLoaded = status.Models.Any(model =>
-                model.Loaded
-                && !string.Equals(model.Id, _options.GeneralModelId, StringComparison.OrdinalIgnoreCase));
-            if (conflictingModelLoaded)
-            {
-                _runtime.WriteLog(
-                    "Information",
-                    "speech.general.restore.deferred",
-                    "General AI bleibt nach dem Vorlesen entladen, weil ein anderer LM-Studio-Lauf aktiv ist.");
-                return;
-            }
-
-            _ = await _lmStudio.EnsureModelLoadedAsync(
-                _options.GeneralModelId,
-                _options.GeneralContextLength,
-                cancellationToken).ConfigureAwait(false);
-            Volatile.Write(ref _sharedRuntimeReady, 1);
-            _runtime.WriteLog(
-                "Information",
-                "speech.general.restored",
-                "General AI wurde nach dem Vorlesen wieder geladen.");
-        }
-        finally
-        {
-            _resourceTransitionGate.Release();
         }
     }
 

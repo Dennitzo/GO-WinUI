@@ -71,7 +71,7 @@ public sealed class LiveCaptionService : BackgroundService
 
             if (expired is not null)
             {
-                await DrainAndReleaseAsync(expired).ConfigureAwait(false);
+                await DrainAsync(expired).ConfigureAwait(false);
                 _runtime.WriteLog("Information", "caption.session.expired", $"Live-Untertitel {expired.SessionId} wegen Inaktivität beendet.");
             }
 
@@ -344,7 +344,6 @@ public sealed class LiveCaptionService : BackgroundService
                     _lifecycleGate.Release();
                 }
 
-                await _workers.ReleaseLiveCaptionResourcesAsync().ConfigureAwait(false);
                 _runtime.WriteLog("Information", "caption.session.completed", $"Live-Untertitel {session.SessionId} beendet.");
                 return snapshot;
             }
@@ -398,7 +397,7 @@ public sealed class LiveCaptionService : BackgroundService
             }
             if (session is not null)
             {
-                await DrainAndReleaseAsync(session).ConfigureAwait(false);
+                await DrainAsync(session).ConfigureAwait(false);
             }
         }
         finally
@@ -432,7 +431,7 @@ public sealed class LiveCaptionService : BackgroundService
                 return;
             }
 
-            await DrainAndReleaseAsync(session).ConfigureAwait(false);
+            await DrainAsync(session).ConfigureAwait(false);
             _runtime.WriteLog("Information", "caption.session.expired", $"Live-Untertitel {session.SessionId} wegen Inaktivität beendet.");
         }
         finally
@@ -441,17 +440,10 @@ public sealed class LiveCaptionService : BackgroundService
         }
     }
 
-    private async Task DrainAndReleaseAsync(CaptionSession session)
+    private static async Task DrainAsync(CaptionSession session)
     {
         await session.ChunkGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
-        try
-        {
-            await _workers.ReleaseLiveCaptionResourcesAsync().ConfigureAwait(false);
-        }
-        finally
-        {
-            session.ChunkGate.Release();
-        }
+        session.ChunkGate.Release();
     }
 
     private CaptionSession GetRequiredSession(string sessionId)

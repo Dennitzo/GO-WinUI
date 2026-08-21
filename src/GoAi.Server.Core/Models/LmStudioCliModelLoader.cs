@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text.Json;
 using GoAi.Server.Core.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -13,49 +12,17 @@ namespace GoAi.Server.Core.Models;
 /// </summary>
 public sealed partial class LmStudioCliModelLoader
 {
-    private static readonly TimeSpan LoadTimeout = TimeSpan.FromMinutes(30);
-    private readonly GoAiServerOptions _options;
+    // Keep a finite safety boundary for a wedged CLI process, but do not cut off
+    // legitimately slow multi-GPU loads at the former 30-minute boundary.
+    internal static readonly TimeSpan LoadTimeout = TimeSpan.FromHours(4);
     private readonly ILogger<LmStudioCliModelLoader> _logger;
-    private string MarkerPath => Path.Combine(_options.DataDirectory, "Config", "coding-gpu-load.json");
 
     public LmStudioCliModelLoader(
         IOptions<GoAiServerOptions> options,
         ILogger<LmStudioCliModelLoader> logger)
     {
-        _options = options.Value;
+        _ = options;
         _logger = logger;
-    }
-
-    public bool IsKnownMaximumGpuLoad(string modelId, int minimumContextLength)
-    {
-        try
-        {
-            if (!File.Exists(MarkerPath))
-            {
-                return false;
-            }
-
-            var marker = JsonSerializer.Deserialize<GpuLoadMarker>(File.ReadAllText(MarkerPath));
-            if (marker is null
-                || !string.Equals(marker.ModelId, modelId, StringComparison.OrdinalIgnoreCase)
-                || marker.ContextLength < minimumContextLength)
-            {
-                return false;
-            }
-
-            using var process = Process.GetProcessById(marker.LlamaServerProcessId);
-            return !process.HasExited
-                && process.StartTime.ToUniversalTime().Ticks == marker.LlamaServerStartTimeUtcTicks;
-        }
-        catch (Exception exception) when (
-            exception is IOException
-                or UnauthorizedAccessException
-                or JsonException
-                or ArgumentException
-                or InvalidOperationException)
-        {
-            return false;
-        }
     }
 
     public async Task LoadWithMaximumGpuOffloadAsync(
@@ -106,43 +73,12 @@ public sealed partial class LmStudioCliModelLoader
         var (output, error) = await AwaitOutputAsync(standardOutput, standardError).ConfigureAwait(false);
         if (process.ExitCode != 0)
         {
-            ClearMarker();
             var detail = LastMeaningfulLine(error) ?? LastMeaningfulLine(output) ?? "Unbekannter LM-Studio-CLI-Fehler.";
             throw new InvalidOperationException(
                 $"Das Coding-Modell '{modelId}' konnte nicht mit maximalem GPU-Offload geladen werden: {detail}");
         }
 
-        var llamaServer = FindNewestLlamaServerProcess()
-            ?? throw new InvalidOperationException(
-                $"LM Studio meldete das Coding-Modell '{modelId}' als geladen, aber es wurde kein llama-server-Prozess gefunden.");
-        using (llamaServer)
-        {
-            await SaveMarkerAsync(
-                new GpuLoadMarker(
-                    modelId,
-                    contextLength,
-                    llamaServer.Id,
-                    llamaServer.StartTime.ToUniversalTime().Ticks,
-                    DateTimeOffset.UtcNow),
-                cancellationToken).ConfigureAwait(false);
-        }
-
         LogCodingModelGpuLoaded(modelId, contextLength);
-    }
-
-    public void ClearMarker()
-    {
-        try
-        {
-            if (File.Exists(MarkerPath))
-            {
-                File.Delete(MarkerPath);
-            }
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            LogGpuLoadMarkerRemovalFailed(exception);
-        }
     }
 
     internal static IReadOnlyList<string> CreateLoadArguments(string modelId, int contextLength) =>
@@ -192,44 +128,6 @@ public sealed partial class LmStudioCliModelLoader
             "Die LM-Studio-CLI wurde nicht gefunden. Erwartet wurde lms.exe unter %USERPROFILE%\\.lmstudio\\bin oder GO_AI_LMS_CLI_PATH.");
     }
 
-    private async Task SaveMarkerAsync(GpuLoadMarker marker, CancellationToken cancellationToken)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(MarkerPath)!);
-        var temporary = MarkerPath + ".tmp";
-        await File.WriteAllTextAsync(
-            temporary,
-            JsonSerializer.Serialize(marker),
-            cancellationToken).ConfigureAwait(false);
-        File.Move(temporary, MarkerPath, true);
-    }
-
-    private static Process? FindNewestLlamaServerProcess()
-    {
-        Process? newest = null;
-        foreach (var process in Process.GetProcessesByName("llama-server"))
-        {
-            try
-            {
-                if (newest is null || process.StartTime > newest.StartTime)
-                {
-                    newest?.Dispose();
-                    newest = process;
-                }
-                else
-                {
-                    process.Dispose();
-                }
-            }
-            catch (Exception exception) when (
-                exception is InvalidOperationException or System.ComponentModel.Win32Exception)
-            {
-                process.Dispose();
-            }
-        }
-
-        return newest;
-    }
-
     private static async Task<(string Output, string Error)> AwaitOutputAsync(
         Task<string> standardOutput,
         Task<string> standardError)
@@ -258,22 +156,10 @@ public sealed partial class LmStudioCliModelLoader
         }
     }
 
-    private sealed record GpuLoadMarker(
-        string ModelId,
-        int ContextLength,
-        int LlamaServerProcessId,
-        long LlamaServerStartTimeUtcTicks,
-        DateTimeOffset LoadedAt);
-
     [LoggerMessage(
         EventId = 3120,
         Level = LogLevel.Information,
         Message = "Coding model {modelId} was loaded through LM Studio with maximum GPU offload and {contextLength} context tokens.")]
     private partial void LogCodingModelGpuLoaded(string modelId, int contextLength);
 
-    [LoggerMessage(
-        EventId = 3121,
-        Level = LogLevel.Warning,
-        Message = "The persisted coding GPU-load marker could not be removed.")]
-    private partial void LogGpuLoadMarkerRemovalFailed(Exception exception);
 }

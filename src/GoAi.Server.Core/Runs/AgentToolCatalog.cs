@@ -54,6 +54,7 @@ public sealed class AgentToolCatalog
         {
             names.Add(ClientToolNames.ProcessRunPreset);
             names.Add(ClientToolNames.ProcessRun);
+            names.Add(ClientToolNames.LeanProof);
         }
         if (HasCapability(capabilities, "bricscad"))
         {
@@ -242,13 +243,38 @@ public sealed class AgentToolCatalog
                 OptionalString(value, "workspace", 1, 1024);
                 break;
             case ClientToolNames.ProcessRun:
-                RequireString(value, "executable", 1, 1024);
+                var executable = RequireString(value, "executable", 1, 1024);
+                if (IsLeanExecutable(executable))
+                {
+                    throw new ArgumentException("Lean und Lake dürfen ausschließlich über das typisierte Werkzeug proof.lean ausgeführt werden.");
+                }
                 RequireString(value, "purpose", 1, 16);
                 OptionalStringArray(value, "arguments", 128, 8192, allowEmpty: true);
                 OptionalString(value, "workingDirectory", 1, 1024);
                 OptionalInteger(value, "timeoutSeconds", 1, 3600);
                 OptionalEnum(value, "purpose", ["inspect", "test", "build", "start"]);
                 OptionalEnum(value, "startMode", ["wait", "smoke"]);
+                break;
+            case ClientToolNames.LeanProof:
+                var leanOperation = RequireString(value, "operation", 1, 16);
+                if (leanOperation is not ("status" or "check" or "build" or "axioms" or "verify"))
+                {
+                    throw new ArgumentException("proof.lean operation is not supported.");
+                }
+                OptionalString(value, "path", 1, 1024);
+                OptionalString(value, "target", 1, 256);
+                OptionalString(value, "theoremName", 1, 512);
+                OptionalInteger(value, "timeoutSeconds", 1, 1800);
+                if (leanOperation is "check" or "axioms" or "verify"
+                    && !value.TryGetProperty("path", out _))
+                {
+                    throw new ArgumentException($"proof.lean operation {leanOperation} requires path.");
+                }
+                if (leanOperation is "axioms" or "verify"
+                    && !value.TryGetProperty("theoremName", out _))
+                {
+                    throw new ArgumentException($"proof.lean operation {leanOperation} requires theoremName.");
+                }
                 break;
             case ClientToolNames.BricsCadGeometryQuery:
             case ClientToolNames.BricsCadMeasure:
@@ -290,6 +316,7 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.FileSystemProposeDelete, "Schlage das Löschen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema("path", ("path", "string"))),
             Client(ClientToolNames.ProcessRunPreset, "Führe ein versioniertes Build-, Test-, Start- oder Git-Preset im freigegebenen Workspace aus.", ToolRiskClass.Process, ProcessSchema()),
             Client(ClientToolNames.ProcessRun, "Führe ein direktes Programm mit getrennter Argumentliste und Workspace-Arbeitsverzeichnis für Analyse, Test, Build oder Smoke-Start aus.", ToolRiskClass.Process, ProcessRunSchema()),
+            Client(ClientToolNames.LeanProof, "Prüfe freiwillig einen mathematischen oder algorithmischen Beweis mit der gepinnten lokalen Lean-/Lake-Toolchain. Verwende niemals process.run für lean oder lake. check kompiliert eine Datei; verify kompiliert und prüft die Axiomabhängigkeiten des exakt deklarierten Theorems. Ein Dateiname erzeugt keinen Lean-Namespace.", ToolRiskClass.Process, LeanProofSchema()),
             Client(ClientToolNames.BricsCadGeometryQuery, "Lese freigegebene BricsCAD-Geometrie.", ToolRiskClass.ReadOnly, CadSchema()),
             Client(ClientToolNames.BricsCadMeasure, "Führe eine lesende BricsCAD-Messung aus.", ToolRiskClass.ReadOnly, CadSchema()),
             Client(ClientToolNames.BricsCadMove, "Schlage eine bestätigungspflichtige BricsCAD-Verschiebung vor.", ToolRiskClass.CadMutation, CadSchema()),
@@ -373,7 +400,11 @@ public sealed class AgentToolCatalog
         """);
 
     private static JsonElement ProcessRunSchema() => Parse("""
-        {"type":"object","properties":{"executable":{"type":"string"},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"}},"workingDirectory":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600},"purpose":{"type":"string","enum":["inspect","test","build","start"]},"startMode":{"type":"string","enum":["wait","smoke"]}},"required":["executable","purpose"],"additionalProperties":false}
+        {"type":"object","properties":{"executable":{"type":"string","description":"Ausschließlich der echte Programmname oder Programmpfad, zum Beispiel py, python, dotnet oder git. Keine komplette Befehlszeile, keine Argumente, keine Shell und keine Umleitung."},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"},"description":"Jedes Programmargument als eigener Arrayeintrag, zum Beispiel [\"-3.11\",\"-m\",\"pytest\"]. Keine Shell-Verkettung oder Ausgabeumleitung."},"workingDirectory":{"type":"string","description":"Relatives Arbeitsverzeichnis innerhalb des freigegebenen Workspace."},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600},"purpose":{"type":"string","enum":["inspect","test","build","start"]},"startMode":{"type":"string","enum":["wait","smoke"]}},"required":["executable","purpose"],"additionalProperties":false}
+        """);
+
+    private static JsonElement LeanProofSchema() => Parse("""
+        {"type":"object","properties":{"operation":{"type":"string","enum":["status","check","build","axioms","verify"]},"path":{"type":"string","description":"Relativer Pfad zu einer Lean-Datei oder einem Lake-Projekt im Workspace."},"target":{"type":"string","description":"Optionales Lake-Build-Target."},"theoremName":{"type":"string","description":"Vollständig qualifizierter Name des zu prüfenden Theorems."},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":1800}},"required":["operation"],"additionalProperties":false}
         """);
 
     private static JsonElement CadSchema() => Parse("""
@@ -398,6 +429,13 @@ public sealed class AgentToolCatalog
 
     private static bool HasCapability(IReadOnlyList<string> capabilities, string expected) =>
         capabilities.Any(value => string.Equals(value, expected, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsLeanExecutable(string executable)
+    {
+        var name = Path.GetFileNameWithoutExtension(executable.Trim());
+        return name.Equals("lean", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("lake", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string RequireString(JsonElement value, string name, int minimum, int maximum)
     {

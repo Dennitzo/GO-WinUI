@@ -202,6 +202,19 @@ public sealed class CodingRunTraceServiceTests
         Assert.Equal("running", console.Status);
     }
 
+    [Fact]
+    public void PowerShellConsoleFiltersBenignGitLineEndingWarningsButKeepsErrors()
+    {
+        const string input = "warning: in the working copy of 'einstein_engine.py', LF will be replaced by CRLF the next time Git touches it\n"
+            + "fatal: test execution failed";
+
+        var filtered = CodingRunTraceService.FilterConsoleNoise(input);
+
+        Assert.Equal("fatal: test execution failed", filtered);
+        Assert.Null(CodingRunTraceService.FilterConsoleNoise(
+            "warning: in the working copy of 'test.py', CRLF will be replaced by LF the next time Git touches it"));
+    }
+
     [Theory]
     [InlineData("git.status", "git status --short", "inspect")]
     [InlineData("git.diff", "git diff --no-ext-diff", "inspect")]
@@ -259,6 +272,15 @@ public sealed class CodingRunTraceServiceTests
 
         Assert.Contains("case \"chat.codingTrace\"", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.codeDiff\"", app, StringComparison.Ordinal);
+        Assert.Contains("currentCodingRun: null", app, StringComparison.Ordinal);
+        Assert.Contains("function ensureCurrentCodingRun(payload)", app, StringComparison.Ordinal);
+        Assert.Contains("function mergeCodingTraceEntries(message, entries)", app, StringComparison.Ordinal);
+        Assert.Contains("const liveRun = state.currentCodingRun?.sessionId === state.activeSessionId", app, StringComparison.Ordinal);
+        Assert.Contains("Array.isArray(payload.entries)", app, StringComparison.Ordinal);
+        Assert.Contains("state.currentCodingRun.status = state.codingCampaign.status === \"faulted\" ? \"failed\" : \"cancelled\"", app, StringComparison.Ordinal);
+        Assert.Contains("state.codingCampaign = { ...state.codingCampaign, status: \"stopping\" }", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"campaign.stop\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
+        Assert.Contains("\"campaign.list\", \"campaign.select\", \"campaign.run\", \"campaign.stop\"", bridge, StringComparison.Ordinal);
         Assert.Contains("function createCodingTrace(message, force = false)", app, StringComparison.Ordinal);
         Assert.Contains("function createPowerShellPanel(message, force = false)", app, StringComparison.Ordinal);
         Assert.Contains("function createCodeDiff(message, force = false)", app, StringComparison.Ordinal);
@@ -269,16 +291,30 @@ public sealed class CodingRunTraceServiceTests
         Assert.DoesNotContain("if (!consoles.length) return null;", app, StringComparison.Ordinal);
         Assert.Contains("Warte auf einen Terminalbefehl", app, StringComparison.Ordinal);
         Assert.Contains("Noch keine Codeänderungen", app, StringComparison.Ordinal);
-        Assert.Contains("createCodingTrace(message, true)", app, StringComparison.Ordinal);
-        Assert.Contains("createPowerShellPanel(message, true)", app, StringComparison.Ordinal);
-        Assert.Contains("createCodeDiff(message, true)", app, StringComparison.Ordinal);
+        Assert.Contains("createCodingTrace(panelMessage, true)", app, StringComparison.Ordinal);
+        Assert.Contains("createPowerShellPanel(panelMessage, true)", app, StringComparison.Ordinal);
+        Assert.Contains("createCodeDiff(panelMessage, true)", app, StringComparison.Ordinal);
+        Assert.Contains("function createCurrentCodingPanels()", app, StringComparison.Ordinal);
+        Assert.Contains("elements.messageList.append(currentCodingPanels)", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("body.classList.add(\"message-body--coding\")", app, StringComparison.Ordinal);
         Assert.Contains("Coding-Ablauf", app, StringComparison.Ordinal);
         Assert.Contains("details.open = !state.closedCodingTraces.has", app, StringComparison.Ordinal);
         Assert.Contains("details.open = !state.closedPowerShellPanels.has", app, StringComparison.Ordinal);
+        Assert.Contains("function collapseCompletedCodingPanels(message, force = false)", app, StringComparison.Ordinal);
+        Assert.Contains("collapseCompletedCodingPanels(payload.message, true)", app, StringComparison.Ordinal);
         Assert.Contains("details.open = !state.closedCodeDiffs.has", app, StringComparison.Ordinal);
         Assert.Contains("for (const entry of visibleEntries)", app, StringComparison.Ordinal);
         Assert.Contains("Coding-Modell wird geladen", app, StringComparison.Ordinal);
         Assert.Contains("list.scrollTop = list.scrollHeight", app, StringComparison.Ordinal);
+        Assert.Contains("function attachCodingPanelMaximize(details, summary, label, panelKind)", app, StringComparison.Ordinal);
+        Assert.Contains("codingPanelMaximizeIcon", app, StringComparison.Ordinal);
+        Assert.Contains("state.maximizedCodingPanelKind === panelKind", app, StringComparison.Ordinal);
+        Assert.Contains("captureMaximizedCodingPanelScroll();", app, StringComparison.Ordinal);
+        Assert.Contains("overflow: auto !important", styles, StringComparison.Ordinal);
+        Assert.Contains("position: sticky", styles, StringComparison.Ordinal);
+        Assert.Contains("if (shouldSuppressMessageInChat(message)) continue;", app, StringComparison.Ordinal);
+        Assert.Contains("if (message?.suppressInChat) return true;", app, StringComparison.Ordinal);
+        Assert.Contains("filterPowerShellOutput(item.standardError)", app, StringComparison.Ordinal);
         Assert.DoesNotContain("message.codingTrace.splice", app, StringComparison.Ordinal);
         Assert.Contains("\"chat.codeDiff\", \"chat.codingTrace\"", bridge, StringComparison.Ordinal);
         Assert.Contains(".message-coding-trace", styles, StringComparison.Ordinal);
@@ -289,10 +325,14 @@ public sealed class CodingRunTraceServiceTests
         Assert.Contains(".message-coding-panels { --coding-panel-viewport-height: 210px; display: grid", styles, StringComparison.Ordinal);
         Assert.Contains("grid-template-columns: repeat(2, minmax(0, 1fr))", styles, StringComparison.Ordinal);
         Assert.Contains(".message-coding-panels > .message-code-diff { grid-column: 1 / -1; }", styles, StringComparison.Ordinal);
+        Assert.Contains(".coding-panel--maximized", styles, StringComparison.Ordinal);
+        Assert.Contains(".current-coding-workspace", styles, StringComparison.Ordinal);
+        Assert.Contains("opacity: 1; pointer-events: auto", styles, StringComparison.Ordinal);
 
-        var traceIndex = app.IndexOf("          createCodingTrace(message, true),", StringComparison.Ordinal);
-        var powerShellIndex = app.IndexOf("          createPowerShellPanel(message, true),", StringComparison.Ordinal);
-        var diffIndex = app.IndexOf("          createCodeDiff(message, true)", StringComparison.Ordinal);
+        var currentPanels = app[app.IndexOf("function createCurrentCodingPanels()", StringComparison.Ordinal)..];
+        var traceIndex = currentPanels.IndexOf("createCodingTrace(panelMessage, true)", StringComparison.Ordinal);
+        var powerShellIndex = currentPanels.IndexOf("createPowerShellPanel(panelMessage, true)", StringComparison.Ordinal);
+        var diffIndex = currentPanels.IndexOf("createCodeDiff(panelMessage, true)", StringComparison.Ordinal);
         Assert.True(traceIndex >= 0 && traceIndex < powerShellIndex && powerShellIndex < diffIndex);
     }
 

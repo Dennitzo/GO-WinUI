@@ -22,6 +22,11 @@ namespace GoWinUI.App;
     Justification = "WinUI owns the Application lifetime; PrepareShutdownAsync cancels and disposes the monitor token.")]
 public partial class App : Application
 {
+    private static readonly Action<ILogger, Guid, Exception?> LocalAutomationFailed =
+        LoggerMessage.Define<Guid>(
+            LogLevel.Error,
+            new EventId(5900, nameof(LocalAutomationFailed)),
+            "Local coding campaign automation command failed for session {SessionId}.");
     private static readonly string[] AccentBrushKeys =
     [
         "GoAccentBrush",
@@ -49,6 +54,7 @@ public partial class App : Application
     private CancellationTokenSource? _aiAvailabilityCancellation;
     private Task? _aiAvailabilityMonitor;
     private readonly SemaphoreSlim _aiAvailabilityLifecycle = new(1, 1);
+    private string? _lastLoggedAiConnectionState;
     private int _shutdownStarted;
 
     public App()
@@ -82,6 +88,12 @@ public partial class App : Application
                 services.AddSingleton<ScreenClipCaptureService>();
                 services.AddSingleton<ProjectAssetThumbnailService>();
                 services.AddSingleton<AssistantArtifactPreviewService>();
+                services.AddSingleton<LeanProofService>();
+                services.AddSingleton<CodingProofVerifier>();
+                services.AddSingleton<ICodingCampaignDefinition, EinsteinCodingCampaignDefinition>();
+                services.AddSingleton<ICodingCampaignDefinition, TheoreticalPhysicsCodingCampaignDefinition>();
+                services.AddSingleton<ICodingCampaignDefinition, TgaVentilationCodingCampaignDefinition>();
+                services.AddSingleton<CodingCampaignCatalog>();
                 services.AddSingleton<ShellViewModel>();
                 services.AddSingleton<RecentActivityService>();
                 services.AddSingleton<ProjectAssetActivityService>();
@@ -97,7 +109,10 @@ public partial class App : Application
                 services.AddSingleton<LocalToolBroker>();
                 services.AddSingleton<CodingDiffService>();
                 services.AddSingleton<CodingRunTraceService>();
+                services.AddSingleton<CodingSolutionPdfExporter>();
                 services.AddSingleton<GoAiAssistantService>();
+                services.AddSingleton<ICodingCampaignAgent>(static provider => provider.GetRequiredService<GoAiAssistantService>());
+                services.AddSingleton<CodingCampaignService>();
             })
             .Build();
     }
@@ -186,10 +201,11 @@ public partial class App : Application
             var settings = GetService<SettingsCoordinator>();
             await settings.InitializeAsync();
             await settings.UpdateAsync(static current => current);
+            await GetService<CodingCampaignService>().PrepareForClientStartAsync();
+            await GetService<GoAiAssistantService>().StopPersistedCampaignRunsAtStartupAsync();
             _ = await GetService<GoAiConnectionService>().TryProvisionLocalHostAsync();
 
             var shell = GetService<ShellViewModel>();
-            shell.DatabaseStatus = "Datenbank bereit";
             shell.IsAiConnectionEnabled = settings.Current.IsAiConnectionEnabled;
             GetService<RecentActivityService>().Restore();
             GetService<ProjectAssetActivityService>().Start();
@@ -207,6 +223,9 @@ public partial class App : Application
             _window.BeforeCloseAsync = PrepareShutdownAsync;
             _window.Activate();
             await ApplyAiConnectionModeAsync(settings.Current.IsAiConnectionEnabled);
+            var initialArguments = string.Join(' ', Environment.GetCommandLineArgs().Skip(1));
+            _ = await TryExecuteLocalAutomationAsync(
+                string.IsNullOrWhiteSpace(initialArguments) ? args.Arguments : initialArguments);
         }
         catch (Exception exception)
         {
@@ -263,7 +282,43 @@ public partial class App : Application
 
     private void OnAppInstanceActivated(object? sender, AppActivationArguments args)
     {
-        _window?.DispatcherQueue.TryEnqueue(() => _window.BringToForeground());
+        var arguments = args.Kind == ExtendedActivationKind.Launch
+            && args.Data is Windows.ApplicationModel.Activation.ILaunchActivatedEventArgs launchArguments
+                ? launchArguments.Arguments
+                : null;
+        _window?.DispatcherQueue.TryEnqueue(async () =>
+        {
+            _window.BringToForeground();
+            _ = await TryExecuteLocalAutomationAsync(arguments);
+        });
+    }
+
+    private async Task<bool> TryExecuteLocalAutomationAsync(string? arguments)
+    {
+        if (!LocalAutomationCommand.TryParse(arguments, out var command) || command is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var campaigns = GetService<CodingCampaignService>();
+            if (command.Action == LocalAutomationAction.RunCodingCampaign)
+            {
+                _ = await campaigns.RunAsync(command.SessionId);
+            }
+            else
+            {
+                _ = await campaigns.StopAsync(command.SessionId);
+            }
+
+            return true;
+        }
+        catch (Exception exception)
+        {
+            LocalAutomationFailed(GetService<ILogger<App>>(), command.SessionId, exception);
+            return false;
+        }
     }
 
     private async Task MonitorLocalAiAvailabilityAsync(CancellationToken cancellationToken)
@@ -390,6 +445,25 @@ public partial class App : Application
         ModelStatusSnapshot? modelStatus,
         IReadOnlyList<ServiceStatusSnapshot>? serviceStatus)
     {
+        var connectionState = !GetService<SettingsCoordinator>().Current.IsAiConnectionEnabled
+            ? "Offline"
+            : !connected
+                ? "Nicht erreichbar"
+                : serverReady
+                    ? "Online"
+                    : "Online · Eingeschränkt";
+        if (!string.Equals(
+                Interlocked.Exchange(ref _lastLoggedAiConnectionState, connectionState),
+                connectionState,
+                StringComparison.Ordinal))
+        {
+            var logger = GetService<ILogger<App>>();
+            if (logger.IsEnabled(LogLevel.Information))
+            {
+                AppLog.LocalAiConnectionStateChanged(logger, connectionState);
+            }
+        }
+
         var shell = GetService<ShellViewModel>();
         var dispatcher = _window?.DispatcherQueue;
         if (dispatcher is null || dispatcher.HasThreadAccess)

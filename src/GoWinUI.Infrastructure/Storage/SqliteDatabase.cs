@@ -9,7 +9,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 21;
+    public const int CurrentSchemaVersion = 24;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -69,6 +69,9 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationNineteenAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentyAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentyOneAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyFourAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -771,6 +774,111 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             command.CommandText = """
                 ALTER TABLE chat_messages ADD COLUMN code_diff TEXT NULL;
                 INSERT INTO schema_migrations(version,applied_at) VALUES(21,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyTwoAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=22;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE coding_campaigns(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL UNIQUE REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    definition_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    workspace_path TEXT NOT NULL,
+                    workspace_fingerprint TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('running','faulted','stopped')),
+                    phase TEXT NOT NULL CHECK(phase IN ('bootstrap','iteration','correction','validation')),
+                    iteration INTEGER NOT NULL DEFAULT 0 CHECK(iteration >= 0),
+                    current_challenge TEXT NULL,
+                    last_error TEXT NULL,
+                    validation_json TEXT NOT NULL DEFAULT '[]',
+                    restart_count INTEGER NOT NULL DEFAULT 0 CHECK(restart_count >= 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE coding_campaign_iterations(
+                    id TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL REFERENCES coding_campaigns(id) ON DELETE CASCADE,
+                    iteration INTEGER NOT NULL CHECK(iteration >= 0),
+                    phase TEXT NOT NULL CHECK(phase IN ('bootstrap','iteration','correction','validation')),
+                    challenge TEXT NOT NULL,
+                    assistant_message_id TEXT NULL REFERENCES chat_messages(id) ON DELETE SET NULL,
+                    status TEXT NOT NULL,
+                    error TEXT NULL,
+                    validation_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX idx_coding_campaign_iterations_campaign
+                    ON coding_campaign_iterations(campaign_id, iteration, created_at);
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(22,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyThreeAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=23;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE coding_campaign_solution_messages(
+                    campaign_id TEXT NOT NULL REFERENCES coding_campaigns(id) ON DELETE CASCADE,
+                    relative_path TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+                    message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                    published_at TEXT NOT NULL,
+                    PRIMARY KEY(campaign_id,relative_path,content_sha256)
+                ) STRICT;
+                CREATE INDEX idx_coding_campaign_solution_messages_message
+                    ON coding_campaign_solution_messages(message_id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(23,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyFourAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=24;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_messages
+                    ADD COLUMN visibility TEXT NOT NULL DEFAULT 'visible'
+                    CHECK(visibility IN ('visible','internal'));
+                CREATE INDEX idx_chat_messages_visible_session
+                    ON chat_messages(session_id,visibility,created_at);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(24,$now);
                 """;
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);

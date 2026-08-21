@@ -10,6 +10,21 @@ namespace GoAi.Server.Tests;
 public sealed class LmStudioClientTests
 {
     [Fact]
+    public void ClientUsesTheRunCancellationInsteadOfAShortHttpTimeout()
+    {
+        using var context = new TestServerContext();
+        using var http = new HttpClient(new ModelStatusHandler());
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        Assert.Equal(Timeout.InfiniteTimeSpan, http.Timeout);
+        Assert.Equal(TimeSpan.FromHours(4), LmStudioCliModelLoader.LoadTimeout);
+    }
+
+    [Fact]
     public async Task RepeatedAndConcurrentStatusRequestsUseOneProviderCall()
     {
         using var context = new TestServerContext();
@@ -123,6 +138,50 @@ public sealed class LmStudioClientTests
     }
 
     [Fact]
+    public async Task DynamicSystemGuidanceStaysInChronologicalInputForPromptCacheReuse()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {
+              "id": "resp_cache_test",
+              "status": "completed",
+              "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "Erledigt" }]
+              }],
+              "usage": { "input_tokens": 20, "output_tokens": 4 }
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.CompleteChatAsync(
+            "ud",
+            [
+                new LmChatMessage("system", "Unveränderliche Grundrichtlinie"),
+                new LmChatMessage("user", "Ändere und prüfe das Projekt."),
+                new LmChatMessage("system", "Dynamischer Reparaturhinweis"),
+            ],
+            []);
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        var root = request.RootElement;
+        Assert.Equal("Unveränderliche Grundrichtlinie", root.GetProperty("instructions").GetString());
+        var input = root.GetProperty("input").EnumerateArray().ToArray();
+        Assert.Equal(2, input.Length);
+        Assert.Equal("user", input[0].GetProperty("role").GetString());
+        Assert.Equal("Ändere und prüfe das Projekt.", input[0].GetProperty("content").GetString());
+        Assert.Equal("user", input[1].GetProperty("role").GetString());
+        Assert.Equal(
+            "[GO_RUNTIME_GUIDANCE]\nDynamischer Reparaturhinweis",
+            input[1].GetProperty("content").GetString());
+    }
+
+    [Fact]
     public async Task EmbeddingLoadOmitsUnsupportedLlmConfiguration()
     {
         using var context = new TestServerContext();
@@ -144,6 +203,25 @@ public sealed class LmStudioClientTests
         Assert.False(request.RootElement.TryGetProperty("parallel", out _));
         Assert.False(request.RootElement.TryGetProperty("flash_attention", out _));
         Assert.False(request.RootElement.TryGetProperty("offload_kv_cache_to_gpu", out _));
+    }
+
+    [Fact]
+    public async Task EmbeddingInferenceDoesNotScheduleAnIdleUnload()
+    {
+        using var context = new TestServerContext();
+        var handler = new EmbeddingLoadHandler();
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.EnsureModelLoadedAsync("text-embedding-bge-m3", 8192);
+        _ = await client.CreateEmbeddingsAsync("text-embedding-bge-m3", ["Lüftungsanlage"]);
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.EmbeddingRequestBody));
+        Assert.False(request.RootElement.TryGetProperty("ttl", out _));
     }
 
     [Fact]
@@ -183,6 +261,52 @@ public sealed class LmStudioClientTests
         Assert.Equal("qwen-coder-test", instance);
         Assert.Equal(1, handler.UnloadRequests);
         Assert.Equal(1, handler.LoadRequests);
+    }
+
+    [Theory]
+    [InlineData("qwen3-coder-next", "qwen-resident")]
+    [InlineData("ud", "deepseek-resident")]
+    public async Task CompatibleResidentCodingModelIsReusedWithoutAProcessMarker(
+        string modelId,
+        string expectedInstanceId)
+    {
+        using var context = new TestServerContext();
+        var handler = new ResidentCodingModelHandler(modelId, expectedInstanceId);
+        using var http = new HttpClient(handler);
+        var cliLoader = new LmStudioCliModelLoader(
+            context.WrappedOptions,
+            NullLogger<LmStudioCliModelLoader>.Instance);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance,
+            cliLoader);
+        var loadingNotifications = 0;
+
+        var first = await client.EnsureModelPreparedAsync(
+            modelId,
+            262_144,
+            _ =>
+            {
+                Interlocked.Increment(ref loadingNotifications);
+                return Task.CompletedTask;
+            });
+        var second = await client.EnsureModelPreparedAsync(
+            modelId,
+            262_144,
+            _ =>
+            {
+                Interlocked.Increment(ref loadingNotifications);
+                return Task.CompletedTask;
+            });
+
+        Assert.True(first.WasAlreadyLoaded);
+        Assert.True(second.WasAlreadyLoaded);
+        Assert.Equal(expectedInstanceId, first.InstanceId);
+        Assert.Equal(0, loadingNotifications);
+        Assert.Equal(0, handler.LoadRequests);
+        Assert.Equal(0, handler.UnloadRequests);
     }
 
     [Fact]
@@ -269,6 +393,31 @@ public sealed class LmStudioClientTests
 
         Assert.Equal(1, handler.UnloadRequests);
         Assert.Equal(1, handler.LoadRequests);
+    }
+
+    [Fact]
+    public async Task VisionInferenceDoesNotScheduleAnIdleUnload()
+    {
+        using var context = new TestServerContext();
+        var handler = new ResidentCoreLoadHandler();
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        Directory.CreateDirectory(context.Root);
+        var imagePath = Path.Combine(context.Root, "vision.png");
+        await File.WriteAllBytesAsync(imagePath, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+        _ = await client.EnsureModelLoadedAsync("qwen3-vl-30b-a3b-instruct", 65_536);
+        _ = await client.AnalyzeImagesAsync(
+            "qwen3-vl-30b-a3b-instruct",
+            "Was ist zu sehen?",
+            [imagePath]);
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.ChatRequestBody));
+        Assert.False(request.RootElement.TryGetProperty("ttl", out _));
     }
 
     [Fact]
@@ -497,6 +646,8 @@ public sealed class LmStudioClientTests
 
         public string? LoadRequestBody { get; private set; }
 
+        public string? EmbeddingRequestBody { get; private set; }
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
@@ -536,6 +687,12 @@ public sealed class LmStudioClientTests
                     """);
             }
 
+            if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/v1/embeddings")
+            {
+                EmbeddingRequestBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+                return JsonResponse("{\"data\":[{\"index\":0,\"embedding\":[0.1,0.2]}]}");
+            }
+
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
 
@@ -550,6 +707,8 @@ public sealed class LmStudioClientTests
         public int LoadRequests { get; private set; }
 
         public int UnloadRequests { get; private set; }
+
+        public string? ChatRequestBody { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -628,7 +787,69 @@ public sealed class LmStudioClientTests
                     """);
             }
 
+            if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/v1/chat/completions")
+            {
+                ChatRequestBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+                return JsonResponse("{\"choices\":[{\"message\":{\"content\":\"Bildanalyse\"}}]}");
+            }
+
             return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+
+        private static HttpResponseMessage JsonResponse(string value) => new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(value, Encoding.UTF8, "application/json"),
+        };
+    }
+
+    private sealed class ResidentCodingModelHandler(string modelId, string instanceId) : HttpMessageHandler
+    {
+        public int LoadRequests { get; private set; }
+
+        public int UnloadRequests { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            _ = cancellationToken;
+            if (request.Method == HttpMethod.Get && request.RequestUri?.AbsolutePath == "/api/v1/models")
+            {
+                return Task.FromResult(JsonResponse($$"""
+                    {
+                      "models": [{
+                        "type": "llm",
+                        "key": "{{modelId}}",
+                        "display_name": "Resident coding model",
+                        "loaded_instances": [{
+                          "id": "{{instanceId}}",
+                          "model_instance_id": "{{instanceId}}",
+                          "config": {
+                            "context_length": 262144,
+                            "parallel": 1,
+                            "flash_attention": true,
+                            "offload_kv_cache_to_gpu": true
+                          }
+                        }],
+                        "max_context_length": 262144
+                      }]
+                    }
+                    """));
+            }
+
+            if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/v1/models/load")
+            {
+                LoadRequests++;
+                return Task.FromResult(JsonResponse("{}"));
+            }
+
+            if (request.Method == HttpMethod.Post && request.RequestUri?.AbsolutePath == "/api/v1/models/unload")
+            {
+                UnloadRequests++;
+                return Task.FromResult(JsonResponse("{}"));
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }
 
         private static HttpResponseMessage JsonResponse(string value) => new(HttpStatusCode.OK)

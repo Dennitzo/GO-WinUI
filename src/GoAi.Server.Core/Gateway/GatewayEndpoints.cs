@@ -160,8 +160,7 @@ internal static class GatewayEndpoints
 
     private static async Task ReleaseEmbeddingsAsync(HttpContext context)
     {
-        var executor = context.RequestServices.GetRequiredService<AgentToolExecutor>();
-        await executor.ReleaseEmbeddingModelAsync(context.RequestAborted).ConfigureAwait(false);
+        await AgentToolExecutor.ReleaseEmbeddingModelAsync(context.RequestAborted).ConfigureAwait(false);
         context.Response.StatusCode = StatusCodes.Status204NoContent;
     }
 
@@ -288,15 +287,18 @@ internal static class GatewayEndpoints
             throw new KeyNotFoundException("Run not found.");
         }
 
-        var inserted = await repository.SaveClientToolResultAsync(runId, result, context.RequestAborted).ConfigureAwait(false);
-        if (inserted)
+        _ = await repository.SaveClientToolResultAsync(runId, result, context.RequestAborted).ConfigureAwait(false);
+        // The proposal event can reach a fast local client before RunProcessor has finished
+        // switching Running -> WaitingForClient. Queueing is therefore based atomically on the
+        // persisted checkpoint and result, rather than on a racy state snapshot. Re-submitting an
+        // idempotent result also repairs a continuation that was missed by an older gateway build.
+        if (await repository.TryQueueClientToolContinuationAsync(
+                runId,
+                result.ProposalId,
+                context.RequestAborted).ConfigureAwait(false))
         {
-            var current = await repository.GetAsync(runId, context.RequestAborted).ConfigureAwait(false);
-            if (current?.State == RunState.WaitingForClient)
-            {
-                var queue = context.RequestServices.GetRequiredService<RunWorkChannel>();
-                await queue.EnqueueAsync(runId, context.RequestAborted).ConfigureAwait(false);
-            }
+            var queue = context.RequestServices.GetRequiredService<RunWorkChannel>();
+            await queue.EnqueueAsync(runId, context.RequestAborted).ConfigureAwait(false);
         }
         context.Response.StatusCode = StatusCodes.Status204NoContent;
     }

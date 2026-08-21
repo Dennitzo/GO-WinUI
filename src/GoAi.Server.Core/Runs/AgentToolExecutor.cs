@@ -75,7 +75,6 @@ public sealed class AgentToolExecutor
         var vectors = await CreateEmbeddingsWithLeaseAsync(
             request.Inputs.Select(static item => item.Text).ToArray(),
             operationId,
-            restoreGeneralAfter: !request.KeepModelLoaded,
             cancellationToken).ConfigureAwait(false);
         if (vectors.Count != request.Inputs.Count
             || vectors.Count == 0
@@ -90,8 +89,13 @@ public sealed class AgentToolExecutor
             request.Inputs.Select((item, index) => new EmbeddingVector(item.Id, vectors[index])).ToArray());
     }
 
-    public Task ReleaseEmbeddingModelAsync(CancellationToken cancellationToken = default) =>
-        _workers.RestoreGeneralModelAsync(cancellationToken);
+    public static Task ReleaseEmbeddingModelAsync(CancellationToken cancellationToken = default)
+    {
+        // Kept as a protocol-compatible endpoint. Model residency is request-driven:
+        // the embedding model remains loaded until another AI run requests a target.
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
+    }
 
     private async Task<AgentToolExecutionResult> SearchAsync(
         JsonElement arguments,
@@ -324,22 +328,15 @@ public sealed class AgentToolExecutor
             runId,
             GpuLeaseMode.Shared,
             cancellationToken).ConfigureAwait(false);
-        try
-        {
-            _ = await _workers.PrepareLmModelAsync(
-                _options.VisionModelId,
-                65_536,
-                cancellationToken).ConfigureAwait(false);
-            return await _lmStudio.AnalyzeImagesAsync(
-                _options.VisionModelId,
-                prompt,
-                imagePaths,
-                cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            await _workers.RestoreGeneralModelAsync(CancellationToken.None).ConfigureAwait(false);
-        }
+        _ = await _workers.PrepareLmModelAsync(
+            _options.VisionModelId,
+            65_536,
+            cancellationToken).ConfigureAwait(false);
+        return await _lmStudio.AnalyzeImagesAsync(
+            _options.VisionModelId,
+            prompt,
+            imagePaths,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<string> AnalyzeTranscriptAsync(
@@ -476,7 +473,6 @@ public sealed class AgentToolExecutor
         var vectors = await CreateEmbeddingsWithLeaseAsync(
             inputs,
             runId,
-            restoreGeneralAfter: true,
             cancellationToken).ConfigureAwait(false);
         return Result(new
         {
@@ -497,7 +493,6 @@ public sealed class AgentToolExecutor
         var vectors = await CreateEmbeddingsWithLeaseAsync(
             [query, .. documents],
             runId,
-            restoreGeneralAfter: true,
             cancellationToken).ConfigureAwait(false);
         var queryVector = vectors[0];
         var matches = documents.Select((document, index) => new
@@ -515,7 +510,6 @@ public sealed class AgentToolExecutor
     private async Task<IReadOnlyList<IReadOnlyList<double>>> CreateEmbeddingsWithLeaseAsync(
         IReadOnlyList<string> inputs,
         string runId,
-        bool restoreGeneralAfter,
         CancellationToken cancellationToken)
     {
         await using var lease = await _scheduler.AcquireAsync(
@@ -523,34 +517,14 @@ public sealed class AgentToolExecutor
             runId,
             GpuLeaseMode.Shared,
             cancellationToken).ConfigureAwait(false);
-        try
-        {
-            _ = await _workers.PrepareLmModelAsync(
-                _options.EmbeddingModelId,
-                8192,
-                cancellationToken).ConfigureAwait(false);
-            var vectors = await _lmStudio.CreateEmbeddingsAsync(
-                _options.EmbeddingModelId,
-                inputs,
-                cancellationToken).ConfigureAwait(false);
-            if (restoreGeneralAfter)
-            {
-                await _workers.RestoreGeneralModelAsync(cancellationToken).ConfigureAwait(false);
-            }
-            return vectors;
-        }
-        catch
-        {
-            try
-            {
-                await _workers.RestoreGeneralModelAsync(CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is not OutOfMemoryException)
-            {
-                _ = exception;
-            }
-            throw;
-        }
+        _ = await _workers.PrepareLmModelAsync(
+            _options.EmbeddingModelId,
+            8192,
+            cancellationToken).ConfigureAwait(false);
+        return await _lmStudio.CreateEmbeddingsAsync(
+            _options.EmbeddingModelId,
+            inputs,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private AgentToolExecutionResult EvaluateMath(JsonElement arguments)

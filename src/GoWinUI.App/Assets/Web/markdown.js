@@ -19,6 +19,16 @@
     return errorCode === "unicodeTextInMathMode" ? "ignore" : "error";
   }
 
+  function normalizeEscapedLatex(tex) {
+    return String(tex || "")
+      // AI-generated Markdown occasionally contains JSON-escaped LaTeX. Preserve a genuine
+      // TeX row break (two slashes before whitespace), but turn escaped commands and spacing
+      // operators back into the single leading slash KaTeX expects.
+      .replace(/\\\\\\\\/g, "\\\\")
+      .replace(/\\\\(?=[A-Za-z])/g, "\\")
+      .replace(/\\\\(?=[,;!:{}])/g, "\\");
+  }
+
   function normalizedMathParts(rawMath) {
     const source = String(rawMath || "").trim();
     let display = false;
@@ -35,7 +45,7 @@
       tex = source.slice(1, -1).trim();
     }
 
-    tex = tex
+    tex = normalizeEscapedLatex(tex)
       .replace(/\u00a0/g, "~")
       .replace(/[\u2009\u202f]/g, "\\,")
       .replace(/\\text\{([^{}]*[\u00b7\u22c5][^{}]*)\}/g, (_match, body) => (

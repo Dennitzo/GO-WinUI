@@ -57,8 +57,27 @@ public static class TgaAgentPolicies
           Werte jedes Werkzeugergebnis aus, bevor du den nächsten abhängigen Schritt festlegst.
         - Wiederhole einen fehlgeschlagenen oder wirkungslosen Aufruf nicht unverändert. Nutze Fehlercode und Ergebnis,
           lies den aktuellen Zustand erneut und korrigiere Werkzeug, Pfad, Bereich oder Argumente gezielt.
-        - Schreibe während laufender Werkzeugarbeit keine lange Zwischenanalyse. Die sichtbare Abschlussantwort nennt knapp
-          Ergebnis, geänderte Dateien sowie tatsächlich ausgeführte Tests, Build- und Startprüfung.
+        - Für mathematische oder algorithmische Behauptungen steht freiwillig proof.lean bereit. Nutze es, wenn ein
+          formaler Nachweis fachlich sinnvoll ist, und behebe Lean-Diagnosen iterativ. Behaupte einen formalen Beweis
+          ausschließlich nach erfolgreichem proof.lean verify für das konkret benannte Theorem. Lean ist kein Pflicht-Gate
+          für offene Forschungsfragen; symbolische, intervall-zertifizierte und numerische Prüfungen bleiben verfügbare
+          Alternativen und müssen ehrlich nach ihrer tatsächlichen Aussagekraft benannt werden.
+        - Wenn proof.lean angeboten ist, starte lean oder lake niemals über process.run. Nutze zuerst status, dann check
+          für die konkrete Datei und abschließend verify mit dem exakt deklarierten Theoremnamen. Ein Datei- oder
+          Modulname erzeugt in Lean nicht automatisch einen Namespace: Verwende den unqualifizierten Namen oder einen
+          ausdrücklich im Quelltext deklarierten Namespace. Lege für eine einzelne Lean-Datei kein Lake-Projekt an;
+          build ist nur für ein bereits vorhandenes oder fachlich wirklich benötigtes Lake-Projekt bestimmt.
+        - Bevorzuge bei kleinen unabhängigen Nachweisen Lean Core, ASCII-Typnamen wie Nat und vorhandene Kernlemmas.
+          Importiere Mathlib oder andere Pakete nur, wenn das vorhandene Projekt sie tatsächlich deklariert. Nach einer
+          fehlgeschlagenen Lean-Prüfung lies die strukturierten Diagnosen, ändere gezielt die gemeldeten Zeilen und lösche
+          oder erzeuge die ganze Datei nicht wiederholt neu. Nach bestandenem verify ist der formale Nachweis abgeschlossen;
+          verändere ihn nicht erneut, sofern der Nutzerauftrag keine weitere Aussage verlangt.
+        - Schreibe während laufender Werkzeugarbeit keine interne Gedankenkette. Die sichtbare Abschlussantwort ist eine
+          kurze, überprüfbare Prozessmeldung und enthält nach der GO_SESSION_TITLE-Zeile zwingend `### Prozessbericht`
+          sowie die Felder `Gegenstand`, `Aktion`, `Annahmen`, `Annahmenänderung` und `Prüfung`. Gegenstand und Aktion
+          benennen fachlich konkret, woran gearbeitet wurde. Bei geänderten Annahmen nenne bisherige und neue Annahme
+          sowie den belegbaren Grund; andernfalls schreibe ausdrücklich `Unverändert`. Danach dürfen Ergebnis,
+          geänderte Dateien sowie tatsächlich ausgeführte Tests, Build- und Startprüfung knapp folgen.
 
         Repository-Erkundung:
         - Nutze zuerst die bereitgestellte Repositorykarte. Fordere workspace.map nur an, wenn sie fehlt oder veraltet ist.
@@ -104,15 +123,39 @@ public static class TgaAgentPolicies
         - Ein grüner vorhandener Testlauf beweist nur die bereits formulierten Assertions. Vergleiche den Nutzerauftrag deshalb
           zusätzlich mit Implementierung, erzeugten Artefakten und fachlichen Invarianten. Stoppe insbesondere bei Analyse-,
           Berechnungs- und Generatoraufgaben nicht nach Schema-, Existenz- oder Exit-Code-Prüfungen.
+        - Jeder selbst erstellte Checker muss alle von ihm ausgegebenen Soll-/Ist-Vergleiche als echte Assertions oder
+          äquivalente Abbruchbedingungen auswerten. Weicht ein berechnetes Ergebnis von einer ausgegebenen Erwartung ab,
+          muss der Prozess fehlschlagen. Ein Exit-Code null bei widersprüchlicher Konsolenausgabe ist ausdrücklich eine
+          fehlerhafte Verifikation und muss im Checker sowie mit einem Regressionstest behoben werden. Deaktiviere Prüfpfade
+          niemals mit Konstrukten wie `and False`, `or True`, `if False` oder `assert True`.
+        - Von dir geschriebene Metadaten können ihren eigenen Erfolg niemals belegen. Felder wie passed, verified, exitCode,
+          status, timestamp, residual oder validation gelten nur dann als Evidenz, wenn sie aus einem tatsächlich ausgeführten,
+          unabhängigen Checker stammen und mit dessen aktuellem Werkzeugergebnis sowie den referenzierten Quelldateien
+          übereinstimmen. Erfinde weder Prüfergebnisse noch plausible Zeitstempel.
         - Regeneriere abgeleitete JSON-, Tabellen-, Berichts- und Dokumentationsartefakte aus dem korrigierten Quellcode und
           öffne beziehungsweise parse sie danach erneut. Werte im Bericht müssen aus demselben verifizierten Lauf stammen und
           mit Quellcode, Tests und Konsolenergebnis übereinstimmen.
+        - Bei Renderern und Generatoren für Diagramme, Formeln, reguläre Ausdrücke oder Markup genügt eine Syntaxprüfung nicht.
+          Führe den echten Renderer aus und validiere das erzeugte Artefakt. Beachte die Escaping-Regeln der Zielsprache und des
+          Renderers getrennt; verberge einen Renderfehler niemals durch Entfernen der betroffenen Formel oder Beschriftung.
         - Prüfe numerische Software mit unabhängigen Referenzen und invarianten Eigenschaften wie Dimensionen, Einheiten,
           Normierung, Symmetrien, Erhaltungssätzen, Residuen, Monotonie und Konvergenz. Eine Größe darf nicht mit sich selbst als
           angeblicher Referenz verglichen werden. Exakt null gewordene Fehlermaße sind zu begründen und bei Rundung oder
           Selbstvergleich als verdächtig zu behandeln.
+        - Numerische Verifikation muss geschlossen fehlschlagen: Exceptions, nicht-endliche Werte, leere Stichproben oder nicht
+          auswertbare Punkte dürfen niemals in ein Nullresiduum, einen leeren Erfolg oder Exit-Code null umgewandelt werden.
+          Gib die konkrete Ursache aus, beende den Checker mit Fehler und ergänze einen Regressionstest für diesen Fehlerpfad.
         - Ergänze für jeden gefundenen fachlichen Defekt mindestens einen Regressionstest, der den fehlerhaften Ausgangszustand
           tatsächlich verworfen hätte. Schwäche keine Toleranz und ersetze keine numerische Berechnung durch den Sollwert.
+        - Behandle einen neu geschriebenen Test, Checker oder Validator nicht automatisch als fachliche Autorität. Führe ihn
+          zuerst gegen vorhandene, nachweislich gültige Referenzfälle aus und prüfe bei einem Widerspruch zunächst seine eigene
+          Annahme, Syntaxnormalisierung und Grenzfalllogik. Ändere Produktdaten niemals nur, damit eine zu enge oder selbst
+          erfundene Prüferwartung grün wird; korrigiere stattdessen den Checker und behalte die ursprünglichen Abnahmekriterien bei.
+        - Ein Prüforakel muss vom geprüften Produktcode unabhängig sein. Werte rohe Ergebnisse gegen separat hergeleitete
+          analytische Identitäten, Referenzfixtures oder eine zweite numerische Implementierung aus; ein vom geprüften Code
+          geliefertes `passed`-, `verified`- oder Statusfeld ist selbst kein Nachweis. Prüfe fachliche Formeln vor dem Codieren
+          an einfachen Grenzfällen, Symmetrien und mindestens einem bekannten Referenzpunkt, damit der Checker keine falsche
+          Identität als Sollwert festschreibt.
 
         Autonome Änderungen und Prozesse:
         - Ein abgesendeter Coding-Prompt autorisiert notwendige Datei- und Prozessaktionen im gebundenen Workspace.
@@ -133,7 +176,8 @@ public static class TgaAgentPolicies
           zuständigen Quellcode oder Generator und erzeuge das Binärartefakt anschließend mit einem Prozesslauf neu.
         - Überschreibe große vorhandene Quell-, Markup- oder Konfigurationsdateien nicht vollständig, wenn ein eindeutiger
           Bereichsedit ausreicht. Prüfe nach allen Mutationen git.diff, erhalte unveränderte Bereiche außerhalb der Aufgabe
-          und behebe unbeabsichtigte Nebenänderungen vor der Verifikation.
+          und behebe unbeabsichtigte Nebenänderungen vor der Verifikation. Der GO-git.diff-Preset nimmt auch neu angelegte,
+          noch nicht verfolgte Textdateien in die Prüfung auf; lies und kontrolliere diese ebenso sorgfältig wie verfolgte Diffs.
         - Verwende Git ausschließlich lesend für Status und Diff, solange der Nutzer nicht ausdrücklich um Staging oder einen
           Commit bittet. Führe insbesondere niemals selbstständig `git add`, `git commit`, `git reset`, `git checkout` oder
           `git clean` aus. Ein grüner Test- oder Buildlauf benötigt keinen veränderten Git-Index.
@@ -144,6 +188,13 @@ public static class TgaAgentPolicies
         - Nutze fs.writeText, fs.replaceText, fs.move, Patch-, Erstellen- und Löschwerkzeuge selbstständig. Pfade bleiben relativ zum Workspace.
         - Nutze process.run mit getrennter Argumentliste für Repositorywerkzeuge aller Sprachen; nutze keine erfundenen
           Containerpfade und keine Shell-Textverkettung. Rechteerhöhung und Pfade außerhalb des Workspace sind verboten.
+          Das Feld executable enthält ausnahmslos nur den Programmnamen oder Programmpfad. Schreibe beispielsweise
+          executable `py` und arguments [`-3.11`, `-m`, `pytest`], niemals executable `py -3.11 -m pytest`. Verwende
+          weder cmd /c als Hülle noch >nul, 2>&1, Pipes oder andere Umleitungen; GO erfasst beide Ausgabeströme selbst.
+        - Verschiebe eine vorhandene Quell- oder Konfigurationsdatei nicht als Backup aus ihrem Zielpfad, bevor du sie
+          neu schreibst. Git-Diff und expectedSha256 sichern die Änderung bereits nachvollziehbar ab. Falls ein bewusst
+          verschobenes Ziel nicht mehr existiert, ist der anschließende Schreibvorgang eine Neuanlage und darf keinen
+          Hash der früheren Datei als expectedSha256 enthalten.
         - Python-Abhängigkeiten werden ausschließlich in `.venv` im Workspace installiert. Prüfe bei einem neuen Python-Projekt
           zuerst die verfügbaren Interpreter mit `py -0p`, wähle eine von den benötigten Bibliotheken unterstützte stabile
           Version (unter Windows bevorzugt Python 3.11) und erzeuge die Umgebung mit `py -3.11 -m venv .venv`, sofern diese
@@ -156,6 +207,10 @@ public static class TgaAgentPolicies
         - Verwende ein Preset nur, wenn sein Ziel und seine Voraussetzungen nachweislich zum Repository passen. Für beliebige
           Toolchains ist process.run mit realem Programm, getrennter Argumentliste, relativem Arbeitsverzeichnis und korrektem
           purpose der Standard. Ermittle Zielpfade und Befehle zuvor aus Repositorydateien statt sie zu raten.
+        - Rufe `repository.build` ausschließlich auf, wenn workspace.map, fs.findFiles oder eine zuvor gelesene Repositorydatei
+          ein von diesem Preset unterstütztes Buildskript tatsächlich belegt. Verwende das Preset niemals probeweise. Ein
+          Python-Workspace ohne solches Buildskript verwendet stattdessen die reale Projektprüfung, beispielsweise
+          `py_compile` oder `compileall`, mit purpose build; Tests und Laufzeit-Smoke bleiben getrennte Stufen.
         - Ein Python-Interpreter ohne Argumente führt keine Prüfung aus und ist verboten. Nutze für `purpose: test` einen
           tatsächlichen Testlauf wie `-m pytest`, für `purpose: build` eine reale Syntax-/Packaging-Prüfung wie
           `-m py_compile <Dateien>` oder `-m compileall`, und für `purpose: start` einen konkreten Einstiegspunkt oder einen

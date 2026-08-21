@@ -301,6 +301,40 @@ public sealed class RunRepository
         return inserted;
     }
 
+    public async Task<bool> TryQueueClientToolContinuationAsync(
+        string runId,
+        string proposalId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE runs
+            SET state = $queued, updated_at = $updated, error_code = NULL
+            WHERE run_id = $run
+              AND state IN ($running, $waiting)
+              AND EXISTS (
+                  SELECT 1
+                  FROM run_checkpoints checkpoint
+                  WHERE checkpoint.run_id = $run
+                    AND json_extract(checkpoint.checkpoint_json, '$.pendingProposalId') = $proposal
+              )
+              AND EXISTS (
+                  SELECT 1
+                  FROM client_tool_results result
+                  WHERE result.run_id = $run
+                    AND result.proposal_id = $proposal
+              );
+            """;
+        command.Parameters.AddWithValue("$queued", RunState.Queued.ToString());
+        command.Parameters.AddWithValue("$running", RunState.Running.ToString());
+        command.Parameters.AddWithValue("$waiting", RunState.WaitingForClient.ToString());
+        command.Parameters.AddWithValue("$run", runId);
+        command.Parameters.AddWithValue("$proposal", proposalId);
+        command.Parameters.AddWithValue("$updated", GoAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+    }
+
     public async Task SaveToolProposalAsync(ToolProposal proposal, CancellationToken cancellationToken = default)
     {
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);

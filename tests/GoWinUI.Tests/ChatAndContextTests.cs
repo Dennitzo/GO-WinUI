@@ -127,6 +127,29 @@ public sealed class ChatAndContextTests
     }
 
     [Fact]
+    public void MarkdownFormattedEmptySessionTitleMarkerIsNeverRendered()
+    {
+        const string raw = "**GO_SESSION_TITLE:\u00A0**  \n\nDie unabhängige Prüfung wurde abgeschlossen.";
+
+        var response = GeneralAgentResponseParser.Parse(raw, "Prüfung fortsetzen");
+
+        Assert.Equal("Die unabhängige Prüfung wurde abgeschlossen.", response.Message);
+        Assert.DoesNotContain("GO_SESSION_TITLE", response.ContextSummary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EscapedMarkdownSessionTitleMarkerIsNeverRendered()
+    {
+        const string raw = "**GO\\_SESSION\\_TITLE:** Technischer Titel\n\n### Prozessbericht\nDie CodeÃ¤nderung wurde geprÃ¼ft.";
+
+        var response = GeneralAgentResponseParser.Parse(raw, "Workflow fortsetzen");
+
+        Assert.DoesNotContain("GO\\_SESSION", response.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("GO_SESSION_TITLE", response.Message, StringComparison.Ordinal);
+        Assert.StartsWith("### Prozessbericht", response.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void WorkflowMetadataConvertsMarkdownToShortPlainText()
     {
         const string markdown = "**Projektstart mit BricsCAD & C.A.T.S. – Raum-Erstellung**\n\n---\n\n## 1 Projektvorbereitung in BricsCAD\n\n| Schritt | Aktion | Hinweis |";

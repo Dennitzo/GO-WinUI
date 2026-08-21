@@ -95,6 +95,29 @@ public sealed class AssistantArtifactPreviewService : IDisposable
         }
     }
 
+    public async Task<string> MaterializeOriginalAsync(Guid artifactId, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var artifact = await _artifacts.GetAsync(artifactId, cancellationToken).ConfigureAwait(false)
+                ?? throw new KeyNotFoundException("Das lokale Artefakt wurde nicht gefunden.");
+            var directory = Path.Combine(CacheRoot, artifact.Id.ToString("N"));
+            Directory.CreateDirectory(directory);
+            var extension = SafeExtension(artifact.FileName, artifact.ContentType);
+            var path = Path.Combine(directory, "original" + extension);
+            if (!File.Exists(path) || new FileInfo(path).Length != artifact.Length)
+            {
+                await WriteOriginalAsync(artifact.BlobId, path, cancellationToken).ConfigureAwait(false);
+            }
+            return path;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     private async Task WriteImagePreviewAsync(Guid blobId, string destination, CancellationToken cancellationToken)
     {
         await using var source = await _blobs.OpenReadAsync(blobId, cancellationToken).ConfigureAwait(false);
@@ -184,6 +207,26 @@ public sealed class AssistantArtifactPreviewService : IDisposable
             && extension.AsSpan(1).IndexOfAnyExceptInRange('a', 'z') < 0
                 ? extension
                 : fallback;
+    }
+
+    private static string SafeExtension(string fileName, string contentType)
+    {
+        var extension = Path.GetExtension(fileName).ToLowerInvariant();
+        if (extension.Length is >= 2 and <= 10
+            && extension[0] == '.'
+            && extension.AsSpan(1).IndexOfAnyExceptInRange('a', 'z') < 0)
+        {
+            return extension;
+        }
+        return contentType.Trim().ToLowerInvariant() switch
+        {
+            "image/jpeg" => ".jpg",
+            "image/gif" => ".gif",
+            "image/webp" => ".webp",
+            "image/bmp" => ".bmp",
+            "image/tiff" => ".tiff",
+            _ => ".png",
+        };
     }
 
     internal static string BuildImageDataUrl(ReadOnlySpan<byte> pngBytes) =>

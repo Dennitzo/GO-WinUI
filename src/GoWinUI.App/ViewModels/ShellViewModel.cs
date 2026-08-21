@@ -35,36 +35,19 @@ public sealed partial class ShellViewModel : ObservableObject
     public partial string ActivePageTitle { get; set; } = "AI Assistent";
 
     [ObservableProperty]
-    public partial string DatabaseStatus { get; set; } = "Datenbank wird vorbereitet";
-
-    [ObservableProperty]
     public partial bool IsAiRunning { get; set; }
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(AiConnectionModeText))]
     public partial bool IsAiAvailable { get; set; }
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(AiConnectionModeText))]
     public partial bool IsAiServerReady { get; set; }
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(AiConnectionModeText))]
     public partial bool IsAiAvailabilityKnown { get; set; }
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(AiConnectionModeText))]
     public partial bool IsAiConnectionEnabled { get; set; }
-
-    public string AiConnectionModeText => !IsAiConnectionEnabled
-        ? "Offline"
-        : !IsAiAvailabilityKnown
-            ? "Wird geprüft"
-            : !IsAiAvailable
-                ? "Nicht erreichbar"
-                : IsAiServerReady
-                    ? "Online"
-                    : "Online · Eingeschränkt";
 
     public ObservableCollection<AiServiceFooterItem> AiServices { get; } = [];
 

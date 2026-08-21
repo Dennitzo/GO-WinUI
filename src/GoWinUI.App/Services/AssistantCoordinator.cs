@@ -22,13 +22,16 @@ public sealed class AssistantCoordinator(
     CodingRunTraceService codingTrace,
     SettingsCoordinator settings,
     RecentActivityService recentActivity,
-    MicrophoneTranscriptionService? microphone = null) : IDisposable
+    MicrophoneTranscriptionService? microphone = null,
+    CodingCampaignService? campaigns = null) : IDisposable
 {
     private const string DefaultSessionTitle = "Neue Sitzung";
     private const string DefaultSystemPrompt = "GO ist ein lokales Arbeitstool für TGA-Fachplanung. Unterstütze Fachplaner bei technischer Gebäudeausrüstung, Anlagenkonzepten, Berechnungen, Koordination und Dokumentation. GO ist hier ein Produktname und nicht die Programmiersprache Go. Weise auf Unsicherheit, fehlende Projektdaten und erforderliche fachliche Prüfungen hin; erfinde keine Norminhalte, Quellen oder Projektangaben.";
     private readonly SemaphoreSlim _chatGate = new(1, 1);
     private CancellationTokenSource? _activeChatCancellation;
+    private string? _activeDiagnosticSessionId;
     private IReadOnlyList<LmModel> _knownModels = Array.Empty<LmModel>();
+    private int _startupCodingRunsHandled;
 
     public Task SaveDraftAsync(Guid sessionId, string draft, CancellationToken cancellationToken = default)
     {
@@ -73,6 +76,24 @@ public sealed class AssistantCoordinator(
             : action;
     }
 
+    public async Task<bool> IsSpeechRequestAsync(
+        JsonElement payload,
+        CancellationToken cancellationToken = default)
+    {
+        var prompt = GetOptionalString(payload, "prompt", 100_000) ?? string.Empty;
+        var sessionId = GetOptionalGuid(payload, "sessionId")
+            ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
+        var explicitTool = GetOptionalString(payload, "toolAction", 40);
+        var match = await ResolvePromptMatchAsync(
+            session,
+            prompt,
+            explicitTool,
+            cancellationToken).ConfigureAwait(false);
+        return match?.Trigger.Action == PromptTriggerAction.TextToSpeech;
+    }
+
     internal static bool HasMediaAnalysisContext(
         PromptTriggerAction action,
         bool hasDocuments,
@@ -114,6 +135,12 @@ public sealed class AssistantCoordinator(
 
     public async Task CancelCurrentAsync()
     {
+        if (campaigns is not null
+            && settings.Current.ActiveSessionId is { } campaignSessionId
+            && await campaigns.StopForNewPromptAsync(campaignSessionId, CancellationToken.None).ConfigureAwait(false))
+        {
+            return;
+        }
         _activeChatCancellation?.Cancel();
         orchestrator.Cancel();
         if (goAi is not null)
@@ -179,6 +206,9 @@ public sealed class AssistantCoordinator(
         var documentItems = await documents.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var attachmentItems = await attachments.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var documentGroupStatus = BuildDocumentGroupStatus(documentItems, attachmentItems.Count);
+        var campaignSnapshot = campaigns is null
+            ? new CodingCampaignUiSnapshot([], null)
+            : await campaigns.GetSnapshotAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var pages = new List<DocumentPage>();
         foreach (var document in documentItems)
         {
@@ -204,6 +234,8 @@ public sealed class AssistantCoordinator(
                 message,
                 artifactItems.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
             workflows = workflowItems.Select(ToWorkflowDto),
+            codingCampaignDefinitions = campaignSnapshot.Definitions,
+            codingCampaign = campaignSnapshot.ActiveCampaign,
             documents = documentItems.Select(ToDocumentDto),
             attachments = attachmentItems.Select(ToAttachmentDto),
             documentGroupStatus,
@@ -238,6 +270,19 @@ public sealed class AssistantCoordinator(
         switch (envelope.Type)
         {
             case "app.ready":
+            {
+                var isFirstReady = Interlocked.CompareExchange(ref _startupCodingRunsHandled, 1, 0) == 0;
+                if (isFirstReady && campaigns is not null)
+                {
+                    await campaigns.PrepareForClientStartAsync(cancellationToken).ConfigureAwait(false);
+                }
+                if (isFirstReady && goAi is not null)
+                {
+                    await goAi.StopPersistedCampaignRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
+                }
+                campaigns?.AttachSinks(
+                    update => EmitGoAiUpdateAsync(update, emit, "campaign"),
+                    snapshot => emit("campaign.changed", snapshot, "campaign"));
                 await emit("state.snapshot", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
                 if (settings.Current.IsAiConnectionEnabled
                     && settings.Current.AiProvider == AiProviderKind.GoAiServer
@@ -255,6 +300,7 @@ public sealed class AssistantCoordinator(
                     }
                 }
                 break;
+            }
             case "session.create":
                 await CreateSessionAsync(emit, envelope.RequestId, cancellationToken);
                 break;
@@ -342,6 +388,49 @@ public sealed class AssistantCoordinator(
             case "workflow.createFromMessage":
                 await CreateWorkflowFromMessageAsync(envelope, emit, cancellationToken);
                 break;
+            case "campaign.list":
+            {
+                var campaignService = campaigns ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
+                var active = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
+                await emit("campaign.snapshot", await campaignService.GetSnapshotAsync(active.Id, cancellationToken).ConfigureAwait(false), envelope.RequestId);
+                break;
+            }
+            case "campaign.select":
+            {
+                var campaignService = campaigns ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
+                var campaignSessionId = GetOptionalGuid(envelope.Payload, "sessionId")
+                    ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
+                var snapshot = await campaignService.SelectAsync(
+                    campaignSessionId,
+                    GetRequiredString(envelope.Payload, "definitionId", 100),
+                    cancellationToken).ConfigureAwait(false);
+                await emit("campaign.changed", snapshot, envelope.RequestId);
+                break;
+            }
+            case "campaign.run":
+            {
+                var campaignService = campaigns ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
+                var campaignSessionId = GetOptionalGuid(envelope.Payload, "sessionId")
+                    ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
+                var instruction = GetOptionalString(envelope.Payload, "instruction", 100_000);
+                await chats.SaveDraftAsync(campaignSessionId, string.Empty, cancellationToken).ConfigureAwait(false);
+                await emit(
+                    "campaign.changed",
+                    await campaignService.RunAsync(campaignSessionId, instruction, cancellationToken).ConfigureAwait(false),
+                    envelope.RequestId).ConfigureAwait(false);
+                break;
+            }
+            case "campaign.stop":
+            {
+                var campaignService = campaigns ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
+                var campaignSessionId = GetOptionalGuid(envelope.Payload, "sessionId")
+                    ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
+                await emit(
+                    "campaign.changed",
+                    await campaignService.StopAsync(campaignSessionId, cancellationToken).ConfigureAwait(false),
+                    envelope.RequestId).ConfigureAwait(false);
+                break;
+            }
             case "ui.sessionPane":
                 await settings.UpdateAsync(current => current with
                 {
@@ -553,12 +642,33 @@ public sealed class AssistantCoordinator(
         string requestId,
         CancellationToken cancellationToken)
     {
-        if (orchestrator.IsRunning || goAi?.IsRunning == true)
-        {
-            throw new InvalidOperationException("Eine Sitzung kann während eines laufenden AI-Auftrags nicht gelöscht werden.");
-        }
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
+
+        if (campaigns is not null)
+        {
+            var campaign = (await campaigns.GetSnapshotAsync(sessionId, cancellationToken).ConfigureAwait(false))
+                .ActiveCampaign;
+            if (string.Equals(campaign?.Status, "running", StringComparison.OrdinalIgnoreCase))
+            {
+                _ = await campaigns.StopAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        if (goAi?.ActiveSessionId == sessionId)
+        {
+            await goAi.CancelCurrentAndWaitAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+
+        if (Guid.TryParse(Volatile.Read(ref _activeDiagnosticSessionId), out var diagnosticSessionId)
+            && diagnosticSessionId == sessionId)
+        {
+            _activeChatCancellation?.Cancel();
+            orchestrator.Cancel();
+            await _chatGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            _chatGate.Release();
+        }
+
         await chats.DeleteSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (settings.Current.ActiveSessionId == sessionId)
         {
@@ -683,6 +793,10 @@ public sealed class AssistantCoordinator(
                     envelope.RequestId),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             return;
+        }
+        if (campaigns is not null)
+        {
+            _ = await campaigns.StopForNewPromptAsync(sessionId, cancellationToken).ConfigureAwait(false);
         }
         var requestedPersistentAction = PersistentToolActionFor(match?.Trigger.Action);
         if (requestedPersistentAction == PersistentToolAction.Audiobook
@@ -828,6 +942,19 @@ public sealed class AssistantCoordinator(
             ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false);
         switch (update.Kind)
         {
+            case GoAiAssistantUpdateKind.MessageAdded:
+                await emit("chat.message", new
+                {
+                    message = ToMessageDto(update.Message, artifactsForMessage),
+                }, requestId).ConfigureAwait(false);
+                break;
+            case GoAiAssistantUpdateKind.MessageRemoved:
+                await emit("chat.removed", new
+                {
+                    messageId = update.Message.Id,
+                    sessionId = update.Message.SessionId,
+                }, requestId).ConfigureAwait(false);
+                break;
             case GoAiAssistantUpdateKind.Started:
                 var sessionMessages = await chats.ListMessagesAsync(
                     update.Message.SessionId,
@@ -900,6 +1027,7 @@ public sealed class AssistantCoordinator(
                         messageId = update.Message.Id,
                         sessionId = update.Message.SessionId,
                         entry = update.CodingTrace,
+                        entries = codingTrace.GetForMessage(update.Message.Id),
                     }, requestId).ConfigureAwait(false);
                 }
                 break;
@@ -950,6 +1078,7 @@ public sealed class AssistantCoordinator(
             var sessionId = GetOptionalGuid(envelope.Payload, "sessionId")
                 ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
             runningSessionId = sessionId;
+            Volatile.Write(ref _activeDiagnosticSessionId, sessionId.ToString("D"));
             var model = await ResolveModelAsync(cancellationToken).ConfigureAwait(false);
             var reasoning = GetOptionalString(envelope.Payload, "reasoningEffort", 20)
                 ?? settings.Current.ReasoningEffort;
@@ -1054,6 +1183,7 @@ public sealed class AssistantCoordinator(
         }
         finally
         {
+            Volatile.Write(ref _activeDiagnosticSessionId, null);
             _activeChatCancellation?.Dispose();
             _activeChatCancellation = null;
             _chatGate.Release();
@@ -1278,23 +1408,30 @@ public sealed class AssistantCoordinator(
         session.PinnedAt,
     };
 
-    private object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null) => new
+    private object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null)
     {
-        id = message.Id,
-        sessionId = message.SessionId,
-        role = message.Role.ToString().ToLowerInvariant(),
-        message.Content,
-        status = message.Status.ToString().ToLowerInvariant(),
-        message.CreatedAt,
-        message.UpdatedAt,
-        message.Error,
-        message.ContextSummary,
-        contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
-        codeDiff = message.CodeDiff,
-        codingTrace = codingTrace.GetForMessage(message.Id),
-        tool = message.ToolExecution,
-        artifacts = (messageArtifacts ?? []).Select(ToArtifactDto),
-    };
+        var messageCodingTrace = codingTrace.GetForMessage(message.Id);
+        return new
+        {
+            id = message.Id,
+            sessionId = message.SessionId,
+            role = message.Role.ToString().ToLowerInvariant(),
+            message.Content,
+            status = message.Status.ToString().ToLowerInvariant(),
+            message.CreatedAt,
+            message.UpdatedAt,
+            message.Error,
+            message.ContextSummary,
+            contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
+            codeDiff = message.CodeDiff,
+            codingTrace = messageCodingTrace,
+            suppressInChat = message.Role == ChatRole.Assistant
+                && message.Status == MessageStatus.Failed
+                && messageCodingTrace.Count > 0,
+            tool = message.ToolExecution,
+            artifacts = (messageArtifacts ?? []).Select(ToArtifactDto),
+        };
+    }
 
     private static object ToArtifactDto(ChatArtifact artifact) => new
     {
@@ -1473,6 +1610,7 @@ public sealed class AssistantCoordinator(
 
     public void Dispose()
     {
+        campaigns?.DetachSinks();
         _activeChatCancellation?.Cancel();
         _activeChatCancellation?.Dispose();
         _chatGate.Dispose();

@@ -632,8 +632,8 @@ class ModelRegistry:
     def release(self) -> None:
         def release_tts_on_owner_thread() -> None:
             # ONNX Runtime sessions are created and destroyed on the same
-            # dedicated thread. This avoids retaining CUDA allocator state in a
-            # worker thread after GO switches to an exclusive coding model.
+            # dedicated thread. This keeps explicit server-shutdown cleanup
+            # deterministic without moving ONNX ownership between threads.
             with self._gate:
                 self._tts = None
                 self._tts_voice_style = None
@@ -733,8 +733,8 @@ def _speaker_tracker(session_id: str) -> SpeakerTracker:
 
 
 def _preload_models() -> None:
-    # Explicit maintenance hook only. Normal startup keeps speech unloaded so
-    # either large coding model can use the complete dual-GPU lane.
+    # GO keeps speech input, speaker separation and TTS resident for the complete
+    # server lifetime, including while a coding model is active.
     for loader in (models.load_stt, models.load_speaker, models.load_tts):
         try:
             loader()

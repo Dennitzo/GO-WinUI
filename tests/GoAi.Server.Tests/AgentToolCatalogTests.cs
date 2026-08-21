@@ -6,6 +6,8 @@ namespace GoAi.Server.Tests;
 
 public sealed class AgentToolCatalogTests
 {
+    private static readonly string[] LeanMainArguments = ["Main.lean"];
+
     [Fact]
     public void ClientToolsAreOnlyAdvertisedForReportedCapabilities()
     {
@@ -17,6 +19,7 @@ public sealed class AgentToolCatalogTests
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.FileSystemReadText);
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.FileSystemReplaceText);
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.ProcessRunPreset);
+        Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.LeanProof);
         Assert.DoesNotContain(withCode, static tool => tool.Name == ClientToolNames.BricsCadMove);
 
         var withDocuments = catalog.GetAvailableTools(CreateRequest(["documents"]));
@@ -24,6 +27,41 @@ public sealed class AgentToolCatalogTests
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsSearch);
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsReadPages);
         Assert.DoesNotContain(withDocuments, static tool => tool.Name == ClientToolNames.FileSystemWriteText);
+    }
+
+    [Fact]
+    public void LeanProofSchemaRequiresOperationSpecificFields()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
+        var lean = catalog.Resolve(ClientToolNames.LeanProof, tools);
+        using var valid = JsonDocument.Parse("""{"operation":"verify","path":"proofs/Main.lean","theoremName":"Main.result","timeoutSeconds":120}""");
+        using var missingTheorem = JsonDocument.Parse("""{"operation":"verify","path":"proofs/Main.lean"}""");
+        using var freeShell = JsonDocument.Parse("""{"operation":"check","path":"proofs/Main.lean","command":"cmd.exe"}""");
+
+        catalog.Validate(lean, valid.RootElement);
+        Assert.Throws<ArgumentException>(() => catalog.Validate(lean, missingTheorem.RootElement));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(lean, freeShell.RootElement));
+    }
+
+    [Theory]
+    [InlineData("lean")]
+    [InlineData("lean.exe")]
+    [InlineData("C:\\Tools\\lake.exe")]
+    public void GenericProcessRunCannotBypassLeanProofContract(string executable)
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
+        var process = catalog.Resolve(ClientToolNames.ProcessRun, tools);
+        using var arguments = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            executable,
+            arguments = LeanMainArguments,
+            purpose = "test",
+        }));
+
+        var exception = Assert.Throws<ArgumentException>(() => catalog.Validate(process, arguments.RootElement));
+        Assert.Contains(ClientToolNames.LeanProof, exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

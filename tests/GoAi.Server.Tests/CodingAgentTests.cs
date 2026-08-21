@@ -10,7 +10,97 @@ public sealed class CodingAgentTests
     private static readonly string[] CSharpGlobs = ["**/*.cs"];
     private static readonly string[] SearchTerms = ["SpeechRecognition", "speech", "voice"];
     private static readonly string[] DotNetTestArguments = ["test"];
+    private static readonly string[] OtherDotNetTestArguments = ["test", "tests/Other.Tests/Other.Tests.csproj"];
     private static readonly string[] PythonPytestArguments = ["-m", "pytest", "tests", "-q"];
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(5, false)]
+    [InlineData(6, true)]
+    [InlineData(7, false)]
+    [InlineData(8, false)]
+    [InlineData(9, true)]
+    [InlineData(12, true)]
+    public void MutationProgressGuidanceIsDeterministicAndPeriodic(int rounds, bool expected)
+    {
+        Assert.Equal(expected, RunProcessor.ShouldAddCodingMutationProgressGuidance(rounds));
+    }
+
+    [Fact]
+    public void RepeatedReplaceFailuresBlockOnlyTheAffectedTarget()
+    {
+        using var arguments = JsonDocument.Parse("""
+            {"path":"config/settings.json","oldText":"old","newText":"new"}
+            """);
+        var call = new LmToolCall(
+            "replace-1",
+            ClientToolNames.FileSystemReplaceText,
+            arguments.RootElement.Clone());
+
+        Assert.False(RunProcessor.ShouldBlockRepeatedReplaceText(
+            call,
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["config/settings.json"] = 1,
+            }));
+        Assert.True(RunProcessor.ShouldBlockRepeatedReplaceText(
+            call,
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["CONFIG/SETTINGS.JSON"] = 2,
+                ["other.json"] = 9,
+            }));
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(2, false)]
+    [InlineData(3, true)]
+    [InlineData(7, true)]
+    public void RepeatedTextMutationsRequireARealProcessCheck(int mutations, bool expected)
+    {
+        using var arguments = JsonDocument.Parse("""
+            {"path":"results/cases.json","content":"{}"}
+            """);
+        var call = new LmToolCall(
+            "write-1",
+            ClientToolNames.FileSystemWriteText,
+            arguments.RootElement.Clone());
+
+        Assert.Equal(
+            expected,
+            RunProcessor.ShouldRequireProcessBeforeAnotherTextMutation(
+                call,
+                new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["RESULTS/CASES.JSON"] = mutations,
+                }));
+    }
+
+    [Theory]
+    [InlineData("ok = actual == expected and False", "test", true)]
+    [InlineData("ok = actual == expected or True", "test", true)]
+    [InlineData("if False:\n    raise AssertionError()", "test", true)]
+    [InlineData("assert True", "test", true)]
+    [InlineData("assert actual == expected", "test", false)]
+    [InlineData("assert True", "inspect", false)]
+    public void VacuousInlinePythonVerificationIsRejected(
+        string code,
+        string purpose,
+        bool expected)
+    {
+        var call = new LmToolCall(
+            "python-check",
+            ClientToolNames.ProcessRun,
+            JsonSerializer.SerializeToElement(new
+            {
+                executable = ".venv/Scripts/python.exe",
+                arguments = new[] { "-c", code },
+                purpose,
+            }));
+
+        Assert.Equal(expected, RunProcessor.IsVacuousVerificationCall(call));
+    }
 
     [Theory]
     [InlineData("Analysiere das Projekt und erkl\u00E4re, wie die Sprachsteuerung implementiert wurde.", CodingRequestIntent.Analysis)]
@@ -233,9 +323,55 @@ public sealed class CodingAgentTests
         Assert.Contains("niemals selbstständig `git add`", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Deaktiviere", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Eine bereits seit der letzten Mutation", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("widersprüchlicher Konsolenausgabe", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Führe den echten Renderer aus", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("`repository.build` ausschließlich", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("`py_compile` oder `compileall`", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Behandle einen neu geschriebenen Test, Checker oder Validator nicht automatisch als fachliche Autorität", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Ändere Produktdaten niemals nur, damit eine zu enge", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Ein Prüforakel muss vom geprüften Produktcode unabhängig sein", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Statusfeld ist selbst kein Nachweis", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Numerische Verifikation muss geschlossen fehlschlagen", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("niemals in ein Nullresiduum", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("Button.Flyout", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("GO-WinUI", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("Build-Portable.ps1", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StaleReplaceGuidanceRequiresSemanticReevaluationBeforeRetry()
+    {
+        var guidance = RunProcessor.CreateReplaceFailureGuidance(
+            "Die Zieldatei wurde zwischenzeitlich geändert; fs.replaceText wurde nicht ausgeführt.");
+
+        Assert.Contains("veralteten Dateirevision", guidance, StringComparison.Ordinal);
+        Assert.Contains("fachlich erforderlich", guidance, StringComparison.Ordinal);
+        Assert.Contains("neu geschriebenen Checker", guidance, StringComparison.Ordinal);
+        Assert.Contains("erneuten Lesen", guidance, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CodingRuntimeGuidanceSourceContainsNoMojibakeMarkers()
+    {
+        var source = File.ReadAllText(FindRepositoryFile("src/GoAi.Server.Core/Runs/RunProcessor.cs"));
+
+        Assert.DoesNotContain("Ã", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("Â", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("â€", source, StringComparison.Ordinal);
+    }
+
+    private static string FindRepositoryFile(string relativePath)
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, relativePath.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        throw new FileNotFoundException($"Repositorydatei nicht gefunden: {relativePath}");
     }
 
     [Theory]
@@ -279,6 +415,94 @@ public sealed class CodingAgentTests
             }));
 
         Assert.Equal(["review"], RunProcessor.VerificationStagesForCall(call));
+    }
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("unknown")]
+    public void NonVerifyingLeanOperationsDoNotCompleteCodingStages(string operation)
+    {
+        var call = new LmToolCall(
+            "lean-stage",
+            ClientToolNames.LeanProof,
+            JsonSerializer.SerializeToElement(new { operation }));
+
+        Assert.Empty(RunProcessor.VerificationStagesForCall(call));
+    }
+
+    [Theory]
+    [InlineData("check", "build")]
+    [InlineData("build", "build")]
+    [InlineData("axioms", "test")]
+    public void LeanOperationsCompleteOnlyTheirDeclaredCodingStage(string operation, string expectedStage)
+    {
+        var call = new LmToolCall(
+            "lean-stage",
+            ClientToolNames.LeanProof,
+            JsonSerializer.SerializeToElement(new { operation }));
+
+        Assert.Equal([expectedStage], RunProcessor.VerificationStagesForCall(call));
+    }
+
+    [Fact]
+    public void LeanVerifyCompletesTheFormalProofStages()
+    {
+        var call = new LmToolCall(
+            "lean-verify",
+            ClientToolNames.LeanProof,
+            JsonSerializer.SerializeToElement(new { operation = "verify" }));
+
+        Assert.Equal(["test", "build", "start"], RunProcessor.VerificationStagesForCall(call));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void LeanToolResultRequiresInnerPassedFlag(bool passed, bool expected)
+    {
+        var call = new LmToolCall(
+            "lean-result",
+            ClientToolNames.LeanProof,
+            JsonSerializer.SerializeToElement(new { operation = "verify" }));
+        var result = new ClientToolResult(
+            "proposal",
+            "completed",
+            JsonSerializer.SerializeToElement(new { passed }));
+
+        Assert.Equal(expected, RunProcessor.IsSuccessfulClientToolResult(call, result));
+    }
+
+    [Fact]
+    public void OrdinaryCompletedClientToolResultRemainsSuccessful()
+    {
+        var call = new LmToolCall(
+            "read-result",
+            ClientToolNames.FileSystemReadText,
+            JsonSerializer.SerializeToElement(new { path = "README.md" }));
+        var result = new ClientToolResult(
+            "proposal",
+            "completed",
+            JsonSerializer.SerializeToElement(new { text = "ok" }));
+
+        Assert.True(RunProcessor.IsSuccessfulClientToolResult(call, result));
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    [InlineData(129, false)]
+    public void ProcessToolResultRequiresZeroExitCode(int exitCode, bool expected)
+    {
+        var call = new LmToolCall(
+            "process-result",
+            ClientToolNames.ProcessRunPreset,
+            JsonSerializer.SerializeToElement(new { preset = "git.diff" }));
+        var result = new ClientToolResult(
+            "proposal",
+            "completed",
+            JsonSerializer.SerializeToElement(new { exitCode }));
+
+        Assert.Equal(expected, RunProcessor.IsSuccessfulClientToolResult(call, result));
     }
 
     [Fact]
@@ -341,6 +565,7 @@ public sealed class CodingAgentTests
     [Theory]
     [InlineData("Erledigt")]
     [InlineData("GO_SESSION_TITLE: Fertig")]
+    [InlineData("GO_SESSION_TITLE: Fertig\n\nDie Anzeige wurde angepasst. Tests sind erfolgreich.")]
     [InlineData("GO_SESSION_TITLE: Fertig\n\nLass mich das korrigieren:\n<tool_call><function=fs_readText></function></tool_call>")]
     public void CodingFinalRejectsMissingMetadataEmptyMessagesAndPseudoTools(string response)
     {
@@ -351,7 +576,36 @@ public sealed class CodingAgentTests
     public void CodingFinalAcceptsAConcreteTitledSummary()
     {
         Assert.True(RunProcessor.IsValidCodingFinalResponse(
-            "GO_SESSION_TITLE: Laufzeitanzeige verbessert\n\nDie Anzeige wurde angepasst. Tests, Build und Smoke-Start sind erfolgreich."));
+            """
+            GO_SESSION_TITLE: Laufzeitanzeige verbessert
+
+            ### Prozessbericht
+            **Gegenstand:** Laufzeitanzeige des Clients.
+            **Aktion:** Die Anzeige wurde angepasst.
+            **Annahmen:** Die bestehende UI-Struktur bleibt erhalten.
+            **Annahmenänderung:** Unverändert.
+            **Prüfung:** Tests, Build und Smoke-Start sind erfolgreich.
+            """));
+    }
+
+    [Theory]
+    [InlineData(1, true, null, false)]
+    [InlineData(2, false, null, false)]
+    [InlineData(2, true, "Dateiänderung fehlt", false)]
+    [InlineData(2, true, null, true)]
+    [InlineData(5, true, null, true)]
+    public void RepeatedRedundantVerificationForcesADeterministicFinalResponse(
+        int redundantCalls,
+        bool verificationComplete,
+        string? blocker,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            RunProcessor.ShouldForceCodingFinalizationAfterRedundantVerification(
+                redundantCalls,
+                verificationComplete,
+                blocker));
     }
 
     [Fact]
@@ -362,6 +616,8 @@ public sealed class CodingAgentTests
             ["test", "build", "start", "review"]);
 
         Assert.True(RunProcessor.IsValidCodingFinalResponse(response));
+        Assert.Contains("### Prozessbericht", response, StringComparison.Ordinal);
+        Assert.Contains("**Annahmenänderung:**", response, StringComparison.Ordinal);
         Assert.Contains("`src/report.py`", response, StringComparison.Ordinal);
         Assert.Contains("Build/Validierung", response, StringComparison.Ordinal);
         Assert.Contains("Laufzeit-Smoke", response, StringComparison.Ordinal);
@@ -378,6 +634,7 @@ public sealed class CodingAgentTests
             ["test", "build", "start", "review"]);
 
         Assert.True(RunProcessor.IsValidCodingFinalResponse(response));
+        Assert.Contains("### Prozessbericht", response, StringComparison.Ordinal);
         Assert.Contains(summary, response, StringComparison.Ordinal);
     }
 
@@ -428,7 +685,7 @@ public sealed class CodingAgentTests
     }
 
     [Fact]
-    public void DirectProcessVerificationUsesItsPurposeForDeduplication()
+    public void DirectProcessVerificationRequiresAnExactSuccessfulCommandForDeduplication()
     {
         var call = new LmToolCall(
             "verify-process",
@@ -440,9 +697,64 @@ public sealed class CodingAgentTests
                 purpose = "test",
             }));
 
-        Assert.True(RunProcessor.IsRedundantVerificationCall(
+        var completedStages = new HashSet<string>(["test"], StringComparer.Ordinal);
+        Assert.False(RunProcessor.IsRedundantVerificationCall(
             call,
-            new HashSet<string>(["test"], StringComparer.Ordinal)));
+            completedStages,
+            new HashSet<string>(StringComparer.Ordinal)));
+
+        var successfulCalls = new HashSet<string>(
+            [RunProcessor.CreateToolFingerprint(call)],
+            StringComparer.Ordinal);
+        Assert.True(RunProcessor.IsRedundantVerificationCall(call, completedStages, successfulCalls));
+
+        var differentCommand = call with
+        {
+            Id = "verify-process-other",
+            Arguments = JsonSerializer.SerializeToElement(new
+            {
+                executable = "dotnet",
+                arguments = OtherDotNetTestArguments,
+                purpose = "test",
+            }),
+        };
+        Assert.False(RunProcessor.IsRedundantVerificationCall(differentCommand, completedStages, successfulCalls));
+    }
+
+    [Fact]
+    public void WorkspaceMutationInvalidatesEarlierProcessAndReadFingerprintsButKeepsUnsafeMutationRetriesBlocked()
+    {
+        static LmToolCall ToolCall(string name, string arguments) =>
+            new(Guid.NewGuid().ToString("N"), name, JsonSerializer.Deserialize<JsonElement>(arguments));
+
+        var successful = new HashSet<string>(StringComparer.Ordinal)
+        {
+            RunProcessor.CreateToolFingerprint(ToolCall(
+                ClientToolNames.ProcessRun,
+                """{"executable":"py","arguments":["-m","pytest"],"workingDirectory":".","purpose":"test"}""")),
+        };
+        var failedProcess = RunProcessor.CreateToolFingerprint(ToolCall(
+            ClientToolNames.ProcessRun,
+            """{"executable":"py","arguments":["-m","pytest"],"workingDirectory":".","purpose":"test"}"""));
+        var failedRead = RunProcessor.CreateToolFingerprint(ToolCall(
+            ClientToolNames.FileSystemReadText,
+            """{"path":"generated.py"}"""));
+        var failedMutation = RunProcessor.CreateToolFingerprint(ToolCall(
+            ClientToolNames.FileSystemReplaceText,
+            """{"path":"app.py","oldText":"old","newText":"new","expectedSha256":"stale"}"""));
+        var failed = new HashSet<string>(StringComparer.Ordinal)
+        {
+            failedProcess,
+            failedRead,
+            failedMutation,
+        };
+
+        RunProcessor.InvalidateToolFingerprintsAfterMutation(successful, failed);
+
+        Assert.Empty(successful);
+        Assert.DoesNotContain(failedProcess, failed);
+        Assert.DoesNotContain(failedRead, failed);
+        Assert.Contains(failedMutation, failed);
     }
 
     [Theory]

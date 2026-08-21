@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Text;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.Storage.Streams;
 using Windows.System;
@@ -285,12 +286,21 @@ public sealed partial class AssistantPage : Page, IDisposable
             return;
         }
 
-        var updatesAiState = args.Envelope.Type is "chat.send" or "microphone.speak";
+        var updatesAiState = false;
+        var isSpeechRequest = args.Envelope.Type == "microphone.speak";
         var microphoneMessageLocked = false;
         var audioCaptureMessageLocked = false;
         var chatMessageLocked = false;
         try
         {
+            if (args.Envelope.Type == "chat.send")
+            {
+                isSpeechRequest = await _coordinator.IsSpeechRequestAsync(
+                    args.Envelope.Payload,
+                    _lifetime?.Token ?? CancellationToken.None);
+            }
+            updatesAiState = args.Envelope.Type == "chat.send" && !isSpeechRequest;
+
             if (args.Envelope.Type.StartsWith("microphone.", StringComparison.Ordinal))
             {
                 await _microphoneBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
@@ -298,7 +308,7 @@ public sealed partial class AssistantPage : Page, IDisposable
             }
 
             if (args.Envelope.Type.StartsWith("audioCapture.", StringComparison.Ordinal)
-                || args.Envelope.Type == "chat.send")
+                || (args.Envelope.Type == "chat.send" && !isSpeechRequest))
             {
                 await _audioCaptureBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
                 audioCaptureMessageLocked = true;
@@ -306,31 +316,35 @@ public sealed partial class AssistantPage : Page, IDisposable
 
             if (args.Envelope.Type == "chat.send")
             {
-                if (_chatBridgeGate.CurrentCount == 0 || _goAi.IsRunning || _microphone.Current.IsSpeaking)
+                if (!isSpeechRequest
+                    && (_chatBridgeGate.CurrentCount == 0 || _goAi.IsRunning || _microphone.Current.IsSpeaking))
                 {
                     await _coordinator.CancelCurrentAsync().ConfigureAwait(false);
-                    await _microphone.StopSpeechAsync(CancellationToken.None).ConfigureAwait(false);
+                    await _goAi.CancelSpeechAsync(CancellationToken.None).ConfigureAwait(false);
                 }
-                await _chatBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
-                chatMessageLocked = true;
-                if (_screenClips.Current.IsRecording)
+                if (!isSpeechRequest)
                 {
-                    var promptSessionId = TryReadGuid(args.Envelope.Payload, "sessionId", out var requestedSessionId)
-                        ? requestedSessionId
-                        : (Guid?)null;
-                    await StopScreenClipAsync(args.Envelope, bridge, promptSessionId, suppressSnapshot: true);
-                }
-
-                var requiredCapture = await _coordinator.GetRequiredMediaCaptureAsync(
-                    args.Envelope.Payload,
-                    _lifetime?.Token ?? CancellationToken.None);
-                if (requiredCapture is { } captureAction)
-                {
-                    await bridge.PostAsync("capture.required", new
+                    await _chatBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
+                    chatMessageLocked = true;
+                    if (_screenClips.Current.IsRecording)
                     {
-                        action = AssistantCoordinator.MediaActionName(captureAction),
-                    }, args.Envelope.RequestId);
-                    return;
+                        var promptSessionId = TryReadGuid(args.Envelope.Payload, "sessionId", out var requestedSessionId)
+                            ? requestedSessionId
+                            : (Guid?)null;
+                        await StopScreenClipAsync(args.Envelope, bridge, promptSessionId, suppressSnapshot: true);
+                    }
+
+                    var requiredCapture = await _coordinator.GetRequiredMediaCaptureAsync(
+                        args.Envelope.Payload,
+                        _lifetime?.Token ?? CancellationToken.None);
+                    if (requiredCapture is { } captureAction)
+                    {
+                        await bridge.PostAsync("capture.required", new
+                        {
+                            action = AssistantCoordinator.MediaActionName(captureAction),
+                        }, args.Envelope.RequestId);
+                        return;
+                    }
                 }
             }
 
@@ -371,6 +385,9 @@ public sealed partial class AssistantPage : Page, IDisposable
                         url = preview.Url,
                         posterUrl = preview.PosterUrl,
                     }, args.Envelope.RequestId);
+                    break;
+                case "artifact.open":
+                    await OpenArtifactAsync(args.Envelope.Payload);
                     break;
                 case "screen.capture":
                     await CaptureScreenshotAsync(args.Envelope, bridge);
@@ -449,7 +466,7 @@ public sealed partial class AssistantPage : Page, IDisposable
                     }
                     break;
                 case "microphone.stopSpeech":
-                    await _microphone.StopSpeechAsync(CancellationToken.None);
+                    await _goAi.CancelSpeechAsync(CancellationToken.None);
                     break;
                 case "microphone.toggleSpeechPause":
                     var playback = await _microphone.ToggleSpeechPauseAsync(
@@ -598,9 +615,7 @@ public sealed partial class AssistantPage : Page, IDisposable
             previousCancellation?.Cancel();
             if (_goAi.IsSpeaking || _microphone.Current.IsSpeaking)
             {
-                await Task.WhenAll(
-                    _microphone.StopSpeechAsync(CancellationToken.None),
-                    _coordinator.CancelCurrentAsync()).ConfigureAwait(false);
+                await _goAi.CancelSpeechAsync(CancellationToken.None).ConfigureAwait(false);
             }
             if (previousTask is { IsCompleted: false })
             {
@@ -1756,6 +1771,25 @@ public sealed partial class AssistantPage : Page, IDisposable
         output.SetLength(0);
         await _blobs.ExportAsync(artifact.BlobId, output, _lifetime?.Token ?? CancellationToken.None);
         await bridge.PostAsync("status.changed", new { artifactSaved = artifact.FileName });
+    }
+
+    private async Task OpenArtifactAsync(JsonElement payload)
+    {
+        if (!TryReadGuid(payload, "artifactId", out var artifactId)
+            || await _artifacts.GetAsync(artifactId, _lifetime?.Token ?? CancellationToken.None) is not { } artifact
+            || !artifact.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Das zu öffnende Bild wurde nicht gefunden.");
+        }
+
+        var path = await _previews.MaterializeOriginalAsync(
+            artifactId,
+            _lifetime?.Token ?? CancellationToken.None);
+        var file = await StorageFile.GetFileFromPathAsync(path);
+        if (!await Launcher.LaunchFileAsync(file))
+        {
+            throw new InvalidOperationException("Das Bild konnte nicht im Standardprogramm geöffnet werden.");
+        }
     }
 
     private static async Task OpenExternalLinkAsync(JsonElement payload)

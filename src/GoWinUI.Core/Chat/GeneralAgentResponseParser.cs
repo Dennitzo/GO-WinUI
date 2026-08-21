@@ -82,7 +82,7 @@ public static class GeneralAgentResponseParser
             if (trimmed.Length == 0
                 || trimmed == "---"
                 || trimmed.Contains('|', StringComparison.Ordinal)
-                || trimmed.StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase)
+                || TryExtractLegacySessionTitle(trimmed, out _)
                 || lines.Count > 0 && trimmed.StartsWith('#'))
             {
                 continue;
@@ -233,16 +233,39 @@ public static class GeneralAgentResponseParser
     private static string CleanVisibleMessage(string content) => string.Join('\n',
         (content ?? string.Empty).ReplaceLineEndings("\n")
             .Split('\n')
-            .Where(static line => !line.TrimStart().StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase)))
+            .Where(static line => !TryExtractLegacySessionTitle(line, out _)))
         .Trim();
 
     private static string? ExtractLegacySessionTitle(string content)
     {
-        var line = (content ?? string.Empty).ReplaceLineEndings("\n")
-            .Split('\n')
-            .Select(static line => line.Trim())
-            .FirstOrDefault(static line => line.StartsWith("GO_SESSION_TITLE:", StringComparison.OrdinalIgnoreCase));
-        return line is null ? null : line["GO_SESSION_TITLE:".Length..].Trim();
+        foreach (var line in (content ?? string.Empty).ReplaceLineEndings("\n").Split('\n'))
+        {
+            if (TryExtractLegacySessionTitle(line, out var title))
+            {
+                return title;
+            }
+        }
+        return null;
+    }
+
+    private static bool TryExtractLegacySessionTitle(string line, out string title)
+    {
+        title = string.Empty;
+        var normalized = (line ?? string.Empty)
+            .Replace('\u00A0', ' ')
+            .Replace("\\_", "_", StringComparison.Ordinal)
+            .Trim()
+            .TrimStart('*', '_', '`', '#', ' ');
+        const string prefix = "GO_SESSION_TITLE:";
+        if (!normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        title = normalized[prefix.Length..]
+            .Trim()
+            .Trim('*', '_', '`', ' ', '\u00A0');
+        return true;
     }
 
     private static string PlainText(string line)

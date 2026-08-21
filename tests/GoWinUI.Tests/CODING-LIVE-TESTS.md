@@ -29,9 +29,9 @@ Das JSONL-Protokoll enthält Modellereignisse, Toolvorschläge, Laufzeiten,
 Programm-Ausgaben, Fehler, Workspace-Revisionen und Abschlusszustände. Große
 Dateiinhalte werden nicht dupliziert; dafür werden Länge und SHA-256 gespeichert.
 
-## Einstein-Kampagne
+## Einstein-Workflow
 
-Die Kampagne untersucht anerkannte exakte, effektive, semiklassische und
+Der Workflow untersucht anerkannte exakte, effektive, semiklassische und
 perturbative Modelle zu Einsteins Feldgleichungen, Quantenfeldern in gekrümmter
 Raumzeit, schwarzer-Loch-Thermodynamik und Niederenergie-Grenzen der
 Stringtheorie. Der Agent muss Resultate symbolisch und numerisch prüfen,
@@ -39,14 +39,19 @@ Gültigkeitsbereiche und offene Fragen dauerhaft dokumentieren und zu jedem Fall
 eine fachlich sinnvolle Grafik oder Simulation samt reproduzierbaren Daten
 erzeugen. Er darf Plot- und Simulationsverfahren selbst auswählen und in
 späteren Iterationen umbauen. Wissentlich inkonsistente Eingabedaten sind nicht
-Teil der Kampagne. Jeder unabhängig als `verified` bestätigte Fall erhält
+Teil des Workflows. Jeder unabhängig als `verified` bestätigte Fall erhält
 zusätzlich ein eigenes ausführliches Markdown-Dokument unter `solutions/` mit
 Herleitung, Annahmen, Gültigkeitsbereich, Prüfresiduen und Reproduktionsschritten.
 
-Beim Start öffnet sich automatisch eine lokale Browseransicht auf Loopback. Sie
-beobachtet `visualizations/`, `simulation_data/` und `solutions/` und aktualisiert
-Plots, Simulationen, Zwischenmetriken und Lösungsstände sekündlich ohne
-Browsercache. Lange Rechnungen schreiben ihren atomaren Fortschritt nach
-`simulation_data/live_progress.json` und aktualisieren einen Live-Plot. Mit der
-Umgebungsvariable `GO_AI_LIVE_DASHBOARD=0` kann das automatische Öffnen für einen
-unbeaufsichtigten Lauf deaktiviert werden. Der Dauermodus läuft bis `Ctrl+C`.
+Jeder direkte Livetest schreibt Aufgaben, Agentenantworten und Fehler zusätzlich
+als strukturierte AI-Nachrichten nach `.go-workflow/chat-messages.jsonl` im
+Workspace. Wird derselbe Workflow später in GO geladen, importiert die Sitzung
+diese Einträge genau einmal in den Chat.
+
+Lange Rechnungen aktualisieren `simulation_data/live_progress.json` und
+`visualizations/live_progress.png` atomar. Im GO-Workflow wird jeder neue stabile
+PNG-Inhaltsstand genau einmal als normale AI-Nachricht mit Bildartefakt
+veröffentlicht. Verifizierte Dateien aus `solutions/` und der aktuelle
+Aufgabenstand erscheinen ebenfalls als statische AI-Nachrichten. Es gibt weder
+eine eingebettete Sonderansicht noch einen externen Browser. Der Dauermodus läuft
+bis `Ctrl+C`; in GO übernimmt der zentrale Prompt-Stop-Button den Abbruch.

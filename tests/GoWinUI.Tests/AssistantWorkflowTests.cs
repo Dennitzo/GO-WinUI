@@ -31,7 +31,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("\"session.tool\"", bridge, StringComparison.Ordinal);
 
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.Contains("bridge.js?v=20260820-1", html, StringComparison.Ordinal);
+        Assert.Contains("bridge.js?v=20260821-1", html, StringComparison.Ordinal);
 
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         Assert.Contains("post(\"session.tool\"", app, StringComparison.Ordinal);
@@ -67,8 +67,9 @@ public sealed class AssistantWorkflowTests
         Assert.InRange(AssistantPage.PdfA4HeightInches, 11.692, 11.693);
         Assert.InRange(AssistantPage.PdfBookMarginLeftInches, .944, .946);
         Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
-        Assert.Contains("styles.css?v=20260819-3", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260820-2", html, StringComparison.Ordinal);
+        Assert.Contains("styles.css?v=20260821-1", html, StringComparison.Ordinal);
+        Assert.Contains("markdown.js?v=20260821-1", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260821-1", html, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
@@ -159,8 +160,9 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("data-tool-action=\"imageGeneration\"", html, StringComparison.Ordinal);
         Assert.Contains("data-tool-action=\"code\"", html, StringComparison.Ordinal);
         Assert.Contains("Vorlesen", app, StringComparison.Ordinal);
-        Assert.Contains("speechMessageId: String(message.id)", app, StringComparison.Ordinal);
-        Assert.Contains("toolAction: \"textToSpeech\"", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"microphone.speak\", {", app, StringComparison.Ordinal);
+        Assert.Contains("messageId: String(message.id)", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("speechMessageId: String(message.id)", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -186,11 +188,54 @@ public sealed class AssistantWorkflowTests
     [InlineData("bricsCad", PromptTriggerAction.BricsCad)]
     [InlineData("code", PromptTriggerAction.Code)]
     [InlineData("audiobook", PromptTriggerAction.Audiobook)]
+    [InlineData("textToSpeech", PromptTriggerAction.TextToSpeech)]
     public void ExplicitComposerToolCreatesOneShotTrigger(string tool, PromptTriggerAction expected)
     {
         var match = AssistantCoordinator.CreateToolMatch(tool, "Aufgabe ohne Präfix");
         Assert.Equal(expected, match.Trigger.Action);
         Assert.Equal("Aufgabe ohne Präfix", match.RemainingPrompt);
+    }
+
+    [Fact]
+    public async Task ReadAloudPromptIsClassifiedWithoutBecomingAChatRun()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        using var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        var session = await environment.Get<IChatRepository>().CreateSessionAsync("Parallel vorlesen");
+
+        using var speechPayload = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            sessionId = session.Id,
+            prompt = "Vorlesen",
+            toolAction = "textToSpeech",
+        }));
+        using var chatPayload = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            sessionId = session.Id,
+            prompt = "Analysiere den nÃ¤chsten Fall.",
+        }));
+
+        Assert.True(await coordinator.IsSpeechRequestAsync(speechPayload.RootElement));
+        Assert.False(await coordinator.IsSpeechRequestAsync(chatPayload.RootElement));
+    }
+
+    [Fact]
+    public void PersistedCodingProcessReportCanAlwaysBeReadAloud()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var message = new ChatMessage(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            ChatRole.Assistant,
+            "### Prozessbericht\n\nDie Schwarzschild-Metrik wird symbolisch geprÃ¼ft.",
+            MessageStatus.Completed,
+            now,
+            now);
+
+        Assert.True(GoAiAssistantService.IsReadableSpeechMessage(message));
+        Assert.NotEmpty(SpeechSourceSegmentation.CreateUnits(message.Content));
     }
 
     [Fact]
@@ -245,7 +290,7 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void AnalysisToolsOwnCaptureAndSidebarDeleteRemainsHoverOnlyDuringRuns()
+    public void AnalysisToolsOwnCaptureAndSidebarDeleteRemainsInteractiveDuringRuns()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
@@ -261,8 +306,9 @@ public sealed class AssistantWorkflowTests
         Assert.DoesNotContain("data-tool-immediate=\"screenClip.toggle\"", html, StringComparison.Ordinal);
         Assert.Contains("beginMediaCapture(action)", app, StringComparison.Ordinal);
         Assert.Contains("if (state.documents.length > 0) return true", app, StringComparison.Ordinal);
-        Assert.Contains(".session-delete:disabled { opacity: 0; }", styles, StringComparison.Ordinal);
-        Assert.Contains(".session-item:hover .session-delete:not(:disabled)", styles, StringComparison.Ordinal);
+        Assert.DoesNotContain("remove.disabled = state.isRunning", app, StringComparison.Ordinal);
+        Assert.DoesNotContain(".session-delete:disabled", styles, StringComparison.Ordinal);
+        Assert.Contains(".session-item:hover .session-delete", styles, StringComparison.Ordinal);
         Assert.Contains("elements.workspaceButton.classList.remove(\"active\")", app, StringComparison.Ordinal);
         Assert.Contains("post(\"audioCapture.start\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
         Assert.Contains("Systemaudio aufnehmen", app, StringComparison.Ordinal);
@@ -704,6 +750,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("background-color: Highlight", styles, StringComparison.Ordinal);
         Assert.Contains("\"speech.progress\"", bridge, StringComparison.Ordinal);
         Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("speech.progress"));
+        Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("chat.removed"));
     }
 
     [Fact]
@@ -715,6 +762,45 @@ public sealed class AssistantWorkflowTests
 
         Assert.StartsWith("data:image/png;base64,", url, StringComparison.Ordinal);
         Assert.Equal(png, Convert.FromBase64String(url[(url.IndexOf(',', StringComparison.Ordinal) + 1)..]));
+    }
+
+    [Fact]
+    public async Task ArtifactImagesCanBeMaterializedAndOpenedThroughTheBridge()
+    {
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("artifact.open"));
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        Assert.Contains("\"artifact.open\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("post(\"artifact.open\", { artifactId: artifact.id })", app, StringComparison.Ordinal);
+
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Bild öffnen");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Bild", MessageStatus.Completed);
+        byte[] png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        var sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(png)).ToLowerInvariant();
+        await using var source = new MemoryStream(png, writable: false);
+        var artifact = await environment.Get<IChatArtifactRepository>().ImportAsync(
+            message.Id,
+            "test-image",
+            "plot.png",
+            "image/png",
+            sha256,
+            png.Length,
+            "coding-campaign",
+            null,
+            source);
+        var cacheRoot = Path.Combine(environment.Directory, "preview-cache");
+        using var previews = new AssistantArtifactPreviewService(
+            environment.Get<IChatArtifactRepository>(),
+            environment.Get<IBinaryObjectStore>(),
+            cacheRoot);
+
+        var path = await previews.MaterializeOriginalAsync(artifact.Id, CancellationToken.None);
+
+        Assert.Equal(Path.Combine(cacheRoot, artifact.Id.ToString("N"), "original.png"), path);
+        Assert.Equal(png, await File.ReadAllBytesAsync(path));
     }
 
 
@@ -876,6 +962,8 @@ public sealed class AssistantWorkflowTests
 
         Assert.Contains("id=\"composer-speech-status\"", html, StringComparison.Ordinal);
         Assert.Contains("id=\"composer-speech-pause\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"composer-speech-stop\"", html, StringComparison.Ordinal);
+        Assert.Contains("title=\"Vorlesen stoppen\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("composer-speech-previous", html, StringComparison.Ordinal);
         Assert.DoesNotContain("composer-speech-skip", html, StringComparison.Ordinal);
         Assert.DoesNotContain("Vorheriger Absatz", html, StringComparison.Ordinal);
@@ -887,6 +975,9 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("case \"speech.status\":", app, StringComparison.Ordinal);
         Assert.Contains("renderSpeechStatus();", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.toggleSpeechPause\"", app, StringComparison.Ordinal);
+        Assert.Contains("elements.composerSpeechStop.addEventListener", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"microphone.stopSpeech\", {});", app, StringComparison.Ordinal);
+        Assert.Contains("\"chat.removed\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.previousSpeechParagraph", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.skipSpeechParagraph", app, StringComparison.Ordinal);
         Assert.Contains("isPaused ? \"Fortsetzen\" : \"Pausieren\"", app, StringComparison.Ordinal);
@@ -895,6 +986,8 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("\"speech.status\"", bridge, StringComparison.Ordinal);
         Assert.DoesNotContain("Erneut senden", app, StringComparison.Ordinal);
         Assert.DoesNotContain("retryMessage", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("createMessageFooterLink(\"Fortsetzen\"", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("function continueMessage()", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -960,6 +1053,44 @@ public sealed class AssistantWorkflowTests
                 sessionId,
                 updatedAt.AddSeconds(1),
                 anchor));
+    }
+
+    [Fact]
+    public void FooterSpeechAcceptsEveryStableStoredAssistantMessage()
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var status in new[]
+                 {
+                     MessageStatus.Completed,
+                     MessageStatus.Cancelled,
+                     MessageStatus.Interrupted,
+                     MessageStatus.Failed,
+                 })
+        {
+            var message = new ChatMessage(
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                ChatRole.Assistant,
+                "Der Coding-Workflow ist geladen und startet gestoppt. Senden startet ihn erneut.",
+                status,
+                now,
+                now);
+            Assert.True(GoAiAssistantService.IsReadableSpeechMessage(message));
+        }
+
+        var invalid = new ChatMessage(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            ChatRole.Assistant,
+            "Noch nicht stabil.",
+            MessageStatus.Streaming,
+            now,
+            now);
+        Assert.False(GoAiAssistantService.IsReadableSpeechMessage(invalid));
+        Assert.False(GoAiAssistantService.IsReadableSpeechMessage(
+            invalid with { Role = ChatRole.User, Status = MessageStatus.Completed }));
+        Assert.False(GoAiAssistantService.IsReadableSpeechMessage(
+            invalid with { Content = string.Empty, Status = MessageStatus.Completed }));
     }
 
     [Fact]
@@ -1137,6 +1268,13 @@ public sealed class AssistantWorkflowTests
             4_096,
             16_384);
         Assert.True(SessionContextPreparationService.CalculateBlockSummaryTarget(4_000, 4) < 4_000);
+    }
+
+    [Fact]
+    public void SseReconnectBudgetResetsAfterPersistedEventProgress()
+    {
+        Assert.Equal(4, GoAiAssistantService.ReconnectAttemptsAfterProgress(4, 120, 120));
+        Assert.Equal(0, GoAiAssistantService.ReconnectAttemptsAfterProgress(4, 120, 121));
     }
 
     private static ChatMessage Message(Guid sessionId, string content) => new(

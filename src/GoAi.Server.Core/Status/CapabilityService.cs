@@ -43,6 +43,7 @@ public sealed class CapabilityService
             ClientToolNames.FileSystemProposeDelete,
             ClientToolNames.ProcessRunPreset,
             ClientToolNames.ProcessRun,
+            ClientToolNames.LeanProof,
             ClientToolNames.BricsCadGeometryQuery,
             ClientToolNames.BricsCadMeasure,
             ClientToolNames.BricsCadMove,

@@ -54,6 +54,7 @@ public static class ClientToolNames
     public const string FileSystemProposeDelete = "fs.proposeDelete";
     public const string ProcessRunPreset = "process.runPreset";
     public const string ProcessRun = "process.run";
+    public const string LeanProof = "proof.lean";
     public const string BricsCadGeometryQuery = "bricscad.geometryQuery";
     public const string BricsCadMeasure = "bricscad.measure";
     public const string BricsCadMove = "bricscad.move";

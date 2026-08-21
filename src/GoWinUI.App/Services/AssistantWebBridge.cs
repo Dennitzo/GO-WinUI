@@ -21,18 +21,20 @@ public sealed class AssistantWebBridge : IDisposable
         "document.remove", "attachment.remove", "workflow.list", "workflow.insert", "workflow.create",
         "workflow.update", "workflow.delete",
         "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
-        "artifact.save", "artifact.preview", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
+        "artifact.save", "artifact.preview", "artifact.open", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
         "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
         "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.toggleSpeechPause", "microphone.stop", "microphone.cancel",
         "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "session.tool", "ui.sessionPane", "external.open",
+        "campaign.list", "campaign.select", "campaign.run", "campaign.stop",
     };
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
-        "state.snapshot", "chat.started", "chat.delta", "chat.completed",
+        "state.snapshot", "chat.message", "chat.removed", "chat.started", "chat.delta", "chat.completed",
         "chat.cancelled", "chat.failed", "chat.codeDiff", "chat.codingTrace", "session.changed", "workflow.snapshot",
         "workflow.changed", "workflow.draft", "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
         "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
         "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady", "host.error",
+        "campaign.snapshot", "campaign.changed",
     };
     private static readonly HashSet<string> ReadableBlockKinds = new(StringComparer.Ordinal)
     {

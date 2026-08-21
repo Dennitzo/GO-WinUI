@@ -6,36 +6,34 @@ namespace GoWinUI.Tests;
 public sealed class ShellViewModelTests
 {
     [Fact]
-    public void ConnectionModeChipDistinguishesOfflineReachableAndUnavailableModes()
+    public void ConnectionStateTracksOfflineReachableAndUnavailableModesWithoutATitleBarLabel()
     {
         var viewModel = new ShellViewModel();
 
         Assert.False(viewModel.IsAiConnectionEnabled);
-        Assert.Equal("Offline", viewModel.AiConnectionModeText);
 
         viewModel.IsAiConnectionEnabled = true;
-
-        Assert.Equal("Wird geprüft", viewModel.AiConnectionModeText);
+        Assert.False(viewModel.IsAiAvailabilityKnown);
 
         viewModel.ApplyAiConnectionState(false, false);
-
-        Assert.Equal("Nicht erreichbar", viewModel.AiConnectionModeText);
+        Assert.True(viewModel.IsAiAvailabilityKnown);
+        Assert.False(viewModel.IsAiAvailable);
+        Assert.False(viewModel.IsAiServerReady);
 
         viewModel.ApplyAiConnectionState(true, false);
-
-        Assert.Equal("Online · Eingeschränkt", viewModel.AiConnectionModeText);
+        Assert.True(viewModel.IsAiAvailable);
+        Assert.False(viewModel.IsAiServerReady);
 
         viewModel.ApplyAiConnectionState(true, true);
-
-        Assert.Equal("Online", viewModel.AiConnectionModeText);
+        Assert.True(viewModel.IsAiAvailable);
+        Assert.True(viewModel.IsAiServerReady);
 
         viewModel.ApplyAiConnectionState(false, false);
-
-        Assert.Equal("Nicht erreichbar", viewModel.AiConnectionModeText);
+        Assert.False(viewModel.IsAiAvailable);
+        Assert.False(viewModel.IsAiServerReady);
 
         viewModel.IsAiConnectionEnabled = false;
-
-        Assert.Equal("Offline", viewModel.AiConnectionModeText);
+        Assert.False(viewModel.IsAiConnectionEnabled);
     }
 
     [Fact]
@@ -51,13 +49,13 @@ public sealed class ShellViewModelTests
         viewModel.ApplyAiAvailabilitySnapshot(false, null, null, null);
 
         Assert.True(viewModel.IsAiAvailable);
-        Assert.Equal("Online", viewModel.AiConnectionModeText);
+        Assert.True(viewModel.IsAiServerReady);
 
         viewModel.IsAiRunning = false;
         viewModel.ApplyAiAvailabilitySnapshot(false, null, null, null);
 
         Assert.False(viewModel.IsAiAvailable);
-        Assert.Equal("Nicht erreichbar", viewModel.AiConnectionModeText);
+        Assert.False(viewModel.IsAiServerReady);
     }
 
     [Fact]

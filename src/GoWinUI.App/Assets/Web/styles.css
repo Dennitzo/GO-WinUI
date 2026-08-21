@@ -154,8 +154,7 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .session-item__short { display: none; place-items: center; width: 38px; height: 38px; border-radius: 9px; font-weight: 700; text-transform: uppercase; }
 .session-delete { display: grid; place-items: center; width: 32px; height: 32px; margin-right: 5px; padding: 0; border: 0; border-radius: 8px; opacity: 0; background: transparent; color: var(--muted); }
 .session-delete svg { width: 17px; height: 17px; }
-.session-delete:disabled { opacity: 0; }
-.session-item:hover .session-delete:not(:disabled), .session-delete:focus-visible:not(:disabled) { opacity: 1; }
+.session-item:hover .session-delete, .session-delete:focus-visible { opacity: 1; }
 .session-delete:hover { background: color-mix(in srgb, var(--danger) 13%, transparent); color: var(--danger); }
 
 .app-shell.sessions-collapsed .session-pane { padding-inline: 8px; }
@@ -183,10 +182,12 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .message-coding-panels { --coding-panel-viewport-height: 210px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; width: 100%; margin-top: 12px; }
 .message-coding-panels > details { width: 100%; min-width: 0; margin-top: 0; }
 .message-coding-panels > .message-code-diff { grid-column: 1 / -1; }
+.current-coding-workspace { box-sizing: border-box; width: calc(100% - 44px); margin: 0 0 24px 44px; }
+.current-coding-workspace .message-coding-panels { margin-top: 0; }
 .message-coding-trace { width: min(980px, 100%); margin-top: 12px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--surface-raised) 88%, transparent); font-size: 12px; }
 .message-coding-trace__summary { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 7px 11px; color: var(--text); cursor: pointer; list-style: none; user-select: none; }
 .message-coding-trace__summary::-webkit-details-marker { display: none; }
-.message-coding-trace__summary::after { content: "\203A"; margin-left: auto; color: var(--muted); font-size: 18px; transform: rotate(90deg); transition: transform .14s ease; }
+.message-coding-trace__summary::after { content: "\203A"; margin-left: 0; color: var(--muted); font-size: 18px; transform: rotate(90deg); transition: transform .14s ease; }
 .message-coding-trace[open] .message-coding-trace__summary::after { transform: rotate(270deg); }
 .message-coding-trace__icon { width: 17px; height: 17px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .message-coding-trace__title { font-weight: 650; }
@@ -202,7 +203,7 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .message-coding-powershell { width: min(980px, 100%); margin-top: 12px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--bg) 76%, #000 24%); font-size: 12px; }
 .message-coding-powershell__summary { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 7px 11px; color: var(--text); cursor: pointer; list-style: none; user-select: none; }
 .message-coding-powershell__summary::-webkit-details-marker { display: none; }
-.message-coding-powershell__summary::after { content: "\203A"; margin-left: auto; color: var(--muted); font-size: 18px; transform: rotate(90deg); transition: transform .14s ease; }
+.message-coding-powershell__summary::after { content: "\203A"; margin-left: 0; color: var(--muted); font-size: 18px; transform: rotate(90deg); transition: transform .14s ease; }
 .message-coding-powershell[open] .message-coding-powershell__summary::after { transform: rotate(270deg); }
 .message-coding-powershell__icon { width: 17px; height: 17px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .message-coding-powershell__title { font-weight: 650; }
@@ -221,7 +222,7 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .message-code-diff { width: min(980px, 100%); margin-top: 12px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border)); border-radius: 12px; background: var(--surface-raised); font-size: 12px; }
 .message-code-diff__summary { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 7px 11px; color: var(--text); cursor: pointer; list-style: none; user-select: none; }
 .message-code-diff__summary::-webkit-details-marker { display: none; }
-.message-code-diff__summary::after { content: "›"; margin-left: auto; color: var(--muted); font-size: 18px; transform: rotate(90deg); transition: transform .14s ease; }
+.message-code-diff__summary::after { content: "›"; margin-left: 0; color: var(--muted); font-size: 18px; transform: rotate(90deg); transition: transform .14s ease; }
 .message-code-diff[open] .message-code-diff__summary::after { transform: rotate(270deg); }
 .message-code-diff__icon { width: 17px; height: 17px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .message-code-diff__title { font-weight: 650; }
@@ -236,6 +237,17 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .diff-line--added { color: #b8edb8; background: rgb(41 112 58 / 22%); }
 .diff-line--deleted { color: #ffc1c1; background: rgb(145 48 48 / 22%); }
 .diff-line--notice { color: var(--muted); font-style: italic; }
+.coding-panel-maximize { display: grid; flex: 0 0 28px; place-items: center; width: 28px; height: 28px; margin-left: auto; padding: 0; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+.coding-panel-maximize:hover { border-color: var(--border); background: var(--surface-hover); color: var(--text); }
+.coding-panel-maximize:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent); outline-offset: 1px; }
+.coding-panel-maximize svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+body.coding-panel-maximized { overflow: hidden; }
+.coding-panel--maximized { position: fixed !important; inset: 12px !important; z-index: 1000; display: block !important; width: auto !important; max-width: none !important; height: auto !important; max-height: none !important; margin: 0 !important; overflow: auto !important; overscroll-behavior: contain; border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); background: var(--surface-solid); box-shadow: 0 24px 80px rgb(0 0 0 / 48%); scrollbar-gutter: stable; }
+.coding-panel--maximized > summary { position: sticky; top: 0; z-index: 2; background: var(--surface-solid); }
+.coding-panel--maximized .message-coding-trace__list,
+.coding-panel--maximized .message-coding-powershell__body,
+.coding-panel--maximized .message-code-diff__content { height: auto !important; max-height: none !important; min-height: 0; overflow-y: visible; }
+.coding-panel--maximized .message-code-diff__content { width: 100%; overflow-x: auto; }
 .chat-header h1 { margin: 0; font: 650 18px/1.25 "Segoe UI Variable Display", sans-serif; }
 .chat-header .icon-button { border-color: transparent; background: transparent; }
 .message-scroll { min-height: 0; padding: 20px 28px 30px; overflow: auto; }
@@ -261,7 +273,6 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .avatar { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--border); border-radius: 50%; background: color-mix(in srgb, var(--accent) 9%, var(--surface-raised)); color: var(--text); font-size: 11px; font-weight: 750; }
 .message-body { display: flex; flex-direction: column; align-items: flex-start; width: fit-content; min-width: 0; max-width: min(900px, 86%); }
 .message.assistant .message-body { width: fit-content; max-width: 100%; }
-.message.assistant .message-body.message-body--coding { width: 100%; }
 .message-meta { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; color: var(--muted); font-size: 12px; }
 .message-content { min-width: 0; max-width: 100%; overflow-wrap: anywhere; line-height: inherit; }
 .message.assistant .message-content { width: fit-content; max-width: 100%; padding: 0; border-radius: 0; background: transparent; }
@@ -323,13 +334,15 @@ html[data-theme="high-contrast"] tr.speech-source-active--block > td {
 .artifact-card { overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-strong); }
 .artifact-card--capture { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); background: var(--surface); }
 .artifact-card img, .artifact-card video { display: block; width: 100%; max-height: 420px; object-fit: contain; background: #111; }
+.artifact-card__open-image { display: block; width: 100%; padding: 0; overflow: hidden; border: 0; background: #111; cursor: zoom-in; }
+.artifact-card__open-image:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .artifact-card audio { display: block; width: calc(100% - 20px); margin: 12px 10px; }
 .artifact-card__footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; color: var(--muted); font-size: 12px; }
 .artifact-card__footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .artifact-card__footer button { flex: 0 0 auto; border: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; }
 .message-footer { display: flex; align-items: center; align-self: stretch; flex-wrap: wrap; gap: 4px; width: 100%; min-height: 26px; margin-top: 4px; opacity: 0; pointer-events: none; transition: opacity .15s ease; }
 .message-footer.has-workflow-actions { width: 100%; gap: 12px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
-.message:hover .message-footer, .message:focus-within .message-footer { opacity: 1; pointer-events: auto; }
+.message.assistant .message-footer, .message:hover .message-footer, .message:focus-within .message-footer { opacity: 1; pointer-events: auto; }
 .message-action { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); transition: background .15s ease, color .15s ease; }
 .message-action svg { width: 20px; height: 20px; }
 .message-action:hover { background: var(--surface-hover); color: var(--text); }
@@ -415,11 +428,11 @@ tr:last-child td { border-bottom: 0; }
 .composer-speech-status #composer-speech-detail { min-width: 0; overflow: hidden; color: color-mix(in srgb, var(--accent) 82%, var(--text)); text-overflow: ellipsis; white-space: nowrap; }
 .composer-speech-status__spinner { flex: 0 0 auto; width: 13px; height: 13px; border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: message-status-spin .9s linear infinite; }
 .composer-speech-status.paused .composer-speech-status__spinner { animation-play-state: paused; }
-.composer-speech-status__pause { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 1px solid color-mix(in srgb, var(--accent) 64%, var(--border)); border-radius: 50%; background: transparent; color: var(--accent); cursor: pointer; }
-.composer-speech-status__pause:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.composer-speech-status__pause:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent); outline-offset: 2px; }
-.composer-speech-status__pause:disabled { opacity: .45; cursor: default; }
-.composer-speech-status__pause svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.composer-speech-status__pause, .composer-speech-status__stop { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 1px solid color-mix(in srgb, var(--accent) 64%, var(--border)); border-radius: 50%; background: transparent; color: var(--accent); cursor: pointer; }
+.composer-speech-status__pause:hover:not(:disabled), .composer-speech-status__stop:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.composer-speech-status__pause:focus-visible, .composer-speech-status__stop:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent); outline-offset: 2px; }
+.composer-speech-status__pause:disabled, .composer-speech-status__stop:disabled { opacity: .45; cursor: default; }
+.composer-speech-status__pause svg, .composer-speech-status__stop svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .composer textarea { display: block; width: 100%; height: 58px; min-height: 58px; max-height: 58px; padding: 2px 6px 11px; overflow-y: auto; resize: none; border: 0; outline: 0; background: transparent; font-size: 16px; line-height: 1.45; }
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .composer-tools { position: relative; flex-wrap: wrap; gap: 8px; }
@@ -831,6 +844,8 @@ tr:last-child td { border-bottom: 0; }
     font-size: .9em !important;
     break-inside: avoid-page;
   }
+  .pdf-book .math-source-text { display: none !important; }
+  .pdf-book .math-render { display: inline-block !important; color: #111 !important; }
   .pdf-book .message-artifacts {
     display: block !important;
     width: 100% !important;

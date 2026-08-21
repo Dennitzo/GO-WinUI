@@ -22,6 +22,9 @@ internal static partial class AppLog
     [LoggerMessage(EventId = 1005, Level = LogLevel.Warning, Message = "Saved window placement could not be restored; using the current display")]
     public static partial void WindowRestoreFailed(ILogger logger, Exception exception);
 
+    [LoggerMessage(EventId = 1006, Level = LogLevel.Information, Message = "GO-AI-Verbindungsstatus geändert: {State}")]
+    public static partial void LocalAiConnectionStateChanged(ILogger logger, string state);
+
     [LoggerMessage(EventId = 1100, Level = LogLevel.Error, Message = "WebView2 initialization failed")]
     public static partial void WebViewInitializationFailed(ILogger logger, Exception exception);
 

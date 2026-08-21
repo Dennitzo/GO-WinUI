@@ -25,6 +25,10 @@ public sealed record AgentRunCheckpoint(
     IReadOnlyList<string>? BlockedToolNames = null,
     IReadOnlyList<string>? SuccessfulReadFingerprints = null,
     IReadOnlyList<WorkspaceReadRange>? SuccessfulReadRanges = null,
-    IReadOnlyList<string>? SuccessfulToolFingerprints = null);
+    IReadOnlyList<string>? SuccessfulToolFingerprints = null,
+    int ConsecutiveRedundantVerifications = 0,
+    int ConsecutiveRoundsWithoutMutation = 0,
+    IReadOnlyDictionary<string, int>? FailedReplaceTargetCounts = null,
+    IReadOnlyDictionary<string, int>? TextMutationCountsSinceProcess = null);
 
 public sealed record WorkspaceReadRange(string Path, int StartLine, int EndLine);

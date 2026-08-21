@@ -18,7 +18,8 @@ public sealed class LocalToolBroker(
     ToolConfirmationService confirmation,
     IBricsCadBridgeHost bricsCad,
     WorkspaceRepositoryIndex repositoryIndex,
-    IDocumentIngestor documents)
+    IDocumentIngestor documents,
+    LeanProofService? leanProof = null)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private const int MaximumProcessStreamCharacters = 1_900_000;
@@ -26,6 +27,7 @@ public sealed class LocalToolBroker(
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
     private readonly AsyncLocal<string?> _executionWorkspace = new();
     private readonly AsyncLocal<Guid?> _executionSession = new();
+    private readonly LeanProofService _leanProof = leanProof ?? new LeanProofService();
 
     public bool IsBricsCadAvailable => bricsCad.IsConnected;
 
@@ -88,6 +90,7 @@ public sealed class LocalToolBroker(
                 ClientToolNames.FileSystemProposeDelete => await DeleteFileAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.ProcessRunPreset => await RunPresetAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.ProcessRun => await RunArbitraryProcessAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
+                ClientToolNames.LeanProof => await _leanProof.ExecuteAsync(Workspace(), proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.BricsCadGeometryQuery or ClientToolNames.BricsCadMeasure
                     or ClientToolNames.BricsCadMove or ClientToolNames.BricsCadAction =>
                     await RunBricsCadAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false),
@@ -146,7 +149,7 @@ public sealed class LocalToolBroker(
             ClientToolNames.FileSystemWriteText or ClientToolNames.FileSystemReplaceText or ClientToolNames.FileSystemMove
                 or ClientToolNames.FileSystemProposePatch or ClientToolNames.FileSystemProposeCreate
                 or ClientToolNames.FileSystemProposeDelete => ToolRiskClass.LocalMutation,
-            ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun => ToolRiskClass.Process,
+            ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun or ClientToolNames.LeanProof => ToolRiskClass.Process,
             ClientToolNames.BricsCadMove or ClientToolNames.BricsCadAction => ToolRiskClass.CadMutation,
             _ => throw new InvalidDataException($"Das Clientwerkzeug '{proposal.Name}' ist nicht freigegeben."),
         };
@@ -268,12 +271,41 @@ public sealed class LocalToolBroker(
                     arguments,
                     ["executable", "purpose"],
                     ["executable", "arguments", "workingDirectory", "timeoutSeconds", "purpose", "startMode"]);
-                ValidateString(arguments, "executable", 1, 1_024);
+                var executable = ValidateString(arguments, "executable", 1, 1_024);
+                if (IsLeanExecutable(executable))
+                {
+                    throw new InvalidDataException("Lean und Lake dürfen ausschließlich über das typisierte Werkzeug proof.lean ausgeführt werden.");
+                }
                 ValidateOptionalStringArray(arguments, "arguments", 128, 8_192);
                 ValidateOptionalString(arguments, "workingDirectory", 1, 1_024);
                 ValidateOptionalInteger(arguments, "timeoutSeconds", 1, 3_600);
                 ValidateOptionalEnum(arguments, "purpose", ["inspect", "test", "build", "start"]);
                 ValidateOptionalEnum(arguments, "startMode", ["wait", "smoke"]);
+                break;
+            case ClientToolNames.LeanProof:
+                ValidateProperties(
+                    arguments,
+                    ["operation"],
+                    ["operation", "path", "target", "theoremName", "timeoutSeconds"]);
+                var leanOperation = ValidateString(arguments, "operation", 1, 16);
+                if (leanOperation is not ("status" or "check" or "build" or "axioms" or "verify"))
+                {
+                    throw new InvalidDataException("Die proof.lean-Operation ist nicht freigegeben.");
+                }
+                ValidateOptionalString(arguments, "path", 1, 1_024);
+                ValidateOptionalString(arguments, "target", 1, 256);
+                ValidateOptionalString(arguments, "theoremName", 1, 512);
+                ValidateOptionalInteger(arguments, "timeoutSeconds", 1, 1_800);
+                if (leanOperation is "check" or "axioms" or "verify"
+                    && !arguments.TryGetProperty("path", out _))
+                {
+                    throw new InvalidDataException($"proof.lean {leanOperation} benötigt 'path'.");
+                }
+                if (leanOperation is "axioms" or "verify"
+                    && !arguments.TryGetProperty("theoremName", out _))
+                {
+                    throw new InvalidDataException($"proof.lean {leanOperation} benötigt 'theoremName'.");
+                }
                 break;
             case ClientToolNames.BricsCadGeometryQuery:
             case ClientToolNames.BricsCadMeasure:
@@ -290,6 +322,13 @@ public sealed class LocalToolBroker(
                 ValidateCadOperation(proposal.Name, operation);
                 break;
         }
+    }
+
+    private static bool IsLeanExecutable(string executable)
+    {
+        var name = Path.GetFileNameWithoutExtension(executable.Trim());
+        return name.Equals("lean", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("lake", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void ValidateIdentifier(string value, string name)
@@ -1120,10 +1159,8 @@ public sealed class LocalToolBroker(
                 timeout = TimeSpan.FromMinutes(2);
                 break;
             case "git.diff":
-                fileName = "git";
-                commandArguments = ["-C", workspace, "diff", "--no-ext-diff"];
-                timeout = TimeSpan.FromMinutes(2);
-                break;
+                var gitDiff = await RunGitDiffAsync(workspace, cancellationToken).ConfigureAwait(false);
+                return Bounded(new { preset, gitDiff.ExitCode, gitDiff.StandardOutput, gitDiff.StandardError });
             case "dotnet.build":
                 fileName = "dotnet";
                 commandArguments = BuildDotNetPresetArguments("build", ResolveOptionalPresetTarget(arguments));
@@ -1162,6 +1199,147 @@ public sealed class LocalToolBroker(
             result = result with { StandardOutput = SummarizeGitStatus(result.StandardOutput) };
         }
         return Bounded(new { preset, result.ExitCode, result.StandardOutput, result.StandardError });
+    }
+
+    private async Task<ProcessResult> RunGitDiffAsync(string workspace, CancellationToken cancellationToken)
+    {
+        var hasHead = await RunProcessAsync(
+            "git",
+            ["-C", workspace, "rev-parse", "--verify", "HEAD"],
+            workspace,
+            null,
+            TimeSpan.FromMinutes(2),
+            cancellationToken).ConfigureAwait(false);
+        var trackedArguments = hasHead.ExitCode == 0
+            ? new[] { "-C", workspace, "diff", "--no-ext-diff", "HEAD" }
+            : ["-C", workspace, "diff", "--no-ext-diff"];
+        var tracked = await RunProcessAsync(
+            "git",
+            trackedArguments,
+            workspace,
+            null,
+            TimeSpan.FromMinutes(2),
+            cancellationToken).ConfigureAwait(false);
+        if (tracked.ExitCode != 0)
+        {
+            return tracked;
+        }
+
+        var untracked = await RunProcessAsync(
+            "git",
+            ["-C", workspace, "ls-files", "--others", "--exclude-standard", "-z"],
+            workspace,
+            null,
+            TimeSpan.FromMinutes(2),
+            cancellationToken).ConfigureAwait(false);
+        if (untracked.ExitCode != 0)
+        {
+            return new ProcessResult(
+                untracked.ExitCode,
+                tracked.StandardOutput,
+                string.Join(Environment.NewLine, new[] { tracked.StandardError, untracked.StandardError }
+                    .Where(static value => !string.IsNullOrWhiteSpace(value))));
+        }
+
+        var result = new StringBuilder(Math.Min(MaximumProcessStreamCharacters, tracked.StandardOutput.Length + 16_384));
+        AppendBounded(result, tracked.StandardOutput);
+        var omitted = 0;
+        foreach (var relativePath in untracked.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var normalized = relativePath.Replace('\\', '/');
+            if (FindGeneratedStatusRoot(normalized) is not null)
+            {
+                continue;
+            }
+
+            var fullPath = ResolvePath(normalized, requireExisting: true);
+            var file = new FileInfo(fullPath);
+            if (file.Length > 512 * 1024)
+            {
+                omitted++;
+                AppendBounded(result, $"\n[Neue Datei '{normalized}' mit {file.Length:N0} Bytes nicht als Text-Diff eingebettet.]\n");
+                continue;
+            }
+
+            var bytes = await File.ReadAllBytesAsync(fullPath, cancellationToken).ConfigureAwait(false);
+            if (bytes.AsSpan().Contains((byte)0))
+            {
+                omitted++;
+                AppendBounded(result, $"\n[Neue Binärdatei '{normalized}' nicht als Text-Diff eingebettet.]\n");
+                continue;
+            }
+
+            var text = DecodeText(bytes);
+            AppendBounded(result, FormatUntrackedTextDiff(normalized, text));
+            if (result.Length >= MaximumProcessStreamCharacters)
+            {
+                omitted++;
+                break;
+            }
+        }
+        if (omitted > 0)
+        {
+            AppendBounded(result, $"\n[{omitted} neue Datei(en) ausgelassen oder zusammengefasst.]\n");
+        }
+
+        return new ProcessResult(
+            0,
+            result.ToString(),
+            string.Join(Environment.NewLine, new[] { tracked.StandardError, untracked.StandardError }
+                .Where(static value => !string.IsNullOrWhiteSpace(value))));
+    }
+
+    internal static string FormatUntrackedTextDiff(string relativePath, string content)
+    {
+        var path = relativePath.Replace('\\', '/');
+        var normalized = content.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        var hasTerminalNewline = normalized.EndsWith('\n');
+        var lines = normalized.Split('\n');
+        var lineCount = normalized.Length == 0
+            ? 0
+            : hasTerminalNewline ? Math.Max(0, lines.Length - 1) : lines.Length;
+        var builder = new StringBuilder(normalized.Length + path.Length * 2 + 96);
+        builder.Append("\ndiff --git a/").Append(path).Append(" b/").Append(path).Append('\n')
+            .Append("new file mode 100644\n")
+            .Append("--- /dev/null\n")
+            .Append("+++ b/").Append(path).Append('\n')
+            .Append("@@ -0,0 +1,").Append(lineCount).Append(" @@\n");
+        for (var index = 0; index < lineCount; index++)
+        {
+            builder.Append('+').Append(lines[index]).Append('\n');
+        }
+        if (!hasTerminalNewline && lineCount > 0)
+        {
+            builder.Append("\\ No newline at end of file\n");
+        }
+        return builder.ToString();
+    }
+
+    private static string DecodeText(byte[] bytes)
+    {
+        if (bytes.AsSpan().StartsWith(Encoding.UTF8.Preamble))
+        {
+            return Encoding.UTF8.GetString(bytes, Encoding.UTF8.Preamble.Length, bytes.Length - Encoding.UTF8.Preamble.Length);
+        }
+        if (bytes.AsSpan().StartsWith(Encoding.Unicode.Preamble))
+        {
+            return Encoding.Unicode.GetString(bytes, Encoding.Unicode.Preamble.Length, bytes.Length - Encoding.Unicode.Preamble.Length);
+        }
+        if (bytes.AsSpan().StartsWith(Encoding.BigEndianUnicode.Preamble))
+        {
+            return Encoding.BigEndianUnicode.GetString(bytes, Encoding.BigEndianUnicode.Preamble.Length, bytes.Length - Encoding.BigEndianUnicode.Preamble.Length);
+        }
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    private static void AppendBounded(StringBuilder target, string value)
+    {
+        var available = MaximumProcessStreamCharacters - target.Length;
+        if (available > 0)
+        {
+            target.Append(value.AsSpan(0, Math.Min(available, value.Length)));
+        }
     }
 
     internal static string SummarizeGitStatus(string output, int maximumDetailedEntries = 240)
@@ -1413,6 +1591,9 @@ public sealed class LocalToolBroker(
     {
         var requestedExecutable = RequiredString(arguments, "executable");
         var processArguments = ReadProcessArguments(arguments);
+        var normalizedRequest = NormalizeInlineProcessRequest(requestedExecutable, processArguments);
+        requestedExecutable = normalizedRequest.Executable;
+        processArguments = normalizedRequest.Arguments;
         var normalizedPython = NormalizePythonProcessRequest(
             requestedExecutable,
             processArguments,
@@ -1457,6 +1638,176 @@ public sealed class LocalToolBroker(
             result.StandardOutput,
             result.StandardError,
         });
+    }
+
+    internal static (string Executable, string[] Arguments) NormalizeInlineProcessRequest(
+        string requestedExecutable,
+        string[] arguments)
+    {
+        var requested = requestedExecutable.Trim();
+        if (requested.Length == 0
+            || File.Exists(requested)
+            || !ContainsCommandLineWhitespace(requested))
+        {
+            return (requested, arguments);
+        }
+
+        requested = RemoveCapturedOutputSuppression(requested);
+        var tokens = TokenizeDirectProcessCommandLine(requested);
+        if (tokens.Count <= 1)
+        {
+            return (requested, arguments);
+        }
+
+        if (IsCmdExecutable(tokens[0]))
+        {
+            var commandIndex = tokens.FindIndex(1, static token => token.Equals("/c", StringComparison.OrdinalIgnoreCase));
+            if (commandIndex < 0 || commandIndex + 1 >= tokens.Count)
+            {
+                throw new InvalidOperationException(
+                    "Eine zusammengefügte cmd-Anforderung muss genau einen sicheren Direktbefehl nach /c enthalten.");
+            }
+
+            var nestedCommand = string.Join(' ', tokens.Skip(commandIndex + 1));
+            nestedCommand = RemoveCapturedOutputSuppression(nestedCommand);
+            if (ContainsShellControlOperator(nestedCommand))
+            {
+                throw new InvalidOperationException(
+                    "Shell-Verkettungen, Pipes und Datei-Umleitungen sind in process.run nicht erlaubt. "
+                    + "Übermittle genau ein Programm und dessen Argumente getrennt.");
+            }
+
+            return NormalizeInlineProcessRequest(nestedCommand, arguments);
+        }
+
+        var executable = tokens[0];
+        var parsedArguments = tokens.Skip(1).ToList();
+        CollapsePythonCodeArgument(executable, parsedArguments);
+        parsedArguments.AddRange(arguments);
+        return (executable, parsedArguments.ToArray());
+    }
+
+    private static bool ContainsCommandLineWhitespace(string value) =>
+        value.Any(char.IsWhiteSpace);
+
+    private static bool IsCmdExecutable(string value)
+    {
+        var name = Path.GetFileName(value);
+        return name.Equals("cmd", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string RemoveCapturedOutputSuppression(string command)
+    {
+        var result = command.Trim();
+        while (true)
+        {
+            var updated = Regex.Replace(
+                result,
+                @"\s+(?:(?:1?>)\s*nul(?:\s+2>\s*&1)?|2>\s*&1)\s*$",
+                string.Empty,
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (updated.Length == result.Length)
+            {
+                return result;
+            }
+            result = updated.TrimEnd();
+        }
+    }
+
+    private static List<string> TokenizeDirectProcessCommandLine(string command)
+    {
+        var result = new List<string>();
+        var token = new StringBuilder(command.Length);
+        var inDoubleQuotes = false;
+        for (var index = 0; index < command.Length; index++)
+        {
+            var character = command[index];
+            if (character == '\\'
+                && inDoubleQuotes
+                && index + 1 < command.Length
+                && command[index + 1] == '"')
+            {
+                token.Append('"');
+                index++;
+                continue;
+            }
+            if (character == '"')
+            {
+                inDoubleQuotes = !inDoubleQuotes;
+                continue;
+            }
+            if (char.IsWhiteSpace(character) && !inDoubleQuotes)
+            {
+                if (token.Length > 0)
+                {
+                    result.Add(token.ToString());
+                    token.Clear();
+                }
+                continue;
+            }
+            token.Append(character);
+        }
+
+        if (inDoubleQuotes)
+        {
+            throw new InvalidOperationException(
+                "Die zusammengefügte process.run-Anforderung enthält nicht geschlossene Anführungszeichen.");
+        }
+        if (token.Length > 0)
+        {
+            result.Add(token.ToString());
+        }
+        return result;
+    }
+
+    private static void CollapsePythonCodeArgument(string executable, List<string> arguments)
+    {
+        var name = Path.GetFileName(executable);
+        var isPython = IsPythonExecutableName(name)
+            || name.Equals("py", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("py.exe", StringComparison.OrdinalIgnoreCase);
+        if (!isPython)
+        {
+            return;
+        }
+
+        var codeIndex = arguments.FindIndex(static argument => argument.Equals("-c", StringComparison.OrdinalIgnoreCase));
+        if (codeIndex < 0 || codeIndex + 2 >= arguments.Count)
+        {
+            return;
+        }
+
+        var code = string.Join(' ', arguments.Skip(codeIndex + 1));
+        arguments.RemoveRange(codeIndex + 1, arguments.Count - codeIndex - 1);
+        arguments.Add(code);
+    }
+
+    private static bool ContainsShellControlOperator(string command)
+    {
+        var inDoubleQuotes = false;
+        for (var index = 0; index < command.Length; index++)
+        {
+            var character = command[index];
+            if (character == '\\'
+                && inDoubleQuotes
+                && index + 1 < command.Length
+                && command[index + 1] == '"')
+            {
+                index++;
+                continue;
+            }
+            if (character == '"')
+            {
+                inDoubleQuotes = !inDoubleQuotes;
+                continue;
+            }
+            if (!inDoubleQuotes && character is '&' or '|' or '<' or '>')
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     internal static (string Executable, string[] Arguments) NormalizePythonProcessRequest(

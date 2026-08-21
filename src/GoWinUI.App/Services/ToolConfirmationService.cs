@@ -105,7 +105,8 @@ public sealed class ToolConfirmationService(MainWindow window) : IDisposable
             or ClientToolNames.FileSystemProposeCreate
             or ClientToolNames.FileSystemProposeDelete
             or ClientToolNames.ProcessRunPreset
-            or ClientToolNames.ProcessRun;
+            or ClientToolNames.ProcessRun
+            or ClientToolNames.LeanProof;
 
     private Task<T> RunOnUiThreadAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
     {

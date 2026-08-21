@@ -7,6 +7,7 @@ namespace GoWinUI.Tests;
 public sealed class LocalToolBrokerValidationTests
 {
     private static readonly string[] VersionArguments = ["--version"];
+    private static readonly string[] LeanMainArguments = ["Main.lean"];
     private static readonly string[] VoiceSearchTerms = ["voice", "speech", "SpeechRecognition"];
     private static readonly string[] AllFilesGlob = ["**/*"];
 
@@ -21,6 +22,48 @@ public sealed class LocalToolBrokerValidationTests
             now);
 
         LocalToolBroker.ValidateProposal(proposal, now);
+    }
+
+    [Fact]
+    public void LeanVerifyUsesTypedProcessContract()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var proposal = Create(
+            ClientToolNames.LeanProof,
+            ToolRiskClass.Process,
+            new
+            {
+                operation = "verify",
+                path = "proofs/Main.lean",
+                theoremName = "Main.result",
+                timeoutSeconds = 120,
+            },
+            now);
+
+        LocalToolBroker.ValidateProposal(proposal, now);
+    }
+
+    [Theory]
+    [InlineData("lean")]
+    [InlineData("lean.exe")]
+    [InlineData("C:\\Tools\\lake.exe")]
+    public void GenericProcessCannotBypassTypedLeanContract(string executable)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var proposal = Create(
+            ClientToolNames.ProcessRun,
+            ToolRiskClass.Process,
+            new
+            {
+                executable,
+                arguments = LeanMainArguments,
+                purpose = "test",
+                startMode = "wait",
+            },
+            now);
+
+        var exception = Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(proposal, now));
+        Assert.Contains(ClientToolNames.LeanProof, exception.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -108,6 +151,72 @@ public sealed class LocalToolBrokerValidationTests
     public void ConcretePythonEntryPointsRemainAllowed(string first, string second)
     {
         LocalToolBroker.ValidatePythonProcessHasEntryPoint("python.exe", [first, second]);
+    }
+
+    [Fact]
+    public void InlinePythonCommandIsSeparatedAndCapturedOutputSuppressionIsRemoved()
+    {
+        var normalized = LocalToolBroker.NormalizeInlineProcessRequest(
+            "py -3.11 -m json.tool einstein_cases.json >nul 2>&1",
+            []);
+
+        Assert.Equal("py", normalized.Executable);
+        Assert.Equal(["-3.11", "-m", "json.tool", "einstein_cases.json"], normalized.Arguments);
+    }
+
+    [Fact]
+    public void InlinePythonCodeRemainsOneArgumentEvenWhenTheModelOmittedQuotes()
+    {
+        var normalized = LocalToolBroker.NormalizeInlineProcessRequest(
+            "python -c import json; print(json.load(open('einstein_cases.json')))",
+            []);
+
+        Assert.Equal("python", normalized.Executable);
+        Assert.Equal(
+            ["-c", "import json; print(json.load(open('einstein_cases.json')))"],
+            normalized.Arguments);
+    }
+
+    [Fact]
+    public void SafeCmdWrapperIsConvertedToADirectProcess()
+    {
+        var normalized = LocalToolBroker.NormalizeInlineProcessRequest(
+            "cmd /c \"py -0p\"",
+            []);
+
+        Assert.Equal("py", normalized.Executable);
+        Assert.Equal(["-0p"], normalized.Arguments);
+    }
+
+    [Fact]
+    public void ShellChainingInsideCmdWrapperRemainsRejected()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            LocalToolBroker.NormalizeInlineProcessRequest(
+                "cmd /c \"python verify.py & whoami\"",
+                []));
+
+        Assert.Contains("Shell-Verkettungen", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExistingExecutablePathWithSpacesIsNotSplit()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "go-process-path-" + Guid.NewGuid().ToString("N"));
+        var executable = Path.Combine(root, "Tool Folder", "tool.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(executable)!);
+        File.WriteAllBytes(executable, []);
+        try
+        {
+            var normalized = LocalToolBroker.NormalizeInlineProcessRequest(executable, ["--version"]);
+
+            Assert.Equal(executable, normalized.Executable);
+            Assert.Equal(["--version"], normalized.Arguments);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -500,6 +609,19 @@ public sealed class LocalToolBrokerValidationTests
         Assert.Contains("[2 Git-Status-Einträge unter '.venv' zusammengefasst]", summarized, StringComparison.Ordinal);
         Assert.Contains("[1 Git-Status-Einträge unter '__pycache__' zusammengefasst]", summarized, StringComparison.Ordinal);
         Assert.DoesNotContain("site-packages", summarized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UntrackedTextDiffUsesARealNewFilePatchWithoutLosingTheFinalLine()
+    {
+        var diff = LocalToolBroker.FormatUntrackedTextDiff(
+            @"proofs\minkowski\proof.py",
+            "from sympy import simplify\nassert simplify(1 - 1) == 0");
+
+        Assert.Contains("diff --git a/proofs/minkowski/proof.py b/proofs/minkowski/proof.py", diff, StringComparison.Ordinal);
+        Assert.Contains("+++ b/proofs/minkowski/proof.py", diff, StringComparison.Ordinal);
+        Assert.Contains("+assert simplify(1 - 1) == 0", diff, StringComparison.Ordinal);
+        Assert.Contains("\\ No newline at end of file", diff, StringComparison.Ordinal);
     }
 
     [Fact]
