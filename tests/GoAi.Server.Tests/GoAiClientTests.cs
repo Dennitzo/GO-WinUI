@@ -130,6 +130,73 @@ public sealed class GoAiClientTests
         Assert.Equal(string.Empty, handler.RequestBodies[2]);
     }
 
+    [Fact]
+    public async Task SpeechSessionRetriesRateLimitResponseUsingRetryAfter()
+    {
+        var handler = new RateLimitedSpeechSessionHandler();
+        using var http = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("https://go-ai.test/"),
+        };
+        using var client = new GoAiClient(http, "goai_123456789abc_test");
+
+        var session = await client.CreateSpeechSessionAsync(
+            new SpeechSessionRequest(SpeechContentProfile.Prepared, "de"));
+
+        Assert.Equal("speech-0123456789abcdef0123456789abcdef", session.SessionId);
+        Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task ArtifactDownloadRetriesRateLimitResponseUsingRetryAfter()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO-AI-Client-Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var destination = Path.Combine(root, "speech.wav");
+        var handler = new RateLimitedArtifactHandler();
+        try
+        {
+            using var http = new HttpClient(handler)
+            {
+                BaseAddress = new Uri("https://go-ai.test/"),
+            };
+            using var client = new GoAiClient(http, "goai_123456789abc_test");
+
+            await client.DownloadArtifactAsync("artifact-0123456789abcdef0123456789abcdef", destination);
+
+            Assert.Equal(2, handler.RequestCount);
+            Assert.Equal("wave-data", await File.ReadAllTextAsync(destination));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DictationChunkCarriesRevisionMetadataInHeaders()
+    {
+        var handler = new DictationChunkHandler();
+        using var http = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("https://go-ai.test/"),
+        };
+        using var client = new GoAiClient(http, "goai_123456789abc_test");
+
+        var response = await client.SendLiveCaptionChunkAsync(
+            "caption-0123456789abcdef0123456789abcdef",
+            4,
+            new byte[44 + 3_200],
+            new LiveCaptionChunkMetadata("turn-42", 9, 1_200, false));
+
+        Assert.Equal("turn-42", handler.Headers[GoAiHeaders.CaptionTurnId]);
+        Assert.Equal("9", handler.Headers[GoAiHeaders.CaptionRevision]);
+        Assert.Equal("1200", handler.Headers[GoAiHeaders.CaptionWindowStartMilliseconds]);
+        Assert.Equal("false", handler.Headers[GoAiHeaders.CaptionFinal]);
+        Assert.Equal(9, response.Revision);
+        Assert.Equal("Heizlast", response.StableText);
+    }
+
     private sealed class StaticResponseHandler(
         HttpStatusCode statusCode,
         string content,
@@ -142,6 +209,28 @@ public sealed class GoAiClientTests
             {
                 Content = new StringContent(content, Encoding.UTF8, mediaType),
             });
+    }
+
+    private sealed class DictationChunkHandler : HttpMessageHandler
+    {
+        public Dictionary<string, string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            foreach (var header in request.Headers)
+            {
+                Headers[header.Key] = Assert.Single(header.Value);
+            }
+            const string payload = """
+                {"sessionId":"caption-0123456789abcdef0123456789abcdef","sequence":4,"text":"Heizlast berechnen","transcript":"Heizlast berechnen","language":"de","languageProbability":0.98,"segments":[],"isFinal":false,"provider":"faster-whisper-large-v3-dictation","createdAt":"2026-08-22T10:00:00Z","turnId":"turn-42","revision":9,"stableText":"Heizlast","provisionalText":"berechnen"}
+                """;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json"),
+            });
+        }
     }
 
     private sealed class EmbeddingSessionHandler : HttpMessageHandler
@@ -195,6 +284,55 @@ public sealed class GoAiClientTests
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json"),
             };
+        }
+    }
+
+    private sealed class RateLimitedSpeechSessionHandler : HttpMessageHandler
+    {
+        public int RequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            if (RequestCount == 1)
+            {
+                var limited = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                limited.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.Zero);
+                return Task.FromResult(limited);
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"sessionId\":\"speech-0123456789abcdef0123456789abcdef\",\"state\":\"active\",\"profile\":\"prepared\",\"provider\":\"supertonic-3-f5-cuda\",\"generalModelEjected\":false,\"createdAt\":\"2026-08-19T12:00:00Z\",\"updatedAt\":\"2026-08-19T12:00:00Z\"}",
+                    Encoding.UTF8,
+                    "application/json"),
+            });
+        }
+    }
+
+    private sealed class RateLimitedArtifactHandler : HttpMessageHandler
+    {
+        public int RequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            if (RequestCount == 1)
+            {
+                var limited = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                limited.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.Zero);
+                return Task.FromResult(limited);
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("wave-data", Encoding.UTF8, "application/octet-stream"),
+            });
         }
     }
 

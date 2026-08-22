@@ -9,7 +9,9 @@ namespace GoAi.Server.Core.Security;
 
 public sealed class ApiRateLimitMiddleware
 {
-    private const int RequestsPerMinute = 240;
+    private const int GeneralRequestsPerMinute = 240;
+    private const int SpeechRequestsPerMinute = 1_200;
+    private const int ArtifactRequestsPerMinute = 1_200;
     private static readonly PathString[] AnonymousPaths =
     [
         new("/v1/health/live"),
@@ -36,7 +38,9 @@ public sealed class ApiRateLimitMiddleware
             ?? context.Request.Headers.Authorization.FirstOrDefault()
             ?? context.Connection.RemoteIpAddress?.ToString()
             ?? "unknown";
-        var partition = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(presented)));
+        var policy = ResolvePolicy(context.Request.Path);
+        var credentialHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(presented)));
+        var partition = $"{credentialHash}:{policy.Name}";
         var now = DateTimeOffset.UtcNow;
         var window = _windows.GetOrAdd(partition, static _ => new Window());
         int count;
@@ -54,9 +58,9 @@ public sealed class ApiRateLimitMiddleware
         }
 
         Cleanup(now);
-        context.Response.Headers["X-RateLimit-Limit"] = RequestsPerMinute.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        context.Response.Headers["X-RateLimit-Remaining"] = Math.Max(0, RequestsPerMinute - count).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        if (count <= RequestsPerMinute)
+        context.Response.Headers["X-RateLimit-Limit"] = policy.RequestsPerMinute.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        context.Response.Headers["X-RateLimit-Remaining"] = Math.Max(0, policy.RequestsPerMinute - count).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (count <= policy.RequestsPerMinute)
         {
             await _next(context).ConfigureAwait(false);
             return;
@@ -76,6 +80,22 @@ public sealed class ApiRateLimitMiddleware
                 context.TraceIdentifier),
             GoAiProtocol.CreateJsonOptions(),
             context.RequestAborted).ConfigureAwait(false);
+    }
+
+    private static RateLimitPolicy ResolvePolicy(PathString path)
+    {
+        if (path.StartsWithSegments("/v1/audio/speech")
+            || path.StartsWithSegments("/v1/audio/live-captions"))
+        {
+            return new("speech", SpeechRequestsPerMinute);
+        }
+
+        if (path.StartsWithSegments("/v1/artifacts"))
+        {
+            return new("artifact", ArtifactRequestsPerMinute);
+        }
+
+        return new("general", GeneralRequestsPerMinute);
     }
 
     private void Cleanup(DateTimeOffset now)
@@ -103,4 +123,6 @@ public sealed class ApiRateLimitMiddleware
 
         public int Count { get; set; }
     }
+
+    private sealed record RateLimitPolicy(string Name, int RequestsPerMinute);
 }

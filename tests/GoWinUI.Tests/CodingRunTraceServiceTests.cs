@@ -303,6 +303,8 @@ public sealed class CodingRunTraceServiceTests
         Assert.Contains("codingRun: null", app, StringComparison.Ordinal);
         Assert.Contains("case \"conversation.snapshot\"", app, StringComparison.Ordinal);
         Assert.Contains("case \"conversation.messageCommitted\"", app, StringComparison.Ordinal);
+        Assert.Contains("const exactDifference = leftCreated < rightCreated ? -1 : leftCreated > rightCreated ? 1 : 0;", app, StringComparison.Ordinal);
+        Assert.Contains("return exactDifference || String(left.id || \"\").localeCompare", app, StringComparison.Ordinal);
         Assert.Contains("case \"conversation.messageRemoved\"", app, StringComparison.Ordinal);
         Assert.Contains("case \"coding.snapshotCommitted\"", app, StringComparison.Ordinal);
         Assert.Contains("function requestConversationRefresh()", app, StringComparison.Ordinal);

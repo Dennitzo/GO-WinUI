@@ -42,7 +42,14 @@ public sealed record TranscriptionSegment(
     double Start,
     double End,
     string Text,
-    string? Speaker = null);
+    string? Speaker = null,
+    IReadOnlyList<TranscriptionWord>? Words = null);
+
+public sealed record TranscriptionWord(
+    double Start,
+    double End,
+    string Text,
+    double Probability = 1.0);
 
 public sealed record TranscriptionResponse(
     string Text,
@@ -57,13 +64,26 @@ public enum LiveCaptionMode
     TranslateToEnglish,
 }
 
+public enum LiveCaptionProfile
+{
+    Captions,
+    Dictation,
+}
+
 public sealed record LiveCaptionSessionRequest(
     string? Language = "de",
     LiveCaptionMode Mode = LiveCaptionMode.Transcribe,
     int SampleRate = GoAiProtocol.LiveCaptionSampleRate,
     int Channels = 1,
     int WindowMilliseconds = 4_000,
-    int OverlapMilliseconds = 500);
+    int OverlapMilliseconds = 500,
+    LiveCaptionProfile Profile = LiveCaptionProfile.Captions);
+
+public sealed record LiveCaptionChunkMetadata(
+    string TurnId,
+    long Revision,
+    int WindowStartMilliseconds,
+    bool IsFinal);
 
 public sealed record LiveCaptionSessionSnapshot(
     string SessionId,
@@ -78,7 +98,8 @@ public sealed record LiveCaptionSessionSnapshot(
     string Transcript,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    LiveCaptionProfile Profile = LiveCaptionProfile.Captions);
 
 public sealed record LiveCaptionChunkResponse(
     string SessionId,
@@ -90,7 +111,11 @@ public sealed record LiveCaptionChunkResponse(
     IReadOnlyList<TranscriptionSegment> Segments,
     bool IsFinal,
     string Provider,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    string? TurnId = null,
+    long Revision = 0,
+    string? StableText = null,
+    string? ProvisionalText = null);
 
 public sealed record SpeechResponse(
     ArtifactDescriptor Artifact,

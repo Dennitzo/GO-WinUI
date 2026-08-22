@@ -620,6 +620,34 @@ internal static class GatewayEndpoints
         var audio = await GatewayRequestReader.ReadBinaryAsync(
             context,
             GoAiProtocol.MaximumLiveCaptionChunkBytes).ConfigureAwait(false);
+        LiveCaptionChunkMetadata? metadata = null;
+        var turnId = context.Request.Headers[GoAiHeaders.CaptionTurnId].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(turnId))
+        {
+            if (!long.TryParse(
+                    context.Request.Headers[GoAiHeaders.CaptionRevision].FirstOrDefault(),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var revision)
+                || revision < 0
+                || !int.TryParse(
+                    context.Request.Headers[GoAiHeaders.CaptionWindowStartMilliseconds].FirstOrDefault(),
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out var windowStartMilliseconds)
+                || windowStartMilliseconds < 0
+                || !bool.TryParse(
+                    context.Request.Headers[GoAiHeaders.CaptionFinal].FirstOrDefault(),
+                    out var isFinal))
+            {
+                throw new ArgumentException("Diktierfenster-Metadaten sind ungültig.");
+            }
+            metadata = new LiveCaptionChunkMetadata(
+                turnId,
+                revision,
+                windowStartMilliseconds,
+                isFinal);
+        }
         var captions = context.RequestServices.GetRequiredService<LiveCaptionService>();
         await WriteJsonAsync(
             context,
@@ -627,6 +655,7 @@ internal static class GatewayEndpoints
                 GetRouteString(context, "sessionId"),
                 sequence,
                 audio,
+                metadata,
                 context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
     }
 

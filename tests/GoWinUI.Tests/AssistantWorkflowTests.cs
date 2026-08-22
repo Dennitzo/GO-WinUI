@@ -69,7 +69,8 @@ public sealed class AssistantWorkflowTests
         Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
         Assert.Contains("styles.css?v=20260821-2", html, StringComparison.Ordinal);
         Assert.Contains("markdown.js?v=20260821-1", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260821-3", html, StringComparison.Ordinal);
+        Assert.Contains("voice.js?v=20260822-2", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260822-6", html, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
@@ -136,10 +137,12 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("createMediaStreamDestination", voice, StringComparison.Ordinal);
         Assert.Contains("getUserMedia({ audio: true, video: false })", voice, StringComparison.Ordinal);
         Assert.Contains("beginTurn(values)", voice, StringComparison.Ordinal);
-        Assert.Contains("const windowSamples = 32000;", voice, StringComparison.Ordinal);
-        Assert.Contains("const overlapSamples = 8000;", voice, StringComparison.Ordinal);
-        Assert.Contains("const windowStepSamples = windowSamples - overlapSamples;", voice, StringComparison.Ordinal);
-        Assert.Contains("sendWindow(turn, [], true);", voice, StringComparison.Ordinal);
+        Assert.Contains("const bridgeFrameSamples = 1600;", voice, StringComparison.Ordinal);
+        Assert.Contains("if (turn.speechSamples >= minimumTurnSamples) emitAvailableFrames(turn);", voice, StringComparison.Ordinal);
+        Assert.Contains("const preRollSamples = 4000;", voice, StringComparison.Ordinal);
+        Assert.Contains("const silenceToFinishSamples = 8000;", voice, StringComparison.Ordinal);
+        Assert.Contains("sendFrame(turn, turn.frameBuffer.splice(0), true);", voice, StringComparison.Ordinal);
+        Assert.DoesNotContain("windowSamples", voice, StringComparison.Ordinal);
         Assert.DoesNotContain("for (const value of values) samples.push(value);", voice, StringComparison.Ordinal);
         Assert.DoesNotContain("MediaRecorder", voice, StringComparison.Ordinal);
 
@@ -255,6 +258,43 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public void DictationCaptureSchedulesAtFiveHundredMillisecondsAndKeepsSixSeconds()
+    {
+        var capture = new MicrophoneTranscriptionService.DictationCaptureState("turn-1", "session-1");
+        var frame = new byte[16_000 * sizeof(short) / 10];
+
+        for (var index = 0; index < 4; index++)
+        {
+            capture.Append(frame);
+        }
+        Assert.False(capture.ShouldSchedule(isFinal: false));
+
+        capture.Append(frame);
+        Assert.True(capture.ShouldSchedule(isFinal: false));
+        var first = capture.CreateWindow(isFinal: false);
+        capture.MarkScheduled();
+        Assert.Equal(0, first.Revision);
+        Assert.Equal(16_000, first.Pcm.Length);
+
+        capture.Append(frame);
+        capture.Append(frame);
+        Assert.False(capture.ShouldSchedule(isFinal: false));
+        capture.Append(frame);
+        Assert.True(capture.ShouldSchedule(isFinal: false));
+        _ = capture.CreateWindow(isFinal: false);
+        capture.MarkScheduled();
+
+        for (var index = 0; index < 60; index++)
+        {
+            capture.Append(frame);
+        }
+        var rolling = capture.CreateWindow(isFinal: true);
+        Assert.Equal(6_000 * 32, rolling.Pcm.Length);
+        Assert.Equal(800, rolling.WindowStartMilliseconds);
+        Assert.True(capture.ShouldSchedule(isFinal: true));
+    }
+
+    [Fact]
     public void SystemAudioAnalysisCaptureProducesAValidTenMinuteBoundedWave()
     {
         var pcm = new byte[SystemAudioAnalysisCaptureService.SampleRate * sizeof(short)];
@@ -330,18 +370,111 @@ public sealed class AssistantWorkflowTests
         Assert.True(AssistantPage.IsMediaCaptureFinishCommand(command));
     }
 
-    [Fact]
-    public void AudiobookVoiceCorrectionOnlyRewritesTheKnownWhisperMisrecognitionInAudiobookMode()
+    [Theory]
+    [InlineData("Senden")]
+    [InlineData("Prompt senden.")]
+    [InlineData("  PROMPT   SENDEN!  ")]
+    public void ExplicitVoiceCommandSendsTheCurrentComposerDraft(string command)
     {
-        Assert.Equal(
-            "Hörbuch fortsetzen",
-            AssistantPage.NormalizeAudiobookVoiceCommand("RLT-Fazit.", audiobookActive: true));
-        Assert.Equal(
-            "RLT-Fazit.",
-            AssistantPage.NormalizeAudiobookVoiceCommand("RLT-Fazit.", audiobookActive: false));
-        Assert.Equal(
-            "Volumenstrom prüfen",
-            AssistantPage.NormalizeAudiobookVoiceCommand("Volumenstrom prüfen", audiobookActive: true));
+        Assert.True(AssistantPage.IsVoicePromptSendCommand(command));
+    }
+
+    [Theory]
+    [InlineData("Bitte diesen Text senden")]
+    [InlineData("Hörbuch erstellen")]
+    [InlineData("Suche im Web")]
+    public void OrdinaryDictationNeverSendsItself(string dictation)
+    {
+        Assert.False(AssistantPage.IsVoicePromptSendCommand(dictation));
+    }
+
+    [Fact]
+    public void VoiceRecognitionUsesEditableComposerDictationWithoutWhisperHotwordsOrIntentDispatch()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        var voice = File.ReadAllText(Path.Combine(webRoot, "voice.js"));
+        var repositoryRoot = FindRepositoryRoot();
+        var worker = File.ReadAllText(Path.Combine(repositoryRoot, "workers", "speech", "app.py"));
+        var page = File.ReadAllText(Path.Combine(repositoryRoot, "src", "GoWinUI.App", "Pages", "AssistantPage.xaml.cs"));
+        var microphone = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "GoWinUI.App",
+            "Services",
+            "MicrophoneTranscriptionService.cs"));
+
+        Assert.Contains("function updateVoiceDictation(", app, StringComparison.Ordinal);
+        Assert.Contains("elements.prompt.value = turn.renderedValue", app, StringComparison.Ordinal);
+        Assert.Contains("nextRevision <= turn.lastRevision", app, StringComparison.Ordinal);
+        Assert.Contains("turn.manuallyConfirmed = true", app, StringComparison.Ordinal);
+        Assert.Contains("payload?.isFinal && payload?.sendPrompt", app, StringComparison.Ordinal);
+        Assert.Contains("void submitPrompt();", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("submitVoicePrompt", app, StringComparison.Ordinal);
+        Assert.Contains("const bridgeFrameSamples = 1600;", voice, StringComparison.Ordinal);
+        Assert.Contains("const silenceToFinishSamples = 8000;", voice, StringComparison.Ordinal);
+        Assert.DoesNotContain("windowSamples", voice, StringComparison.Ordinal);
+        Assert.Contains("FirstDecodeMilliseconds = 480", microphone, StringComparison.Ordinal);
+        Assert.Contains("DecodeCadenceMilliseconds = 300", microphone, StringComparison.Ordinal);
+        Assert.Contains("WindowMilliseconds = 6_000", microphone, StringComparison.Ordinal);
+        Assert.Contains("LiveCaptionProfile.Dictation", microphone, StringComparison.Ordinal);
+        Assert.Contains("_pendingDictationPartial = pending", microphone, StringComparison.Ordinal);
+        Assert.Contains("_pendingDictationFinals.Enqueue(pending)", microphone, StringComparison.Ordinal);
+        Assert.DoesNotContain("WHISPER_HOTWORDS", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("hotwords=", worker, StringComparison.Ordinal);
+        Assert.Contains("condition_on_previous_text=not dictation", worker, StringComparison.Ordinal);
+        Assert.Contains("word_timestamps=dictation", worker, StringComparison.Ordinal);
+        Assert.Contains("if not dictation and temporary is not None", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("ClassifyIntentAsync", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("UtteranceIntent.", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void VoiceDictationRemainsVisibleWhileSpeechPlaybackIsActive()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var page = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "GoWinUI.App",
+            "Pages",
+            "AssistantPage.xaml.cs"));
+        var app = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "Assets",
+            "Web",
+            "app.js"));
+
+        Assert.Contains(
+            "Whisper dictation and speech playback are independent",
+            page,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "if (!_microphone.Current.IsSpeaking)",
+            page,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "if (microphoneState.IsSpeaking)\r\n            {\r\n                await bridge.PostAsync(\"microphone.transcript\"",
+            page,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Speech playback and dictation have independent lifetimes",
+            app,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "setSuspended(!state.microphone?.isRecording)",
+            app,
+            StringComparison.Ordinal);
+        var microphone = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "GoWinUI.App",
+            "Services",
+            "MicrophoneTranscriptionService.cs"));
+        Assert.Contains("private string? _transcriptionProvider;", microphone, StringComparison.Ordinal);
+        Assert.Contains("private string? _speechProvider;", microphone, StringComparison.Ordinal);
+        Assert.Contains("_speaking ? _speechProvider : _transcriptionProvider", microphone, StringComparison.Ordinal);
+        Assert.Contains("Sprache wird erkannt · Vorlesen läuft", microphone, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -382,6 +515,31 @@ public sealed class AssistantWorkflowTests
         Assert.True(AssistantPage.IsVoiceControlStopCommand(command));
     }
 
+    [Fact]
+    public void NewPromptInterruptsOnlyAnExistingChatRunAndNeverIndependentSpeech()
+    {
+        Assert.False(AssistantPage.ShouldCancelActiveChatBeforePrompt(
+            isSpeechRequest: false,
+            chatRequestInFlight: false,
+            aiRunActive: false,
+            speechPlaybackActive: true));
+        Assert.True(AssistantPage.ShouldCancelActiveChatBeforePrompt(
+            isSpeechRequest: false,
+            chatRequestInFlight: true,
+            aiRunActive: false,
+            speechPlaybackActive: true));
+        Assert.True(AssistantPage.ShouldCancelActiveChatBeforePrompt(
+            isSpeechRequest: false,
+            chatRequestInFlight: false,
+            aiRunActive: true,
+            speechPlaybackActive: true));
+        Assert.False(AssistantPage.ShouldCancelActiveChatBeforePrompt(
+            isSpeechRequest: true,
+            chatRequestInFlight: true,
+            aiRunActive: true,
+            speechPlaybackActive: true));
+    }
+
     [Theory]
     [InlineData("Abbrechen")]
     [InlineData("Vorlesen abbrechen")]
@@ -406,6 +564,10 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("payload?.isFinal && payload?.stopVoice", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.isBusy && !active", app, StringComparison.Ordinal);
         Assert.Contains("const active = Boolean(browserActive || state.voiceStarting)", app, StringComparison.Ordinal);
+        Assert.Contains("function resetTransientVoiceStateForSessionChange()", app, StringComparison.Ordinal);
+        Assert.Contains("resetTransientVoiceStateForSessionChange();", app, StringComparison.Ordinal);
+        Assert.Contains("isBusy: browserCaptureActive && Boolean(state.microphone?.isBusy)", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("browserVoiceActive || state.microphone?.isBusy", app, StringComparison.Ordinal);
         Assert.Contains("elements.microphone.classList.remove(\"speaking\")", app, StringComparison.Ordinal);
         Assert.DoesNotContain("classList.toggle(\"speaking\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain(".microphone-button.speaking", styles, StringComparison.Ordinal);
@@ -951,6 +1113,11 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("cleanStatusMetadata", app, StringComparison.Ordinal);
         Assert.DoesNotContain("Kontexttoken", app, StringComparison.Ordinal);
         Assert.Contains("if (Number.isFinite(payload.contextUsed))", app, StringComparison.Ordinal);
+        Assert.Contains("function visibleModelLabel(value)", app, StringComparison.Ordinal);
+        Assert.Contains("model.replace(/\\s*·\\s*MXFP4", app, StringComparison.Ordinal);
+        Assert.Contains("state.messageRunStatus.clear();", app, StringComparison.Ordinal);
+        Assert.Contains("const acceptsRunStatus =", app, StringComparison.Ordinal);
+        Assert.Contains("!isTerminalMessageStatus(statusMessage?.status)", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -978,6 +1145,14 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("post(\"microphone.toggleSpeechPause\"", app, StringComparison.Ordinal);
         Assert.Contains("elements.composerSpeechStop.addEventListener", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.stopSpeech\", {});", app, StringComparison.Ordinal);
+        Assert.Contains("const canStop = state.isRunning || campaignRunning;", app, StringComparison.Ordinal);
+        var promptStop = app.IndexOf("elements.stop.addEventListener", StringComparison.Ordinal);
+        var speechStop = app.IndexOf("elements.composerSpeechStop.addEventListener", StringComparison.Ordinal);
+        Assert.True(promptStop >= 0 && speechStop > promptStop);
+        Assert.DoesNotContain(
+            "microphone.stopSpeech",
+            app[promptStop..speechStop],
+            StringComparison.Ordinal);
         Assert.Contains("\"chat.removed\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.previousSpeechParagraph", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.skipSpeechParagraph", app, StringComparison.Ordinal);
@@ -989,6 +1164,28 @@ public sealed class AssistantWorkflowTests
         Assert.DoesNotContain("retryMessage", app, StringComparison.Ordinal);
         Assert.DoesNotContain("createMessageFooterLink(\"Fortsetzen\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain("function continueMessage()", app, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReadAloudRemainsIndependentAndScrollIsPersistedOnlyAcrossSessionChanges()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+
+        Assert.Contains("const canStop = state.isRunning || campaignRunning;", app, StringComparison.Ordinal);
+        Assert.Contains("if (sessionChanged && previousSessionId) persistSessionScrollPosition(previousSessionId);", app, StringComparison.Ordinal);
+        Assert.Contains("if (sessionChanged) restoreSessionScrollPosition(state.activeSessionId);", app, StringComparison.Ordinal);
+        Assert.Contains("sessionScrollStoragePrefix", app, StringComparison.Ordinal);
+        Assert.Contains("anchorMessageId", app, StringComparison.Ordinal);
+        Assert.Contains("renderMessages(currentSessionMessagesChanged);", app, StringComparison.Ordinal);
+        Assert.Contains("renderMessages(messagesChanged);", app, StringComparison.Ordinal);
+        Assert.Contains("renderMessages(true);", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("scheduleSessionScrollSave", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("elements.messageScroll.addEventListener(\"scroll\"", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("addEventListener(\"pagehide\", () => persistSessionScrollPosition", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("preserveForSpeech", app, StringComparison.Ordinal);
+        Assert.Contains("&& isVoiceControlActive()", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("payload.message?.contentProfile !== \"audiobook\"", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1172,7 +1369,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("data-tool-action=\"audiobook\"", html, StringComparison.Ordinal);
         Assert.Contains("Hörbuch erstellen", html, StringComparison.Ordinal);
         Assert.Contains("audiobook: [\"Hörbuch erstellen\"", app, StringComparison.Ordinal);
-        Assert.Contains("payload.message?.contentProfile !== \"audiobook\"", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("payload.message?.contentProfile !== \"audiobook\"", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1430,6 +1627,19 @@ public sealed class AssistantWorkflowTests
             NullLogger<RecentActivityService>.Instance);
         service.Restore();
         return service;
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "GO.slnx")))
+            {
+                return directory.FullName;
+            }
+        }
+
+        throw new DirectoryNotFoundException("Das GO-Repository wurde aus dem Testausgabeverzeichnis nicht gefunden.");
     }
 
     private static AssistantCoordinator CreateCoordinator(

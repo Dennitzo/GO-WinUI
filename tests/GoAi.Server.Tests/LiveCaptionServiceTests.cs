@@ -120,6 +120,66 @@ public sealed class LiveCaptionServiceTests
             ]).Replace("\r\n", "\n", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void DictationLocalAgreementCommitsOnlyTheSharedPrefix()
+    {
+        IReadOnlyList<LiveCaptionService.DictationWord> first =
+        [
+            new(0.10, 0.40, " Heiz"),
+            new(0.42, 0.75, " Last"),
+            new(0.80, 1.10, " berechnen"),
+        ];
+        IReadOnlyList<LiveCaptionService.DictationWord> revised =
+        [
+            new(0.12, 0.70, " Heizlast"),
+            new(0.82, 1.12, " berechnen"),
+        ];
+
+        Assert.Equal(0, LiveCaptionService.FindPrefixAgreementLength(first, revised));
+        Assert.Equal(2, LiveCaptionService.FindPrefixAgreementLength(revised,
+        [
+            new(0.11, 0.69, " Heizlast"),
+            new(0.83, 1.14, " berechnen"),
+            new(1.20, 1.45, " bitte"),
+        ]));
+    }
+
+    [Fact]
+    public void DictationLocalAgreementRejectsCoincidentalWordsLaterInTheWindow()
+    {
+        IReadOnlyList<LiveCaptionService.DictationWord> first =
+        [
+            new(0.10, 0.30, " Die"),
+            new(0.35, 0.70, " Anlage"),
+        ];
+        IReadOnlyList<LiveCaptionService.DictationWord> unrelated =
+        [
+            new(0.10, 0.40, " Heute"),
+            new(0.45, 0.65, " ist"),
+            new(0.70, 0.90, " die"),
+        ];
+
+        Assert.Equal(0, LiveCaptionService.FindPrefixAgreementLength(first, unrelated));
+    }
+
+    [Fact]
+    public void FinalDictationDecodeKeepsOnlyTheUnstableTailWithContext()
+    {
+        var full = CreateWave(sampleRate: 16_000, channels: 1, durationMilliseconds: 6_000);
+        IReadOnlyList<LiveCaptionService.DictationWord> committed =
+        [
+            new(0.2, 1.0, " Der"),
+            new(3.2, 4.0, " Text"),
+        ];
+
+        var trimmed = LiveCaptionService.TrimFinalDictationWave(full, 0, committed);
+        var info = LiveCaptionService.ValidateWave(trimmed.Audio.Span, 16_000, 1, 7_000);
+
+        Assert.Equal(3_750, trimmed.WindowStartMilliseconds);
+        Assert.Equal(2_250, info.DurationMilliseconds, precision: 3);
+        Assert.True(trimmed.Audio.Length < full.Length);
+    }
+
     private static byte[] CreateWave(int sampleRate, int channels, int durationMilliseconds)
     {
         var dataLength = checked(sampleRate * channels * 2 * durationMilliseconds / 1_000);

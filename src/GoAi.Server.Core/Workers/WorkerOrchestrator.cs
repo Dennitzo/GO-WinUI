@@ -57,6 +57,8 @@ public sealed class WorkerOrchestrator : IDisposable
         ReadOnlyMemory<byte> waveAudio,
         string? language,
         LiveCaptionMode mode,
+        LiveCaptionProfile profile,
+        bool isFinal,
         string sessionId,
         string? previousContext,
         CancellationToken cancellationToken = default)
@@ -71,6 +73,8 @@ public sealed class WorkerOrchestrator : IDisposable
             waveAudio,
             language,
             mode,
+            profile,
+            isFinal,
             sessionId,
             previousContext,
             cancellationToken).ConfigureAwait(false);
@@ -78,6 +82,7 @@ public sealed class WorkerOrchestrator : IDisposable
 
     public async Task PrepareLiveCaptionResourcesAsync(
         string sessionId,
+        LiveCaptionProfile profile = LiveCaptionProfile.Captions,
         CancellationToken cancellationToken = default)
     {
         await using var lease = await _scheduler.AcquireAsync(
@@ -87,7 +92,10 @@ public sealed class WorkerOrchestrator : IDisposable
             cancellationToken).ConfigureAwait(false);
         await PrepareWorkerAsync("speech", cancellationToken).ConfigureAwait(false);
         _ = await _workers.LoadSpeechComponentAsync("stt", cancellationToken).ConfigureAwait(false);
-        _ = await _workers.LoadSpeechComponentAsync("speaker", cancellationToken).ConfigureAwait(false);
+        if (profile == LiveCaptionProfile.Captions)
+        {
+            _ = await _workers.LoadSpeechComponentAsync("speaker", cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async Task<(IReadOnlyList<TranscriptionSegment> Segments, string ModelId)> TranslateCaptionSegmentsAsync(

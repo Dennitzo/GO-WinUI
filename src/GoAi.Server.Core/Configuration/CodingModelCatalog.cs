@@ -27,7 +27,7 @@ public static class CodingModelCatalog
             "qwen-coder"),
         new(
             GptOss120BId,
-            "gpt-oss-120b · MXFP4",
+            "gpt-oss-120b",
             131_072,
             "gpt-oss-coder"),
     ];

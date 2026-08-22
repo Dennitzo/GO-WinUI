@@ -1497,7 +1497,6 @@ public sealed class CodingCampaignTests
                 {
                     throw new InvalidOperationException("Simulierter Laufzeitfehler im Coding-Agenten.");
                 }
-                Interlocked.Increment(ref _runCount);
                 var message = await chats.AddMessageAsync(
                     sessionId,
                     ChatRole.Assistant,
@@ -1513,12 +1512,17 @@ public sealed class CodingCampaignTests
                     """,
                     MessageStatus.Completed,
                     cancellationToken: cancellationToken);
-                return TryConsumeNoDiff()
+                var result = TryConsumeNoDiff()
                     ? message
                     : message with
                     {
                         CodeDiff = "diff --git a/src/demo.py b/src/demo.py\n--- a/src/demo.py\n+++ b/src/demo.py\n@@ -1 +1 @@\n-alt\n+neu\n",
                     };
+                // RunCount represents a completed fake run. Publishing it only
+                // after the backing chat row was committed prevents waiters
+                // from observing a run whose process report is not readable yet.
+                Interlocked.Increment(ref _runCount);
+                return result;
             }
             finally
             {

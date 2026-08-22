@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import gc
+import io
 import json
 import os
 import re
@@ -34,12 +35,6 @@ WHISPER_MODEL = Path(os.environ.get("GO_AI_WHISPER_MODEL", MODEL_ROOT / "faster-
 SPEAKER_MODEL = Path(os.environ.get("GO_AI_SPEAKER_MODEL", MODEL_ROOT / "spkrec-ecapa-voxceleb"))
 WHISPER_CUDA_DEVICE = max(0, int(os.environ.get("GO_AI_WHISPER_CUDA_DEVICE", "0")))
 SPEAKER_CUDA_DEVICE = max(0, int(os.environ.get("GO_AI_SPEAKER_CUDA_DEVICE", "0")))
-WHISPER_HOTWORDS = os.environ.get(
-    "GO_AI_WHISPER_HOTWORDS",
-    "Hörbuch, Hörbuch erstellen, Hörbuch fortsetzen, Pausieren, Fortsetzen, Abbrechen, "
-    "TGA, technische Gebäudeausrüstung, Heizung, Lüftung, Sanitär, Klima, Kälte, "
-    "Elektro, Brandschutz, Volumenstrom, Heizlast, Kühllast, RLT, VDI, DIN, BricsCAD",
-).strip()
 WHISPER_COMPUTE_TYPE = "float16"
 # The full large-v3 model already provides the best available model quality. These
 # profiles spend more decoder work on accuracy while keeping short live windows
@@ -849,7 +844,6 @@ def transcribe(request: TranscriptionRequest) -> dict:
             word_timestamps=False,
             vad_filter=True,
             condition_on_previous_text=True,
-            hotwords=WHISPER_HOTWORDS or None,
             language_detection_segments=WHISPER_LANGUAGE_DETECTION_SEGMENTS,
         )
         rows = [
@@ -896,41 +890,85 @@ def _transcribe_live_caption(
     task: str,
     context: str | None,
     session_id: str,
+    profile: str,
+    is_final: bool,
 ) -> dict:
     slots = _acquire_process_slots()
-    temporary = Path("/tmp") / f"caption-{uuid.uuid4().hex}.wav"
+    temporary: Path | None = None
     try:
-        temporary.write_bytes(audio)
         model = models.load_stt()
+        dictation = profile == "dictation"
+        if dictation:
+            waveform, sample_rate = sf.read(
+                io.BytesIO(audio),
+                dtype="float32",
+                always_2d=False,
+            )
+            if sample_rate != 16000:
+                raise ValueError("dictation audio must use 16 kHz")
+            if waveform.ndim > 1:
+                waveform = waveform.mean(axis=1)
+            transcription_input = np.ascontiguousarray(waveform, dtype=np.float32)
+        else:
+            temporary = Path("/tmp") / f"caption-{uuid.uuid4().hex}.wav"
+            temporary.write_bytes(audio)
+            transcription_input = str(temporary)
+
         segments, info = model.transcribe(
-            str(temporary),
+            transcription_input,
             language=language,
             task=task,
-            beam_size=WHISPER_LIVE_BEAM_SIZE,
-            best_of=WHISPER_BEST_OF,
-            patience=WHISPER_LIVE_PATIENCE,
-            word_timestamps=False,
-            vad_filter=True,
-            condition_on_previous_text=True,
+            beam_size=WHISPER_LIVE_BEAM_SIZE if is_final or not dictation else 1,
+            best_of=WHISPER_BEST_OF if is_final or not dictation else 1,
+            patience=WHISPER_LIVE_PATIENCE if is_final or not dictation else 1.0,
+            word_timestamps=dictation,
+            vad_filter=not dictation,
+            condition_on_previous_text=not dictation,
             initial_prompt=_recent_whisper_context(context),
-            hotwords=WHISPER_HOTWORDS or None,
-            temperature=WHISPER_LIVE_TEMPERATURES,
+            temperature=WHISPER_LIVE_TEMPERATURES if is_final or not dictation else 0.0,
+            hallucination_silence_threshold=0.8 if dictation else None,
         )
         rows = [
-            {"start": round(segment.start, 3), "end": round(segment.end, 3), "text": segment.text.strip()}
+            {
+                "start": round(segment.start, 3),
+                "end": round(segment.end, 3),
+                "text": segment.text.strip(),
+                **(
+                    {
+                        "words": [
+                            {
+                                "start": round(word.start, 3),
+                                "end": round(word.end, 3),
+                                "text": word.word,
+                                "probability": round(word.probability, 6),
+                            }
+                            for word in (segment.words or [])
+                            if word.word.strip()
+                        ]
+                    }
+                    if dictation
+                    else {}
+                ),
+            }
             for segment in segments
             if segment.text.strip()
         ]
-        _speaker_labels(temporary, rows, session_id)
+        if not dictation and temporary is not None:
+            _speaker_labels(temporary, rows, session_id)
         return {
             "text": " ".join(row["text"] for row in rows).strip(),
             "language": info.language,
             "languageProbability": round(info.language_probability, 6),
             "segments": rows,
-            "provider": "whisper-large-v3-live + ECAPA",
+            "provider": (
+                "faster-whisper-large-v3-dictation"
+                if dictation
+                else "whisper-large-v3-live + ECAPA"
+            ),
         }
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         _release_process_slots(slots)
 
 
@@ -956,6 +994,13 @@ async def live_captions(request: Request) -> dict:
     session_id = request.headers.get("x-go-ai-caption-session", "")
     if not CAPTION_SESSION_PATTERN.fullmatch(session_id):
         raise HTTPException(400, detail={"errorCode": "speech.caption_session_invalid"})
+    profile = request.headers.get("x-go-ai-caption-profile", "captions").strip().lower()
+    if profile not in ("captions", "dictation"):
+        raise HTTPException(400, detail={"errorCode": "speech.caption_profile_invalid"})
+    final_header = request.headers.get("x-go-ai-caption-final", "true").strip().lower()
+    if final_header not in ("true", "false"):
+        raise HTTPException(400, detail={"errorCode": "speech.caption_final_invalid"})
+    is_final = final_header == "true"
     context = None
     encoded_context = request.headers.get("x-go-ai-caption-context-b64")
     if encoded_context:
@@ -976,6 +1021,8 @@ async def live_captions(request: Request) -> dict:
         task,
         context,
         session_id,
+        profile,
+        is_final,
     )
 
 

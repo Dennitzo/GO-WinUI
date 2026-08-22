@@ -33,6 +33,11 @@ public static class GoAiHeaders
     public const string LastEventId = "Last-Event-ID";
     public const string IdempotencyKey = "Idempotency-Key";
     public const string WorkerKey = "X-GO-AI-Worker-Key";
+    public const string CaptionProfile = "X-GO-AI-Caption-Profile";
+    public const string CaptionTurnId = "X-GO-AI-Caption-Turn-Id";
+    public const string CaptionRevision = "X-GO-AI-Caption-Revision";
+    public const string CaptionWindowStartMilliseconds = "X-GO-AI-Caption-Window-Start-Ms";
+    public const string CaptionFinal = "X-GO-AI-Caption-Final";
 }
 
 public sealed record GoAiProblem(

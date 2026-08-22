@@ -539,7 +539,7 @@ paths:
                 $ref: "#/components/schemas/UtteranceIntentResponse"
   /v1/audio/live-captions/sessions:
     post:
-      summary: Explizite Live-Untertitel-Sitzung für Client-Systemaudio starten
+      summary: Explizite Live-Untertitel- oder revidierbare Diktatsitzung starten
       operationId: createLiveCaptionSession
       requestBody:
         required: true
@@ -594,8 +594,34 @@ paths:
           format: int64
           minimum: 0
     put:
-      summary: Kurzes PCM16-WAV-Systemaudiofenster transkribieren
+      summary: Kurzes PCM16-WAV-Audiofenster transkribieren
       operationId: putLiveCaptionChunk
+      parameters:
+        - name: X-GO-AI-Caption-Turn-Id
+          in: header
+          required: false
+          schema:
+            type: string
+            maxLength: 128
+          description: Im Profil dictation verpflichtende ID des revidierbaren Diktierabschnitts.
+        - name: X-GO-AI-Caption-Revision
+          in: header
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: X-GO-AI-Caption-Window-Start-Ms
+          in: header
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+        - name: X-GO-AI-Caption-Final
+          in: header
+          required: false
+          schema:
+            type: boolean
       requestBody:
         required: true
         content:
@@ -1562,12 +1588,33 @@ components:
         speaker:
           type: [string, "null"]
           description: Stabile, sitzungsbezogene Sprecherbezeichnung bei Live-Untertiteln.
+        words:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/TranscriptionWord"
+    TranscriptionWord:
+      type: object
+      additionalProperties: false
+      required: [start, end, text]
+      properties:
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+        text:
+          type: string
+        probability:
+          type: number
+          minimum: 0
+          maximum: 1
     LiveCaptionSessionRequest:
       type: object
       additionalProperties: false
       properties:
         language:
-          type: string
+          type: [string, "null"]
           maxLength: 16
         mode:
           enum: [transcribe, translateToEnglish]
@@ -1585,6 +1632,9 @@ components:
           type: integer
           minimum: 0
           maximum: 2000
+        profile:
+          enum: [captions, dictation]
+          default: captions
     LiveCaptionSessionSnapshot:
       type: object
       additionalProperties: false
@@ -1625,6 +1675,9 @@ components:
         expiresAt:
           type: string
           format: date-time
+        profile:
+          enum: [captions, dictation]
+          default: captions
     LiveCaptionChunkResponse:
       type: object
       additionalProperties: false
@@ -1653,12 +1706,24 @@ components:
           items:
             $ref: "#/components/schemas/TranscriptionSegment"
         isFinal:
-          const: true
+          type: boolean
         provider:
           type: string
         createdAt:
           type: string
           format: date-time
+        turnId:
+          type: [string, "null"]
+          maxLength: 128
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+        stableText:
+          type: [string, "null"]
+        provisionalText:
+          type: [string, "null"]
     SpeechResponse:
       type: object
       additionalProperties: false

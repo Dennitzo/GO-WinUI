@@ -11,6 +11,7 @@ namespace GoAi.Client;
 
 public sealed class GoAiClient : IDisposable
 {
+    private const int MaximumRateLimitRetries = 3;
     private readonly HttpClient _httpClient;
     private readonly JsonSerializerOptions _jsonOptions = GoAiProtocol.CreateJsonOptions();
     private readonly bool _ownsHttpClient;
@@ -110,12 +111,12 @@ public sealed class GoAiClient : IDisposable
         PostAsync<TranscriptionRequest, TranscriptionResponse>("v1/audio/transcriptions", request, cancellationToken);
 
     public Task<SpeechResponse> SynthesizeSpeechAsync(SpeechRequest request, CancellationToken cancellationToken = default) =>
-        PostAsync<SpeechRequest, SpeechResponse>("v1/audio/speech", request, cancellationToken);
+        PostWithRateLimitRetryAsync<SpeechRequest, SpeechResponse>("v1/audio/speech", request, cancellationToken);
 
     public Task<SpeechSessionSnapshot> CreateSpeechSessionAsync(
         SpeechSessionRequest request,
         CancellationToken cancellationToken = default) =>
-        PostAsync<SpeechSessionRequest, SpeechSessionSnapshot>(
+        PostWithRateLimitRetryAsync<SpeechSessionRequest, SpeechSessionSnapshot>(
             "v1/audio/speech/sessions",
             request,
             cancellationToken);
@@ -124,7 +125,7 @@ public sealed class GoAiClient : IDisposable
         string sessionId,
         SpeechParagraphRequest request,
         CancellationToken cancellationToken = default) =>
-        PostAsync<SpeechParagraphRequest, SpeechParagraphResponse>(
+        PostWithRateLimitRetryAsync<SpeechParagraphRequest, SpeechParagraphResponse>(
             $"v1/audio/speech/sessions/{Uri.EscapeDataString(sessionId)}/paragraphs",
             request,
             cancellationToken);
@@ -132,14 +133,14 @@ public sealed class GoAiClient : IDisposable
     public Task<SpeechSessionSnapshot> EndSpeechSessionAsync(
         string sessionId,
         CancellationToken cancellationToken = default) =>
-        PostWithoutBodyAsync<SpeechSessionSnapshot>(
+        PostWithoutBodyWithRateLimitRetryAsync<SpeechSessionSnapshot>(
             $"v1/audio/speech/sessions/{Uri.EscapeDataString(sessionId)}/end",
             cancellationToken);
 
     public Task<SpeechSessionSnapshot> CancelSpeechSessionAsync(
         string sessionId,
         CancellationToken cancellationToken = default) =>
-        PostWithoutBodyAsync<SpeechSessionSnapshot>(
+        PostWithoutBodyWithRateLimitRetryAsync<SpeechSessionSnapshot>(
             $"v1/audio/speech/sessions/{Uri.EscapeDataString(sessionId)}/cancel",
             cancellationToken);
 
@@ -175,6 +176,19 @@ public sealed class GoAiClient : IDisposable
         string sessionId,
         long sequence,
         ReadOnlyMemory<byte> waveAudio,
+        CancellationToken cancellationToken = default) =>
+        await SendLiveCaptionChunkAsync(
+            sessionId,
+            sequence,
+            waveAudio,
+            metadata: null,
+            cancellationToken).ConfigureAwait(false);
+
+    public async Task<LiveCaptionChunkResponse> SendLiveCaptionChunkAsync(
+        string sessionId,
+        long sequence,
+        ReadOnlyMemory<byte> waveAudio,
+        LiveCaptionChunkMetadata? metadata,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -192,6 +206,20 @@ public sealed class GoAiClient : IDisposable
             Content = new ReadOnlyMemoryContent(waveAudio),
         };
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+        if (metadata is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(metadata.TurnId);
+            ArgumentOutOfRangeException.ThrowIfNegative(metadata.Revision);
+            ArgumentOutOfRangeException.ThrowIfNegative(metadata.WindowStartMilliseconds);
+            request.Headers.TryAddWithoutValidation(GoAiHeaders.CaptionTurnId, metadata.TurnId);
+            request.Headers.TryAddWithoutValidation(
+                GoAiHeaders.CaptionRevision,
+                metadata.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            request.Headers.TryAddWithoutValidation(
+                GoAiHeaders.CaptionWindowStartMilliseconds,
+                metadata.WindowStartMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            request.Headers.TryAddWithoutValidation(GoAiHeaders.CaptionFinal, metadata.IsFinal ? "true" : "false");
+        }
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         return await ReadRequiredAsync<LiveCaptionChunkResponse>(response, cancellationToken).ConfigureAwait(false);
     }
@@ -477,29 +505,38 @@ public sealed class GoAiClient : IDisposable
             }
         }
 
-        using var request = new HttpRequestMessage(
-            HttpMethod.Get,
-            $"v1/artifacts/{Uri.EscapeDataString(artifactId)}");
-        if (existingLength > 0)
+        for (var attempt = 0; ; attempt++)
         {
-            request.Headers.Range = new RangeHeaderValue(existingLength, null);
-        }
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"v1/artifacts/{Uri.EscapeDataString(artifactId)}");
+            if (existingLength > 0)
+            {
+                request.Headers.Range = new RangeHeaderValue(existingLength, null);
+            }
 
-        using var response = await _httpClient.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken).ConfigureAwait(false);
-        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
-        if (existingLength > 0
-            && (response.StatusCode != System.Net.HttpStatusCode.PartialContent
-                || response.Content.Headers.ContentRange?.From != existingLength))
-        {
-            throw new InvalidDataException("The server did not honor the artifact resume range.");
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken).ConfigureAwait(false);
+            if (await WaitForRateLimitRetryAsync(response, attempt, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+            if (existingLength > 0
+                && (response.StatusCode != System.Net.HttpStatusCode.PartialContent
+                    || response.Content.Headers.ContentRange?.From != existingLength))
+            {
+                throw new InvalidDataException("The server did not honor the artifact resume range.");
+            }
+            var mode = existingLength > 0 ? FileMode.Append : FileMode.Create;
+            await using var output = new FileStream(destinationPath, mode, FileAccess.Write, FileShare.None, 81920, true);
+            await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
+            return;
         }
-        var mode = existingLength > 0 ? FileMode.Append : FileMode.Create;
-        await using var output = new FileStream(destinationPath, mode, FileAccess.Write, FileShare.None, 81920, true);
-        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
     }
 
     public void Dispose()
@@ -533,6 +570,28 @@ public sealed class GoAiClient : IDisposable
         return await ReadRequiredAsync<TResponse>(response, cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<TResponse> PostWithRateLimitRetryAsync<TRequest, TResponse>(
+        string path,
+        TRequest value,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        for (var attempt = 0; ; attempt++)
+        {
+            using var response = await _httpClient.PostAsJsonAsync(
+                path,
+                value,
+                _jsonOptions,
+                cancellationToken).ConfigureAwait(false);
+            if (await WaitForRateLimitRetryAsync(response, attempt, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            return await ReadRequiredAsync<TResponse>(response, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private async Task<TResponse> PutAsync<TRequest, TResponse>(
         string path,
         TRequest value,
@@ -555,6 +614,45 @@ public sealed class GoAiClient : IDisposable
         using var request = new HttpRequestMessage(HttpMethod.Post, path);
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         return await ReadRequiredAsync<TResponse>(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<TResponse> PostWithoutBodyWithRateLimitRetryAsync<TResponse>(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        for (var attempt = 0; ; attempt++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, path);
+            using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (await WaitForRateLimitRetryAsync(response, attempt, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            return await ReadRequiredAsync<TResponse>(response, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<bool> WaitForRateLimitRetryAsync(
+        HttpResponseMessage response,
+        int attempt,
+        CancellationToken cancellationToken)
+    {
+        if (response.StatusCode != System.Net.HttpStatusCode.TooManyRequests
+            || attempt >= MaximumRateLimitRetries)
+        {
+            return false;
+        }
+
+        var retryAfter = response.Headers.RetryAfter;
+        var delay = retryAfter?.Delta
+            ?? (retryAfter?.Date is { } retryAt
+                ? retryAt - DateTimeOffset.UtcNow
+                : TimeSpan.FromSeconds(Math.Min(8, 1 << attempt)));
+        delay = TimeSpan.FromMilliseconds(Math.Clamp(delay.TotalMilliseconds, 0, TimeSpan.FromSeconds(65).TotalMilliseconds));
+        await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     private async Task<RunAccepted> PostRunWorkloadAsync<TRequest>(

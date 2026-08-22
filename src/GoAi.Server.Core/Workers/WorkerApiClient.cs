@@ -41,6 +41,8 @@ public sealed class WorkerApiClient
         ReadOnlyMemory<byte> waveAudio,
         string? language,
         LiveCaptionMode mode,
+        LiveCaptionProfile profile,
+        bool isFinal,
         string sessionId,
         string? previousContext,
         CancellationToken cancellationToken = default)
@@ -58,6 +60,10 @@ public sealed class WorkerApiClient
         request.Headers.TryAddWithoutValidation(
             "X-GO-AI-Caption-Task",
             mode == LiveCaptionMode.TranslateToEnglish ? "translate" : "transcribe");
+        request.Headers.TryAddWithoutValidation(
+            GoAiHeaders.CaptionProfile,
+            profile == LiveCaptionProfile.Dictation ? "dictation" : "captions");
+        request.Headers.TryAddWithoutValidation(GoAiHeaders.CaptionFinal, isFinal ? "true" : "false");
         request.Headers.TryAddWithoutValidation("X-GO-AI-Caption-Session", sessionId);
         if (!string.IsNullOrWhiteSpace(previousContext))
         {

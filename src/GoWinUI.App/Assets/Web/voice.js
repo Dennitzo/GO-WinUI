@@ -2,13 +2,14 @@
   "use strict";
 
   const targetSampleRate = 16000;
-  const windowSamples = 32000;
-  const overlapSamples = 8000;
-  const windowStepSamples = windowSamples - overlapSamples;
+  // Chromium forwards small PCM frames. The native client owns the rolling
+  // Whisper window and coalesces revisions while an inference is running.
+  const bridgeFrameSamples = 1600;
   const preRollSamples = 4000;
   const minimumTurnSamples = 3200;
-  // Zwei Sekunden Sprechpause bestätigen eine vollständige Äußerung.
-  const silenceToFinishSamples = 32000;
+  // Eine kurze Pause beendet nur den aktuellen Diktierabschnitt. Die
+  // Mikrofonspur und der bereits sichtbare Composertext bleiben bestehen.
+  const silenceToFinishSamples = 8000;
   const capture = {
     active: false,
     starting: false,
@@ -19,6 +20,7 @@
     analyser: null,
     processor: null,
     outputSink: null,
+    sessionId: null,
     visualizerFrame: 0,
     preRoll: [],
     turn: null,
@@ -104,35 +106,22 @@
     return globalThis.btoa(binary);
   }
 
-  function sendWindow(turn, samples, isFinal) {
-    if (samples.length < minimumTurnSamples) {
-      if (!isFinal) return;
-      const padded = samples.slice();
-      while (padded.length < minimumTurnSamples) padded.push(0);
-      samples = padded;
-    }
+  function sendFrame(turn, samples, isFinal) {
+    const padded = samples.slice();
+    while (padded.length < bridgeFrameSamples) padded.push(0);
     globalThis.goBridge.post("microphone.audio", {
       turnId: turn.id,
+      sessionId: turn.sessionId,
       chunkIndex: turn.chunkIndex,
-      pcm: toPcmBase64(samples),
+      pcm: toPcmBase64(padded),
       isFinal: Boolean(isFinal)
     });
     turn.chunkIndex += 1;
   }
 
-  function emitAvailableWindows(turn) {
-    while (turn.samples.length - turn.nextWindowStart >= windowSamples) {
-      const start = turn.nextWindowStart;
-      const end = start + windowSamples;
-      sendWindow(turn, turn.samples.slice(start, end), false);
-      turn.lastWindowEnd = end;
-      turn.nextWindowStart += windowStepSamples;
-      if (turn.nextWindowStart > windowSamples * 2) {
-        const remove = turn.nextWindowStart - overlapSamples;
-        turn.samples.splice(0, remove);
-        turn.nextWindowStart -= remove;
-        turn.lastWindowEnd -= remove;
-      }
+  function emitAvailableFrames(turn) {
+    while (turn.frameBuffer.length >= bridgeFrameSamples) {
+      sendFrame(turn, turn.frameBuffer.splice(0, bridgeFrameSamples), false);
     }
   }
 
@@ -141,32 +130,23 @@
     capture.turn = null;
     capture.loudFrames = 0;
     capture.preRoll.length = 0;
-    if (!turn || turn.speechSamples < minimumTurnSamples) return;
-    if (turn.lastWindowEnd === 0) {
-      sendWindow(turn, turn.samples.slice(), true);
-      return;
-    }
-    if (turn.samples.length > turn.lastWindowEnd) {
-      const start = Math.max(0, turn.lastWindowEnd - overlapSamples);
-      sendWindow(turn, turn.samples.slice(start), true);
-    } else {
-      // Always close the server-side turn, even when the last full window
-      // happened to end exactly at the local buffer boundary.
-      sendWindow(turn, [], true);
-    }
+    if (!turn) return;
+    if (turn.speechSamples < minimumTurnSamples && turn.chunkIndex === 0) return;
+    // A final frame also closes a turn when the previous regular frame ended
+    // exactly at the current buffer boundary.
+    sendFrame(turn, turn.frameBuffer.splice(0), true);
   }
 
   function beginTurn(values) {
-    const samples = capture.preRoll.slice();
+    const frameBuffer = capture.preRoll.slice();
     capture.preRoll.length = 0;
     capture.turn = {
       id: newTurnId(),
+      sessionId: capture.sessionId,
       chunkIndex: 0,
-      samples,
-      nextWindowStart: 0,
-      lastWindowEnd: 0,
+      frameBuffer,
       silenceSamples: 0,
-      speechSamples: Math.min(samples.length, values.length * capture.loudFrames)
+      speechSamples: Math.min(frameBuffer.length, values.length * capture.loudFrames)
     };
   }
 
@@ -185,18 +165,23 @@
     }
 
     const turn = capture.turn;
-    for (let index = 0; index < values.length; index += 1) turn.samples.push(values[index]);
+    for (let index = 0; index < values.length; index += 1) turn.frameBuffer.push(values[index]);
     if (loud) {
       turn.speechSamples += values.length;
       turn.silenceSamples = 0;
     } else {
       turn.silenceSamples += values.length;
     }
-    emitAvailableWindows(turn);
+    // Keep the preroll locally until at least 200 ms of actual speech has
+    // passed the browser VAD. This prevents a click or another very short
+    // disturbance from reaching Whisper, while the first real decode still
+    // receives the complete 250 ms word-start context.
+    if (turn.speechSamples >= minimumTurnSamples) emitAvailableFrames(turn);
     if (turn.silenceSamples >= silenceToFinishSamples) finishTurn();
   }
 
-  async function start() {
+  async function start(sessionId = null) {
+    capture.sessionId = sessionId ? String(sessionId) : capture.sessionId;
     if (capture.active || capture.starting) {
       const track = capture.stream?.getAudioTracks?.()[0];
       return { deviceLabel: track?.label || "Standardmikrofon", sampleRate: targetSampleRate };
@@ -294,10 +279,15 @@
     }
   }
 
+  function setSessionId(value) {
+    capture.sessionId = value ? String(value) : null;
+  }
+
   globalThis.goVoiceCapture = Object.freeze({
     start,
     stop,
     setSuspended,
+    setSessionId,
     get isActive() { return capture.active; },
     get isStarting() { return capture.starting; }
   });

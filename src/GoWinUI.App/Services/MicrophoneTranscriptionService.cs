@@ -28,7 +28,11 @@ public sealed record MicrophoneTurnSnapshot(
     string TurnId,
     string Text,
     bool IsFinal,
-    string? Provider);
+    string? Provider,
+    long Revision = 0,
+    string? StableText = null,
+    string? ProvisionalText = null,
+    string? ClientSessionId = null);
 
 public sealed partial class MicrophoneTranscriptionService(
     GoAiConnectionService connection,
@@ -36,10 +40,17 @@ public sealed partial class MicrophoneTranscriptionService(
     ILogger<MicrophoneTranscriptionService> logger) : IDisposable
 {
     private const int SampleRate = GoAiProtocol.LiveCaptionSampleRate;
-    private const int WindowMilliseconds = 2_000;
-    private const int OverlapMilliseconds = 500;
-    private const int MinimumPcmBytes = SampleRate * sizeof(short) / 5;
-    private const int MaximumPcmBytes = SampleRate * sizeof(short) * 3;
+    private const int WindowMilliseconds = 6_000;
+    private const int OverlapMilliseconds = 0;
+    private const int BrowserFrameMilliseconds = 100;
+    private const int FirstDecodeMilliseconds = 480;
+    private const int DecodeCadenceMilliseconds = 300;
+    private const int BytesPerMillisecond = SampleRate * sizeof(short) / 1_000;
+    private const int BrowserFramePcmBytes = BrowserFrameMilliseconds * BytesPerMillisecond;
+    private const int MaximumBrowserFramePcmBytes = BrowserFramePcmBytes * 5;
+    private const int FirstDecodePcmBytes = FirstDecodeMilliseconds * BytesPerMillisecond;
+    private const int DecodeCadencePcmBytes = DecodeCadenceMilliseconds * BytesPerMillisecond;
+    private const int MaximumRollingPcmBytes = WindowMilliseconds * BytesPerMillisecond;
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(30);
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly SemaphoreSlim _chunkGate = new(1, 1);
@@ -49,14 +60,18 @@ public sealed partial class MicrophoneTranscriptionService(
     private CancellationTokenSource? _sessionCancellation;
     private CancellationTokenSource? _playbackCancellation;
     private Task? _keepAliveTask;
+    private Task? _dictationPumpTask;
     private string? _serverSessionId;
     private long _serverSequence;
-    private string? _turnId;
-    private int _nextTurnChunk;
     private string _turnTranscript = string.Empty;
+    private readonly SemaphoreSlim _dictationSignal = new(0, 1);
+    private readonly Dictionary<string, DictationCaptureState> _dictationCaptures = new(StringComparer.Ordinal);
+    private readonly Queue<PendingDictationWindow> _pendingDictationFinals = new();
+    private PendingDictationWindow? _pendingDictationPartial;
     private string _status = "Inaktiv";
     private string? _error;
-    private string? _provider;
+    private string? _transcriptionProvider;
+    private string? _speechProvider;
     private string? _deviceLabel;
     private DateTimeOffset? _startedAt;
     private WaveOutEvent? _activeOutput;
@@ -87,21 +102,8 @@ public sealed partial class MicrophoneTranscriptionService(
         _startedAt,
         _error,
         _turnTranscript,
-        _provider,
+        _speaking ? _speechProvider : _transcriptionProvider,
         _deviceLabel);
-
-    public async Task<UtteranceIntentResponse> ClassifyIntentAsync(
-        string text,
-        CancellationToken cancellationToken = default)
-    {
-        using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
-        var language = settings.Current.LiveCaptionLanguage;
-        return await client.ClassifyUtteranceIntentAsync(
-            new UtteranceIntentRequest(
-                text,
-                string.Equals(language, "auto", StringComparison.OrdinalIgnoreCase) ? null : language),
-            cancellationToken).ConfigureAwait(false);
-    }
 
     public async Task StartAsync(
         string? deviceLabel = null,
@@ -119,13 +121,12 @@ public sealed partial class MicrophoneTranscriptionService(
             _starting = true;
             _status = "Sprachmodell wird geladen";
             _error = null;
-            _provider = null;
+            _transcriptionProvider = null;
             _deviceLabel = string.IsNullOrWhiteSpace(deviceLabel) ? "Standardmikrofon" : deviceLabel.Trim();
             _startedAt = DateTimeOffset.Now;
-            _turnId = null;
             _turnTranscript = string.Empty;
-            _nextTurnChunk = 0;
             _serverSequence = 0;
+            ResetDictationQueue();
             RaiseChanged();
 
             var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
@@ -139,7 +140,8 @@ public sealed partial class MicrophoneTranscriptionService(
                         SampleRate,
                         1,
                         WindowMilliseconds,
-                        OverlapMilliseconds),
+                        OverlapMilliseconds,
+                        LiveCaptionProfile.Dictation),
                     cancellationToken).ConfigureAwait(false);
 
                 _client = client;
@@ -147,7 +149,10 @@ public sealed partial class MicrophoneTranscriptionService(
                 _sessionCancellation = new CancellationTokenSource();
                 _active = true;
                 _starting = false;
-                _status = "Ich höre zu";
+                _status = _speaking ? "AI-Antwort wird vorgelesen" : "Ich höre zu";
+                _dictationPumpTask = Task.Run(
+                    () => ProcessDictationQueueAsync(_sessionCancellation.Token),
+                    CancellationToken.None);
                 _keepAliveTask = Task.Run(
                     () => KeepAliveAsync(_sessionCancellation.Token),
                     CancellationToken.None);
@@ -180,6 +185,7 @@ public sealed partial class MicrophoneTranscriptionService(
 
     public async Task SubmitChunkAsync(
         string turnId,
+        string? clientSessionId,
         int chunkIndex,
         string pcmBase64,
         bool isFinal,
@@ -189,6 +195,10 @@ public sealed partial class MicrophoneTranscriptionService(
         if (string.IsNullOrWhiteSpace(turnId) || turnId.Length > 128)
         {
             throw new ArgumentException("Die Sprachsequenz ist ungültig.", nameof(turnId));
+        }
+        if (clientSessionId?.Length > 64)
+        {
+            throw new ArgumentException("Die Chat-Sitzung der Sprachsequenz ist ungültig.", nameof(clientSessionId));
         }
         ArgumentOutOfRangeException.ThrowIfNegative(chunkIndex);
         var pcm = DecodePcm(pcmBase64);
@@ -200,91 +210,335 @@ public sealed partial class MicrophoneTranscriptionService(
             {
                 return;
             }
-            if (_turnId is null)
+            if (!_dictationCaptures.TryGetValue(turnId, out var capture))
             {
-                _turnId = turnId;
-                _nextTurnChunk = 0;
-                _turnTranscript = string.Empty;
+                capture = new DictationCaptureState(turnId, clientSessionId);
+                _dictationCaptures.Add(turnId, capture);
             }
-            if (!string.Equals(_turnId, turnId, StringComparison.Ordinal))
-            {
-                // WebView message callbacks may finish acquiring the native bridge
-                // semaphore in a different order. A new turn supersedes an unfinished
-                // turn; the speech window itself is still independently transcribable.
-                _turnId = turnId;
-                _nextTurnChunk = chunkIndex;
-                _turnTranscript = string.Empty;
-            }
-            else if (chunkIndex < _nextTurnChunk)
+            if (capture.IsFinalQueued || chunkIndex < capture.NextChunkIndex)
             {
                 // Duplicate delivery after a bridge retry is idempotent.
                 return;
             }
-            else if (chunkIndex > _nextTurnChunk)
+            if (chunkIndex > capture.NextChunkIndex)
             {
-                // Continue with the newest available window instead of poisoning all
-                // later microphone input because one browser message was dropped.
-                _nextTurnChunk = chunkIndex;
+                DictationFrameGap(logger, turnId, capture.NextChunkIndex, chunkIndex, null);
+            }
+            capture.NextChunkIndex = chunkIndex + 1;
+            capture.Append(pcm);
+
+            if (!capture.ShouldSchedule(isFinal))
+            {
+                return;
             }
 
-            var client = _client ?? throw new InvalidOperationException("Der Sprachclient ist nicht aktiv.");
-            var sessionId = _serverSessionId ?? throw new InvalidOperationException("Die Sprachsitzung ist nicht aktiv.");
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken,
-                _sessionCancellation?.Token ?? CancellationToken.None);
-            _status = "Sprache wird erkannt";
-            _error = null;
-            _recognizing = true;
-            RaiseChanged();
-
-            var response = await SendChunkWithRecoveryAsync(
-                client,
-                sessionId,
-                CreatePcm16Wave(pcm),
-                linked.Token).ConfigureAwait(false);
-            _nextTurnChunk++;
-            _provider = response.Provider;
-            _turnTranscript = AppendSegment(_turnTranscript, PlainSpeechText(response));
-            var turnSnapshot = new MicrophoneTurnSnapshot(
-                turnId,
-                _turnTranscript,
-                isFinal,
-                _provider);
-
+            var pending = capture.CreateWindow(isFinal);
+            capture.MarkScheduled();
             if (isFinal)
             {
-                _turnId = null;
-                _nextTurnChunk = 0;
-                _turnTranscript = string.Empty;
+                capture.IsFinalQueued = true;
+                if (string.Equals(_pendingDictationPartial?.TurnId, turnId, StringComparison.Ordinal))
+                {
+                    _pendingDictationPartial = null;
+                }
+                _pendingDictationFinals.Enqueue(pending);
             }
-            TurnChanged?.Invoke(this, turnSnapshot);
-            _recognizing = false;
-            _status = _speaking ? "AI-Antwort wird vorgelesen" : "Ich höre zu";
-            _error = null;
-            RaiseChanged();
+            else
+            {
+                // A waiting interim hypothesis is obsolete as soon as newer audio
+                // arrives. The active Whisper request itself is never duplicated.
+                _pendingDictationPartial = pending;
+            }
+            SignalDictationPump();
         }
-        catch (OperationCanceledException) when (_sessionCancellation?.IsCancellationRequested == true)
+        finally
         {
-            // Stopping voice mode intentionally abandons the current partial window.
-            _recognizing = false;
+            _chunkGate.Release();
         }
-        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+    }
+
+    private async Task ProcessDictationQueueAsync(CancellationToken cancellationToken)
+    {
+        try
         {
-            _recognizing = false;
-            _turnId = null;
-            _nextTurnChunk = 0;
-            _turnTranscript = string.Empty;
-            _status = "Spracherkennung unterbrochen";
-            _error = FriendlyError(exception);
-            RaiseChanged();
-            VoiceFailed(logger, exception.GetType().Name, exception);
-            throw new InvalidOperationException(_error, exception);
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await _dictationSignal.WaitAsync(cancellationToken).ConfigureAwait(false);
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    var pending = await TakePendingDictationAsync(cancellationToken).ConfigureAwait(false);
+                    if (pending is null)
+                    {
+                        break;
+                    }
+
+                    _recognizing = true;
+                    _status = _speaking
+                        ? "Sprache wird erkannt · Vorlesen läuft"
+                        : "Sprache wird erkannt";
+                    _error = null;
+                    RaiseChanged();
+                    try
+                    {
+                        await ProcessDictationWindowAsync(pending, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception exception) when (exception is not OutOfMemoryException)
+                    {
+                        await HandleDictationFailureAsync(
+                            pending,
+                            exception,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
+                _recognizing = false;
+                _status = _speaking ? "AI-Antwort wird vorgelesen" : "Ich höre zu";
+                RaiseChanged();
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Normal shutdown of the persistent dictation pump.
         }
         finally
         {
             _recognizing = false;
+        }
+    }
+
+    private async Task<PendingDictationWindow?> TakePendingDictationAsync(
+        CancellationToken cancellationToken)
+    {
+        await _chunkGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_pendingDictationFinals.Count > 0)
+            {
+                return _pendingDictationFinals.Dequeue();
+            }
+
+            var pending = _pendingDictationPartial;
+            _pendingDictationPartial = null;
+            return pending;
+        }
+        finally
+        {
             _chunkGate.Release();
         }
+    }
+
+    private async Task ProcessDictationWindowAsync(
+        PendingDictationWindow pending,
+        CancellationToken cancellationToken)
+    {
+        LiveCaptionChunkResponse? response = null;
+        Exception? failure = null;
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                var client = _client ?? throw new InvalidOperationException("Der Sprachclient ist nicht aktiv.");
+                var sessionId = _serverSessionId ?? throw new InvalidOperationException("Die Sprachsitzung ist nicht aktiv.");
+                response = await SendChunkWithRecoveryAsync(
+                    client,
+                    sessionId,
+                    CreatePcm16Wave(pending.Pcm),
+                    new LiveCaptionChunkMetadata(
+                        pending.TurnId,
+                        pending.Revision,
+                        pending.WindowStartMilliseconds,
+                        pending.IsFinal),
+                    cancellationToken).ConfigureAwait(false);
+                failure = null;
+                break;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                failure = exception;
+                if (attempt == 0)
+                {
+                    if (!pending.IsFinal
+                        && await HasSupersedingDictationWindowAsync(
+                            pending,
+                            cancellationToken).ConfigureAwait(false))
+                    {
+                        return;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if (response is not null)
+        {
+            var stable = (response.StableText ?? string.Empty).Trim();
+            var provisional = (response.ProvisionalText ?? string.Empty).Trim();
+            var text = JoinDictationText(stable, provisional);
+            var responseRevision = response.Revision;
+            if (!string.IsNullOrWhiteSpace(response.TurnId)
+                && !string.Equals(response.TurnId, pending.TurnId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Die Diktierantwort gehört zu einem anderen Abschnitt.");
+            }
+            if (responseRevision < pending.Revision)
+            {
+                // A cached response from a recovered session may be older than the
+                // latest browser revision. It must never overwrite newer prompt text.
+                return;
+            }
+
+            await _chunkGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (!_dictationCaptures.TryGetValue(pending.TurnId, out var capture))
+                {
+                    return;
+                }
+                capture.LastText = text;
+                capture.LastStableText = stable;
+                capture.LastProvisionalText = provisional;
+                capture.LastCompletedRevision = responseRevision;
+                _transcriptionProvider = response.Provider;
+                _turnTranscript = pending.IsFinal ? string.Empty : text;
+                if (pending.IsFinal)
+                {
+                    _dictationCaptures.Remove(pending.TurnId);
+                }
+            }
+            finally
+            {
+                _chunkGate.Release();
+            }
+
+            TurnChanged?.Invoke(this, new MicrophoneTurnSnapshot(
+                pending.TurnId,
+                text,
+                pending.IsFinal,
+                response.Provider,
+                responseRevision,
+                stable,
+                provisional,
+                pending.ClientSessionId));
+            _error = null;
+            return;
+        }
+
+        await HandleDictationFailureAsync(pending, failure, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> HasSupersedingDictationWindowAsync(
+        PendingDictationWindow pending,
+        CancellationToken cancellationToken)
+    {
+        await _chunkGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return (_pendingDictationPartial is { } partial
+                    && string.Equals(partial.TurnId, pending.TurnId, StringComparison.Ordinal)
+                    && partial.Revision > pending.Revision)
+                || _pendingDictationFinals.Any(final =>
+                    string.Equals(final.TurnId, pending.TurnId, StringComparison.Ordinal)
+                    && final.Revision > pending.Revision);
+        }
+        finally
+        {
+            _chunkGate.Release();
+        }
+    }
+
+    private async Task HandleDictationFailureAsync(
+        PendingDictationWindow pending,
+        Exception? failure,
+        CancellationToken cancellationToken)
+    {
+        string lastText = string.Empty;
+        string lastStable = string.Empty;
+        string lastProvisional = string.Empty;
+        await _chunkGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_dictationCaptures.TryGetValue(pending.TurnId, out var capture))
+            {
+                lastText = capture.LastText;
+                lastStable = capture.LastStableText;
+                lastProvisional = capture.LastProvisionalText;
+                if (pending.IsFinal)
+                {
+                    _dictationCaptures.Remove(pending.TurnId);
+                    _turnTranscript = string.Empty;
+                }
+            }
+        }
+        finally
+        {
+            _chunkGate.Release();
+        }
+
+        _error = pending.IsFinal
+            ? "Die abschließende Spracherkennung war unvollständig; der letzte erkannte Stand wurde übernommen."
+            : null;
+        if (!pending.IsFinal)
+        {
+            _status = "Spracherkennung wird fortgesetzt";
+        }
+        RaiseChanged();
+        if (failure is not null)
+        {
+            VoiceFailed(logger, $"dictation_revision_{pending.Revision}_{failure.GetType().Name}", failure);
+        }
+
+        if (pending.IsFinal && lastText.Length > 0)
+        {
+            TurnChanged?.Invoke(this, new MicrophoneTurnSnapshot(
+                pending.TurnId,
+                lastText,
+                true,
+                _transcriptionProvider,
+                pending.Revision,
+                lastStable,
+                lastProvisional,
+                pending.ClientSessionId));
+        }
+    }
+
+    private void SignalDictationPump()
+    {
+        if (_dictationSignal.CurrentCount == 0)
+        {
+            try { _dictationSignal.Release(); }
+            catch (SemaphoreFullException) { }
+        }
+    }
+
+    private void ResetDictationQueue()
+    {
+        _dictationCaptures.Clear();
+        _pendingDictationFinals.Clear();
+        _pendingDictationPartial = null;
+        while (_dictationSignal.Wait(0)) { }
+    }
+
+    private static string JoinDictationText(string? stable, string? provisional)
+    {
+        var left = (stable ?? string.Empty).Trim();
+        var right = (provisional ?? string.Empty).Trim();
+        if (left.Length == 0)
+        {
+            return right;
+        }
+        if (right.Length == 0)
+        {
+            return left;
+        }
+        return $"{left} {right}";
     }
 
     public Task SpeakAsync(string markdown, CancellationToken cancellationToken = default) =>
@@ -343,7 +597,9 @@ public sealed partial class MicrophoneTranscriptionService(
                 requireActiveVoiceMode ? _sessionCancellation?.Token ?? CancellationToken.None : CancellationToken.None,
                 playbackCancellation.Token);
             _speaking = true;
-            _status = "Sprachausgabe wird erzeugt";
+            _status = _recognizing
+                ? "Sprachausgabe wird erzeugt · Sprache wird erkannt"
+                : "Sprachausgabe wird erzeugt";
             _error = null;
             lock (_playbackGate)
             {
@@ -398,9 +654,10 @@ public sealed partial class MicrophoneTranscriptionService(
                 _playbackCancellation = null;
             }
             _speaking = false;
+            _speechProvider = null;
             if (_active)
             {
-                _status = "Ich höre zu";
+                _status = _recognizing ? "Sprache wird erkannt" : "Ich höre zu";
             }
             RaiseChanged();
             _speechGate.Release();
@@ -436,22 +693,26 @@ public sealed partial class MicrophoneTranscriptionService(
                 {
                     _activeOutput.Play();
                     _speechPaused = false;
-                    _status = "AI-Antwort wird vorgelesen";
+                    _status = _recognizing
+                        ? "AI-Antwort wird vorgelesen · Sprache wird erkannt"
+                        : "AI-Antwort wird vorgelesen";
                     playbackUpdate = new(
                         _activePlaybackSegmentIndex,
                         SpeechPlaybackState.Playing,
-                        _provider,
+                        _speechProvider,
                         _activePlaybackSegmentIndexes);
                 }
                 else
                 {
                     _activeOutput.Pause();
                     _speechPaused = true;
-                    _status = "Vorlesen pausiert";
+                    _status = _recognizing
+                        ? "Vorlesen pausiert · Sprache wird erkannt"
+                        : "Vorlesen pausiert";
                     playbackUpdate = new(
                         _activePlaybackSegmentIndex,
                         SpeechPlaybackState.Paused,
-                        _provider,
+                        _speechProvider,
                         _activePlaybackSegmentIndexes);
                 }
                 progress = _playbackProgress;
@@ -506,6 +767,13 @@ public sealed partial class MicrophoneTranscriptionService(
             }
             RaiseChanged();
 
+            var dictationPump = _dictationPumpTask;
+            if (dictationPump is not null)
+            {
+                try { await dictationPump.ConfigureAwait(false); }
+                catch (OperationCanceledException) { }
+            }
+
             await _chunkGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -541,13 +809,13 @@ public sealed partial class MicrophoneTranscriptionService(
                 _speechGate.Release();
             }
             ReleaseSession();
-            _turnId = null;
             _turnTranscript = string.Empty;
-            _nextTurnChunk = 0;
+            ResetDictationQueue();
             _recognizing = false;
             if (stopSpeech)
             {
                 _speaking = false;
+                _speechProvider = null;
             }
             _stopping = false;
             _startedAt = null;
@@ -583,24 +851,8 @@ public sealed partial class MicrophoneTranscriptionService(
                 }
                 catch (GoAiApiException exception) when (exception.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    // Protocol 1.0 servers built before the heartbeat endpoint stay
-                    // compatible until the installed gateway is upgraded.
-                    await _chunkGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                    try
-                    {
-                        if (_active && string.Equals(_serverSessionId, sessionId, StringComparison.Ordinal))
-                        {
-                            _ = await SendChunkWithRecoveryAsync(
-                                client,
-                                sessionId,
-                                CreatePcm16Wave(new byte[MinimumPcmBytes]),
-                                cancellationToken).ConfigureAwait(false);
-                        }
-                    }
-                    finally
-                    {
-                        _chunkGate.Release();
-                    }
+                    // The next real dictation window recreates an expired session.
+                    // Never inject synthetic silence into Local Agreement state.
                 }
             }
         }
@@ -620,6 +872,7 @@ public sealed partial class MicrophoneTranscriptionService(
         GoAiClient client,
         string sessionId,
         ReadOnlyMemory<byte> wave,
+        LiveCaptionChunkMetadata metadata,
         CancellationToken cancellationToken)
     {
         try
@@ -628,6 +881,7 @@ public sealed partial class MicrophoneTranscriptionService(
                 sessionId,
                 _serverSequence,
                 wave,
+                metadata,
                 cancellationToken).ConfigureAwait(false);
             _serverSequence++;
             return response;
@@ -641,6 +895,7 @@ public sealed partial class MicrophoneTranscriptionService(
                 session.SessionId,
                 _serverSequence,
                 wave,
+                metadata,
                 cancellationToken).ConfigureAwait(false);
             _serverSequence++;
             return response;
@@ -659,7 +914,8 @@ public sealed partial class MicrophoneTranscriptionService(
                 SampleRate,
                 1,
                 WindowMilliseconds,
-                OverlapMilliseconds),
+                OverlapMilliseconds,
+                LiveCaptionProfile.Dictation),
             cancellationToken);
     }
 
@@ -1011,7 +1267,9 @@ public sealed partial class MicrophoneTranscriptionService(
             _activeOutput = output;
             _canPauseSpeech = true;
             _speechPaused = false;
-            _status = "AI-Antwort wird vorgelesen";
+            _status = _recognizing
+                ? "AI-Antwort wird vorgelesen · Sprache wird erkannt"
+                : "AI-Antwort wird vorgelesen";
         }
         RaiseChanged();
 
@@ -1042,14 +1300,17 @@ public sealed partial class MicrophoneTranscriptionService(
                 {
                     activeSegment = current.Part.Index;
                     var snapshotChanged = false;
+                    var playbackStatus = _recognizing
+                        ? "AI-Antwort wird vorgelesen · Sprache wird erkannt"
+                        : "AI-Antwort wird vorgelesen";
                     lock (_playbackGate)
                     {
                         _activePlaybackSegmentIndex = current.Part.Index;
                         _activePlaybackSegmentIndexes = [current.Part.Index];
-                        snapshotChanged = !string.Equals(_provider, current.Provider, StringComparison.Ordinal)
-                            || !string.Equals(_status, "AI-Antwort wird vorgelesen", StringComparison.Ordinal);
-                        _provider = current.Provider;
-                        _status = "AI-Antwort wird vorgelesen";
+                        snapshotChanged = !string.Equals(_speechProvider, current.Provider, StringComparison.Ordinal)
+                            || !string.Equals(_status, playbackStatus, StringComparison.Ordinal);
+                        _speechProvider = current.Provider;
+                        _status = playbackStatus;
                     }
                     // A sentence boundary is carried by speech.progress. Re-emitting
                     // the otherwise unchanged microphone snapshot here caused the
@@ -1297,6 +1558,7 @@ public sealed partial class MicrophoneTranscriptionService(
         _sessionCancellation?.Dispose();
         _sessionCancellation = null;
         _keepAliveTask = null;
+        _dictationPumpTask = null;
         _client?.Dispose();
         _client = null;
         _serverSessionId = null;
@@ -1305,9 +1567,9 @@ public sealed partial class MicrophoneTranscriptionService(
 
     internal static byte[] CreatePcm16Wave(ReadOnlySpan<byte> pcm)
     {
-        if (pcm.Length is < MinimumPcmBytes or > MaximumPcmBytes || (pcm.Length & 1) != 0)
+        if (pcm.Length is < BrowserFramePcmBytes or > MaximumRollingPcmBytes || (pcm.Length & 1) != 0)
         {
-            throw new ArgumentException("Das Mikrofon-Audiofenster muss 0,2 bis 3 Sekunden PCM16 enthalten.", nameof(pcm));
+            throw new ArgumentException("Das Mikrofon-Audiofenster muss 0,1 bis 6 Sekunden PCM16 enthalten.", nameof(pcm));
         }
         var wave = new byte[44 + pcm.Length];
         "RIFF"u8.CopyTo(wave);
@@ -1335,7 +1597,7 @@ public sealed partial class MicrophoneTranscriptionService(
         try
         {
             var pcm = Convert.FromBase64String(value);
-            if (pcm.Length is < MinimumPcmBytes or > MaximumPcmBytes || (pcm.Length & 1) != 0)
+            if (pcm.Length is < BrowserFramePcmBytes or > MaximumBrowserFramePcmBytes || (pcm.Length & 1) != 0)
             {
                 throw new ArgumentException("Das Mikrofon-Audiofenster liegt außerhalb der erlaubten Dauer.", nameof(value));
             }
@@ -1345,16 +1607,6 @@ public sealed partial class MicrophoneTranscriptionService(
         {
             throw new ArgumentException("Das Mikrofon-Audiofenster ist nicht gültig codiert.", nameof(value), exception);
         }
-    }
-
-    private static string AppendSegment(string current, string next)
-    {
-        var value = next.Trim();
-        if (value.Length == 0)
-        {
-            return current;
-        }
-        return current.Length == 0 ? value : $"{current} {value}";
     }
 
     internal static string PlainSpeechText(LiveCaptionChunkResponse response)
@@ -1382,6 +1634,73 @@ public sealed partial class MicrophoneTranscriptionService(
     }
 
     private void RaiseChanged() => Changed?.Invoke(this, Current);
+
+    internal sealed class DictationCaptureState(string turnId, string? clientSessionId)
+    {
+        private readonly List<byte> _rollingPcm = new(MaximumRollingPcmBytes);
+
+        public string TurnId { get; } = turnId;
+
+        public string? ClientSessionId { get; } = clientSessionId;
+
+        public int NextChunkIndex { get; set; }
+
+        public long TotalPcmBytes { get; private set; }
+
+        public long LastScheduledPcmBytes { get; private set; }
+
+        public long NextRevision { get; private set; }
+
+        public long LastCompletedRevision { get; set; } = -1;
+
+        public bool IsFinalQueued { get; set; }
+
+        public string LastText { get; set; } = string.Empty;
+
+        public string LastStableText { get; set; } = string.Empty;
+
+        public string LastProvisionalText { get; set; } = string.Empty;
+
+        public void Append(ReadOnlySpan<byte> pcm)
+        {
+            _rollingPcm.AddRange(pcm.ToArray());
+            TotalPcmBytes += pcm.Length;
+            var overflow = _rollingPcm.Count - MaximumRollingPcmBytes;
+            if (overflow > 0)
+            {
+                _rollingPcm.RemoveRange(0, overflow);
+            }
+        }
+
+        public bool ShouldSchedule(bool isFinal) =>
+            isFinal
+            || (TotalPcmBytes >= FirstDecodePcmBytes
+                && TotalPcmBytes - LastScheduledPcmBytes >= DecodeCadencePcmBytes);
+
+        public void MarkScheduled() => LastScheduledPcmBytes = TotalPcmBytes;
+
+        public PendingDictationWindow CreateWindow(bool isFinal)
+        {
+            var windowStartMilliseconds = (int)Math.Min(
+                int.MaxValue,
+                Math.Max(0, (TotalPcmBytes - _rollingPcm.Count) / BytesPerMillisecond));
+            return new PendingDictationWindow(
+                TurnId,
+                ClientSessionId,
+                NextRevision++,
+                windowStartMilliseconds,
+                isFinal,
+                _rollingPcm.ToArray());
+        }
+    }
+
+    internal sealed record PendingDictationWindow(
+        string TurnId,
+        string? ClientSessionId,
+        long Revision,
+        int WindowStartMilliseconds,
+        bool IsFinal,
+        byte[] Pcm);
 
     private sealed record PreparedAudioBatch(
         int Index,
@@ -1437,6 +1756,7 @@ public sealed partial class MicrophoneTranscriptionService(
         ReleaseSession();
         _lifecycleGate.Dispose();
         _chunkGate.Dispose();
+        _dictationSignal.Dispose();
         _speechGate.Dispose();
     }
 
@@ -1473,6 +1793,9 @@ public sealed partial class MicrophoneTranscriptionService(
     private static readonly Action<ILogger, string, Exception?> VoiceFailed =
         LoggerMessage.Define<string>(LogLevel.Warning, new EventId(5312, nameof(VoiceFailed)),
             "Browser microphone conversation failed ({FailureKind}).");
+    private static readonly Action<ILogger, string, int, int, Exception?> DictationFrameGap =
+        LoggerMessage.Define<string, int, int>(LogLevel.Debug, new EventId(5314, nameof(DictationFrameGap)),
+            "Dictation frame gap for {TurnId}: expected {ExpectedFrame}, received {ActualFrame}.");
     private static readonly Action<ILogger, string, Exception?> MediaTransportFailed =
         LoggerMessage.Define<string>(LogLevel.Warning, new EventId(5313, nameof(MediaTransportFailed)),
             "Windows speech media controls failed ({FailureKind}).");

@@ -87,6 +87,39 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public void DictationContractIsAdditiveAndCarriesRevisableText()
+    {
+        var request = new LiveCaptionSessionRequest(
+            Language: null,
+            WindowMilliseconds: 6_000,
+            OverlapMilliseconds: 0,
+            Profile: LiveCaptionProfile.Dictation);
+        var response = new LiveCaptionChunkResponse(
+            "caption-test",
+            3,
+            "Heizlast berechnen",
+            "Heizlast berechnen",
+            "de",
+            0.98,
+            [],
+            false,
+            "faster-whisper-large-v3-dictation",
+            DateTimeOffset.UtcNow,
+            "turn-1",
+            7,
+            "Heizlast",
+            "berechnen");
+
+        var requestJson = JsonSerializer.Serialize(request, GoAiProtocol.CreateJsonOptions());
+        var responseJson = JsonSerializer.Serialize(response, GoAiProtocol.CreateJsonOptions());
+
+        Assert.Contains("\"profile\":\"dictation\"", requestJson, StringComparison.Ordinal);
+        Assert.Contains("\"stableText\":\"Heizlast\"", responseJson, StringComparison.Ordinal);
+        Assert.Contains("\"provisionalText\":\"berechnen\"", responseJson, StringComparison.Ordinal);
+        Assert.Contains("\"revision\":7", responseJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GpuStatusRemainsCompatibleWithGatewayWithoutStructuredWorkloads()
     {
         const string json = """

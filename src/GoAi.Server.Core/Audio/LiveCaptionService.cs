@@ -77,7 +77,10 @@ public sealed class LiveCaptionService : BackgroundService
 
             var now = DateTimeOffset.UtcNow;
             var sessionId = $"caption-{Guid.NewGuid():N}";
-            await _workers.PrepareLiveCaptionResourcesAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            await _workers.PrepareLiveCaptionResourcesAsync(
+                sessionId,
+                request.Profile,
+                cancellationToken).ConfigureAwait(false);
             await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             try
             {
@@ -147,6 +150,7 @@ public sealed class LiveCaptionService : BackgroundService
         string sessionId,
         long sequence,
         ReadOnlyMemory<byte> waveAudio,
+        LiveCaptionChunkMetadata? metadata = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(sequence);
@@ -192,18 +196,75 @@ public sealed class LiveCaptionService : BackgroundService
                 _lifecycleGate.Release();
             }
 
-            _ = ValidateWave(
+            var waveInfo = ValidateWave(
                 waveAudio.Span,
                 session.Request.SampleRate,
                 session.Request.Channels,
                 session.Request.WindowMilliseconds + 1_000);
+            var isDictation = session.Request.Profile == LiveCaptionProfile.Dictation;
+            if (isDictation)
+            {
+                ValidateDictationMetadata(metadata);
+            }
+            else if (metadata is not null)
+            {
+                throw new ArgumentException("Diktiermetadaten sind nur im Diktierprofil zulässig.", nameof(metadata));
+            }
+
+            var dictationState = isDictation
+                ? session.GetDictationTurn(metadata!.TurnId)
+                : null;
+            var transcriptionAudio = waveAudio;
+            var transcriptionMetadata = metadata;
+            if (isDictation && metadata!.IsFinal && dictationState is not null)
+            {
+                var trimmed = TrimFinalDictationWave(
+                    waveAudio,
+                    metadata.WindowStartMilliseconds,
+                    dictationState.CommittedWords);
+                transcriptionAudio = trimmed.Audio;
+                transcriptionMetadata = metadata with
+                {
+                    WindowStartMilliseconds = trimmed.WindowStartMilliseconds,
+                };
+                waveInfo = ValidateWave(
+                    transcriptionAudio.Span,
+                    session.Request.SampleRate,
+                    session.Request.Channels,
+                    session.Request.WindowMilliseconds + 1_000);
+            }
+            var transcriptionLanguage = session.Request.Language;
+            if (string.IsNullOrWhiteSpace(transcriptionLanguage)
+                && !string.IsNullOrWhiteSpace(dictationState?.Language))
+            {
+                transcriptionLanguage = dictationState.Language;
+            }
+            var transcriptionContext = isDictation && dictationState is not null
+                ? JoinTextParts(
+                    session.RawTranscript,
+                    JoinDictationWords(dictationState.CommittedWords))
+                : session.RawTranscript;
             var transcription = await _workers.TranscribeLiveCaptionAsync(
-                waveAudio,
-                session.Request.Language,
+                transcriptionAudio,
+                transcriptionLanguage,
                 session.Request.Mode,
+                session.Request.Profile,
+                metadata?.IsFinal ?? true,
                 session.SessionId,
-                session.RawTranscript,
+                transcriptionContext,
                 cancellationToken).ConfigureAwait(false);
+
+            if (isDictation)
+            {
+                var response = BuildDictationResponse(
+                    session,
+                    sequence,
+                    transcriptionMetadata!,
+                    waveInfo.DurationMilliseconds,
+                    transcription);
+                await CommitResponseAsync(session, sequence, response, cancellationToken).ConfigureAwait(false);
+                return response;
+            }
 
             IReadOnlyList<TranscriptionSegment> rawSegments = transcription.Segments.Count > 0
                 ? transcription.Segments
@@ -257,43 +318,24 @@ public sealed class LiveCaptionService : BackgroundService
                 })
                 .ToArray();
 
-            await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
+            if (!string.IsNullOrWhiteSpace(uniqueRawText))
             {
-                if (!ReferenceEquals(_active, session) || session.IsStopping)
-                {
-                    throw new KeyNotFoundException("Live-Untertitel-Sitzung wurde beendet.");
-                }
-                if (!string.IsNullOrWhiteSpace(uniqueRawText))
-                {
-                    AppendBoundedPlainTranscript(session, uniqueRawText);
-                    AppendDialogueTranscript(session, displaySegments);
-                }
-
-                session.NextSequence++;
-                session.UpdatedAt = DateTimeOffset.UtcNow;
-                var response = new LiveCaptionChunkResponse(
-                    session.SessionId,
-                    sequence,
-                    uniqueText,
-                    session.Transcript,
-                    transcription.Language,
-                    transcription.LanguageProbability,
-                    segments,
-                    true,
-                    provider,
-                    DateTimeOffset.UtcNow);
-                session.Responses[sequence] = response;
-                foreach (var oldSequence in session.Responses.Keys.Where(value => value < sequence - 15).ToArray())
-                {
-                    _ = session.Responses.Remove(oldSequence);
-                }
-                return response;
+                AppendBoundedPlainTranscript(session, uniqueRawText);
+                AppendDialogueTranscript(session, displaySegments);
             }
-            finally
-            {
-                _lifecycleGate.Release();
-            }
+            var captionResponse = new LiveCaptionChunkResponse(
+                session.SessionId,
+                sequence,
+                uniqueText,
+                session.Transcript,
+                transcription.Language,
+                transcription.LanguageProbability,
+                segments,
+                true,
+                provider,
+                DateTimeOffset.UtcNow);
+            await CommitResponseAsync(session, sequence, captionResponse, cancellationToken).ConfigureAwait(false);
+            return captionResponse;
         }
         finally
         {
@@ -356,6 +398,320 @@ public sealed class LiveCaptionService : BackgroundService
         {
             _sessionTransitionGate.Release();
         }
+    }
+
+    private async Task CommitResponseAsync(
+        CaptionSession session,
+        long sequence,
+        LiveCaptionChunkResponse response,
+        CancellationToken cancellationToken)
+    {
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!ReferenceEquals(_active, session) || session.IsStopping)
+            {
+                throw new KeyNotFoundException("Live-Untertitel-Sitzung wurde beendet.");
+            }
+            session.NextSequence++;
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+            session.Responses[sequence] = response;
+            foreach (var oldSequence in session.Responses.Keys.Where(value => value < sequence - 15).ToArray())
+            {
+                _ = session.Responses.Remove(oldSequence);
+            }
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private static void ValidateDictationMetadata(LiveCaptionChunkMetadata? metadata)
+    {
+        if (metadata is null
+            || metadata.TurnId.Length is < 1 or > 128
+            || metadata.TurnId.Any(static character =>
+                !char.IsAsciiLetterOrDigit(character) && character is not ('-' or '_'))
+            || metadata.Revision < 0
+            || metadata.WindowStartMilliseconds < 0)
+        {
+            throw new ArgumentException("Das Diktierfenster enthält keine gültigen Metadaten.", nameof(metadata));
+        }
+    }
+
+    internal static (ReadOnlyMemory<byte> Audio, int WindowStartMilliseconds) TrimFinalDictationWave(
+        ReadOnlyMemory<byte> waveAudio,
+        int windowStartMilliseconds,
+        IReadOnlyList<DictationWord> committedWords)
+    {
+        if (committedWords.Count == 0
+            || waveAudio.Length < 44
+            || !waveAudio.Span.Slice(36, 4).SequenceEqual("data"u8))
+        {
+            return (waveAudio, windowStartMilliseconds);
+        }
+
+        const int contextLeadMilliseconds = 250;
+        const int bytesPerMillisecond = GoAiProtocol.LiveCaptionSampleRate * sizeof(short) / 1_000;
+        const int minimumRemainingMilliseconds = 200;
+        var relativeStartMilliseconds = committedWords[^1].End * 1_000
+            - windowStartMilliseconds
+            - contextLeadMilliseconds;
+        var bytesToSkip = (int)Math.Floor(Math.Max(0, relativeStartMilliseconds) * bytesPerMillisecond);
+        bytesToSkip -= bytesToSkip & 1;
+        var declaredDataLength = BinaryPrimitives.ReadInt32LittleEndian(waveAudio.Span.Slice(40, 4));
+        var minimumRemainingBytes = minimumRemainingMilliseconds * bytesPerMillisecond;
+        if (declaredDataLength <= 0
+            || 44L + declaredDataLength > waveAudio.Length
+            || bytesToSkip <= 0
+            || declaredDataLength - bytesToSkip < minimumRemainingBytes)
+        {
+            return (waveAudio, windowStartMilliseconds);
+        }
+
+        var remainingBytes = declaredDataLength - bytesToSkip;
+        var trimmed = new byte[44 + remainingBytes];
+        waveAudio.Span[..44].CopyTo(trimmed);
+        waveAudio.Span.Slice(44 + bytesToSkip, remainingBytes).CopyTo(trimmed.AsSpan(44));
+        BinaryPrimitives.WriteInt32LittleEndian(trimmed.AsSpan(4, 4), trimmed.Length - 8);
+        BinaryPrimitives.WriteInt32LittleEndian(trimmed.AsSpan(40, 4), remainingBytes);
+        return (
+            trimmed,
+            checked(windowStartMilliseconds + bytesToSkip / bytesPerMillisecond));
+    }
+
+    private static LiveCaptionChunkResponse BuildDictationResponse(
+        CaptionSession session,
+        long sequence,
+        LiveCaptionChunkMetadata metadata,
+        double durationMilliseconds,
+        TranscriptionResponse transcription)
+    {
+        var state = session.GetDictationTurn(metadata.TurnId);
+        if (metadata.Revision <= state.LastRevision)
+        {
+            throw new InvalidOperationException(
+                $"Die Diktierrevision muss größer als {state.LastRevision} sein.");
+        }
+
+        state.LastRevision = metadata.Revision;
+        state.ObservationCount++;
+        if (string.IsNullOrWhiteSpace(session.Request.Language)
+            && string.IsNullOrWhiteSpace(state.Language)
+            && transcription.LanguageProbability >= MinimumConfidentGermanProbability
+            && !string.IsNullOrWhiteSpace(transcription.Language))
+        {
+            state.Language = transcription.Language.Trim();
+        }
+
+        var windowStartSeconds = metadata.WindowStartMilliseconds / 1000d;
+        var audioEndSeconds = windowStartSeconds + durationMilliseconds / 1000d;
+        var current = ExtractDictationWords(transcription, windowStartSeconds, audioEndSeconds);
+        var previous = state.PreviousWords;
+
+        // Once the six-second rolling window advances, words that would otherwise
+        // leave the window are retained from the preceding, already observed
+        // hypothesis. Normal operation confirms them through Local Agreement first.
+        if (state.ObservationCount > 2 && previous.Count > 0)
+        {
+            AppendDistinctWords(
+                state.CommittedWords,
+                previous.Where(word => word.End <= windowStartSeconds + 0.12));
+        }
+
+        if (previous.Count > 0 && current.Count > 0)
+        {
+            var committedEndBeforeAgreement = state.CommittedWords.Count == 0
+                ? double.NegativeInfinity
+                : state.CommittedWords[^1].End;
+            var previousUncommitted = previous
+                .Where(word => word.End > committedEndBeforeAgreement + 0.04)
+                .ToArray();
+            var currentUncommitted = current
+                .Where(word => word.End > committedEndBeforeAgreement + 0.04)
+                .ToArray();
+            var agreementLength = FindPrefixAgreementLength(
+                previousUncommitted,
+                currentUncommitted);
+            var safeAudioEnd = audioEndSeconds - (metadata.IsFinal ? 0 : 0.20);
+            if (agreementLength > 0)
+            {
+                AppendDistinctWords(
+                    state.CommittedWords,
+                    currentUncommitted
+                        .Take(agreementLength)
+                        .Where(word => word.End <= safeAudioEnd));
+            }
+        }
+
+        if (metadata.IsFinal)
+        {
+            AppendDistinctWords(
+                state.CommittedWords,
+                current.Count > 0 ? current : previous);
+        }
+
+        var lastCommittedEnd = state.CommittedWords.Count == 0
+            ? double.NegativeInfinity
+            : state.CommittedWords[^1].End;
+        var provisionalWords = metadata.IsFinal
+            ? []
+            : current
+                .Where(word => word.End > lastCommittedEnd + 0.04)
+                .ToList();
+        var stableText = JoinDictationWords(state.CommittedWords);
+        var provisionalText = JoinDictationWords(provisionalWords);
+        var turnText = JoinTextParts(stableText, provisionalText);
+
+        state.PreviousWords = current;
+        state.LastWindowStartSeconds = windowStartSeconds;
+        if (metadata.IsFinal)
+        {
+            state.IsFinal = true;
+            if (!string.IsNullOrWhiteSpace(turnText))
+            {
+                AppendBoundedPlainTranscript(session, turnText);
+                session.Transcript = JoinTextParts(session.Transcript, turnText);
+                if (session.Transcript.Length > MaximumTranscriptCharacters)
+                {
+                    session.Transcript = session.Transcript[^MaximumTranscriptCharacters..];
+                }
+            }
+        }
+
+        IReadOnlyList<TranscriptionSegment> absoluteSegments = transcription.Segments
+            .Select(segment => segment with
+            {
+                Start = windowStartSeconds + segment.Start,
+                End = windowStartSeconds + segment.End,
+                Speaker = null,
+                Words = segment.Words?.Select(word => word with
+                {
+                    Start = windowStartSeconds + word.Start,
+                    End = windowStartSeconds + word.End,
+                }).ToArray(),
+            })
+            .ToArray();
+        return new LiveCaptionChunkResponse(
+            session.SessionId,
+            sequence,
+            turnText,
+            JoinTextParts(session.Transcript, metadata.IsFinal ? null : turnText),
+            transcription.Language,
+            transcription.LanguageProbability,
+            absoluteSegments,
+            metadata.IsFinal,
+            transcription.Provider,
+            DateTimeOffset.UtcNow,
+            metadata.TurnId,
+            metadata.Revision,
+            stableText,
+            provisionalText);
+    }
+
+    private static List<DictationWord> ExtractDictationWords(
+        TranscriptionResponse transcription,
+        double windowStartSeconds,
+        double audioEndSeconds)
+    {
+        var words = transcription.Segments
+            .SelectMany(static segment => segment.Words ?? [])
+            .Where(static word => !string.IsNullOrWhiteSpace(word.Text))
+            .Select(word => new DictationWord(
+                windowStartSeconds + Math.Max(0, word.Start),
+                windowStartSeconds + Math.Max(word.Start, word.End),
+                word.Text))
+            .OrderBy(static word => word.Start)
+            .ToList();
+        if (words.Count > 0)
+        {
+            return words;
+        }
+
+        var tokens = (transcription.Text ?? string.Empty)
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (tokens.Length == 0)
+        {
+            return [];
+        }
+        var duration = Math.Max(0.20, audioEndSeconds - windowStartSeconds);
+        return tokens.Select((token, index) => new DictationWord(
+            windowStartSeconds + duration * index / tokens.Length,
+            windowStartSeconds + duration * (index + 1) / tokens.Length,
+            index == 0 ? token : " " + token)).ToList();
+    }
+
+    internal static int FindPrefixAgreementLength(
+        IReadOnlyList<DictationWord> previous,
+        IReadOnlyList<DictationWord> current)
+    {
+        var length = 0;
+        while (length < previous.Count && length < current.Count)
+        {
+            var previousWord = previous[length];
+            var currentWord = current[length];
+            if (Math.Abs(previousWord.Start - currentWord.Start) > 0.75
+                || !string.Equals(
+                    NormalizeWord(previousWord.Text),
+                    NormalizeWord(currentWord.Text),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+            length++;
+        }
+        return length;
+    }
+
+    private static void AppendDistinctWords(
+        List<DictationWord> committed,
+        IEnumerable<DictationWord> candidates)
+    {
+        foreach (var word in candidates.OrderBy(static word => word.Start))
+        {
+            if (string.IsNullOrWhiteSpace(word.Text))
+            {
+                continue;
+            }
+            if (committed.Count > 0)
+            {
+                var last = committed[^1];
+                if (word.End <= last.End + 0.04
+                    || (Math.Abs(word.Start - last.Start) <= 0.45
+                        && string.Equals(
+                            NormalizeWord(word.Text),
+                            NormalizeWord(last.Text),
+                            StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+            }
+            committed.Add(word);
+        }
+    }
+
+    private static string JoinDictationWords(IEnumerable<DictationWord> words)
+    {
+        var result = string.Concat(words.Select(static word => word.Text)).Trim();
+        return string.Join(' ', result.Split(
+            [' ', '\t', '\r', '\n'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
+    private static string JoinTextParts(string? first, string? second)
+    {
+        var left = (first ?? string.Empty).Trim();
+        var right = (second ?? string.Empty).Trim();
+        if (left.Length == 0)
+        {
+            return right;
+        }
+        if (right.Length == 0)
+        {
+            return left;
+        }
+        return $"{left} {right}";
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -496,6 +852,10 @@ public sealed class LiveCaptionService : BackgroundService
     private static void ValidateRequest(LiveCaptionSessionRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (!Enum.IsDefined(request.Mode) || !Enum.IsDefined(request.Profile))
+        {
+            throw new ArgumentException("Live-Untertitel-Modus oder -Profil ist ungültig.", nameof(request));
+        }
         if (request.Language?.Length is > 16
             || request.Language is { Length: > 0 } language
                 && language.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('-' or '_')))
@@ -509,6 +869,15 @@ public sealed class LiveCaptionService : BackgroundService
             || request.OverlapMilliseconds > Math.Min(2_000, request.WindowMilliseconds / 2))
         {
             throw new ArgumentException("Live-Untertitel benötigen 16-kHz-Mono-PCM und gültige Fenster-/Überlappungswerte.", nameof(request));
+        }
+        if (request.Profile == LiveCaptionProfile.Dictation
+            && (request.Mode != LiveCaptionMode.Transcribe
+                || request.WindowMilliseconds != 6_000
+                || request.OverlapMilliseconds != 0))
+        {
+            throw new ArgumentException(
+                "Das Diktierprofil benötigt Transkription mit einem rollierenden Sechs-Sekunden-Fenster ohne serverseitige Überlappung.",
+                nameof(request));
         }
     }
 
@@ -759,9 +1128,25 @@ public sealed class LiveCaptionService : BackgroundService
 
         public Dictionary<long, LiveCaptionChunkResponse> Responses { get; } = [];
 
+        public Dictionary<string, DictationTurnState> DictationTurns { get; } = new(StringComparer.Ordinal);
+
         public SemaphoreSlim ChunkGate { get; } = new(1, 1);
 
         public bool IsExpired(DateTimeOffset now) => now - UpdatedAt >= IdleTimeout;
+
+        public DictationTurnState GetDictationTurn(string turnId)
+        {
+            if (!DictationTurns.TryGetValue(turnId, out var state))
+            {
+                state = new DictationTurnState();
+                DictationTurns[turnId] = state;
+            }
+            if (state.IsFinal)
+            {
+                throw new InvalidOperationException("Der Diktierabschnitt wurde bereits abgeschlossen.");
+            }
+            return state;
+        }
 
         public LiveCaptionSessionSnapshot ToSnapshot(string state)
         {
@@ -779,9 +1164,30 @@ public sealed class LiveCaptionService : BackgroundService
                 Transcript,
                 CreatedAt,
                 UpdatedAt,
-                idleExpiry);
+                idleExpiry,
+                Request.Profile);
         }
     }
+
+    private sealed class DictationTurnState
+    {
+        public long LastRevision { get; set; } = -1;
+
+        public int ObservationCount { get; set; }
+
+        public string? Language { get; set; }
+
+        public double LastWindowStartSeconds { get; set; }
+
+        public bool IsFinal { get; set; }
+
+        public List<DictationWord> CommittedWords { get; } = [];
+
+        public List<DictationWord> PreviousWords { get; set; } = [];
+    }
+
+    internal readonly record struct DictationWord(double Start, double End, string Text);
+
 }
 
 internal readonly record struct PcmWaveInfo(

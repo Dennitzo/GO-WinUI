@@ -2657,7 +2657,7 @@ public sealed class GoAiAssistantService(
     {
         "ud" => "DeepSeek-V4-Flash-0731 · UD-IQ2_M",
         "qwen3-coder-next" => "Qwen3-Coder-Next · Q6_K",
-        "openai/gpt-oss-120b" => "gpt-oss-120b · MXFP4",
+        "openai/gpt-oss-120b" => "gpt-oss-120b",
         _ => string.IsNullOrWhiteSpace(modelId) ? "Coding-Agent" : modelId,
     };
 

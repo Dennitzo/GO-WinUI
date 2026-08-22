@@ -59,6 +59,44 @@ public sealed class ApiRateLimitMiddlewareTests
         Assert.Equal(300, forwarded);
     }
 
+    [Fact]
+    public async Task SpeechAndArtifactTrafficUseIndependentHigherCapacityWindows()
+    {
+        var forwarded = 0;
+        var middleware = new ApiRateLimitMiddleware(context =>
+        {
+            forwarded++;
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return Task.CompletedTask;
+        });
+
+        for (var index = 0; index < 240; index++)
+        {
+            await middleware.InvokeAsync(CreateContext("stable-test-key"));
+        }
+
+        var speech = CreateContext("stable-test-key");
+        speech.Request.Path = "/v1/audio/speech/sessions/speech-test/paragraphs";
+        await middleware.InvokeAsync(speech);
+        var dictation = CreateContext("stable-test-key");
+        dictation.Request.Path = "/v1/audio/live-captions/sessions/caption-test/chunks/0";
+        await middleware.InvokeAsync(dictation);
+        var artifact = CreateContext("stable-test-key");
+        artifact.Request.Path = "/v1/artifacts/artifact-test";
+        await middleware.InvokeAsync(artifact);
+        var rejectedGeneral = CreateContext("stable-test-key");
+        await middleware.InvokeAsync(rejectedGeneral);
+
+        Assert.Equal(StatusCodes.Status204NoContent, speech.Response.StatusCode);
+        Assert.Equal("1200", speech.Response.Headers["X-RateLimit-Limit"]);
+        Assert.Equal(StatusCodes.Status204NoContent, dictation.Response.StatusCode);
+        Assert.Equal("1200", dictation.Response.Headers["X-RateLimit-Limit"]);
+        Assert.Equal(StatusCodes.Status204NoContent, artifact.Response.StatusCode);
+        Assert.Equal("1200", artifact.Response.Headers["X-RateLimit-Limit"]);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, rejectedGeneral.Response.StatusCode);
+        Assert.Equal(243, forwarded);
+    }
+
     private static DefaultHttpContext CreateContext(string apiKey)
     {
         var context = new DefaultHttpContext();

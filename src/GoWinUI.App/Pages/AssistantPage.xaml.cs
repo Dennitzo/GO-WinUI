@@ -53,7 +53,6 @@ public sealed partial class AssistantPage : Page, IDisposable
     private readonly SemaphoreSlim _captionResultGate = new(1, 1);
     private readonly SemaphoreSlim _microphoneBridgeGate = new(1, 1);
     private readonly SemaphoreSlim _audioCaptureBridgeGate = new(1, 1);
-    private readonly SemaphoreSlim _voiceIntentGate = new(1, 1);
     private readonly SemaphoreSlim _chatBridgeGate = new(1, 1);
     private readonly SemaphoreSlim _speechStartGate = new(1, 1);
     private readonly UISettings _uiSettings = new();
@@ -316,11 +315,13 @@ public sealed partial class AssistantPage : Page, IDisposable
 
             if (args.Envelope.Type == "chat.send")
             {
-                if (!isSpeechRequest
-                    && (_chatBridgeGate.CurrentCount == 0 || _goAi.IsRunning || _microphone.Current.IsSpeaking))
+                if (ShouldCancelActiveChatBeforePrompt(
+                    isSpeechRequest,
+                    _chatBridgeGate.CurrentCount == 0,
+                    _goAi.IsRunning,
+                    _microphone.Current.IsSpeaking || _goAi.IsSpeaking))
                 {
                     await _coordinator.CancelCurrentAsync().ConfigureAwait(false);
-                    await _goAi.CancelSpeechAsync(CancellationToken.None).ConfigureAwait(false);
                 }
                 if (!isSpeechRequest)
                 {
@@ -437,6 +438,7 @@ public sealed partial class AssistantPage : Page, IDisposable
                     }
                     await _microphone.SubmitChunkAsync(
                         ReadRequiredText(args.Envelope.Payload, "turnId", 128),
+                        ReadOptionalText(args.Envelope.Payload, "sessionId", 64),
                         chunkIndex,
                         ReadRequiredText(args.Envelope.Payload, "pcm", 150_000),
                         finalElement.GetBoolean(),
@@ -529,6 +531,18 @@ public sealed partial class AssistantPage : Page, IDisposable
                 await SetShellAiStateAsync(false);
             }
         }
+    }
+
+    internal static bool ShouldCancelActiveChatBeforePrompt(
+        bool isSpeechRequest,
+        bool chatRequestInFlight,
+        bool aiRunActive,
+        bool speechPlaybackActive)
+    {
+        // Vorlesen has its own lifecycle and controls. Merely playing audio is
+        // never a reason to cancel anything when a new prompt is submitted.
+        _ = speechPlaybackActive;
+        return !isSpeechRequest && (chatRequestInFlight || aiRunActive);
     }
 
     private void OnReadFromContextRequested(
@@ -803,7 +817,7 @@ public sealed partial class AssistantPage : Page, IDisposable
             "Docker · Whisper STT");
         UpdateClientAiRun(
             "microphone-stt",
-            string.Equals(snapshot.Status, "Sprache wird erkannt", StringComparison.Ordinal),
+            snapshot.Status.Contains("Sprache wird erkannt", StringComparison.Ordinal),
             "Sprache wird live transkribiert",
             "Docker · Whisper STT");
         UpdateClientAiRun(
@@ -837,24 +851,14 @@ public sealed partial class AssistantPage : Page, IDisposable
         {
             if (!snapshot.IsFinal)
             {
-                // Während der Wiedergabe bleibt Chromium nur für lokale
-                // Sprachsteuerbefehle offen. Partielle Rückkopplungen der
-                // Lautsprecherausgabe werden nicht im Chat eingeblendet.
-                if (!_microphone.Current.IsSpeaking)
-                {
-                    await bridge.PostAsync("microphone.transcript", snapshot);
-                }
+                // Whisper dictation and speech playback are independent. Keep
+                // publishing revisions while Supertonic is synthesizing or
+                // playing so the user can continue editing the composer.
+                await bridge.PostAsync("microphone.transcript", snapshot);
                 return;
             }
 
             var voiceCancellation = _lifetime?.Token ?? CancellationToken.None;
-            var audiobookContext = await _coordinator.HasAudiobookVoiceContextAsync(
-                voiceCancellation).ConfigureAwait(false);
-            var normalizedText = NormalizeAudiobookVoiceCommand(snapshot.Text, audiobookContext);
-            if (!string.Equals(normalizedText, snapshot.Text, StringComparison.Ordinal))
-            {
-                snapshot = snapshot with { Text = normalizedText };
-            }
 
             if (IsVoiceControlStopCommand(snapshot.Text))
             {
@@ -867,6 +871,10 @@ public sealed partial class AssistantPage : Page, IDisposable
                     snapshot.Text,
                     snapshot.IsFinal,
                     snapshot.Provider,
+                    snapshot.Revision,
+                    snapshot.StableText,
+                    snapshot.ProvisionalText,
+                    snapshot.ClientSessionId,
                     Execute = false,
                     Cancel = false,
                     Noise = true,
@@ -899,6 +907,10 @@ public sealed partial class AssistantPage : Page, IDisposable
                     snapshot.Text,
                     snapshot.IsFinal,
                     snapshot.Provider,
+                    snapshot.Revision,
+                    snapshot.StableText,
+                    snapshot.ProvisionalText,
+                    snapshot.ClientSessionId,
                     Execute = false,
                     Cancel = playbackControl == VoicePlaybackControl.Cancel,
                     Noise = true,
@@ -907,10 +919,7 @@ public sealed partial class AssistantPage : Page, IDisposable
                 return;
             }
 
-            // Während die Vorlesestimme läuft, werden ausschließlich die lokalen
-            // Pause-/Fortsetzen-/Abbruchbefehle ausgewertet. So kann die Ausgabe
-            // nicht über das Mikrofon selbst als neuer Prompt zurückgekoppelt werden.
-            if (microphoneState.IsSpeaking)
+            if (IsVoicePromptSendCommand(snapshot.Text))
             {
                 await bridge.PostAsync("microphone.transcript", new
                 {
@@ -918,9 +927,12 @@ public sealed partial class AssistantPage : Page, IDisposable
                     snapshot.Text,
                     snapshot.IsFinal,
                     snapshot.Provider,
-                    Execute = false,
-                    Cancel = false,
-                    Noise = true,
+                    snapshot.Revision,
+                    snapshot.StableText,
+                    snapshot.ProvisionalText,
+                    snapshot.ClientSessionId,
+                    SendPrompt = true,
+                    Dictation = false,
                 });
                 return;
             }
@@ -937,6 +949,10 @@ public sealed partial class AssistantPage : Page, IDisposable
                     snapshot.Text,
                     snapshot.IsFinal,
                     snapshot.Provider,
+                    snapshot.Revision,
+                    snapshot.StableText,
+                    snapshot.ProvisionalText,
+                    snapshot.ClientSessionId,
                     Execute = false,
                     Cancel = true,
                     Noise = false,
@@ -944,32 +960,19 @@ public sealed partial class AssistantPage : Page, IDisposable
                 return;
             }
 
-            await _voiceIntentGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
-            try
+            await bridge.PostAsync("microphone.transcript", new
             {
-                var result = await _microphone.ClassifyIntentAsync(
-                    snapshot.Text,
-                    _lifetime?.Token ?? CancellationToken.None);
-                if (result.Intent == UtteranceIntent.Cancel)
-                {
-                    await _microphone.StopSpeechAsync(_lifetime?.Token ?? CancellationToken.None);
-                    await _coordinator.CancelCurrentAsync().ConfigureAwait(false);
-                }
-                await bridge.PostAsync("microphone.transcript", new
-                {
-                    snapshot.TurnId,
-                    Text = result.NormalizedText ?? snapshot.Text,
-                    snapshot.IsFinal,
-                    snapshot.Provider,
-                    Execute = result.Intent is UtteranceIntent.Question or UtteranceIntent.Instruction,
-                    Cancel = result.Intent == UtteranceIntent.Cancel,
-                    Noise = result.Intent == UtteranceIntent.Noise,
-                });
-            }
-            finally
-            {
-                _voiceIntentGate.Release();
-            }
+                snapshot.TurnId,
+                snapshot.Text,
+                snapshot.IsFinal,
+                snapshot.Provider,
+                snapshot.Revision,
+                snapshot.StableText,
+                snapshot.ProvisionalText,
+                snapshot.ClientSessionId,
+                SendPrompt = false,
+                Dictation = true,
+            });
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
@@ -993,19 +996,10 @@ public sealed partial class AssistantPage : Page, IDisposable
         return command is "sprachsteuerung abbrechen" or "sprachsteuerung beenden";
     }
 
-    internal static string NormalizeAudiobookVoiceCommand(string? text, bool audiobookActive)
+    internal static bool IsVoicePromptSendCommand(string? text)
     {
-        var original = (text ?? string.Empty).Trim();
-        if (!audiobookActive || original.Length == 0)
-        {
-            return original;
-        }
-
-        var command = NormalizeSpokenCommand(original);
-        return command is "rlt fazit" or "rtl fazit" or "r l t fazit" or "hörbuch fazit"
-            or "hoerbuch fazit" or "hörbuchfortsetzen" or "hoerbuchfortsetzen"
-            ? "Hörbuch fortsetzen"
-            : original;
+        var command = NormalizeSpokenCommand(text);
+        return command is "senden" or "prompt senden";
     }
 
     internal static VoicePlaybackControl ResolveVoicePlaybackControl(

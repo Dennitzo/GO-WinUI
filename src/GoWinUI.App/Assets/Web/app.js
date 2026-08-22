@@ -206,6 +206,7 @@
   };
 
   const sidebarStorageKey = "go.assistant.sessions-collapsed";
+  const sessionScrollStoragePrefix = "go.assistant.session-scroll.v1:";
   let draftTimer = 0;
   let pendingDraft = null;
 
@@ -284,6 +285,73 @@
     catch { setSessionsCollapsed(false, false); }
   }
 
+  function sessionScrollStorageKey(sessionId) {
+    return `${sessionScrollStoragePrefix}${String(sessionId || "")}`;
+  }
+
+  function readSessionScrollPosition(sessionId) {
+    if (!sessionId) return null;
+    try {
+      const value = JSON.parse(globalThis.localStorage.getItem(sessionScrollStorageKey(sessionId)) || "null");
+      if (!value || !Number.isFinite(value.top) || !Number.isFinite(value.left)) return null;
+      return value;
+    } catch {
+      return null;
+    }
+  }
+
+  function persistSessionScrollPosition(sessionId = state.activeSessionId) {
+    if (!sessionId || !elements.messageScroll) return;
+    const scroller = elements.messageScroll;
+    const maximumTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const scrollerBounds = scroller.getBoundingClientRect();
+    const anchor = [...elements.messageList.querySelectorAll(":scope > .message[data-message-id]")]
+      .find(message => message.getBoundingClientRect().bottom > scrollerBounds.top + 1);
+    const anchorBounds = anchor?.getBoundingClientRect();
+    const value = {
+      top: Math.max(0, scroller.scrollTop),
+      left: Math.max(0, scroller.scrollLeft),
+      progress: maximumTop > 0 ? Math.max(0, Math.min(1, scroller.scrollTop / maximumTop)) : 0,
+      atEnd: maximumTop - scroller.scrollTop <= 4,
+      anchorMessageId: anchor?.dataset.messageId || null,
+      anchorOffset: anchorBounds ? anchorBounds.top - scrollerBounds.top : null
+    };
+    try { globalThis.localStorage.setItem(sessionScrollStorageKey(sessionId), JSON.stringify(value)); }
+    catch { /* WebView storage is optional. */ }
+  }
+
+  function restoreSessionScrollPosition(sessionId) {
+    const saved = readSessionScrollPosition(sessionId);
+    requestAnimationFrame(() => {
+      if (String(sessionId || "") !== String(state.activeSessionId || "")) return;
+      const scroller = elements.messageScroll;
+      const maximumTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      if (!saved) {
+        scroller.scrollTop = maximumTop;
+        scroller.scrollLeft = 0;
+        return;
+      }
+      if (saved.atEnd) {
+        scroller.scrollTop = maximumTop;
+      } else {
+        const anchor = saved.anchorMessageId
+          ? [...elements.messageList.querySelectorAll(":scope > .message[data-message-id]")]
+            .find(message => message.dataset.messageId === String(saved.anchorMessageId))
+          : null;
+        if (anchor && Number.isFinite(saved.anchorOffset)) {
+          const scrollerBounds = scroller.getBoundingClientRect();
+          const currentOffset = anchor.getBoundingClientRect().top - scrollerBounds.top;
+          scroller.scrollTop = Math.max(0, Math.min(maximumTop,
+            scroller.scrollTop + currentOffset - saved.anchorOffset));
+        } else {
+          const proportionalTop = Number.isFinite(saved.progress) ? maximumTop * saved.progress : saved.top;
+          scroller.scrollTop = Math.max(0, Math.min(maximumTop, proportionalTop));
+        }
+      }
+      scroller.scrollLeft = Math.max(0, saved.left);
+    });
+  }
+
   function renderSessions() {
     const query = elements.sessionSearch.value.trim().toLocaleLowerCase();
     elements.sessionList.replaceChildren();
@@ -343,8 +411,6 @@
     const previousScrollTop = elements.messageScroll.scrollTop;
     const previousScrollLeft = elements.messageScroll.scrollLeft;
     captureMaximizedCodingPanelScroll();
-    const preserveForSpeech = Boolean(state.speechStatus?.active)
-      || ["buffering", "playing", "paused"].includes(String(state.speechProgress?.state || ""));
     elements.messageList.replaceChildren();
     for (const message of state.messages) {
       elements.messageList.append(createMessage(message));
@@ -356,7 +422,7 @@
       elements.messageList.append(empty);
     }
     applySpeechHighlight();
-    if (scrollToEnd && !preserveForSpeech) {
+    if (scrollToEnd) {
       requestAnimationFrame(() => { elements.messageScroll.scrollTop = elements.messageScroll.scrollHeight; });
     } else {
       elements.messageScroll.scrollTop = previousScrollTop;
@@ -1363,10 +1429,30 @@
     })[String(status).toLowerCase()] || String(status);
   }
 
+  function isTerminalMessageStatus(status) {
+    return ["completed", "cancelled", "failed", "interrupted"]
+      .includes(String(status || "").toLowerCase());
+  }
+
+  function pruneTerminalMessageRunStatuses() {
+    for (const message of state.messages) {
+      if (isTerminalMessageStatus(message?.status)) {
+        state.messageRunStatus.delete(String(message.id));
+      }
+    }
+  }
+
+  function visibleModelLabel(value) {
+    const model = String(value || "").trim();
+    return /gpt-oss-120b/i.test(model)
+      ? model.replace(/\s*·\s*MXFP4\b/ig, "").trim()
+      : model;
+  }
+
   function runStatusText(liveStatus) {
     const status = String(liveStatus?.status || "").trim();
     const detail = cleanStatusMetadata(liveStatus?.detail);
-    const model = String(liveStatus?.model || state.model || "").trim();
+    const model = visibleModelLabel(liveStatus?.model || state.model);
     return uniqueStatusParts(status, model ? `Modell: ${model}` : null, detail).join(" · ");
   }
 
@@ -1441,14 +1527,10 @@
   function finishActiveMediaCaptureFromVoice(text) {
     if (!isCaptureFinishCommand(text)) return false;
     if (state.audioCapture?.isRecording) {
-      state.voiceTurn = null;
-      renderMessages(false);
       post("audioCapture.stop", {});
       return true;
     }
     if (state.screenClip?.isRecording) {
-      state.voiceTurn = null;
-      renderMessages(false);
       post("screenClip.stop", { sessionId: state.activeSessionId });
       return true;
     }
@@ -1511,17 +1593,13 @@
       globalThis.goVoiceCapture?.isActive
       || globalThis.goVoiceCapture?.isStarting
       || state.voiceStarting);
-    if (browserVoiceActive || state.voiceTurn?.text || state.microphone?.isBusy) {
+    if (browserVoiceActive) {
       const chip = document.createElement("div");
       chip.className = "active-tool-chip voice-context-chip";
       const label = document.createElement("span");
-      label.textContent = state.voiceTurn?.text
-        ? `Sprache erkannt · ${state.voiceTurn.text}`
-        : state.microphone?.isBusy
-          ? "Sprache wird erkannt …"
-          : state.voiceStarting
-            ? "Mikrofon wird geöffnet …"
-            : "Ich höre zu … Sprich jetzt.";
+      label.textContent = state.voiceStarting
+        ? "Mikrofon wird geöffnet …"
+        : "Ich höre zu · „Senden“ zum Absenden";
       chip.append(createToolIcon("M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"), label);
       elements.activeTools.append(chip);
     }
@@ -1708,8 +1786,6 @@
       && !(state.selectedToolAction && state.selectedToolAction !== "code")
       && !isAudioCaptureActive()
       && !isScreenClipActive()
-      && !state.voiceTurn?.text
-      && !state.microphone?.isBusy
       && !globalThis.goVoiceCapture?.isActive
       && !globalThis.goVoiceCapture?.isStarting
       && !state.voiceStarting
@@ -1718,7 +1794,10 @@
 
   function renderStatus() {
     const campaignRunning = state.codingCampaign?.status === "running";
-    const canStop = state.isRunning || campaignRunning || Boolean(state.microphone?.isSpeaking) || Boolean(state.speechStatus?.active);
+    // Speech playback is an independent activity. The composer stop button only
+    // cancels the current AI run or coding campaign; playback has its own chip
+    // controls so sending/aborting a prompt cannot interrupt it.
+    const canStop = state.isRunning || campaignRunning;
     elements.send.hidden = canStop;
     elements.stop.hidden = !canStop;
     elements.prompt.disabled = false;
@@ -1832,16 +1911,19 @@
 
   function syncVoiceCaptureSuspension() {
     if (!globalThis.goVoiceCapture?.isActive) return;
-    // Keep Chromium microphone capture active while speech is played. The native
-    // side accepts only pause/resume/cancel commands during playback and discards
-    // every other transcript, preventing the AI voice from feeding itself back.
+    // Speech playback and dictation have independent lifetimes. Chromium keeps
+    // its microphone stream active and applies its normal browser audio
+    // processing while Supertonic synthesizes or plays audio.
     globalThis.goVoiceCapture.setSuspended(!state.microphone?.isRecording);
   }
 
   async function stopVoiceControl(notifyHost = true) {
     state.voiceStarting = false;
     state.voicePlaybackPending = false;
+    // Keep already recognized dictation in the editor when the user manually
+    // turns the microphone off. Only explicit control commands are discarded.
     state.voiceTurn = null;
+    scheduleDraftSave();
     state.voiceLevel = 0;
     state.voiceFrequency = 0;
     state.voiceDominantHz = 0;
@@ -2187,6 +2269,8 @@
 
   async function submitPrompt() {
     const prompt = elements.prompt.value.trim();
+    state.voiceTurn = null;
+    renderContext();
     const loadedCodingWorkflow = isCodingCampaignMode() && Boolean(state.codingCampaign);
     if (loadedCodingWorkflow) {
       clearTimeout(draftTimer);
@@ -2213,24 +2297,111 @@
     elements.prompt.value = "";
   }
 
-  async function submitVoicePrompt(prompt) {
-    const text = String(prompt || "").trim();
-    if (!text || !state.activeSessionId) return;
-    if (finishActiveMediaCaptureFromVoice(text)) return;
-    if (isCodingCampaignMode() && state.codingCampaign) {
-      post("campaign.run", {
-        sessionId: state.activeSessionId,
-        instruction: text
-      });
+  function appendVoiceDictation(baseText, transcript) {
+    const base = String(baseText || "");
+    const text = String(transcript || "").trim();
+    if (!text) return base;
+    return base && !/\s$/u.test(base) ? `${base} ${text}` : `${base}${text}`;
+  }
+
+  function updateVoiceDictation(
+    turnId,
+    transcript,
+    isFinal,
+    revision = 0,
+    stableText = "",
+    provisionalText = "") {
+    const id = String(turnId || "");
+    const text = String(transcript || "").trim();
+    const nextRevision = Number.isFinite(Number(revision)) ? Number(revision) : 0;
+    if (!id || !text) return;
+
+    let turn = state.voiceTurn;
+    if (!turn || String(turn.turnId) !== id) {
+      turn = {
+        turnId: id,
+        baseText: elements.prompt.value,
+        text: "",
+        stableText: "",
+        provisionalText: "",
+        renderedValue: elements.prompt.value,
+        lastRevision: -1,
+        manuallyConfirmed: false,
+        draftSavedAt: Date.now()
+      };
+      state.voiceTurn = turn;
+    } else if (nextRevision <= turn.lastRevision) {
+      return;
+    } else if (elements.prompt.value !== turn.renderedValue) {
+      // Preserve manual edits made while Whisper was refining the current
+      // partial transcript. Editing inside that provisional suffix explicitly
+      // confirms the visible wording; later Whisper revisions cannot replace it.
+      const oldSuffix = appendVoiceDictation(turn.baseText, turn.text)
+        .slice(turn.baseText.length);
+      if (oldSuffix && elements.prompt.value.endsWith(oldSuffix)) {
+        turn.baseText = elements.prompt.value.slice(0, -oldSuffix.length);
+      } else {
+        turn.baseText = elements.prompt.value;
+        turn.renderedValue = elements.prompt.value;
+        turn.manuallyConfirmed = true;
+      }
+    }
+
+    turn.lastRevision = nextRevision;
+    if (turn.manuallyConfirmed) {
+      if (isFinal) state.voiceTurn = null;
+      scheduleDraftSave();
+      if (isFinal || Date.now() - turn.draftSavedAt >= 1500) {
+        flushDraft();
+        turn.draftSavedAt = Date.now();
+      }
+      renderContext();
       return;
     }
-    await postChatRequest({
-      sessionId: state.activeSessionId,
-      prompt: text,
-      documentIds: state.documents.map(item => item.id),
-      reasoningEffort: elements.reasoning.value,
-      toolAction: state.selectedToolAction
-    });
+
+    const promptWasFocused = document.activeElement === elements.prompt;
+    const oldSelectionStart = elements.prompt.selectionStart ?? elements.prompt.value.length;
+    const oldSelectionEnd = elements.prompt.selectionEnd ?? oldSelectionStart;
+    const oldRenderedLength = elements.prompt.value.length;
+    turn.text = text;
+    turn.stableText = String(stableText || "").trim();
+    turn.provisionalText = String(provisionalText || "").trim();
+    turn.renderedValue = appendVoiceDictation(turn.baseText, text);
+    elements.prompt.value = turn.renderedValue;
+    if (isFinal) state.voiceTurn = null;
+    scheduleDraftSave();
+    if (isFinal || Date.now() - turn.draftSavedAt >= 1500) {
+      flushDraft();
+      turn.draftSavedAt = Date.now();
+    }
+    if (promptWasFocused) {
+      const lengthDelta = elements.prompt.value.length - oldRenderedLength;
+      const generatedStart = turn.baseText.length;
+      const adjustPosition = position => position <= generatedStart
+        ? position
+        : Math.max(generatedStart, Math.min(elements.prompt.value.length, position + lengthDelta));
+      elements.prompt.setSelectionRange(
+        adjustPosition(oldSelectionStart),
+        adjustPosition(oldSelectionEnd));
+    }
+    renderContext();
+  }
+
+  function discardVoiceDictation(turnId) {
+    const turn = state.voiceTurn;
+    if (!turn || (turnId && String(turn.turnId) !== String(turnId))) return;
+    if (elements.prompt.value === turn.renderedValue) {
+      elements.prompt.value = turn.baseText;
+    } else {
+      const suffix = appendVoiceDictation(turn.baseText, turn.text)
+        .slice(turn.baseText.length);
+      if (suffix && elements.prompt.value.endsWith(suffix)) {
+        elements.prompt.value = elements.prompt.value.slice(0, -suffix.length);
+      }
+    }
+    state.voiceTurn = null;
+    scheduleDraftSave();
+    renderContext();
   }
 
   function selectToolAction(action, persist = true) {
@@ -2269,13 +2440,61 @@
     }
   }
 
+  function resetTransientVoiceStateForSessionChange() {
+    const browserCaptureActive = Boolean(
+      globalThis.goVoiceCapture?.isActive
+      || globalThis.goVoiceCapture?.isStarting);
+    state.voiceTurn = null;
+    state.voiceStarting = false;
+    state.voiceCaptureFeedbackAction = null;
+    state.voiceCaptureFeedbackStarted = false;
+    state.voiceLevel = 0;
+    state.voiceFrequency = 0;
+    state.voiceDominantHz = 0;
+    state.microphone = {
+      ...state.microphone,
+      isBusy: browserCaptureActive && Boolean(state.microphone?.isBusy),
+      partialTranscript: browserCaptureActive ? state.microphone?.partialTranscript || "" : "",
+      status: browserCaptureActive ? state.microphone?.status || "Aktiv" : "Inaktiv",
+      error: null
+    };
+  }
+
+  function conversationMessagesDiffer(previousMessages, nextMessages) {
+    const previous = Array.isArray(previousMessages) ? previousMessages : [];
+    const next = Array.isArray(nextMessages) ? nextMessages : [];
+    if (previous.length !== next.length) return true;
+
+    for (let index = 0; index < previous.length; index += 1) {
+      const left = previous[index] || {};
+      const right = next[index] || {};
+      if (String(left.id || "") !== String(right.id || "")
+        || Number(left.revision || 0) !== Number(right.revision || 0)
+        || String(left.status || "") !== String(right.status || "")
+        || String(left.updatedAt || "") !== String(right.updatedAt || "")
+        || String(left.content || "") !== String(right.content || "")
+        || (Array.isArray(left.artifacts) ? left.artifacts.length : 0)
+          !== (Array.isArray(right.artifacts) ? right.artifacts.length : 0)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   function applySnapshot(payload) {
     const dialogWasOpen = !elements.overlay.hidden;
     const editorSelection = state.selectedWorkflowEditorId;
     const wasEditing = state.isWorkflowEditing;
     const previousSessionId = state.activeSessionId;
+    const nextSessionId = payload.activeSessionId || null;
+    const sessionChanged = previousSessionId !== nextSessionId;
+    const nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
+    const currentSessionMessagesChanged = !sessionChanged
+      && conversationMessagesDiffer(state.messages, nextMessages);
+    if (sessionChanged && previousSessionId) persistSessionScrollPosition(previousSessionId);
     state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
-    state.messages = Array.isArray(payload.messages) ? payload.messages : [];
+    state.messages = nextMessages;
     state.conversationRevision = Number(payload.conversationRevision) || 0;
     state.conversationRefreshPending = false;
     state.codingRun = payload.codingRun || null;
@@ -2286,10 +2505,13 @@
     state.documents = Array.isArray(payload.documents) ? payload.documents : [];
     state.attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
     state.documentGroupStatus = payload.documentGroupStatus || { total: 0, ready: 0, processing: 0, failed: 0, status: "ready" };
-    state.activeSessionId = payload.activeSessionId || null;
+    state.activeSessionId = nextSessionId;
+    globalThis.goVoiceCapture?.setSessionId(state.activeSessionId);
     const activeCodingMode = state.assistantMode === "code"
       || payload.selectedToolAction === "code";
     if (previousSessionId !== state.activeSessionId) {
+      state.messageRunStatus.clear();
+      resetTransientVoiceStateForSessionChange();
       state.codingWorkspaceOpen = false;
       state.codingWorkspaceSessionId = state.activeSessionId;
     }
@@ -2314,6 +2536,7 @@
     }
     state.runStatus = payload.runStatus || null;
     state.runDetail = payload.runDetail || null;
+    pruneTerminalMessageRunStatuses();
     state.liveCaption = payload.liveCaption || state.liveCaption;
     if (typeof payload.isSessionPaneOpen === "boolean") {
       const collapsed = !payload.isSessionPaneOpen;
@@ -2325,7 +2548,8 @@
     setReasoning(payload.reasoningEffort || "medium");
     renderSessions();
     renderSessionPin();
-    renderMessages(true);
+    renderMessages(currentSessionMessagesChanged);
+    if (sessionChanged) restoreSessionScrollPosition(state.activeSessionId);
     renderContext();
     renderCodingWorkspace();
     renderWorkspace();
@@ -2367,8 +2591,20 @@
 
   function sortCommittedMessages() {
     state.messages.sort((left, right) => {
-      const timeDifference = new Date(left.createdAt || 0).getTime() - new Date(right.createdAt || 0).getTime();
-      return timeDifference || String(left.id || "").localeCompare(String(right.id || ""));
+      const leftCreated = String(left.createdAt || "");
+      const rightCreated = String(right.createdAt || "");
+      const leftMilliseconds = Date.parse(leftCreated);
+      const rightMilliseconds = Date.parse(rightCreated);
+      const timeDifference = leftMilliseconds - rightMilliseconds;
+      if (Number.isFinite(timeDifference) && timeDifference !== 0) return timeDifference;
+
+      // Date.parse rounds the database's 100-nanosecond precision down to
+      // milliseconds. A user message and its streaming AI placeholder are
+      // intentionally only one tick apart, so comparing just Date values can
+      // randomly reverse them by GUID. The canonical UTC ISO strings retain
+      // those fractional digits and therefore reproduce SQLite's ordering.
+      const exactDifference = leftCreated < rightCreated ? -1 : leftCreated > rightCreated ? 1 : 0;
+      return exactDifference || String(left.id || "").localeCompare(String(right.id || ""));
     });
   }
 
@@ -2380,12 +2616,15 @@
 
   function applyConversationSnapshot(payload) {
     if (!payload || String(payload.activeSessionId || "") !== String(state.activeSessionId || "")) return;
-    state.messages = Array.isArray(payload.messages) ? payload.messages : [];
+    const nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
+    const messagesChanged = conversationMessagesDiffer(state.messages, nextMessages);
+    state.messages = nextMessages;
     sortCommittedMessages();
     state.conversationRevision = Number(payload.conversationRevision) || 0;
     state.codingRun = payload.codingRun || null;
     state.conversationRefreshPending = false;
-    renderMessages(false);
+    pruneTerminalMessageRunStatuses();
+    renderMessages(messagesChanged);
     renderCodingWorkspace();
   }
 
@@ -2413,6 +2652,9 @@
       state.messages[index] = message;
     } else {
       state.messages.push(message);
+    }
+    if (isTerminalMessageStatus(message.status)) {
+      state.messageRunStatus.delete(String(message.id));
     }
     sortCommittedMessages();
     renderMessages(true);
@@ -2504,7 +2746,10 @@
         clearCompletedOneShotToolAction();
         state.runStatus = payload.runStatus || null;
         state.runDetail = payload.runDetail || null;
-        if (payload.message?.id) state.messageRunStatus.delete(String(payload.message.id));
+        // A terminal chat event ends the only active model run. Clear every
+        // transient per-message status so a previously rendered card cannot
+        // retain (or regain) a stale "Denkt nach" indicator.
+        state.messageRunStatus.clear();
         if (payload.session) {
           const sessionIndex = state.sessions.findIndex(item => item.id === payload.session.id);
           if (sessionIndex >= 0) state.sessions[sessionIndex] = payload.session;
@@ -2517,11 +2762,11 @@
           }
         }
         renderSessions();
+        renderMessages(false);
         renderStatus();
         if (type === "chat.completed"
           && isVoiceControlActive()
           && payload.message?.content
-          && payload.message?.contentProfile !== "audiobook"
           && payload.message.content.trim() !== "Der Text wurde vorgelesen.") {
           state.voicePlaybackPending = true;
           syncVoiceCaptureSuspension();
@@ -2610,23 +2855,39 @@
         elements.overlay.hidden = false;
         showWorkflowEditor(payload.workflow || null);
         break;
-      case "status.changed":
-        if (payload.model) state.model = payload.model;
-        if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
-        if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
-        if (typeof payload.contextWasTruncated === "boolean") state.contextWasTruncated = payload.contextWasTruncated;
-        if (Object.hasOwn(payload, "loadedFiles")) state.loadedFiles = payload.loadedFiles;
-        state.runStatus = payload.runStatus || state.runStatus;
-        state.runDetail = payload.runDetail ?? state.runDetail;
-        if (payload?.messageId) state.messageRunStatus.set(String(payload.messageId), {
-          status: payload.runStatus || "Denkt nach",
-          detail: payload.runDetail || null,
-          model: payload.model || state.model || null
-        });
+      case "status.changed": {
+        const statusMessageId = payload?.messageId ? String(payload.messageId) : null;
+        const statusMessage = statusMessageId
+          ? state.messages.find(message => String(message.id) === statusMessageId)
+          : null;
+        const statusSessionMatches = !payload?.sessionId
+          || String(payload.sessionId) === String(state.activeSessionId || "");
+        const acceptsRunStatus = !statusMessageId
+          || (state.isRunning
+            && statusSessionMatches
+            && !isTerminalMessageStatus(statusMessage?.status));
+
+        if (acceptsRunStatus) {
+          if (payload.model) state.model = payload.model;
+          if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
+          if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
+          if (typeof payload.contextWasTruncated === "boolean") state.contextWasTruncated = payload.contextWasTruncated;
+          if (Object.hasOwn(payload, "loadedFiles")) state.loadedFiles = payload.loadedFiles;
+          state.runStatus = payload.runStatus || state.runStatus;
+          state.runDetail = payload.runDetail ?? state.runDetail;
+          if (statusMessageId) state.messageRunStatus.set(statusMessageId, {
+            status: payload.runStatus || "Denkt nach",
+            detail: payload.runDetail || null,
+            model: payload.model || state.model || null
+          });
+        } else if (statusMessageId) {
+          state.messageRunStatus.delete(statusMessageId);
+        }
         renderContext();
         renderMessages(false);
         renderStatus();
         break;
+      }
       case "speech.status":
         state.speechStatus = {
           active: Boolean(payload?.active),
@@ -2667,6 +2928,7 @@
       case "microphone.changed":
         const wasSpeaking = Boolean(state.microphone?.isSpeaking);
         state.microphone = payload || state.microphone;
+        if (payload?.error && !payload?.isRecording) state.voiceTurn = null;
         if (state.voiceCaptureFeedbackAction && payload?.isSpeaking) {
           state.voiceCaptureFeedbackStarted = true;
         }
@@ -2703,24 +2965,37 @@
         if (payload?.error) showToast(payload.error, true);
         break;
       case "microphone.transcript": {
+        if (payload?.clientSessionId
+          && String(payload.clientSessionId) !== String(state.activeSessionId || "")) {
+          break;
+        }
         const text = String(payload?.text || "").trim();
         if (payload?.isFinal && payload?.stopVoice) {
+          discardVoiceDictation(payload.turnId);
           void stopVoiceControl(false);
           break;
         }
-        state.voiceTurn = text ? {
-          turnId: payload.turnId,
-          text,
-          isFinal: Boolean(payload.isFinal)
-        } : null;
-        renderMessages(true);
         if (payload?.isFinal && text && finishActiveMediaCaptureFromVoice(text)) {
+          discardVoiceDictation(payload.turnId);
           break;
         }
-        if (payload?.isFinal && payload?.execute && text) submitVoicePrompt(text);
-        if (payload?.isFinal && payload?.noise) {
-          state.voiceTurn = null;
-          renderMessages(false);
+        if (payload?.isFinal && payload?.sendPrompt) {
+          discardVoiceDictation(payload.turnId);
+          void submitPrompt();
+          break;
+        }
+        if (payload?.isFinal && (payload?.noise || payload?.control)) {
+          discardVoiceDictation(payload.turnId);
+          break;
+        }
+        if (text && payload?.dictation !== false) {
+          updateVoiceDictation(
+            payload.turnId,
+            text,
+            Boolean(payload.isFinal),
+            payload.revision,
+            payload.stableText,
+            payload.provisionalText);
         }
         break;
       }
@@ -2859,7 +3134,6 @@
     } else {
       post("chat.cancel", {});
     }
-    post("microphone.stopSpeech", {});
   });
   elements.codingWorkspaceToggle.addEventListener("click", () => {
     setCodingWorkspaceExpanded(!state.codingWorkspaceOpen);
@@ -2888,7 +3162,7 @@
     renderMicrophone();
     renderMessages(true);
     try {
-      const source = await globalThis.goVoiceCapture.start();
+      const source = await globalThis.goVoiceCapture.start(state.activeSessionId);
       post("microphone.start", {
         deviceLabel: source.deviceLabel,
         sampleRate: source.sampleRate
