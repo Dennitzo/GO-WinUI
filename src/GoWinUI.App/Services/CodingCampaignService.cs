@@ -179,10 +179,11 @@ public sealed class CodingCampaignService(
             var now = DateTimeOffset.UtcNow;
             var iteration = Math.Max(canReuse ? existing!.Iteration : 0, definition.ReadIteration(workspace));
             var hasFoundation = definition.HasFoundation(workspace);
+            var title = ResolveStateTitle(definition, workspace);
             var state = canReuse
                 ? existing! with
                 {
-                    Title = definition.Descriptor.Title,
+                    Title = title,
                     WorkspacePath = workspace,
                     WorkspaceFingerprint = session.WorkspaceFingerprint ?? string.Empty,
                     ModelId = settings.Current.SelectedCodingModel,
@@ -191,7 +192,7 @@ public sealed class CodingCampaignService(
                     UpdatedAt = now,
                 }
                 : new CodingCampaignState(
-                    Guid.NewGuid(), session.Id, definition.Descriptor.Id, definition.Descriptor.Title,
+                    Guid.NewGuid(), session.Id, definition.Descriptor.Id, title,
                     workspace, session.WorkspaceFingerprint ?? string.Empty, settings.Current.SelectedCodingModel,
                     CodingCampaignStatus.Stopped,
                     hasFoundation ? CodingCampaignPhase.Iteration : CodingCampaignPhase.Bootstrap,
@@ -209,6 +210,39 @@ public sealed class CodingCampaignService(
         finally
         {
             _controlGate.Release();
+        }
+    }
+
+    private static string ResolveStateTitle(ICodingCampaignDefinition definition, string workspacePath)
+    {
+        if (!string.Equals(definition.Descriptor.Id, PromptDrivenCodingCampaignDefinition.DescriptorId, StringComparison.Ordinal))
+        {
+            return definition.Descriptor.Title;
+        }
+
+        var path = Path.Combine(workspacePath, PromptDrivenCodingCampaignDefinition.ContractRelativePath.Replace('/', Path.DirectorySeparatorChar));
+        if (!File.Exists(path))
+        {
+            return definition.Descriptor.Title;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path), new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+            });
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                   && document.RootElement.TryGetProperty("title", out var title)
+                   && title.ValueKind == JsonValueKind.String
+                   && !string.IsNullOrWhiteSpace(title.GetString())
+                ? title.GetString()!.Trim()
+                : definition.Descriptor.Title;
+        }
+        catch (JsonException)
+        {
+            return definition.Descriptor.Title;
         }
     }
 

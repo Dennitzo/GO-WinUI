@@ -1,6 +1,7 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Research;
+using GoAi.Server.Core.Runs;
 using GoAi.Server.Core.Security;
 using Microsoft.Extensions.Options;
 using System.Net;
@@ -10,6 +11,34 @@ namespace GoAi.Server.Tests;
 
 public sealed class WebResearchServiceTests
 {
+    [Fact]
+    public void FetchUsesBrowserCompatibleRequestHeaders()
+    {
+        using var request = WebResearchService.CreateFetchRequest(new Uri("https://example.com/reference"));
+
+        var userAgent = request.Headers.UserAgent.ToString();
+        Assert.Contains("Mozilla/5.0", userAgent, StringComparison.Ordinal);
+        Assert.Contains("GO-AI-Server/1.0", userAgent, StringComparison.Ordinal);
+        Assert.Contains("text/html", string.Join(',', request.Headers.GetValues("Accept")), StringComparison.Ordinal);
+        Assert.Contains("de-DE", string.Join(',', request.Headers.GetValues("Accept-Language")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ForbiddenFetchBecomesActionableAlternativeSourceResult()
+    {
+        var exception = new HttpRequestException(
+            "Forbidden",
+            inner: null,
+            HttpStatusCode.Forbidden);
+
+        var failure = AgentToolExecutor.DescribeResearchFailure("web.fetch", exception);
+
+        Assert.Equal("web.fetch.unavailable", failure.ErrorCode);
+        Assert.False(failure.Retryable);
+        Assert.Contains("HTTP 403", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("anderen Suchtreffer", failure.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task YouTubeKeyUsesOfficialApiWithoutExposingKeyInUrl()
     {

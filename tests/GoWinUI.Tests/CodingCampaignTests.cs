@@ -1428,6 +1428,35 @@ public sealed class CodingCampaignTests
         }
     }
 
+    [Fact]
+    public async Task SolutionPdfExporterRejectsInvalidKatexBeforePublishingPdf()
+    {
+        var workspace = CreateTemporaryWorkspace();
+        try
+        {
+            var source = Path.Combine(workspace, "broken.md");
+            await File.WriteAllTextAsync(
+                source,
+                """
+                # Defekte Formel
+
+                Dieser Ausdruck ist absichtlich kaputt: $\frac{1}{$
+                """);
+            using var exporter = new CodingSolutionPdfExporter(
+                NullLogger<CodingSolutionPdfExporter>.Instance);
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                exporter.EnsureCurrentAsync(source, sourceChanged: true));
+
+            Assert.Contains("KaTeX", exception.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(Path.ChangeExtension(source, ".pdf")));
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
     private static CodingCampaignService CreateService(
         TestEnvironment environment,
         IChatRepository chats,

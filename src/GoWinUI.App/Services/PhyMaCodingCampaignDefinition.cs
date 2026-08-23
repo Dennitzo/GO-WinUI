@@ -156,8 +156,9 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
 
         Erzeuge und aktualisiere nach jeder bestandenen Abnahme eine für Menschen lesbare A4-PDF
         `{{PdfRelativePath}}`, die `{{BookRelativePath}}` mit korrekt gerendertem KaTeX/LaTeX wiedergibt. Nutze dafür
-        die GO-PDF-Exportlogik oder eine gleichwertige lokale HTML/Chromium-Renderstrecke; rohe LaTeX-Quellen,
-        ungerenderte Formeln oder ein leeres Platzhalter-PDF gelten nicht als Ergebnis. Lege dabei kein zweites
+        zwingend `process.runPreset` mit `preset: "document.renderPdf"` und `target: "{{BookRelativePath}}"`.
+        Eigene HTML/CDN-KaTeX-Exporter, rohe LaTeX-Quellen, ungerenderte Formeln oder ein leeres Platzhalter-PDF
+        gelten nicht als Ergebnis. Lege dabei kein zweites
         Buchmanuskript an. Beginne mit einem Vorwort, einer Inhaltsübersicht, einer konsistenten
         Notations- und Einheitenkonvention sowie mindestens einer belastbar validierten mathematischen und einer
         belastbar validierten physikalischen Lerneinheit. Formuliere wie in einem guten Fachbuch: Motivation,
@@ -261,7 +262,8 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
 
         Aktualisiere nach erfolgreicher fachlicher Änderung `{{BookRelativePath}}`, `{{PdfRelativePath}}`,
         `phyma_catalog.json`, die drei Beweismanifeste, Checker, numerischen Daten und betroffene Tests konsistent.
-        Die PDF muss das Buch im A4-Buchformat mit gerendertem KaTeX darstellen; rohe Formelquellen oder ein
+        Die PDF muss über `process.runPreset` mit `preset: "document.renderPdf"` aus `{{BookRelativePath}}` erzeugt
+        werden und das Buch im A4-Buchformat mit gerendertem KaTeX darstellen; rohe Formelquellen oder ein
         Platzhalter-PDF reichen nicht. Schreibe neue Inhalte in den passenden bestehenden Abschnitt oder in genau
         einen neuen Abschnitt mit neuer `phyma-unit`; doppelte Einträge in `solutions/PhyMa.md` sind ungültig.
         Lasse keine autoritativen Nebenartefakte zurück: Jedes JSON unter `proofs/` und jede JSON-Datei unter

@@ -17,6 +17,9 @@ public sealed partial class WebResearchService
 {
     private const int MaximumFetchBytes = 5 * 1024 * 1024;
     private const int MaximumRedirects = 5;
+    private const string BrowserCompatibleUserAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 GO-AI-Server/1.0";
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly GoAiServerOptions _options;
     private readonly DpapiSecretStore? _secretStore;
@@ -282,8 +285,7 @@ public sealed partial class WebResearchService
             {
                 Timeout = TimeSpan.FromSeconds(30),
             };
-            using var message = new HttpRequestMessage(HttpMethod.Get, current);
-            message.Headers.UserAgent.ParseAdd("GO-AI-Server/1.0");
+            using var message = CreateFetchRequest(current);
             using var response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             if (IsRedirect(response.StatusCode))
             {
@@ -323,6 +325,17 @@ public sealed partial class WebResearchService
         }
 
         throw new HttpRequestException("Fetch failed unexpectedly.");
+    }
+
+    internal static HttpRequestMessage CreateFetchRequest(Uri uri)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        request.Headers.TryAddWithoutValidation("User-Agent", BrowserCompatibleUserAgent);
+        request.Headers.TryAddWithoutValidation(
+            "Accept",
+            "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8");
+        request.Headers.TryAddWithoutValidation("Accept-Language", "de-DE,de;q=0.9,en;q=0.7");
+        return request;
     }
 
     private static SocketsHttpHandler CreatePinnedHandler(string host, IReadOnlyList<IPAddress> addresses)

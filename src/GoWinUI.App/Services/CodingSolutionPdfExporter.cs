@@ -94,6 +94,11 @@ public sealed partial class CodingSolutionPdfExporter(ILogger<CodingSolutionPdfE
             if (process.ExitCode != 0 || !File.Exists(output) || new FileInfo(output).Length < 1024)
             {
                 var detail = LastMeaningfulLine(errorText) ?? LastMeaningfulLine(outputText) ?? "Unbekannter Exportfehler.";
+                if (!detail.Contains("KaTeX", StringComparison.OrdinalIgnoreCase)
+                    && SourceLikelyContainsMathematics(source))
+                {
+                    detail += " KaTeX-Pruefung oder mathematisches Rendering wurde nicht erfolgreich abgeschlossen.";
+                }
                 throw new InvalidOperationException($"Die Lösungs-PDF konnte nicht erzeugt werden: {detail}");
             }
 
@@ -108,6 +113,22 @@ public sealed partial class CodingSolutionPdfExporter(ILogger<CodingSolutionPdfE
 
     private static string? LastMeaningfulLine(string value) =>
         value.Split(['\r', '\n'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+
+    private static bool SourceLikelyContainsMathematics(string sourcePath)
+    {
+        try
+        {
+            var text = File.ReadAllText(sourcePath);
+            return text.Contains('$', StringComparison.Ordinal)
+                || text.Contains("\\(", StringComparison.Ordinal)
+                || text.Contains("\\[", StringComparison.Ordinal)
+                || text.Contains("\\begin{", StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     private static void TryKill(Process process)
     {

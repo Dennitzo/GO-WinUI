@@ -405,6 +405,7 @@ public sealed class CodingRunTraceServiceTests
     [InlineData("git.diff", "git diff --no-ext-diff", "inspect")]
     [InlineData("dotnet.build", "dotnet build Demo.sln --nologo", "build")]
     [InlineData("dotnet.test", "dotnet test Demo.sln --nologo", "test")]
+    [InlineData("document.renderPdf", "GO-Preset document.renderPdf Demo.sln", "build")]
     [InlineData("repository.verify", "GO-Preset repository.verify Demo.sln", "verify")]
     public void EveryProcessPresetCreatesAPowerShellConsole(string preset, string expectedCommand, string expectedPurpose)
     {
@@ -472,7 +473,7 @@ public sealed class CodingRunTraceServiceTests
         Assert.DoesNotContain("state.messages.push(nextMessage)", app, StringComparison.Ordinal);
         Assert.Contains("state.codingCampaign = { ...state.codingCampaign, status: \"stopping\" }", app, StringComparison.Ordinal);
         Assert.Contains("post(\"campaign.stop\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
-        Assert.Contains("\"campaign.list\", \"campaign.select\", \"campaign.run\", \"campaign.stop\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("\"campaign.list\", \"campaign.select\", \"campaign.loadWorkflow\", \"campaign.run\", \"campaign.stop\"", bridge, StringComparison.Ordinal);
         Assert.Contains("\"app.ready\", \"conversation.refresh\"", bridge, StringComparison.Ordinal);
         Assert.Contains("\"conversation.snapshot\", \"conversation.messageCommitted\", \"conversation.messageRemoved\"", bridge, StringComparison.Ordinal);
         Assert.Contains("function createCodingTrace(message, force = false)", app, StringComparison.Ordinal);

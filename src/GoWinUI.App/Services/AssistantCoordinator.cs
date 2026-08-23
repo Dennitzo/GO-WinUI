@@ -33,6 +33,7 @@ public sealed class AssistantCoordinator(
     {
         WriteIndented = true,
     };
+    private static readonly string[] PromptWorkflowTags = ["Coding", "Prompt-Workflow"];
     private readonly SemaphoreSlim _chatGate = new(1, 1);
     private CancellationTokenSource? _activeChatCancellation;
     private string? _activeDiagnosticSessionId;
@@ -511,6 +512,9 @@ public sealed class AssistantCoordinator(
                 await emit("campaign.changed", snapshot, envelope.RequestId);
                 break;
             }
+            case "campaign.loadWorkflow":
+                await LoadPromptWorkflowForCodingAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
+                break;
             case "campaign.run":
             {
                 var campaignService = campaigns ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
@@ -1476,6 +1480,10 @@ public sealed class AssistantCoordinator(
         var workflowId = GetRequiredGuid(envelope.Payload, "workflowId");
         var workflow = await workflows.GetAsync(workflowId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Der Workflow wurde nicht gefunden.");
+        if (IsPromptCodingWorkflow(workflow))
+        {
+            throw new InvalidOperationException("Coding-Workflows werden im Coding-Modus Ã¼ber Workflows geladen.");
+        }
         var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         await chats.SelectWorkflowAsync(session.Id, null, cancellationToken).ConfigureAwait(false);
         await chats.AddMessageAsync(
@@ -1593,6 +1601,64 @@ public sealed class AssistantCoordinator(
         }, envelope.RequestId);
     }
 
+    private async Task LoadPromptWorkflowForCodingAsync(
+        WebBridgeEnvelope envelope,
+        Func<string, object, string?, Task> emit,
+        CancellationToken cancellationToken)
+    {
+        var workflow = await workflows.GetAsync(
+                GetRequiredGuid(envelope.Payload, "workflowId"),
+                cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Der Workflow wurde nicht gefunden.");
+        if (!IsPromptCodingWorkflow(workflow))
+        {
+            throw new InvalidOperationException("Der ausgewÃ¤hlte Eintrag ist kein Coding-Workflow.");
+        }
+
+        var session = await EnsureSessionWorkspaceAsync(
+            await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+        var campaignService = campaigns
+            ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfuegbar.");
+
+        if (string.IsNullOrWhiteSpace(session.WorkspacePath) || !Directory.Exists(session.WorkspacePath))
+        {
+            throw new DirectoryNotFoundException("WÃ¤hle zuerst einen verfÃ¼gbaren Workspace fÃ¼r den Coding-Workflow aus.");
+        }
+
+        await chats.SetPersistentToolActionAsync(
+            session.Id,
+            PersistentToolAction.Code,
+            cancellationToken).ConfigureAwait(false);
+
+        var workspace = Path.GetFullPath(session.WorkspacePath);
+        var campaignDirectory = Path.Combine(workspace, ".go-campaign");
+        Directory.CreateDirectory(campaignDirectory);
+        await WriteAtomicUtf8Async(
+            Path.Combine(workspace, PromptDrivenCodingCampaignDefinition.ContractRelativePath.Replace('/', Path.DirectorySeparatorChar)),
+            workflow.ContentJson,
+            cancellationToken).ConfigureAwait(false);
+        var sourceRelativePath = GetPromptWorkflowSourceDocument(workflow.ContentJson)
+            ?? ".go-campaign/prompt-workflow-source.md";
+        var sourcePath = ResolveSafeWorkspaceRelativePath(workspace, sourceRelativePath)
+            ?? Path.Combine(campaignDirectory, "prompt-workflow-source.md");
+        await WriteAtomicUtf8Async(
+            sourcePath,
+            BuildSavedPromptWorkflowSourceMarkdown(workflow),
+            cancellationToken).ConfigureAwait(false);
+
+        var snapshot = await campaignService.SelectAsync(
+            session.Id,
+            PromptDrivenCodingCampaignDefinition.DescriptorId,
+            cancellationToken).ConfigureAwait(false);
+        await recentActivity.RecordAsync(
+            $"Coding-Workflow â€ž{workflow.Title}â€œ geladen",
+            CancellationToken.None).ConfigureAwait(false);
+        await emit("campaign.changed", snapshot, envelope.RequestId).ConfigureAwait(false);
+        await emit("session.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
+    }
+
     private async Task CreatePromptWorkflowFromCodingMessageAsync(
         ChatSession session,
         ChatMessage message,
@@ -1613,6 +1679,31 @@ public sealed class AssistantCoordinator(
             throw new InvalidOperationException("Die AI-Nachricht enthält keinen Workflow-Inhalt.");
         }
 
+        if (OpenCodingWorkflowSaveAsDraft())
+        {
+            var draftTitle = GeneralAgentResponseParser.CreateWorkflowTitle(content);
+            var draftWorkflowId = Guid.NewGuid();
+            var draftSourceRelativePath = ".go-campaign/prompt-workflow-source.md";
+            var draftContractJson = BuildPromptWorkflowContractJson(draftTitle, message, content, draftSourceRelativePath, draftWorkflowId);
+            await emit("workflow.draft", new
+            {
+                mode = "campaign",
+                workflow = new
+                {
+                    id = (Guid?)null,
+                    revision = 0,
+                    title = draftTitle,
+                    description = "Aus einer Coding-AI-Nachricht erstellt.",
+                    domain = "Coding",
+                    contextSummary = $"Prompt, Ausgangsnachricht und Ausfuehrungsauftrag fuer den Coding-Agenten. Quelle: AI-Nachricht {message.Id:D}.",
+                    contentJson = draftContractJson,
+                    isBuiltIn = false,
+                    tags = PromptWorkflowTags,
+                },
+            }, requestId).ConfigureAwait(false);
+        }
+        else
+        {
         if (string.IsNullOrWhiteSpace(session.WorkspacePath) || !Directory.Exists(session.WorkspacePath))
         {
             throw new DirectoryNotFoundException("Wähle zuerst einen verfügbaren Workspace für die Coding-Sitzung aus.");
@@ -1622,15 +1713,33 @@ public sealed class AssistantCoordinator(
         var campaignDirectory = Path.Combine(workspace, ".go-campaign");
         Directory.CreateDirectory(campaignDirectory);
         var title = GeneralAgentResponseParser.CreateWorkflowTitle(content);
+        var workflowId = Guid.NewGuid();
         var sourceFileName = "prompt-workflow-source.md";
         var sourceRelativePath = ".go-campaign/" + sourceFileName;
+        var contractJson = BuildPromptWorkflowContractJson(title, message, content, sourceRelativePath, workflowId);
+        var now = DateTimeOffset.UtcNow;
+        _ = await workflows.CreateAsync(
+            new WorkflowDefinition(
+                workflowId,
+                CreateUniqueWorkflowSlug(title, workflowId),
+                title,
+                "Aus einer Coding-AI-Nachricht gespeichert.",
+                "Coding",
+                $"Prompt, Ausgangsnachricht und Ausfuehrungsauftrag fuer den Coding-Agenten. Quelle: AI-Nachricht {message.Id:D}.",
+                contractJson,
+                false,
+                1,
+                now,
+                now,
+                PromptWorkflowTags),
+            cancellationToken).ConfigureAwait(false);
         await WriteAtomicUtf8Async(
             Path.Combine(campaignDirectory, sourceFileName),
             BuildPromptWorkflowSourceMarkdown(title, message, content),
             cancellationToken).ConfigureAwait(false);
         await WriteAtomicUtf8Async(
             Path.Combine(workspace, PromptDrivenCodingCampaignDefinition.ContractRelativePath.Replace('/', Path.DirectorySeparatorChar)),
-            BuildPromptWorkflowContractJson(title, message, content, sourceRelativePath),
+            contractJson,
             cancellationToken).ConfigureAwait(false);
 
         var snapshot = await campaignService.SelectAsync(
@@ -1641,12 +1750,82 @@ public sealed class AssistantCoordinator(
             $"Coding-Workflow „{title}“ aus AI-Nachricht gespeichert",
             CancellationToken.None).ConfigureAwait(false);
         await emit("campaign.changed", snapshot, requestId).ConfigureAwait(false);
+        await emit("workflow.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), requestId).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), requestId).ConfigureAwait(false);
+        }
     }
 
     private static bool IsCodingWorkflowSession(ChatSession session) =>
         session.AssistantMode == AssistantMode.Code
         || session.PersistentToolAction == PersistentToolAction.Code;
+
+    private static bool OpenCodingWorkflowSaveAsDraft() => true;
+
+    private static bool IsPromptCodingWorkflow(WorkflowDefinition workflow)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(workflow.ContentJson);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("schema", out var schema)
+                && schema.ValueKind == JsonValueKind.String
+                && string.Equals(schema.GetString(), "go.prompt-workflow.v1", StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static string? GetPromptWorkflowSourceDocument(string contentJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(contentJson);
+            if (document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("scope", out var scope)
+                && scope.ValueKind == JsonValueKind.Object
+                && scope.TryGetProperty("sourceDocument", out var source)
+                && source.ValueKind == JsonValueKind.String)
+            {
+                var value = source.GetString();
+                return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return null;
+    }
+
+    private static string? ResolveSafeWorkspaceRelativePath(string workspace, string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath))
+        {
+            return null;
+        }
+
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspace));
+        var candidate = Path.GetFullPath(Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        return candidate.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            ? candidate
+            : null;
+    }
+
+    private static string BuildSavedPromptWorkflowSourceMarkdown(WorkflowDefinition workflow) => $"""
+        # {workflow.Title}
+
+        Quelle: gespeicherter Coding-Workflow `{workflow.Id:D}` vom {workflow.UpdatedAt:O}
+
+        {TruncateForWorkflow(workflow.ContextSummary, 40_000)}
+
+        ## Workflow-Vertrag
+
+        ```json
+        {TruncateForWorkflow(workflow.ContentJson, 250_000)}
+        ```
+        """;
 
     private static string BuildPromptWorkflowSourceMarkdown(
         string title,
@@ -1663,7 +1842,8 @@ public sealed class AssistantCoordinator(
         string title,
         ChatMessage message,
         string content,
-        string sourceRelativePath)
+        string sourceRelativePath,
+        Guid workflowId)
     {
         var excerpt = TruncateForWorkflow(content, 20_000);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
@@ -1676,6 +1856,7 @@ public sealed class AssistantCoordinator(
             scope = new
             {
                 source = "ai-message-footer",
+                savedWorkflowId = workflowId,
                 sourceMessageId = message.Id,
                 sourceMessageUpdatedAt = message.UpdatedAt,
                 sourceMessageSha256 = hash,
@@ -1826,10 +2007,28 @@ public sealed class AssistantCoordinator(
         workflow.Domain,
         workflow.ContextSummary,
         workflow.ContentJson,
+        schema = GetWorkflowSchema(workflow.ContentJson),
         workflow.IsBuiltIn,
         workflow.Revision,
         tags = workflow.EffectiveTags,
     };
+
+    private static string? GetWorkflowSchema(string contentJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(contentJson);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("schema", out var schema)
+                && schema.ValueKind == JsonValueKind.String
+                ? schema.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     private static object ToDocumentDto(StoredDocument document) => new
     {
@@ -1903,6 +2102,18 @@ public sealed class AssistantCoordinator(
 
         var slug = builder.ToString().Trim('-');
         return string.IsNullOrWhiteSpace(slug) ? $"workflow-{Guid.NewGuid():N}" : slug;
+    }
+
+    private static string CreateUniqueWorkflowSlug(string title, Guid id)
+    {
+        var baseSlug = CreateSlug(title);
+        baseSlug = baseSlug[..Math.Min(baseSlug.Length, 70)].Trim('-');
+        if (baseSlug.Length == 0)
+        {
+            baseSlug = "workflow";
+        }
+
+        return $"{baseSlug}-{id:N}"[..Math.Min(baseSlug.Length + 33, 110)];
     }
 
     private static Guid GetRequiredGuid(JsonElement payload, string name)

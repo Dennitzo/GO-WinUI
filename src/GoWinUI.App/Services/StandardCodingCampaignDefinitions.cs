@@ -137,7 +137,9 @@ public sealed class PromptDrivenCodingCampaignDefinition() : ICodingCampaignDefi
         Behandle selbst geschriebene Tests nicht automatisch als Wahrheit: prüfe sie gegen bekannte gültige und ungültige
         Referenzfälle oder eine unabhängige Zweitberechnung. Führe danach die engsten passenden Tests, Build- oder
         Syntaxprüfung und einen begrenzten Start-/Smoke-Lauf aus. Aktualisiere den Vertrag atomar mit den realen
-        Ergebnissen. Wenn kein ausdrückliches Nutzerziel vorliegt, inspiziere README/Projektstruktur und wähle den
+        Ergebnissen. Wenn der Workflow ein Buch, eine Lösung oder eine Lehrtext-PDF erzeugt, pflege die Quelle als
+        Markdown/Text/TeX/JSON und rendere die PDF ausschließlich mit `process.runPreset` `document.renderPdf`; baue
+        dafür keine eigene HTML-, CDN-KaTeX- oder Direkt-PDF-Strecke. Wenn kein ausdrückliches Nutzerziel vorliegt, inspiziere README/Projektstruktur und wähle den
         kleinsten sicheren Qualitäts- oder Verifikationsschritt.
         """;
 
@@ -153,8 +155,10 @@ public sealed class PromptDrivenCodingCampaignDefinition() : ICodingCampaignDefi
         er die Akzeptanzkriterien wirklich abdeckt; andernfalls ergänze den Prüfvertrag und die Tests.
 
         Erhöhe `iteration` nur bei einer echten Verbesserung oder einer bewusst dokumentierten Erkenntnis. Führe die
-        im Vertrag passenden setup/test/build/start-Schritte aus, behebe Fehler selbstständig und schreibe im
-        Prozessbericht knapp, was aus dem Workflow-Vertrag abgeleitet wurde und welche Prüfungen tatsächlich liefen.
+        im Vertrag passenden setup/test/build/start-Schritte aus, behebe Fehler selbstständig und schreibe bei
+        PDF-Artefakten `document.renderPdf` als Verifikations-/Buildschritt fest, damit KaTeX lokal durch GO gerendert
+        und validiert wird. Im Prozessbericht steht knapp, was aus dem Workflow-Vertrag abgeleitet wurde und welche
+        Prüfungen tatsächlich liefen.
         """;
 
     public string BuildCorrectionPrompt(int iteration, string challenge, IReadOnlyList<string> issues) => $$"""

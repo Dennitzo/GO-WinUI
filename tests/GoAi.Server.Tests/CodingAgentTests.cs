@@ -470,6 +470,8 @@ public sealed class CodingAgentTests
     {
         Assert.Contains("persistente Coding-Agent", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("native strukturierte Tool-Calls", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("web.search und web.fetch", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Suchtreffer sind nur Wegweiser", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("nicht-denkenden Modus", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Unterstelle weder .NET", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Technologie- und Architekturadaption", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
@@ -493,6 +495,58 @@ public sealed class CodingAgentTests
         Assert.DoesNotContain("Button.Flyout", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("GO-WinUI", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("Build-Portable.ps1", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WebResearchEventsExposeOnlyTheAuditableQueryOrUrlAsTarget()
+    {
+        using var search = JsonDocument.Parse("""{"query":"official WinUI documentation","maximumResults":5}""");
+        using var fetch = JsonDocument.Parse("""{"url":"https://learn.microsoft.com/windows/apps/"}""");
+
+        Assert.Equal(
+            "official WinUI documentation",
+            RunProcessor.CreateServerToolTarget("web.search", search.RootElement));
+        Assert.Equal(
+            "https://learn.microsoft.com/windows/apps/",
+            RunProcessor.CreateServerToolTarget("web.fetch", fetch.RootElement));
+        Assert.Null(RunProcessor.CreateServerToolTarget("math.evaluate", search.RootElement));
+    }
+
+    [Fact]
+    public void GeneralWebResearchPolicyRequiresFetchingPagesInsteadOfReturningSnippets()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.General,
+            [new RunMessage("user", [new ContentPart("text", "Suche aktuelle Dokumentation")])],
+            AllowedServerTools: ["web.search", "web.fetch"]);
+
+        var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation(
+            "general",
+            request,
+            ["web.search", "web.fetch"]);
+
+        Assert.Contains("Verbindliche Webrecherche", policy, StringComparison.Ordinal);
+        Assert.Contains("Suchtreffer und Snippets sind nur Wegweiser", policy, StringComparison.Ordinal);
+        Assert.Contains("web.fetch", policy, StringComparison.Ordinal);
+        Assert.Contains("Titel und URL", policy, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OrdinaryGeneralChatDoesNotReceiveMandatoryWebResearchPolicy()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Auto,
+            [new RunMessage("user", [new ContentPart("text", "Erkläre den Begriff Volumenstrom")])],
+            AllowedServerTools: ["math.evaluate"]);
+
+        var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation(
+            "general",
+            request,
+            ["math.evaluate"]);
+
+        Assert.DoesNotContain("Verbindliche Webrecherche", policy, StringComparison.Ordinal);
     }
 
     [Fact]

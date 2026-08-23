@@ -6,7 +6,7 @@
     "app.ready", "conversation.refresh", "chat.send", "chat.cancel", "session.create", "session.open",
     "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick",
     "document.remove", "workflow.list", "workflow.insert", "workflow.create",
-    "campaign.list", "campaign.select", "campaign.run", "campaign.stop",
+    "campaign.list", "campaign.select", "campaign.loadWorkflow", "campaign.run", "campaign.stop",
     "workflow.update", "workflow.delete",
     "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
     "attachment.remove",

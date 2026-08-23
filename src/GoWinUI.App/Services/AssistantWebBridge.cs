@@ -25,7 +25,7 @@ public sealed class AssistantWebBridge : IDisposable
         "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
         "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.toggleSpeechPause", "microphone.stop", "microphone.cancel",
         "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "session.tool", "ui.sessionPane", "external.open",
-        "campaign.list", "campaign.select", "campaign.run", "campaign.stop",
+        "campaign.list", "campaign.select", "campaign.loadWorkflow", "campaign.run", "campaign.stop",
     };
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {

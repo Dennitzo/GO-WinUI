@@ -46,16 +46,35 @@ public sealed class AssistantWorkflowTests
     {
         Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.mode"));
         Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.tool"));
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("campaign.loadWorkflow"));
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
         Assert.Contains("\"session.mode\"", bridge, StringComparison.Ordinal);
         Assert.Contains("\"session.tool\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("\"campaign.loadWorkflow\"", bridge, StringComparison.Ordinal);
 
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
         Assert.Contains("bridge.js?v=20260821-2", html, StringComparison.Ordinal);
 
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         Assert.Contains("post(\"session.tool\"", app, StringComparison.Ordinal);
+        Assert.Contains("campaign.loadWorkflow", app, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CodingWorkflowOverlayUsesTheSameEditAndDeleteFooterAsChatWorkflows()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
+
+        Assert.Contains("function preferredCampaignWorkflow()", app, StringComparison.Ordinal);
+        Assert.Contains("const workflow = preferredCampaignWorkflow();", app, StringComparison.Ordinal);
+        Assert.Contains("setWorkflowFooterMode(\"preview\", selectedWorkflow);", app, StringComparison.Ordinal);
+        Assert.Contains("if (workflow && !workflow.isBuiltIn) showWorkflowEditor(workflow);", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"workflow.delete\", { workflowId: workflow.id", app, StringComparison.Ordinal);
+        Assert.Contains("id=\"delete-workflow\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"edit-workflow\"", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1065,6 +1084,81 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public void CodingAgentAlwaysReceivesSearchAndSafePageFetchTools()
+    {
+        var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.Code);
+
+        Assert.Contains("web.search", tools);
+        Assert.Contains("web.fetch", tools);
+        Assert.Contains("math.evaluate", tools);
+        Assert.DoesNotContain("youtube.search", tools);
+    }
+
+    [Fact]
+    public void GeneralWebSearchActionReceivesSearchAndSafePageFetchTools()
+    {
+        var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.WebSearch);
+
+        Assert.Equal(["web.search", "web.fetch"], tools);
+    }
+
+    [Fact]
+    public void GeneralWebSearchReadsRelevantPagesBeforePreparingTheAnswer()
+    {
+        const string prompt = "Vergleiche die aktuellen WebView2-APIs und nenne die Quellen.";
+
+        var transformed = GoAiAssistantService.BuildWebResearchPrompt(prompt);
+
+        Assert.Contains("zuerst web.search", transformed, StringComparison.Ordinal);
+        Assert.Contains("web.fetch", transformed, StringComparison.Ordinal);
+        Assert.Contains("tatsächlich abgerufenen Seiteninhalte", transformed, StringComparison.Ordinal);
+        Assert.Contains("Titel und URL", transformed, StringComparison.Ordinal);
+        Assert.Contains("keine rohe Trefferliste", transformed, StringComparison.Ordinal);
+        Assert.EndsWith(prompt, transformed, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Nutze eine Websuche, um die aktuelle API zu prüfen.")]
+    [InlineData("Führe eine Web-Suche nach der offiziellen Dokumentation durch.")]
+    [InlineData("Use Web Search before implementing this feature.")]
+    public void CodingWebSearchPromptsRequireSearchAndRelevantPageFetches(string prompt)
+    {
+        var transformed = GoAiAssistantService.BuildCodingPrompt(prompt);
+
+        Assert.Contains("web.search", transformed, StringComparison.Ordinal);
+        Assert.Contains("web.fetch", transformed, StringComparison.Ordinal);
+        Assert.Contains("offizielle Dokumentation", transformed, StringComparison.Ordinal);
+        Assert.EndsWith(prompt, transformed, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OrdinaryCodingPromptIsNotForcedThroughWebResearch()
+    {
+        const string prompt = "Behebe den NullReferenceException-Test im vorhandenen Projekt.";
+
+        Assert.Equal(prompt, GoAiAssistantService.BuildCodingPrompt(prompt));
+    }
+
+    [Theory]
+    [InlineData("web.search", false, "Websuche wird ausgef\u00FChrt")]
+    [InlineData("web.search", true, "Websuche abgeschlossen")]
+    [InlineData("web.fetch", false, "Webseite wird gelesen")]
+    [InlineData("web.fetch", true, "Webseite gelesen")]
+    public void CodingTraceNamesWebResearchStepsClearly(string tool, bool completed, string expected)
+    {
+        Assert.Equal(expected, GoAiAssistantService.CodingServerToolTitle(tool, completed));
+    }
+
+    [Theory]
+    [InlineData("web.search", "Websuche nicht verf\u00FCgbar")]
+    [InlineData("web.fetch", "Webseite nicht verf\u00FCgbar")]
+    [InlineData("youtube.search", "YouTube-Suche nicht verf\u00FCgbar")]
+    public void CodingTraceNamesRecoverableResearchFailuresClearly(string tool, string expected)
+    {
+        Assert.Equal(expected, GoAiAssistantService.CodingServerToolFailureTitle(tool));
+    }
+
+    [Fact]
     public void DocumentAnswersKeepInlineCitationsButRemoveTheEvidenceFooter()
     {
         const string response = "Die XREF-Vorlage wird im Projekt geladen [Anleitung_C.A.T.S.pdf, S. 12].\n\n"
@@ -1628,6 +1722,7 @@ public sealed class AssistantWorkflowTests
             CreateRecentActivity(settings),
             campaigns: campaignService);
         var emittedTypes = new List<string>();
+        object? draftPayload = null;
         using var payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(new { messageId = message.Id }));
         var envelope = new WebBridgeEnvelope(
             AssistantWebBridge.ProtocolVersion,
@@ -1637,29 +1732,35 @@ public sealed class AssistantWorkflowTests
 
         await coordinator.HandleAsync(
             envelope,
-            (type, _, _) =>
+            (type, payload, _) =>
             {
                 emittedTypes.Add(type);
+                if (type == "workflow.draft") draftPayload = payload;
                 return Task.CompletedTask;
             });
 
         var contractPath = Path.Combine(workspace, ".go-campaign", "prompt-workflow.json");
         var sourcePath = Path.Combine(workspace, ".go-campaign", "prompt-workflow-source.md");
-        Assert.True(File.Exists(contractPath));
-        Assert.True(File.Exists(sourcePath));
-        using var contract = JsonDocument.Parse(await File.ReadAllTextAsync(contractPath));
+        Assert.False(File.Exists(contractPath));
+        Assert.False(File.Exists(sourcePath));
+        Assert.Contains("workflow.draft", emittedTypes);
+        Assert.DoesNotContain("campaign.changed", emittedTypes);
+        Assert.DoesNotContain("workflow.changed", emittedTypes);
+        Assert.DoesNotContain("session.changed", emittedTypes);
+        Assert.DoesNotContain(await environment.Get<IWorkflowRepository>().ListAsync(), static item => item.Domain == "Coding" && !item.IsBuiltIn);
+        Assert.Null(await environment.Get<ICodingCampaignRepository>().GetForSessionAsync(session.Id));
+
+        using var draft = JsonDocument.Parse(JsonSerializer.Serialize(draftPayload));
+        Assert.Equal("campaign", draft.RootElement.GetProperty("mode").GetString());
+        var workflow = draft.RootElement.GetProperty("workflow");
+        Assert.Null(workflow.GetProperty("id").GetString());
+        Assert.Equal("Coding", workflow.GetProperty("domain").GetString());
+        Assert.Contains("Prompt-Workflow", workflow.GetProperty("tags").EnumerateArray().Select(static item => item.GetString()));
+        using var contract = JsonDocument.Parse(workflow.GetProperty("contentJson").GetString()!);
         Assert.Equal("go.prompt-workflow.v1", contract.RootElement.GetProperty("schema").GetString());
         Assert.Equal("ai-message-footer", contract.RootElement.GetProperty("scope").GetProperty("source").GetString());
         Assert.Equal(message.Id, contract.RootElement.GetProperty("scope").GetProperty("sourceMessageId").GetGuid());
-        Assert.Contains("Erstelle einen reproduzierbaren Testworkflow", await File.ReadAllTextAsync(sourcePath), StringComparison.Ordinal);
-
-        var campaign = await environment.Get<ICodingCampaignRepository>().GetForSessionAsync(session.Id);
-        Assert.NotNull(campaign);
-        Assert.Equal(PromptDrivenCodingCampaignDefinition.DescriptorId, campaign.DefinitionId);
-        Assert.Equal(CodingCampaignStatus.Stopped, campaign.Status);
-        Assert.Contains("campaign.changed", emittedTypes);
-        Assert.Contains("session.changed", emittedTypes);
-        Assert.DoesNotContain("workflow.draft", emittedTypes);
+        Assert.Contains("Erstelle einen reproduzierbaren Testworkflow", workflow.GetProperty("contentJson").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]

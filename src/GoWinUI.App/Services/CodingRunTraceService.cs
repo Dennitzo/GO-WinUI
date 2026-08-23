@@ -588,7 +588,7 @@ public sealed class CodingRunTraceService
         purpose = preset switch
         {
             "dotnet.test" or "code.test" => "test",
-            "dotnet.build" or "repository.build" => "build",
+            "dotnet.build" or "repository.build" or "document.renderPdf" => "build",
             "repository.start" or "code.run" => "start",
             "repository.verify" => "verify",
             _ => "inspect",
@@ -607,6 +607,7 @@ public sealed class CodingRunTraceService
             "git.diff" => "git diff --no-ext-diff",
             "dotnet.build" => $"dotnet build{targetArgument} --nologo",
             "dotnet.test" => $"dotnet test{targetArgument} --nologo",
+            "document.renderPdf" => $"GO-Preset document.renderPdf{targetArgument}",
             _ => $"GO-Preset {QuotePowerShellArgument(preset)}{targetArgument}",
         };
     }

@@ -11,6 +11,7 @@ public sealed class AgentToolCatalog
         "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
         "image.generate", "math.evaluate", "context.embed", "context.retrieve",
     ];
+    private static readonly string[] CodingResearchTools = ["web.search", "web.fetch"];
 
     private readonly Dictionary<string, AgentToolSpec> _tools = CreateTools();
 
@@ -25,6 +26,13 @@ public sealed class AgentToolCatalog
                 throw new ArgumentException($"Unknown or unavailable server tool: {name}");
             }
             names.Add(name);
+        }
+        // Web research is a built-in read-only capability of every coding run.
+        // Keep this server-side guarantee for older GO clients that still send an
+        // explicit empty or incomplete server-tool allow-list.
+        if (request.Mode == RunMode.Code)
+        {
+            names.UnionWith(CodingResearchTools);
         }
         var capabilities = request.ClientCapabilities ?? [];
         if (HasCapability(capabilities, "documents"))
@@ -314,7 +322,7 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.FileSystemProposePatch, "Schlage einen Patch für eine vorhandene Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "patch"], ("path", "string"), ("patch", "string"))),
             Client(ClientToolNames.FileSystemProposeCreate, "Schlage das Erstellen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "content"], ("path", "string"), ("content", "string"))),
             Client(ClientToolNames.FileSystemProposeDelete, "Schlage das Löschen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema("path", ("path", "string"))),
-            Client(ClientToolNames.ProcessRunPreset, "Führe ein versioniertes Build-, Test-, Start- oder Git-Preset im freigegebenen Workspace aus.", ToolRiskClass.Process, ProcessSchema()),
+            Client(ClientToolNames.ProcessRunPreset, "Führe ein versioniertes Build-, Test-, Start-, Git- oder Dokument-Preset im freigegebenen Workspace aus. Nutze document.renderPdf für KaTeX-kompatible PDF-Erzeugung aus Markdown/Text/TeX/JSON statt eigener HTML/CDN-PDF-Skripte.", ToolRiskClass.Process, ProcessSchema()),
             Client(ClientToolNames.ProcessRun, "Führe ein direktes Programm mit getrennter Argumentliste und Workspace-Arbeitsverzeichnis für Analyse, Setup, Test, Build oder Smoke-Start aus.", ToolRiskClass.Process, ProcessRunSchema()),
             Client(ClientToolNames.LeanProof, "Prüfe freiwillig einen mathematischen oder algorithmischen Beweis mit der gepinnten lokalen Lean-/Lake-Toolchain. Verwende niemals process.run für lean oder lake. check kompiliert eine Datei; verify kompiliert und prüft die Axiomabhängigkeiten des exakt deklarierten Theorems. Ein Dateiname erzeugt keinen Lean-Namespace.", ToolRiskClass.Process, LeanProofSchema()),
             Client(ClientToolNames.BricsCadGeometryQuery, "Lese freigegebene BricsCAD-Geometrie.", ToolRiskClass.ReadOnly, CadSchema()),
@@ -396,7 +404,7 @@ public sealed class AgentToolCatalog
         + name + "\"],\"additionalProperties\":false}");
 
     private static JsonElement ProcessSchema() => Parse("""
-        {"type":"object","properties":{"preset":{"type":"string","enum":["git.status","git.diff","dotnet.build","dotnet.test","repository.build","repository.verify","repository.start","code.run","code.test"]},"target":{"type":"string","description":"Optionaler relativer Datei-, Projekt- oder Solutionpfad. Wird von dotnet.build, dotnet.test, code.run, code.test und unterstützten repository.verify-Abläufen verwendet."}},"required":["preset"],"additionalProperties":false}
+        {"type":"object","properties":{"preset":{"type":"string","enum":["git.status","git.diff","dotnet.build","dotnet.test","repository.build","repository.verify","repository.start","code.run","code.test","document.renderPdf"]},"target":{"type":"string","description":"Optionaler relativer Datei-, Projekt- oder Solutionpfad. Bei document.renderPdf ist target die Markdown-/Text-/TeX-/JSON-Quelldatei, aus der GO eine gleichnamige A4-PDF mit lokal gerendertem KaTeX erzeugt."}},"required":["preset"],"additionalProperties":false}
         """);
 
     private static JsonElement ProcessRunSchema() => Parse("""

@@ -34,7 +34,9 @@ services:
   searxng:
     image: searxng/searxng@sha256:c2dc2d9e6b910653e8628361c23443222490e4cabbb9e02667b7847143db843b
     container_name: go-ai-searxng
-    restart: "no"
+    # GO AI Server starts and stops the Compose project. While the server is
+    # active, SearXNG self-recovers after a container or engine failure.
+    restart: unless-stopped
     read_only: true
     cap_drop:
       - ALL

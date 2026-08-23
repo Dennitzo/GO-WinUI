@@ -95,7 +95,11 @@ $html = @"
   <script>
     const decodeUtf8 = value => new TextDecoder().decode(Uint8Array.from(atob(value), character => character.charCodeAt(0)));
     document.getElementById('solution-title').textContent = decodeUtf8('$titleBase64');
-    document.getElementById('solution-content').append(globalThis.goMarkdown.render(decodeUtf8('$sourceBase64')));
+    const solutionContent = document.getElementById('solution-content');
+    solutionContent.append(globalThis.goMarkdown.render(decodeUtf8('$sourceBase64')));
+    document.body.dataset.goPdfReady = 'true';
+    document.body.dataset.goKatexInvalid = String(solutionContent.querySelectorAll('.math-selectable.invalid').length);
+    document.body.dataset.goKatexRendered = String(solutionContent.querySelectorAll('.math-render[data-math-typeset="true"] .katex').length);
   </script>
 </body>
 </html>
@@ -104,7 +108,7 @@ $html = @"
 try {
     [IO.File]::WriteAllText($htmlPath, $html, [Text.UTF8Encoding]::new($false))
     $edge = Resolve-EdgeExecutable
-    $arguments = @(
+    $commonArguments = @(
         '--headless=new',
         '--disable-gpu',
         '--disable-extensions',
@@ -112,9 +116,27 @@ try {
         '--no-first-run',
         '--allow-file-access-from-files',
         '--run-all-compositor-stages-before-draw',
-        '--no-pdf-header-footer',
         '--virtual-time-budget=5000',
-        ('--user-data-dir=' + $profilePath),
+        ('--user-data-dir=' + $profilePath)
+    )
+    $dumpArguments = $commonArguments + @(
+        '--dump-dom',
+        ([Uri]$htmlPath).AbsoluteUri
+    )
+
+    $renderedDom = (& $edge @dumpArguments 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Microsoft Edge hat die KaTeX-Prüfung mit Exit-Code $LASTEXITCODE beendet."
+    }
+    if ($renderedDom -notmatch 'data-go-pdf-ready="true"') {
+        throw 'Der GO-Markdown-/KaTeX-Renderer wurde vor der PDF-Erzeugung nicht vollständig initialisiert.'
+    }
+    if ($renderedDom -match 'data-go-katex-invalid="([1-9][0-9]*)"') {
+        throw "Die PDF wurde nicht erzeugt, weil $($Matches[1]) mathematische Ausdrücke nicht KaTeX-kompatibel sind."
+    }
+
+    $arguments = $commonArguments + @(
+        '--no-pdf-header-footer',
         ('--print-to-pdf=' + $temporaryPdf),
         ([Uri]$htmlPath).AbsoluteUri
     )

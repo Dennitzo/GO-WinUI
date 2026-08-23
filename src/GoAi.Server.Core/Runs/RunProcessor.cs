@@ -492,10 +492,11 @@ public sealed class RunProcessor : BackgroundService
 
                     if (tool.ServerSide)
                     {
+                        var serverToolTarget = CreateServerToolTarget(tool.Name, call.Arguments);
                         await _repository.AppendEventAsync(
                             runId,
                             RunEventTypes.ServerToolStarted,
-                            new { tool = tool.Name, toolCallId = call.Id },
+                            new { tool = tool.Name, toolCallId = call.Id, target = serverToolTarget },
                             cancellationToken).ConfigureAwait(false);
                         var result = await _toolExecutor.ExecuteAsync(tool.Name, call.Arguments, runId, cancellationToken).ConfigureAwait(false);
                         foreach (var artifact in result.Artifacts)
@@ -505,8 +506,24 @@ public sealed class RunProcessor : BackgroundService
                         await _repository.AppendEventAsync(
                             runId,
                             RunEventTypes.ServerToolCompleted,
-                            new { tool = tool.Name, toolCallId = call.Id, result = result.Result },
+                            new
+                            {
+                                tool = tool.Name,
+                                toolCallId = call.Id,
+                                target = serverToolTarget,
+                                success = result.Succeeded,
+                                errorCode = result.ErrorCode,
+                                errorMessage = result.ErrorMessage,
+                                result = result.Result,
+                            },
                             cancellationToken).ConfigureAwait(false);
+                        if (!result.Succeeded)
+                        {
+                            _runtime.WriteLog(
+                                "Warning",
+                                result.ErrorCode ?? "server_tool.failed",
+                                $"Run {runId}: Serverwerkzeug {tool.Name} konnte nicht ausgeführt werden; der Agentenlauf wird fortgesetzt.");
+                        }
                         messages.Add(new LmChatMessage("tool", result.Result.GetRawText(), ToolCallId: call.Id));
                         nextToolIndex++;
                         await SaveCheckpointAsync().ConfigureAwait(false);
@@ -2134,6 +2151,25 @@ public sealed class RunProcessor : BackgroundService
         return string.IsNullOrWhiteSpace(target)
             ? $"GO soll {tool.Name} lokal ausführen."
             : $"GO soll {tool.Name} für „{target}“ lokal ausführen.";
+    }
+
+    internal static string? CreateServerToolTarget(string toolName, JsonElement arguments)
+    {
+        var value = toolName switch
+        {
+            "web.search" or "youtube.search" => StringArgument(arguments, "query"),
+            "web.fetch" => StringArgument(arguments, "url"),
+            _ => null,
+        };
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        const int maximumCharacters = 512;
+        return value.Length <= maximumCharacters
+            ? value
+            : value[..maximumCharacters];
     }
 
     private static IEnumerable<string> SplitDeltas(string content)

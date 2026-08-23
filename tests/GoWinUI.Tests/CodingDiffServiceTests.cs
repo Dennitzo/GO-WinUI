@@ -46,6 +46,61 @@ public sealed class CodingDiffServiceTests
     }
 
     [Fact]
+    public async Task GeneratedFrameworkTreesAreExcludedFromCapturedDiff()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"go-coding-diff-generated-{Guid.NewGuid():N}");
+        var root = Path.Combine(testRoot, "workspace");
+        var state = Path.Combine(testRoot, "state");
+        Directory.CreateDirectory(Path.Combine(root, ".lake", "packages", "Cli"));
+        Directory.CreateDirectory(Path.Combine(root, ".venv", "Lib", "site-packages"));
+        Directory.CreateDirectory(Path.Combine(root, "target", "debug"));
+        try
+        {
+            // Regression: combining an explicitly ignored directory with negative Git
+            // pathspecs made `git add` return exit code 1 and left normal coding runs
+            // without baseline.json or any subsequent code-diff updates.
+            await File.WriteAllTextAsync(Path.Combine(root, ".gitignore"), "/.lake/\n", new UTF8Encoding(false));
+            await File.WriteAllTextAsync(Path.Combine(root, "chapter.md"), "baseline\n", new UTF8Encoding(false));
+            await File.WriteAllTextAsync(
+                Path.Combine(root, ".lake", "packages", "Cli", "Generated.lean"),
+                "theorem generated : True := by trivial\n",
+                new UTF8Encoding(false));
+            await File.WriteAllTextAsync(
+                Path.Combine(root, ".venv", "Lib", "site-packages", "generated.py"),
+                "generated = True\n",
+                new UTF8Encoding(false));
+            await File.WriteAllTextAsync(Path.Combine(root, "target", "debug", "generated.log"), "cache\n", new UTF8Encoding(false));
+
+            var runId = Guid.NewGuid();
+            var service = new CodingDiffService(new GoInfrastructureOptions { DataDirectory = state });
+            Assert.True(await service.BeginAsync(runId, root));
+
+            await File.WriteAllTextAsync(Path.Combine(root, "chapter.md"), "baseline\nreal change\n", new UTF8Encoding(false));
+            await File.WriteAllTextAsync(
+                Path.Combine(root, ".lake", "packages", "Cli", "Generated.lean"),
+                "theorem generated : True := by trivial\n-- changed cache\n",
+                new UTF8Encoding(false));
+            await File.WriteAllTextAsync(
+                Path.Combine(root, ".venv", "Lib", "site-packages", "generated.py"),
+                "generated = False\n",
+                new UTF8Encoding(false));
+            await File.WriteAllTextAsync(Path.Combine(root, "target", "debug", "generated.log"), "changed cache\n", new UTF8Encoding(false));
+
+            var snapshot = Assert.IsType<CodingDiffSnapshot>(await service.RefreshAsync(runId, root));
+            Assert.Equal(1, snapshot.FileCount);
+            Assert.Contains("chapter.md", snapshot.Diff, StringComparison.Ordinal);
+            Assert.Contains("+real change", snapshot.Diff, StringComparison.Ordinal);
+            Assert.DoesNotContain(".lake", snapshot.Diff, StringComparison.Ordinal);
+            Assert.DoesNotContain(".venv", snapshot.Diff, StringComparison.Ordinal);
+            Assert.DoesNotContain("target", snapshot.Diff, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task DiffContainsOnlyChangesMadeAfterRunBaselineAndNeverTouchesRealIndex()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"go-coding-diff-{Guid.NewGuid():N}");

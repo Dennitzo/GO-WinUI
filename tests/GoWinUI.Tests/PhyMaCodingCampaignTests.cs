@@ -39,6 +39,7 @@ public sealed class PhyMaCodingCampaignTests
         Assert.Contains(catalog.List(), descriptor => descriptor.Id == "phyma");
         Assert.Contains("solutions/PhyMa.md", bootstrap, StringComparison.Ordinal);
         Assert.Contains("solutions/PhyMa.pdf", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("document.renderPdf", bootstrap, StringComparison.Ordinal);
         Assert.Contains("korrekt gerendertem KaTeX", bootstrap, StringComparison.Ordinal);
         Assert.Contains("rohe LaTeX-Quellen", bootstrap, StringComparison.Ordinal);
         Assert.Contains("aufbereiteten Lean-Beweis", bootstrap, StringComparison.Ordinal);
@@ -47,6 +48,7 @@ public sealed class PhyMaCodingCampaignTests
         Assert.Contains("formalCoverage` enthält nicht leere Texte", bootstrap, StringComparison.Ordinal);
         Assert.Contains("das Objekt `crossChecks`", bootstrap, StringComparison.Ordinal);
         Assert.Contains("solutions/PhyMa.pdf", iteration, StringComparison.Ordinal);
+        Assert.Contains("document.renderPdf", iteration, StringComparison.Ordinal);
         Assert.Contains("A4-Buchformat mit gerendertem KaTeX", iteration, StringComparison.Ordinal);
         Assert.Contains("Analytische und numerische Prüfdetails gehören in Checker", iteration, StringComparison.Ordinal);
         Assert.Contains("nur einmal vorkommen", bootstrap, StringComparison.Ordinal);

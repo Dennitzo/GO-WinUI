@@ -25,6 +25,19 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Fact]
+    public void DocumentRenderPdfPresetIsAcceptedWithAWorkspaceRelativeTarget()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var proposal = Create(
+            ClientToolNames.ProcessRunPreset,
+            ToolRiskClass.Process,
+            new { preset = "document.renderPdf", target = "solutions/PhyMa.md" },
+            now);
+
+        LocalToolBroker.ValidateProposal(proposal, now);
+    }
+
+    [Fact]
     public void LeanVerifyUsesTypedProcessContract()
     {
         var now = DateTimeOffset.UtcNow;
@@ -666,15 +679,21 @@ public sealed class LocalToolBrokerValidationTests
     {
         var status = string.Join('\n',
         [
+            "?? .lake/packages/Cli/",
+            "?? .lake/packages/mathlib/Mathlib.lean",
             "A  .venv/Lib/site-packages/numpy/__init__.py",
             "A  .venv/Scripts/python.exe",
             "A  __pycache__/solver.cpython-311.pyc",
+            "?? target/debug/app.exe",
             " M physics_solver.py",
         ]);
 
         var summarized = LocalToolBroker.SummarizeGitStatus(status);
 
         Assert.Contains(" M physics_solver.py", summarized, StringComparison.Ordinal);
+        Assert.Contains(".lake", summarized, StringComparison.Ordinal);
+        Assert.Contains("target", summarized, StringComparison.Ordinal);
+        Assert.DoesNotContain("Cli", summarized, StringComparison.Ordinal);
         Assert.Contains("[2 Git-Status-Einträge unter '.venv' zusammengefasst]", summarized, StringComparison.Ordinal);
         Assert.Contains("[1 Git-Status-Einträge unter '__pycache__' zusammengefasst]", summarized, StringComparison.Ordinal);
         Assert.DoesNotContain("site-packages", summarized, StringComparison.Ordinal);
@@ -691,6 +710,17 @@ public sealed class LocalToolBrokerValidationTests
         Assert.Contains("+++ b/proofs/minkowski/proof.py", diff, StringComparison.Ordinal);
         Assert.Contains("+assert simplify(1 - 1) == 0", diff, StringComparison.Ordinal);
         Assert.Contains("\\ No newline at end of file", diff, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GitDiffPresetExcludesGeneratedFrameworkTrees()
+    {
+        var arguments = LocalToolBroker.BuildGitDiffArguments(@"C:\Workspace", "HEAD");
+
+        Assert.Contains(":(exclude).lake/**", arguments);
+        Assert.Contains(":(exclude)**/.lake/**", arguments);
+        Assert.Contains(":(exclude)node_modules/**", arguments);
+        Assert.Contains(":(exclude)target/**", arguments);
     }
 
     [Fact]

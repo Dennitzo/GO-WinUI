@@ -18,6 +18,7 @@
     assistantMode: "general",
     workflowOverlayMode: "workflow",
     selectedCampaignDefinitionId: null,
+    selectedCampaignWorkflowId: null,
     documents: [],
     attachments: [],
     documentGroupStatus: { total: 0, ready: 0, processing: 0, failed: 0, status: "ready" },
@@ -2179,6 +2180,20 @@
     return ({ bootstrap: "Projektgrundlage", iteration: "Iteration", correction: "Korrektur", validation: "Abnahme" })[phase] || phase || "";
   }
 
+  function isCodingWorkflow(workflow) {
+    if (!workflow) return false;
+    if (workflow.schema === "go.prompt-workflow.v1") return true;
+    try {
+      return JSON.parse(workflow.contentJson || "{}")?.schema === "go.prompt-workflow.v1";
+    } catch {
+      return false;
+    }
+  }
+
+  function codingWorkflowItems() {
+    return state.workflows.filter(isCodingWorkflow);
+  }
+
   function selectedCampaignDefinition() {
     return state.campaignDefinitions.find(item => item.id === state.selectedCampaignDefinitionId)
       || state.campaignDefinitions.find(item => item.id === state.codingCampaign?.definitionId)
@@ -2186,19 +2201,56 @@
       || null;
   }
 
+  function selectedCampaignWorkflow() {
+    const workflows = codingWorkflowItems();
+    return workflows.find(item => item.id === state.selectedCampaignWorkflowId)
+      || (state.codingCampaign?.definitionId === "prompt-workflow"
+        ? workflows.find(item => item.title === state.codingCampaign?.title)
+        : null)
+      || null;
+  }
+
+  function preferredCampaignWorkflow() {
+    if (state.selectedCampaignDefinitionId) return selectedCampaignWorkflow();
+    return selectedCampaignWorkflow()
+      || codingWorkflowItems()[0]
+      || null;
+  }
+
   function setCampaignFooterMode() {
-    const selected = selectedCampaignDefinition();
-    for (const control of [elements.deleteWorkflow, elements.editWorkflow, elements.cancelWorkflowEdit, elements.saveWorkflow]) {
-      control.hidden = true;
+    const selectedDefinition = selectedCampaignDefinition();
+    const selectedWorkflow = selectedCampaignWorkflow();
+    const editing = state.isWorkflowEditing;
+
+    if (editing) {
+      setWorkflowFooterMode("edit", selectedWorkflow);
+      elements.selectWorkflow.textContent = "Workflow laden";
+      return;
     }
-    elements.selectWorkflow.hidden = !selected;
+
+    if (selectedWorkflow) {
+      setWorkflowFooterMode("preview", selectedWorkflow);
+      elements.selectWorkflow.hidden = false;
+      elements.selectWorkflow.textContent = "Workflow laden";
+      return;
+    }
+
+    elements.deleteWorkflow.hidden = true;
+    elements.editWorkflow.hidden = true;
+    elements.cancelWorkflowEdit.hidden = true;
+    elements.saveWorkflow.hidden = true;
+    elements.selectWorkflow.hidden = !selectedDefinition;
     elements.selectWorkflow.textContent = "Workflow laden";
   }
 
   function showCampaignPreview(definition) {
     state.selectedCampaignDefinitionId = definition?.id || null;
+    state.selectedCampaignWorkflowId = null;
+    state.selectedWorkflowEditorId = null;
     state.isWorkflowEditing = false;
+    setWorkflowIdentity(null);
     elements.workflowEditor.hidden = true;
+    elements.workflowLock.hidden = true;
     elements.workflowEmpty.hidden = Boolean(definition);
     elements.workflowPreview.hidden = !definition;
     if (definition) {
@@ -2219,17 +2271,69 @@
     renderCampaignList();
   }
 
+  function showCampaignWorkflowPreview(workflow) {
+    state.selectedCampaignWorkflowId = workflow?.id || null;
+    state.selectedCampaignDefinitionId = null;
+    state.selectedWorkflowEditorId = workflow?.id || null;
+    state.isWorkflowEditing = false;
+    setWorkflowIdentity(workflow);
+    elements.workflowEditor.hidden = true;
+    elements.workflowLock.hidden = true;
+    elements.workflowEmpty.hidden = Boolean(workflow);
+    elements.workflowPreview.hidden = !workflow;
+    if (workflow) {
+      const active = state.codingCampaign?.definitionId === "prompt-workflow"
+        && state.codingCampaign?.title === workflow.title;
+      elements.workflowPreviewTitle.textContent = workflow.title || "Unbenannter Coding-Workflow";
+      elements.workflowPreviewId.textContent = [workflow.domain || "Coding", workflow.slug || workflow.id].filter(Boolean).join(" · ");
+      elements.workflowPreviewBadge.hidden = !active;
+      elements.workflowPreviewBadge.textContent = active ? campaignStatusLabel(state.codingCampaign.status) : "";
+      elements.workflowPreviewTags.replaceChildren();
+      for (const tag of workflow.tags || []) {
+        const chip = document.createElement("span");
+        chip.className = "workflow-tag";
+        chip.textContent = tag;
+        elements.workflowPreviewTags.append(chip);
+      }
+      elements.workflowPreviewTags.hidden = (workflow.tags || []).length === 0;
+      elements.workflowPreviewDescription.textContent = workflow.description || "Gespeicherter promptgetriebener Coding-Workflow.";
+      elements.workflowPreviewSummary.textContent = workflow.contextSummary || "Laedt den konkreten Workflow-Vertrag in den aktuellen Workspace.";
+      elements.workflowPreviewContent.textContent = readableWorkflowContent(workflow.contentJson);
+    }
+    setCampaignFooterMode();
+    renderCampaignList();
+  }
+
   function renderCampaignList() {
     const query = elements.workflowSearch.value.trim().toLocaleLowerCase();
     const definitions = state.campaignDefinitions.filter(item => !query
       || `${item.title} ${item.description} ${item.category}`.toLocaleLowerCase().includes(query));
+    const savedWorkflows = codingWorkflowItems().filter(item => !query
+      || `${item.title} ${item.description} ${item.domain} ${item.contextSummary} ${(item.tags || []).join(" ")}`
+        .toLocaleLowerCase().includes(query));
     elements.workflowList.replaceChildren();
-    if (definitions.length === 0) {
+    if (definitions.length === 0 && savedWorkflows.length === 0) {
       const empty = document.createElement("p");
       empty.className = "workflow-list-empty";
       empty.textContent = query ? "Kein passender Coding-Workflow." : "Keine Coding-Workflows verfügbar.";
       elements.workflowList.append(empty);
       return;
+    }
+    for (const workflow of savedWorkflows) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `workflow-item${workflow.id === state.selectedCampaignWorkflowId ? " active" : ""}`;
+      const title = document.createElement("strong");
+      title.textContent = workflow.title;
+      const description = document.createElement("span");
+      description.textContent = workflow.description || workflow.contextSummary || "Gespeicherter Coding-Workflow";
+      button.append(title, description);
+      const badge = document.createElement("span");
+      badge.className = "built-in-badge";
+      badge.textContent = "Gespeichert";
+      button.append(badge);
+      button.addEventListener("click", () => showCampaignWorkflowPreview(workflow));
+      elements.workflowList.append(button);
     }
     for (const definition of definitions) {
       const button = document.createElement("button");
@@ -2258,8 +2362,12 @@
       ? "Fortlaufende Coding-Workflows im freigegebenen Workspace"
       : "Gespeicherte Abläufe auswählen und verwalten";
     elements.workflowSearch.placeholder = campaignMode ? "Coding-Workflows durchsuchen …" : "Workflows durchsuchen …";
-    elements.newWorkflow.hidden = campaignMode;
-    if (campaignMode) showCampaignPreview(selectedCampaignDefinition());
+    elements.newWorkflow.hidden = false;
+    if (campaignMode) {
+      const workflow = selectedCampaignWorkflow();
+      if (workflow) showCampaignWorkflowPreview(workflow);
+      else showCampaignPreview(selectedCampaignDefinition());
+    }
   }
 
   function renderWorkflows() {
@@ -2268,9 +2376,9 @@
       return;
     }
     const query = elements.workflowSearch.value.trim().toLocaleLowerCase();
-    const workflows = state.workflows.filter(item => !query ||
+    const workflows = state.workflows.filter(item => !isCodingWorkflow(item) && (!query ||
       `${item.title} ${item.description} ${item.domain} ${item.contextSummary} ${(item.tags || []).join(" ")}`
-        .toLocaleLowerCase().includes(query));
+        .toLocaleLowerCase().includes(query)));
     elements.workflowList.replaceChildren();
 
     if (workflows.length === 0) {
@@ -2376,6 +2484,51 @@
     requestAnimationFrame(() => elements.workflowName.focus());
   }
 
+  function createCodingWorkflowDraft() {
+    return {
+      id: null,
+      revision: 0,
+      title: "Neuer Coding-Workflow",
+      domain: "Coding",
+      tags: ["Coding", "Prompt-Workflow"],
+      description: "Promptgetriebener Coding-Workflow.",
+      contextSummary: "Ziel, Prompt, Ausfuehrungen und Verifikation werden als Coding-Workflow gespeichert.",
+      contentJson: JSON.stringify({
+        schema: "go.prompt-workflow.v1",
+        title: "Neuer Coding-Workflow",
+        objective: "Beschreibe hier das konkrete Coding-Ziel, das autonom im Workspace bearbeitet werden soll.",
+        iteration: 0,
+        scope: { source: "workflow-overlay" },
+        assumptions: ["Der freigegebene Workspace ist die einzige Mutationsgrenze."],
+        acceptanceCriteria: ["Der Coding-Agent fuehrt passende Tests, Builds oder Pruefungen aus und dokumentiert echte Ergebnisse."],
+        verificationCommands: [
+          { purpose: "test", command: "Projektabhaengige Tests durch den Coding-Agenten bestimmen und ausfuehren." }
+        ],
+        artifacts: [],
+        openQuestions: [],
+        lastRun: {
+          status: "draft",
+          changedFiles: [],
+          checks: [],
+          nextAction: "Workflow laden und ueber den Promptbutton starten."
+        }
+      }, null, 2),
+      isBuiltIn: false
+    };
+  }
+
+  function normalizeWorkflowContentForSave(contentJson, title) {
+    if (state.workflowOverlayMode !== "campaign") return contentJson;
+    try {
+      const contract = JSON.parse(contentJson || "{}");
+      if (contract?.schema !== "go.prompt-workflow.v1") return contentJson;
+      contract.title = title;
+      return JSON.stringify(contract);
+    } catch {
+      return contentJson;
+    }
+  }
+
   function selectedWorkflowForDialog() {
     return state.workflows.find(item => item.id === state.selectedWorkflowEditorId)
       || state.workflows[0]
@@ -2388,7 +2541,11 @@
     configureWorkflowOverlayMode();
     if (state.workflowOverlayMode === "campaign") {
       post("campaign.list", { sessionId: state.activeSessionId });
-      showCampaignPreview(selectedCampaignDefinition());
+      post("workflow.list", { search: elements.workflowSearch.value });
+      state.selectedCampaignDefinitionId = null;
+      const workflow = preferredCampaignWorkflow();
+      if (workflow) showCampaignWorkflowPreview(workflow);
+      else showCampaignPreview(selectedCampaignDefinition());
     } else {
       post("workflow.list", { search: elements.workflowSearch.value });
       showWorkflowPreview(selectedWorkflowForDialog());
@@ -2716,7 +2873,9 @@
     if (dialogWasOpen && isCodingCampaignMode()) {
       state.workflowOverlayMode = "campaign";
       configureWorkflowOverlayMode();
-      showCampaignPreview(selectedCampaignDefinition());
+      const selectedWorkflow = selectedCampaignWorkflow();
+      if (selectedWorkflow) showCampaignWorkflowPreview(selectedWorkflow);
+      else showCampaignPreview(selectedCampaignDefinition());
     } else if (dialogWasOpen && !wasEditing) {
       state.workflowOverlayMode = "workflow";
       configureWorkflowOverlayMode();
@@ -2992,11 +3151,23 @@
         renderStatus();
         if (!elements.overlay.hidden && state.workflowOverlayMode === "campaign") {
           configureWorkflowOverlayMode();
-          showCampaignPreview(selectedCampaignDefinition());
+          const workflow = selectedCampaignWorkflow();
+          if (workflow) showCampaignWorkflowPreview(workflow);
+          else showCampaignPreview(selectedCampaignDefinition());
         }
         break;
       case "workflow.snapshot": {
         state.workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
+        if (state.workflowOverlayMode === "campaign") {
+          if (!state.isWorkflowEditing) {
+            const workflow = selectedCampaignWorkflow();
+            if (workflow) showCampaignWorkflowPreview(workflow);
+            else showCampaignPreview(selectedCampaignDefinition());
+          } else {
+            renderCampaignList();
+          }
+          break;
+        }
         if (!state.isWorkflowEditing) {
           const current = state.workflows.find(item => item.id === state.selectedWorkflowEditorId) || selectedWorkflowForDialog();
           showWorkflowPreview(current || null);
@@ -3007,6 +3178,10 @@
       }
       case "workflow.draft":
         elements.overlay.hidden = false;
+        state.workflowOverlayMode = payload?.mode === "campaign" || isCodingWorkflow(payload?.workflow)
+          ? "campaign"
+          : "workflow";
+        configureWorkflowOverlayMode();
         showWorkflowEditor(payload.workflow || null);
         break;
       case "status.changed": {
@@ -3411,10 +3586,16 @@
   });
   elements.workflowSearch.addEventListener("input", renderWorkflows);
   elements.newWorkflow.addEventListener("click", () => {
-    if (state.workflowOverlayMode === "workflow") showWorkflowEditor(null);
+    showWorkflowEditor(state.workflowOverlayMode === "campaign" ? createCodingWorkflowDraft() : null);
   });
   elements.selectWorkflow.addEventListener("click", () => {
     if (state.workflowOverlayMode === "campaign") {
+      const workflow = selectedCampaignWorkflow();
+      if (workflow) {
+        post("campaign.loadWorkflow", { sessionId: state.activeSessionId, workflowId: workflow.id });
+        closeWorkflows();
+        return;
+      }
       const definition = selectedCampaignDefinition();
       if (definition) {
         post("campaign.select", { sessionId: state.activeSessionId, definitionId: definition.id });
@@ -3428,11 +3609,31 @@
     }
   });
   elements.editWorkflow.addEventListener("click", () => {
+    if (state.workflowOverlayMode === "campaign") {
+      const workflow = selectedCampaignWorkflow();
+      if (workflow && !workflow.isBuiltIn) showWorkflowEditor(workflow);
+      return;
+    }
     const workflow = state.workflows.find(item => item.id === state.selectedWorkflowEditorId);
     if (workflow && !workflow.isBuiltIn) showWorkflowEditor(workflow);
   });
-  elements.cancelWorkflowEdit.addEventListener("click", () => showWorkflowPreview(selectedWorkflowForDialog()));
+  elements.cancelWorkflowEdit.addEventListener("click", () => {
+    if (state.workflowOverlayMode === "campaign") {
+      const workflow = selectedCampaignWorkflow();
+      if (workflow) showCampaignWorkflowPreview(workflow);
+      else showCampaignPreview(selectedCampaignDefinition());
+      return;
+    }
+    showWorkflowPreview(selectedWorkflowForDialog());
+  });
   elements.deleteWorkflow.addEventListener("click", () => {
+    if (state.workflowOverlayMode === "campaign") {
+      const workflow = selectedCampaignWorkflow();
+      if (workflow && !workflow.isBuiltIn && globalThis.confirm("Diesen Workflow endgueltig loeschen?")) {
+        post("workflow.delete", { workflowId: workflow.id, revision: Number(workflow.revision || 0) });
+      }
+      return;
+    }
     const workflow = state.workflows.find(item => item.id === state.selectedWorkflowEditorId);
     if (workflow && !workflow.isBuiltIn && globalThis.confirm("Diesen Workflow endgültig löschen?")) {
       post("workflow.delete", { workflowId: workflow.id, revision: Number(workflow.revision || 0) });
@@ -3455,12 +3656,15 @@
       workflowId: elements.workflowId.value || null,
       revision: Number(elements.workflowRevision.value || 0),
       title,
-      domain: elements.workflowDomain.value.trim(),
+      domain: state.workflowOverlayMode === "campaign" ? "Coding" : elements.workflowDomain.value.trim(),
       tags: elements.workflowTags.value.split(",").map(tag => tag.trim()).filter(Boolean),
       description: elements.workflowDescription.value.trim(),
       contextSummary: elements.workflowSummary.value.trim(),
-      contentJson: normalizedContent
+      contentJson: normalizeWorkflowContentForSave(normalizedContent, title)
     };
+    if (state.workflowOverlayMode === "campaign" && !payload.tags.some(tag => tag.toLowerCase() === "coding")) {
+      payload.tags.push("Coding");
+    }
     state.pendingWorkflowTitle = title;
     state.isWorkflowEditing = false;
     post(payload.workflowId ? "workflow.update" : "workflow.create", payload);

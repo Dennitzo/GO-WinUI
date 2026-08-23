@@ -97,6 +97,19 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
+    public void ProcessPresetAdvertisesDeterministicKatexPdfRendering()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
+        var preset = catalog.Resolve(ClientToolNames.ProcessRunPreset, tools);
+        using var renderPdf = JsonDocument.Parse("""{"preset":"document.renderPdf","target":"solutions/PhyMa.md"}""");
+
+        catalog.Validate(preset, renderPdf.RootElement);
+        Assert.Contains("document.renderPdf", preset.Description, StringComparison.Ordinal);
+        Assert.Contains("document.renderPdf", preset.Schema.GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void UnknownPropertiesAndUnknownToolsAreRejected()
     {
         var catalog = new AgentToolCatalog();
@@ -151,6 +164,24 @@ public sealed class AgentToolCatalogTests
         Assert.Contains(tools, static tool => tool.Name == "math.evaluate");
         Assert.DoesNotContain(tools, static tool => tool.Name == "image.generate");
         Assert.DoesNotContain(tools, static tool => tool.Name == "web.search");
+    }
+
+    [Fact]
+    public void CodingRunsAlwaysReceiveSearchAndSafePageFetchTools()
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest(["code"]) with
+        {
+            Mode = RunMode.Code,
+            AllowedServerTools = [],
+        };
+
+        var tools = catalog.GetAvailableTools(request);
+
+        Assert.Contains(tools, static tool => tool.Name == "web.search");
+        Assert.Contains(tools, static tool => tool.Name == "web.fetch");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "youtube.search");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "image.generate");
     }
 
     [Fact]

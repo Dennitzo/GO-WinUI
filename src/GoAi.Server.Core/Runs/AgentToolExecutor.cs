@@ -50,19 +50,83 @@ public sealed class AgentToolExecutor
         string runId,
         CancellationToken cancellationToken = default)
     {
-        return name switch
+        try
         {
-            "web.search" => await SearchAsync(arguments, runId, youtube: false, cancellationToken).ConfigureAwait(false),
-            "youtube.search" => await SearchAsync(arguments, runId, youtube: true, cancellationToken).ConfigureAwait(false),
-            "web.fetch" => await FetchAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
-            "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, cancellationToken).ConfigureAwait(false),
-            "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, cancellationToken).ConfigureAwait(false),
-            "image.generate" => await GenerateImagesAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
-            "math.evaluate" => EvaluateMath(arguments),
-            "context.embed" => await EmbedAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
-            "context.retrieve" => await RetrieveAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
-            _ => throw new InvalidOperationException($"No server executor exists for tool {name}.")
-        };
+            return name switch
+            {
+                "web.search" => await SearchAsync(arguments, runId, youtube: false, cancellationToken).ConfigureAwait(false),
+                "youtube.search" => await SearchAsync(arguments, runId, youtube: true, cancellationToken).ConfigureAwait(false),
+                "web.fetch" => await FetchAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
+                "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, cancellationToken).ConfigureAwait(false),
+                "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, cancellationToken).ConfigureAwait(false),
+                "image.generate" => await GenerateImagesAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
+                "math.evaluate" => EvaluateMath(arguments),
+                "context.embed" => await EmbedAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
+                "context.retrieve" => await RetrieveAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
+                _ => throw new InvalidOperationException($"No server executor exists for tool {name}.")
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsRecoverableResearchFailure(name, exception))
+        {
+            var failure = DescribeResearchFailure(name, exception);
+            return Result(
+                new
+                {
+                    success = false,
+                    errorCode = failure.ErrorCode,
+                    message = failure.Message,
+                    retryable = failure.Retryable,
+                },
+                succeeded: false,
+                errorCode: failure.ErrorCode,
+                errorMessage: failure.Message);
+        }
+    }
+
+    private static bool IsRecoverableResearchFailure(string toolName, Exception exception) =>
+        toolName is "web.search" or "web.fetch" or "youtube.search"
+        && exception is HttpRequestException or TimeoutException or TaskCanceledException or IOException;
+
+    internal static ResearchToolFailure DescribeResearchFailure(string toolName, Exception exception)
+    {
+        var statusCode = exception is HttpRequestException httpException
+            ? httpException.StatusCode
+            : null;
+        var retryable = statusCode is null
+            || statusCode is System.Net.HttpStatusCode.RequestTimeout
+                or System.Net.HttpStatusCode.TooManyRequests
+                or System.Net.HttpStatusCode.InternalServerError
+                or System.Net.HttpStatusCode.BadGateway
+                or System.Net.HttpStatusCode.ServiceUnavailable
+                or System.Net.HttpStatusCode.GatewayTimeout;
+
+        if (toolName == "web.fetch")
+        {
+            var message = statusCode switch
+            {
+                System.Net.HttpStatusCode.Forbidden =>
+                    "Die Zielseite verweigert den automatisierten Abruf (HTTP 403). Wähle einen anderen Suchtreffer oder eine alternative Quelle.",
+                System.Net.HttpStatusCode.NotFound =>
+                    "Die Zielseite wurde nicht gefunden (HTTP 404). Wähle einen anderen Suchtreffer oder eine alternative Quelle.",
+                System.Net.HttpStatusCode.TooManyRequests =>
+                    "Die Zielseite begrenzt Abrufe (HTTP 429). Verwende zunächst einen anderen Suchtreffer.",
+                { } value =>
+                    $"Die Zielseite konnte nicht abgerufen werden (HTTP {(int)value}). Wähle einen anderen Suchtreffer oder eine alternative Quelle.",
+                _ =>
+                    "Die Zielseite konnte nicht abgerufen werden. Wähle einen anderen Suchtreffer oder eine alternative Quelle.",
+            };
+            return new ResearchToolFailure("web.fetch.unavailable", message, retryable);
+        }
+
+        var serviceName = toolName == "youtube.search" ? "YouTube-Suche" : "Websuche";
+        var serviceMessage = statusCode is { } serviceStatus
+            ? $"Die {serviceName} ist momentan nicht verfügbar (HTTP {(int)serviceStatus}). Versuche eine alternative Recherche oder fahre mit vorhandenen Belegen fort."
+            : $"Die {serviceName} ist momentan nicht verfügbar. Versuche eine alternative Recherche oder fahre mit vorhandenen Belegen fort.";
+        return new ResearchToolFailure($"{toolName}.unavailable", serviceMessage, retryable);
     }
 
     public async Task<EmbeddingBatchResponse> CreateEmbeddingBatchAsync(
@@ -558,7 +622,10 @@ public sealed class AgentToolExecutor
     private AgentToolExecutionResult Result(
         object value,
         IReadOnlyList<ArtifactDescriptor>? artifacts = null,
-        string? modelId = null)
+        string? modelId = null,
+        bool succeeded = true,
+        string? errorCode = null,
+        string? errorMessage = null)
     {
         var json = JsonSerializer.Serialize(value, _jsonOptions);
         if (Encoding.UTF8.GetByteCount(json) > MaximumToolResultBytes)
@@ -567,7 +634,13 @@ public sealed class AgentToolExecutor
         }
 
         using var document = JsonDocument.Parse(json);
-        return new AgentToolExecutionResult(document.RootElement.Clone(), artifacts ?? [], modelId);
+        return new AgentToolExecutionResult(
+            document.RootElement.Clone(),
+            artifacts ?? [],
+            modelId,
+            succeeded,
+            errorCode,
+            errorMessage);
     }
 
     private static WebFetchResponse TrimFetch(WebFetchResponse response) => response.Content.Length <= 256_000
@@ -687,4 +760,12 @@ public sealed class AgentToolExecutor
 public sealed record AgentToolExecutionResult(
     JsonElement Result,
     IReadOnlyList<ArtifactDescriptor> Artifacts,
-    string? ModelId = null);
+    string? ModelId = null,
+    bool Succeeded = true,
+    string? ErrorCode = null,
+    string? ErrorMessage = null);
+
+internal sealed record ResearchToolFailure(
+    string ErrorCode,
+    string Message,
+    bool Retryable);

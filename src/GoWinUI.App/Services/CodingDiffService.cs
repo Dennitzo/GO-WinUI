@@ -24,6 +24,14 @@ public sealed partial class CodingDiffService
 {
     private const int MaximumDiffCharacters = 2_000_000;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly string[] GeneratedPathspecExcludes =
+    [
+        ".lake", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+        ".tox", ".nox", "site-packages", "node_modules", "bower_components", ".npm", ".pnpm-store",
+        ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", "target", "vendor", "bin",
+        "obj", "artifacts", "TestResults", "coverage", "AppPackages", "BundleArtifacts",
+        "Generated Files", "build", "out", "render_tmp",
+    ];
     private readonly string _stateDirectory;
 
     public CodingDiffService(GoInfrastructureOptions options)
@@ -120,11 +128,7 @@ public sealed partial class CodingDiffService
 
             var result = await RunGitAsync(
                 metadata.RepositoryRoot,
-                [
-                    "diff", "--no-ext-diff", "--no-color", "--no-textconv",
-                    "--find-renames", "--find-copies", "--unified=3",
-                    metadata.BaselineTree, currentTree, "--", metadata.PathSpec,
-                ],
+                BuildDiffArguments(metadata.BaselineTree, currentTree, metadata.PathSpec),
                 environment: null,
                 cancellationToken).ConfigureAwait(false);
             if (result.ExitCode != 0)
@@ -200,13 +204,21 @@ public sealed partial class CodingDiffService
         string runDirectory,
         CancellationToken cancellationToken)
     {
-        var indexPath = Path.Combine(runDirectory, $"index-{Guid.NewGuid():N}");
+        var captureId = Guid.NewGuid().ToString("N");
+        var indexPath = Path.Combine(runDirectory, $"index-{captureId}");
+        var excludesPath = Path.Combine(runDirectory, $"generated-{captureId}.exclude");
         var environment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
         {
             ["GIT_INDEX_FILE"] = indexPath,
         };
         try
         {
+            await File.WriteAllLinesAsync(
+                excludesPath,
+                GeneratedPathspecExcludes.Select(static directory => $"{directory.Replace('\\', '/')}/"),
+                new UTF8Encoding(false),
+                cancellationToken).ConfigureAwait(false);
+
             var readTree = await RunGitAsync(
                 repositoryRoot,
                 ["read-tree", "HEAD"],
@@ -224,7 +236,7 @@ public sealed partial class CodingDiffService
 
             var add = await RunGitAsync(
                 repositoryRoot,
-                ["add", "-A", "--", pathSpec],
+                BuildAddArguments(pathSpec, excludesPath),
                 environment,
                 cancellationToken).ConfigureAwait(false);
             if (add.ExitCode != 0) return null;
@@ -242,6 +254,7 @@ public sealed partial class CodingDiffService
         {
             TryDelete(indexPath);
             TryDelete(indexPath + ".lock");
+            TryDelete(excludesPath);
         }
     }
 
@@ -330,4 +343,30 @@ public sealed partial class CodingDiffService
         DateTimeOffset CreatedAt);
 
     private sealed record GitResult(int ExitCode, string StandardOutput, string StandardError);
+
+    private static string[] BuildAddArguments(string pathSpec, string excludesPath) =>
+        [
+            "-c", $"core.excludesFile={excludesPath.Replace('\\', '/')}",
+            "add", "-A", "--", pathSpec,
+        ];
+
+    private static string[] BuildDiffArguments(string baselineTree, string currentTree, string pathSpec) =>
+        [
+            "diff", "--no-ext-diff", "--no-color", "--no-textconv",
+            "--find-renames", "--find-copies", "--unified=3",
+            baselineTree, currentTree, "--", pathSpec, .. BuildGeneratedPathspecExcludes(),
+        ];
+
+    private static string[] BuildGeneratedPathspecExcludes()
+    {
+        var excludes = new List<string>(GeneratedPathspecExcludes.Length * 2);
+        foreach (var directory in GeneratedPathspecExcludes)
+        {
+            var escaped = directory.Replace('\\', '/');
+            excludes.Add($":(exclude){escaped}/**");
+            excludes.Add($":(exclude)**/{escaped}/**");
+        }
+
+        return [.. excludes];
+    }
 }
