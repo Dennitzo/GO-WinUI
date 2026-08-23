@@ -2070,10 +2070,11 @@
   }
 
   const reasoningLabels = Object.freeze({
+    off: "Aus",
+    on: "An",
     low: "Niedrig",
     medium: "Mittel",
-    high: "Hoch",
-    xhigh: "Sehr hoch"
+    high: "Hoch"
   });
   const nonReasoningToolModels = Object.freeze({
     audioAnalysis: "Audioanalyse-Pipeline",

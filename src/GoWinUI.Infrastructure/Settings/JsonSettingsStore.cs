@@ -147,7 +147,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         }
 
         var normalized = value?.Trim().ToLowerInvariant();
-        return normalized is "low" or "medium" or "high" or "xhigh"
+        return normalized is "off" or "on" or "low" or "medium" or "high"
             ? normalized
             : "auto";
     }

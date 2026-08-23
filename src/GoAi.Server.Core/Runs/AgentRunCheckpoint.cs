@@ -29,6 +29,7 @@ public sealed record AgentRunCheckpoint(
     int ConsecutiveRedundantVerifications = 0,
     int ConsecutiveRoundsWithoutMutation = 0,
     IReadOnlyDictionary<string, int>? FailedReplaceTargetCounts = null,
-    IReadOnlyDictionary<string, int>? TextMutationCountsSinceProcess = null);
+    IReadOnlyDictionary<string, int>? TextMutationCountsSinceProcess = null,
+    bool ReasoningRecoveryRequired = false);
 
 public sealed record WorkspaceReadRange(string Path, int StartLine, int EndLine);

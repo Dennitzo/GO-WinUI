@@ -104,7 +104,7 @@ public sealed class RunRequestValidatorTests
             RunMode.Code,
             [new RunMessage("user", [new ContentPart("text", "Bearbeite das Projekt.")])],
             PreferredCodeModelId: CodingModelCatalog.Qwen38BId,
-            ReasoningEffort: "xhigh");
+            ReasoningEffort: "on");
         var gptOss = qwen38 with
         {
             PreferredCodeModelId = CodingModelCatalog.GptOss120BId,
@@ -115,7 +115,7 @@ public sealed class RunRequestValidatorTests
         RunRequestValidator.Validate(gptOss);
 
         var unsupportedQwenEffort = Assert.Throws<ArgumentException>(() =>
-            RunRequestValidator.Validate(qwen38 with { ReasoningEffort = "high" }));
+            RunRequestValidator.Validate(qwen38 with { ReasoningEffort = "medium" }));
         Assert.Contains("nicht unterstützt", unsupportedQwenEffort.Message, StringComparison.OrdinalIgnoreCase);
 
         var fixedCoderEffort = Assert.Throws<ArgumentException>(() =>

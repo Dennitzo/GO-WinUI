@@ -216,6 +216,7 @@ public sealed class RunProcessor : BackgroundService
         var verificationFailed = checkpoint.VerificationFailed;
         var repairReminderCount = checkpoint.RepairReminderCount;
         var reasoningBudgetRetryCount = 0;
+        var reasoningRecoveryRequired = checkpoint.ReasoningRecoveryRequired;
         var finalSynthesisRequested = checkpoint.FinalSynthesisRequested;
         var failedToolFingerprints = new HashSet<string>(checkpoint.FailedToolFingerprints ?? [], StringComparer.Ordinal);
         // Tool names are never disabled globally after one bad call. Coding models
@@ -700,13 +701,23 @@ public sealed class RunProcessor : BackgroundService
                     modelTools,
                     maximumOutputTokens,
                     modelRole: selection.Role,
-                    reasoningEffort: request.ReasoningEffort,
+                    reasoningEffort: ResolveReasoningEffortForRound(
+                        selection.ModelId,
+                        selection.Role,
+                        request.ReasoningEffort,
+                        reasoningRecoveryRequired),
                     cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
             roundCount++;
             inputTokens += response.InputTokens;
             outputTokens += response.OutputTokens;
+            if (reasoningRecoveryRequired
+                && (response.ToolCalls.Count > 0 || !string.IsNullOrWhiteSpace(response.Content)))
+            {
+                reasoningRecoveryRequired = false;
+                reasoningBudgetRetryCount = 0;
+            }
             if (response.ToolCalls.Count == 0)
             {
                 if (string.IsNullOrWhiteSpace(response.Content))
@@ -733,6 +744,10 @@ public sealed class RunProcessor : BackgroundService
                     reasoningBudgetRetryCount = reasoningBudgetExhausted
                         ? reasoningBudgetRetryCount + 1
                         : 0;
+                    if (reasoningBudgetExhausted)
+                    {
+                        reasoningRecoveryRequired = true;
+                    }
                     repairReminderCount++;
                     if (reasoningBudgetRetryCount > 1)
                     {
@@ -1200,7 +1215,8 @@ public sealed class RunProcessor : BackgroundService
                     .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.OrdinalIgnoreCase),
                 textMutationCountsSinceProcess
                     .OrderBy(static item => item.Key, StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.OrdinalIgnoreCase)),
+                    .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.OrdinalIgnoreCase),
+                reasoningRecoveryRequired),
             cancellationToken);
     }
 
@@ -1763,6 +1779,27 @@ public sealed class RunProcessor : BackgroundService
         && response.ReasoningTokens > 0
         && response.OutputTokens >= Math.Max(1, maximumOutputTokens - 16)
         && response.ReasoningTokens >= response.OutputTokens - 4;
+
+    internal static string? ResolveReasoningEffortForRound(
+        string modelId,
+        string role,
+        string? requestedEffort,
+        bool reasoningRecoveryRequired)
+    {
+        var profile = ModelReasoningProfiles.Resolve(modelId, role);
+        var selected = profile.Resolve(requestedEffort);
+        if (!reasoningRecoveryRequired)
+        {
+            return selected;
+        }
+
+        if (profile.Supports("off"))
+        {
+            return "off";
+        }
+
+        return profile.Supports("low") ? "low" : selected;
+    }
 
     internal static bool ShouldBlockRepeatedReplaceText(
         LmToolCall call,

@@ -32,7 +32,7 @@ public static class ModelReasoningProfiles
     public const string UnknownFamily = "automatic";
 
     private static readonly IReadOnlyList<string> GptOssEfforts = ["low", "medium", "high"];
-    private static readonly IReadOnlyList<string> Qwen38Efforts = ["low", "medium", "xhigh"];
+    private static readonly IReadOnlyList<string> Qwen38Efforts = ["off", "on"];
 
     public static ModelReasoningProfile Resolve(string? modelId, string? role)
     {
@@ -51,9 +51,10 @@ public static class ModelReasoningProfiles
             || normalizedModelId.Contains("qwen3_8", StringComparison.OrdinalIgnoreCase)
             || normalizedModelId.Contains("qwen38", StringComparison.OrdinalIgnoreCase))
         {
-            // Low is deliberately the GO default for long agent runs. Qwen3.8
-            // officially also exposes medium and xhigh, which remain selectable.
-            return new(Qwen38Family, Qwen38Efforts, "low");
+            // LM Studio exposes Qwen3.8 GGUF reasoning as the model-specific
+            // on/off switch. The low/medium/xhigh Jinja values from the upstream
+            // Transformers template are not public options of this runtime.
+            return new(Qwen38Family, Qwen38Efforts, "on");
         }
 
         if (normalizedModelId.Contains("qwen3-coder-next", StringComparison.OrdinalIgnoreCase))

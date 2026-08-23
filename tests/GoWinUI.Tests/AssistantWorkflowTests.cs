@@ -392,7 +392,9 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("id=\"reasoning-options\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("data-reasoning=\"low\"", html, StringComparison.Ordinal);
         Assert.Contains("reasoningProfiles: { general: null, code: null }", app, StringComparison.Ordinal);
-        Assert.Contains("xhigh: \"Sehr hoch\"", app, StringComparison.Ordinal);
+        Assert.Contains("off: \"Aus\"", app, StringComparison.Ordinal);
+        Assert.Contains("on: \"An\"", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("xhigh: \"Sehr hoch\"", app, StringComparison.Ordinal);
         Assert.Contains("profile.supportedEfforts", app, StringComparison.Ordinal);
         Assert.Contains("reasoningEffort: elements.reasoning.value", app, StringComparison.Ordinal);
         Assert.Contains("Aktives Modell:", app, StringComparison.Ordinal);

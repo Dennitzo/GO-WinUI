@@ -54,6 +54,44 @@ public sealed class CodingAgentTests
     }
 
     [Theory]
+    [InlineData(256, 128)]
+    [InlineData(8_192, 4_096)]
+    [InlineData(65_536, 4_096)]
+    public void QwenReasoningBudgetAlwaysReservesAnswerCapacity(int outputTokens, int expectedBudget)
+    {
+        Assert.Equal(expectedBudget, LmStudioClient.ResolveCodingReasoningBudget(outputTokens));
+        Assert.True(expectedBudget < outputTokens);
+    }
+
+    [Theory]
+    [InlineData(false, "on")]
+    [InlineData(true, "off")]
+    public void QwenReasoningExhaustionUsesOneDeterministicNoReasoningRecoveryRound(
+        bool recoveryRequired,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            RunProcessor.ResolveReasoningEffortForRound(
+                "qwen3.8-27b",
+                "code",
+                "on",
+                recoveryRequired));
+    }
+
+    [Fact]
+    public void GptOssReasoningRecoveryDropsToLowEffort()
+    {
+        Assert.Equal(
+            "low",
+            RunProcessor.ResolveReasoningEffortForRound(
+                "openai/gpt-oss-120b",
+                "code",
+                "high",
+                reasoningRecoveryRequired: true));
+    }
+
+    [Theory]
     [InlineData(ClientToolNames.ProcessRun, 5, 0, false)]
     [InlineData(ClientToolNames.ProcessRun, 6, 0, true)]
     [InlineData(ClientToolNames.ProcessRunPreset, 12, 0, true)]

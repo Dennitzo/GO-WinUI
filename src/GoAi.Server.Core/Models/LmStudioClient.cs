@@ -303,7 +303,13 @@ public sealed partial class LmStudioClient : IDisposable
             ["input"] = input,
             ["stream"] = true,
         };
-        ApplySamplingProfile(body, modelId, includeReasoning: true, modelRole: "general", requestedReasoningEffort: null);
+        ApplySamplingProfile(
+            body,
+            modelId,
+            includeReasoning: true,
+            modelRole: "general",
+            requestedReasoningEffort: null,
+            maximumOutputTokens: null);
         using var request = await CreateRequestAsync(HttpMethod.Post, "v1/responses", body, cancellationToken).ConfigureAwait(false);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
         using var response = await _httpClient.SendAsync(
@@ -403,7 +409,13 @@ public sealed partial class LmStudioClient : IDisposable
             ["max_output_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
             ["store"] = false,
         };
-        ApplySamplingProfile(body, modelId, includeReasoning: true, modelRole, reasoningEffort);
+        ApplySamplingProfile(
+            body,
+            modelId,
+            includeReasoning: true,
+            modelRole,
+            reasoningEffort,
+            maximumOutputTokens);
         if (toolPayload.Length > 0)
         {
             body["tools"] = toolPayload;
@@ -1112,7 +1124,13 @@ public sealed partial class LmStudioClient : IDisposable
             ["stream"] = false,
             ["max_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
         };
-        ApplySamplingProfile(body, modelId, includeReasoning: false, modelRole, reasoningEffort);
+        ApplySamplingProfile(
+            body,
+            modelId,
+            includeReasoning: false,
+            modelRole,
+            reasoningEffort,
+            maximumOutputTokens);
         if (tools.Count > 0)
         {
             body["tools"] = tools.Select(static tool => new
@@ -1254,7 +1272,8 @@ public sealed partial class LmStudioClient : IDisposable
         string modelId,
         bool includeReasoning,
         string modelRole,
-        string? requestedReasoningEffort)
+        string? requestedReasoningEffort,
+        int? maximumOutputTokens)
     {
         var reasoningProfile = ModelReasoningProfiles.Resolve(modelId, modelRole);
         var reasoningEffort = reasoningProfile.Resolve(requestedReasoningEffort);
@@ -1281,28 +1300,21 @@ public sealed partial class LmStudioClient : IDisposable
 
             if (string.Equals(codingProfile.SamplingProfile, "qwen38-coder", StringComparison.Ordinal))
             {
-                // Qwen3.8 thinks at xhigh by default. With an 8K response budget,
-                // long repository turns can otherwise spend the entire response on
-                // private reasoning and return neither text nor a function call.
-                // Keep reasoning enabled at the model's published low setting and
-                // use the matching official thinking-mode sampling profile.
+                // LM Studio exposes this GGUF's real public reasoning options as
+                // on/off. When enabled, a hard llama.cpp thinking budget reserves
+                // half of the response for the required tool call or final answer.
                 body["temperature"] = 1.0;
                 body["top_p"] = 0.95;
                 body["top_k"] = 20;
                 body["min_p"] = 0.0;
                 body["presence_penalty"] = 0.0;
                 body["repetition_penalty"] = 1.0;
-                if (includeReasoning && reasoningEffort is not null)
-                {
-                    body["reasoning"] = new { effort = reasoningEffort };
-                }
-                else if (reasoningEffort is not null)
-                {
-                    // Chat Completions uses the OpenAI-compatible field name.
-                    // This keeps the compatibility fallback from silently returning
-                    // to Qwen3.8's xhigh default.
-                    body["reasoning_effort"] = reasoningEffort;
-                }
+                ApplyQwen38Reasoning(
+                    body,
+                    includeReasoning,
+                    reasoningEffort,
+                    maximumOutputTokens,
+                    reserveAgentAnswerBudget: true);
                 return;
             }
 
@@ -1324,6 +1336,13 @@ public sealed partial class LmStudioClient : IDisposable
             body["min_p"] = 0.0;
             body["presence_penalty"] = 0.0;
             body["repetition_penalty"] = 1.0;
+            ApplyQwen38Reasoning(
+                body,
+                includeReasoning,
+                reasoningEffort,
+                maximumOutputTokens,
+                reserveAgentAnswerBudget: false);
+            return;
         }
         else
         {
@@ -1337,6 +1356,43 @@ public sealed partial class LmStudioClient : IDisposable
         {
             body["reasoning_effort"] = reasoningEffort;
         }
+    }
+
+    private static void ApplyQwen38Reasoning(
+        Dictionary<string, object?> body,
+        bool includeReasoning,
+        string? reasoningEffort,
+        int? maximumOutputTokens,
+        bool reserveAgentAnswerBudget)
+    {
+        if (string.Equals(reasoningEffort, "off", StringComparison.OrdinalIgnoreCase))
+        {
+            // The OpenAI Responses schema calls the disabled state `none`, while
+            // LM Studio advertises the same model switch as `off`.
+            if (includeReasoning)
+            {
+                body["reasoning"] = new { effort = "none" };
+            }
+            else
+            {
+                body["reasoning_effort"] = "none";
+            }
+            return;
+        }
+
+        // Do not send effort=on: it is not part of the OpenAI Responses enum.
+        // Omitting the field activates LM Studio's advertised Qwen default without
+        // the misleading low/medium/high fallback warning.
+        if (reserveAgentAnswerBudget && maximumOutputTokens is > 1)
+        {
+            body["thinking_budget_tokens"] = ResolveCodingReasoningBudget(maximumOutputTokens.Value);
+        }
+    }
+
+    internal static int ResolveCodingReasoningBudget(int maximumOutputTokens)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maximumOutputTokens, 2);
+        return Math.Min(4_096, Math.Max(1, maximumOutputTokens / 2));
     }
 
     private sealed class ResponsesCompatibilityException(System.Net.HttpStatusCode statusCode) : Exception

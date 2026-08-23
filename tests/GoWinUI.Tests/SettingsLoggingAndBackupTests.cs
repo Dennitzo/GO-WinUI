@@ -120,8 +120,11 @@ public sealed class SettingsLoggingAndBackupTests
         await settings.SaveAsync(new AppSettings { Version = 10, ReasoningEffort = "high" });
         Assert.Equal("auto", (await settings.LoadAsync()).ReasoningEffort);
 
+        await settings.SaveAsync(new AppSettings { Version = 11, ReasoningEffort = "on" });
+        Assert.Equal("on", (await settings.LoadAsync()).ReasoningEffort);
+
         await settings.SaveAsync(new AppSettings { Version = 11, ReasoningEffort = "xhigh" });
-        Assert.Equal("xhigh", (await settings.LoadAsync()).ReasoningEffort);
+        Assert.Equal("auto", (await settings.LoadAsync()).ReasoningEffort);
     }
 
     [Fact]

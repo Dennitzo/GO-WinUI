@@ -906,7 +906,7 @@ components:
           enum: [qwen3.8-27b, qwen3-coder-next, openai/gpt-oss-120b]
         reasoningEffort:
           description: Vom ausgewählten Modell tatsächlich unterstützte Reasoning-Stufe.
-          enum: [low, medium, high, xhigh]
+          enum: [off, on, low, medium, high]
         documentContext:
           $ref: "#/components/schemas/DocumentContextDescriptor"
         sessionContext:
@@ -1231,9 +1231,9 @@ components:
         reasoningEfforts:
           type: array
           items:
-            enum: [low, medium, high, xhigh]
+            enum: [off, on, low, medium, high]
         defaultReasoningEffort:
-          enum: [low, medium, high, xhigh]
+          enum: [off, on, low, medium, high]
     ModelStatusSnapshot:
       type: object
       additionalProperties: false

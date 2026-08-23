@@ -427,7 +427,7 @@ public sealed class LmStudioClientTests
     }
 
     [Fact]
-    public async Task Qwen38CoderUsesPublishedLowReasoningSamplingProfile()
+    public async Task Qwen38CoderUsesLmStudioOnSwitchWithBoundedReasoning()
     {
         using var context = new TestServerContext();
         var handler = new RecordingHandler("""
@@ -461,11 +461,12 @@ public sealed class LmStudioClientTests
         Assert.Equal(0.0, root.GetProperty("min_p").GetDouble(), 3);
         Assert.Equal(0.0, root.GetProperty("presence_penalty").GetDouble(), 3);
         Assert.Equal(1.0, root.GetProperty("repetition_penalty").GetDouble(), 3);
-        Assert.Equal("low", root.GetProperty("reasoning").GetProperty("effort").GetString());
+        Assert.False(root.TryGetProperty("reasoning", out _));
+        Assert.Equal(4_096, root.GetProperty("thinking_budget_tokens").GetInt32());
     }
 
     [Fact]
-    public async Task Qwen38CoderForwardsTheSelectedXHighReasoningEffort()
+    public async Task Qwen38CoderMapsLmStudioOffToResponsesNone()
     {
         using var context = new TestServerContext();
         var handler = new RecordingHandler("""
@@ -490,10 +491,12 @@ public sealed class LmStudioClientTests
             [new LmChatMessage("user", "Analysiere das Projekt gründlich.")],
             [],
             modelRole: "code",
-            reasoningEffort: "xhigh");
+            reasoningEffort: "off");
 
         using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
-        Assert.Equal("xhigh", request.RootElement.GetProperty("reasoning").GetProperty("effort").GetString());
+        var root = request.RootElement;
+        Assert.Equal("none", root.GetProperty("reasoning").GetProperty("effort").GetString());
+        Assert.False(root.TryGetProperty("thinking_budget_tokens", out _));
     }
 
     [Fact]
@@ -750,7 +753,7 @@ public sealed class LmStudioClientTests
     }
 
     [Fact]
-    public async Task Qwen38CompatibilityFallbackKeepsLowReasoning()
+    public async Task Qwen38CompatibilityFallbackKeepsBoundedOnReasoning()
     {
         using var context = new TestServerContext();
         var handler = new ResponsesCompatibilityHandler();
@@ -770,7 +773,8 @@ public sealed class LmStudioClientTests
         using var request = JsonDocument.Parse(handler.RequestBodies[1]);
         var root = request.RootElement;
         Assert.Equal("qwen3.8-27b", root.GetProperty("model").GetString());
-        Assert.Equal("low", root.GetProperty("reasoning_effort").GetString());
+        Assert.False(root.TryGetProperty("reasoning_effort", out _));
+        Assert.Equal(4_096, root.GetProperty("thinking_budget_tokens").GetInt32());
         Assert.Equal(20, root.GetProperty("top_k").GetInt32());
     }
 

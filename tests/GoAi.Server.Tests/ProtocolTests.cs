@@ -74,8 +74,8 @@ public sealed class ProtocolTests
         Assert.Equal("low", general.DefaultReasoningEffort);
 
         var qwen38 = Assert.Single(snapshot.Models, static model => model.Id == CodingModelCatalog.Qwen38BId);
-        Assert.Equal(["low", "medium", "xhigh"], qwen38.ReasoningEfforts);
-        Assert.Equal("low", qwen38.DefaultReasoningEffort);
+        Assert.Equal(["off", "on"], qwen38.ReasoningEfforts);
+        Assert.Equal("on", qwen38.DefaultReasoningEffort);
 
         var qwenCoder = Assert.Single(snapshot.Models, static model => model.Id == CodingModelCatalog.Qwen3CoderNextId);
         Assert.Empty(qwenCoder.ReasoningEfforts!);
