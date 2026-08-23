@@ -82,9 +82,11 @@ public sealed partial class CodingProofVerifier(LeanProofService? leanProof = nu
             }
 
             var extension = Path.GetExtension(artifactPath);
-            if (kind == CodingProofKind.Formal && !extension.Equals(".lean", StringComparison.OrdinalIgnoreCase)
-                || kind is CodingProofKind.Symbolic or CodingProofKind.IntervalCertified
-                && !extension.Equals(".py", StringComparison.OrdinalIgnoreCase))
+            var isLeanArtifact = extension.Equals(".lean", StringComparison.OrdinalIgnoreCase);
+            var isPythonArtifact = extension.Equals(".py", StringComparison.OrdinalIgnoreCase);
+            if (kind == CodingProofKind.Formal && !isLeanArtifact
+                || kind is CodingProofKind.Symbolic or CodingProofKind.NumericalEvidence && !isPythonArtifact
+                || kind == CodingProofKind.IntervalCertified && !isLeanArtifact && !isPythonArtifact)
             {
                 return Failure(caseId, relativeManifest, kind, "Beweisart und Dateiformat des Checker-Artefakts stimmen nicht überein.");
             }
@@ -105,13 +107,8 @@ public sealed partial class CodingProofVerifier(LeanProofService? leanProof = nu
                 }
             }
 
-            if (kind == CodingProofKind.NumericalEvidence)
-            {
-                return new(caseId, relativeManifest, kind, false, true,
-                    "Numerische Evidenz wurde geprüft, gilt aber definitionsgemäß nicht als mathematischer Beweis.");
-            }
-
-            if (kind == CodingProofKind.Formal)
+            if (kind == CodingProofKind.Formal
+                || kind == CodingProofKind.IntervalCertified && isLeanArtifact)
             {
                 var source = await File.ReadAllTextAsync(artifactPath, cancellationToken).ConfigureAwait(false);
                 var forbidden = LeanProofService.FindForbiddenConstructs(source);
@@ -144,9 +141,11 @@ public sealed partial class CodingProofVerifier(LeanProofService? leanProof = nu
             }
 
             var execution = await ExecuteCheckerAsync(workspacePath, artifactPath, kind, cancellationToken).ConfigureAwait(false);
-            return new(caseId, relativeManifest, kind, true, execution.ExitCode == 0,
+            return new(caseId, relativeManifest, kind, kind != CodingProofKind.NumericalEvidence, execution.ExitCode == 0,
                 execution.ExitCode == 0
-                    ? $"Checker erfolgreich: {execution.Command}"
+                    ? kind == CodingProofKind.NumericalEvidence
+                        ? $"Numerischer Checker erfolgreich ausgeführt; die Evidenz gilt nicht als mathematischer Beweis: {execution.Command}"
+                        : $"Checker erfolgreich: {execution.Command}"
                     : $"Checker fehlgeschlagen (Exit {execution.ExitCode}): {Limit(execution.Output, 1200)}");
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)

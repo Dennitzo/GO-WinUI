@@ -78,6 +78,25 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
+    public void ProcessRunAcceptsWorkspaceFrameworkSetupPurpose()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
+        var process = catalog.Resolve(ClientToolNames.ProcessRun, tools);
+        using var setup = JsonDocument.Parse("""
+            {
+              "executable": "npm.cmd",
+              "arguments": ["install"],
+              "workingDirectory": ".",
+              "purpose": "setup",
+              "startMode": "wait"
+            }
+            """);
+
+        catalog.Validate(process, setup.RootElement);
+    }
+
+    [Fact]
     public void UnknownPropertiesAndUnknownToolsAreRejected()
     {
         var catalog = new AgentToolCatalog();

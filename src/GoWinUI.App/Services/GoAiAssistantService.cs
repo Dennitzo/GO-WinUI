@@ -957,7 +957,15 @@ public sealed class GoAiAssistantService(
             if (action == PromptTriggerAction.Code)
             {
                 var codingSession = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
-                _ = await codingDiffs.BeginAsync(localRun.Id, codingSession?.WorkspacePath, cancellationToken).ConfigureAwait(false);
+                if (!await codingDiffs.BeginAsync(
+                        localRun.Id,
+                        codingSession?.WorkspacePath,
+                        cancellationToken).ConfigureAwait(false))
+                {
+                    throw new InvalidOperationException(
+                        "Die Git-Baseline für Codeänderungen konnte im freigegebenen Workspace nicht initialisiert werden. "
+                        + "Prüfe, ob der Ordner verfügbar und Git installiert ist.");
+                }
                 var trace = await codingTrace.StartAsync(
                     localRun.Id,
                     localRun.SessionId,

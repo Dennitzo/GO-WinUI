@@ -285,7 +285,7 @@ public sealed class LocalToolBroker(
                 ValidateOptionalStringArray(arguments, "arguments", 128, 8_192);
                 ValidateOptionalString(arguments, "workingDirectory", 1, 1_024);
                 ValidateOptionalInteger(arguments, "timeoutSeconds", 1, 3_600);
-                ValidateOptionalEnum(arguments, "purpose", ["inspect", "test", "build", "start"]);
+                ValidateOptionalEnum(arguments, "purpose", ["inspect", "setup", "test", "build", "start"]);
                 ValidateOptionalEnum(arguments, "startMode", ["wait", "smoke"]);
                 break;
             case ClientToolNames.LeanProof:
@@ -1160,6 +1160,16 @@ public sealed class LocalToolBroker(
         switch (preset)
         {
             case "git.status":
+                if (await CodingDiffService.EnsureRepositoryRootAsync(workspace, cancellationToken).ConfigureAwait(false) is null)
+                {
+                    return Bounded(new
+                    {
+                        preset,
+                        ExitCode = -1,
+                        StandardOutput = string.Empty,
+                        StandardError = "Das lokale Git-Repository des Workspaces konnte nicht initialisiert werden.",
+                    });
+                }
                 fileName = "git";
                 commandArguments = ["-C", workspace, "status", "--short"];
                 timeout = TimeSpan.FromMinutes(2);
@@ -1209,6 +1219,13 @@ public sealed class LocalToolBroker(
 
     private async Task<ProcessResult> RunGitDiffAsync(string workspace, CancellationToken cancellationToken)
     {
+        if (await CodingDiffService.EnsureRepositoryRootAsync(workspace, cancellationToken).ConfigureAwait(false) is null)
+        {
+            return new ProcessResult(
+                -1,
+                string.Empty,
+                "Das lokale Git-Repository des Workspaces konnte nicht initialisiert werden.");
+        }
         var hasHead = await RunProcessAsync(
             "git",
             ["-C", workspace, "rev-parse", "--verify", "HEAD"],

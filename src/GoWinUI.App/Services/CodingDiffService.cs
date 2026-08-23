@@ -17,7 +17,8 @@ public sealed record CodingDiffSnapshot(
 /// <summary>
 /// Captures an immutable Git tree before a coding run and compares later workspace
 /// states with that tree. A private index is used, so the user's staging area and
-/// existing dirty worktree are never changed.
+/// existing dirty worktree are never changed. A plain workspace is initialized as
+/// a local Git repository on first coding use; GO neither stages nor commits files.
 /// </summary>
 public sealed partial class CodingDiffService
 {
@@ -51,8 +52,8 @@ public sealed partial class CodingDiffService
         try
         {
             var workspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspacePath));
-            var repositoryRoot = await ResolveRepositoryRootAsync(workspace, cancellationToken).ConfigureAwait(false);
-            if (repositoryRoot is null || !IsWithin(repositoryRoot, workspace))
+            var repositoryRoot = await EnsureRepositoryRootAsync(workspace, cancellationToken).ConfigureAwait(false);
+            if (repositoryRoot is null)
             {
                 return false;
             }
@@ -158,6 +159,28 @@ public sealed partial class CodingDiffService
         Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
         Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
         StringComparison.OrdinalIgnoreCase);
+
+    internal static async Task<string?> EnsureRepositoryRootAsync(
+        string workspacePath,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath)) return null;
+        var workspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspacePath));
+        var repositoryRoot = await ResolveRepositoryRootAsync(workspace, cancellationToken).ConfigureAwait(false);
+        if (repositoryRoot is not null && IsWithin(repositoryRoot, workspace)) return repositoryRoot;
+
+        var initialize = await RunGitAsync(
+            workspace,
+            ["init", "--quiet"],
+            environment: null,
+            cancellationToken).ConfigureAwait(false);
+        if (initialize.ExitCode != 0) return null;
+
+        repositoryRoot = await ResolveRepositoryRootAsync(workspace, cancellationToken).ConfigureAwait(false);
+        return repositoryRoot is not null && IsWithin(repositoryRoot, workspace)
+            ? repositoryRoot
+            : null;
+    }
 
     private static async Task<string?> ResolveRepositoryRootAsync(string workspace, CancellationToken cancellationToken)
     {

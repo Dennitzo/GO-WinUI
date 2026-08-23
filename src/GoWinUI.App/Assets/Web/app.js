@@ -1135,6 +1135,7 @@
       metadata.className = "message-coding-powershell__metadata";
       const purposeLabels = {
         inspect: "Prüfung",
+        setup: "Setup",
         test: "Test",
         build: "Build",
         start: "Programmstart",

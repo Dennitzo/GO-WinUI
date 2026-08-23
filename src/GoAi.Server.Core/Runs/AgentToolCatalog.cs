@@ -252,7 +252,7 @@ public sealed class AgentToolCatalog
                 OptionalStringArray(value, "arguments", 128, 8192, allowEmpty: true);
                 OptionalString(value, "workingDirectory", 1, 1024);
                 OptionalInteger(value, "timeoutSeconds", 1, 3600);
-                OptionalEnum(value, "purpose", ["inspect", "test", "build", "start"]);
+                OptionalEnum(value, "purpose", ["inspect", "setup", "test", "build", "start"]);
                 OptionalEnum(value, "startMode", ["wait", "smoke"]);
                 break;
             case ClientToolNames.LeanProof:
@@ -315,7 +315,7 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.FileSystemProposeCreate, "Schlage das Erstellen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "content"], ("path", "string"), ("content", "string"))),
             Client(ClientToolNames.FileSystemProposeDelete, "Schlage das Löschen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema("path", ("path", "string"))),
             Client(ClientToolNames.ProcessRunPreset, "Führe ein versioniertes Build-, Test-, Start- oder Git-Preset im freigegebenen Workspace aus.", ToolRiskClass.Process, ProcessSchema()),
-            Client(ClientToolNames.ProcessRun, "Führe ein direktes Programm mit getrennter Argumentliste und Workspace-Arbeitsverzeichnis für Analyse, Test, Build oder Smoke-Start aus.", ToolRiskClass.Process, ProcessRunSchema()),
+            Client(ClientToolNames.ProcessRun, "Führe ein direktes Programm mit getrennter Argumentliste und Workspace-Arbeitsverzeichnis für Analyse, Setup, Test, Build oder Smoke-Start aus.", ToolRiskClass.Process, ProcessRunSchema()),
             Client(ClientToolNames.LeanProof, "Prüfe freiwillig einen mathematischen oder algorithmischen Beweis mit der gepinnten lokalen Lean-/Lake-Toolchain. Verwende niemals process.run für lean oder lake. check kompiliert eine Datei; verify kompiliert und prüft die Axiomabhängigkeiten des exakt deklarierten Theorems. Ein Dateiname erzeugt keinen Lean-Namespace.", ToolRiskClass.Process, LeanProofSchema()),
             Client(ClientToolNames.BricsCadGeometryQuery, "Lese freigegebene BricsCAD-Geometrie.", ToolRiskClass.ReadOnly, CadSchema()),
             Client(ClientToolNames.BricsCadMeasure, "Führe eine lesende BricsCAD-Messung aus.", ToolRiskClass.ReadOnly, CadSchema()),
@@ -400,7 +400,7 @@ public sealed class AgentToolCatalog
         """);
 
     private static JsonElement ProcessRunSchema() => Parse("""
-        {"type":"object","properties":{"executable":{"type":"string","description":"Ausschließlich der echte Programmname oder Programmpfad, zum Beispiel py, python, dotnet oder git. Keine komplette Befehlszeile, keine Argumente, keine Shell und keine Umleitung."},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"},"description":"Jedes Programmargument als eigener Arrayeintrag, zum Beispiel [\"-3.11\",\"-m\",\"pytest\"]. Keine Shell-Verkettung oder Ausgabeumleitung."},"workingDirectory":{"type":"string","description":"Relatives Arbeitsverzeichnis innerhalb des freigegebenen Workspace."},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600},"purpose":{"type":"string","enum":["inspect","test","build","start"]},"startMode":{"type":"string","enum":["wait","smoke"]}},"required":["executable","purpose"],"additionalProperties":false}
+        {"type":"object","properties":{"executable":{"type":"string","description":"Ausschließlich der echte Programmname oder Programmpfad, zum Beispiel py, python, npm.cmd, cargo, go, dotnet oder git. Keine komplette Befehlszeile, keine Argumente, keine Shell und keine Umleitung."},"arguments":{"type":"array","maxItems":128,"items":{"type":"string"},"description":"Jedes Programmargument als eigener Arrayeintrag, zum Beispiel [\"-3.11\",\"-m\",\"pytest\"] oder [\"install\"]. Keine Shell-Verkettung oder Ausgabeumleitung."},"workingDirectory":{"type":"string","description":"Relatives Arbeitsverzeichnis innerhalb des freigegebenen Workspace."},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600},"purpose":{"type":"string","enum":["inspect","setup","test","build","start"]},"startMode":{"type":"string","enum":["wait","smoke"]}},"required":["executable","purpose"],"additionalProperties":false}
         """);
 
     private static JsonElement LeanProofSchema() => Parse("""

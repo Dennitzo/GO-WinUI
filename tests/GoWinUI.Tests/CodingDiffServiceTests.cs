@@ -8,6 +8,44 @@ namespace GoWinUI.Tests;
 public sealed class CodingDiffServiceTests
 {
     [Fact]
+    public async Task PlainWorkspaceIsInitializedAndDiffedWithoutStagingOrCommittingFiles()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), $"go-coding-diff-plain-{Guid.NewGuid():N}");
+        var root = Path.Combine(testRoot, "workspace");
+        var state = Path.Combine(testRoot, "state");
+        Directory.CreateDirectory(root);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(root, "existing.cs"), "baseline\n", new UTF8Encoding(false));
+            Assert.False(Directory.Exists(Path.Combine(root, ".git")));
+            var runId = Guid.NewGuid();
+            var service = new CodingDiffService(new GoInfrastructureOptions { DataDirectory = state });
+
+            Assert.True(await service.BeginAsync(runId, root));
+            Assert.True(Directory.Exists(Path.Combine(root, ".git")));
+            Assert.Equal(string.Empty, await GitAsync(root, "diff", "--cached", "--binary"));
+            Assert.False(await HasGitHeadAsync(root));
+
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "existing.cs"),
+                "baseline\nchanged after start\n",
+                new UTF8Encoding(false));
+            await File.WriteAllTextAsync(Path.Combine(root, "created.cs"), "new file\n", new UTF8Encoding(false));
+
+            var snapshot = Assert.IsType<CodingDiffSnapshot>(await service.RefreshAsync(runId, root));
+            Assert.Equal(2, snapshot.FileCount);
+            Assert.Contains("+changed after start", snapshot.Diff, StringComparison.Ordinal);
+            Assert.Contains("created.cs", snapshot.Diff, StringComparison.Ordinal);
+            Assert.DoesNotContain("+baseline", snapshot.Diff, StringComparison.Ordinal);
+            Assert.Equal(string.Empty, await GitAsync(root, "diff", "--cached", "--binary"));
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
+    }
+
+    [Fact]
     public async Task DiffContainsOnlyChangesMadeAfterRunBaselineAndNeverTouchesRealIndex()
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"go-coding-diff-{Guid.NewGuid():N}");
@@ -52,15 +90,37 @@ public sealed class CodingDiffServiceTests
         }
         finally
         {
-            if (Directory.Exists(testRoot))
-            {
-                foreach (var file in Directory.EnumerateFiles(testRoot, "*", SearchOption.AllDirectories))
-                {
-                    File.SetAttributes(file, FileAttributes.Normal);
-                }
-                Directory.Delete(testRoot, recursive: true);
-            }
+            DeleteTestRoot(testRoot);
         }
+    }
+
+    private static async Task<bool> HasGitHeadAsync(string workingDirectory)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "git",
+            WorkingDirectory = workingDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        startInfo.ArgumentList.Add("rev-parse");
+        startInfo.ArgumentList.Add("--verify");
+        startInfo.ArgumentList.Add("HEAD");
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Git konnte nicht gestartet werden.");
+        await process.WaitForExitAsync();
+        return process.ExitCode == 0;
+    }
+
+    private static void DeleteTestRoot(string testRoot)
+    {
+        if (!Directory.Exists(testRoot)) return;
+        foreach (var file in Directory.EnumerateFiles(testRoot, "*", SearchOption.AllDirectories))
+        {
+            File.SetAttributes(file, FileAttributes.Normal);
+        }
+        Directory.Delete(testRoot, recursive: true);
     }
 
     private static async Task<string> GitAsync(string workingDirectory, params string[] arguments)

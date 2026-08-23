@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -8,7 +9,13 @@ namespace GoWinUI.App.Services;
 public sealed partial class LeanProofService
 {
     private const int MaximumOutputCharacters = 256 * 1024;
+    internal const string PinnedLeanToolchain = "leanprover/lean4:v4.30.0";
+    internal const string PinnedMathlibRevision = "v4.30.0";
+    internal const string MathlibRepositoryUrl = "https://github.com/leanprover-community/mathlib4.git";
     private static readonly TimeSpan VersionTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan MathlibPreparationTimeout = TimeSpan.FromMinutes(30);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> MathlibProjectGates =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly string _toolchainDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".elan",
@@ -105,6 +112,7 @@ public sealed partial class LeanProofService
             return MissingToolchain("check", context.WorkspaceRoot, context.RelativePath);
         }
 
+        context = await PrepareMathlibContextAsync(context, tools.Value, cancellationToken).ConfigureAwait(false);
         var execution = await RunLeanFileAsync(context, tools.Value, context.FilePath, timeout, cancellationToken).ConfigureAwait(false);
         var versions = await GetVersionsAsync(tools.Value, context.WorkspaceRoot, cancellationToken).ConfigureAwait(false);
         return CreateExecutionResult("check", context, execution, versions, null, [], []);
@@ -140,6 +148,11 @@ public sealed partial class LeanProofService
             return MissingToolchain("build", workspaceRoot, relative, target: target);
         }
 
+        if (ProjectDeclaresMathlib(projectPath))
+        {
+            await EnsureMathlibDependenciesAsync(projectPath, tools.Value, cancellationToken).ConfigureAwait(false);
+        }
+
         var arguments = new List<string> { "build" };
         if (!string.IsNullOrWhiteSpace(target)) arguments.Add(target);
         var execution = await RunProcessAsync(tools.Value.Lake, arguments, projectPath, timeout, cancellationToken).ConfigureAwait(false);
@@ -163,6 +176,7 @@ public sealed partial class LeanProofService
             return MissingToolchain("axioms", context.WorkspaceRoot, context.RelativePath, theoremName: theoremName);
         }
 
+        context = await PrepareMathlibContextAsync(context, tools.Value, cancellationToken).ConfigureAwait(false);
         var audit = await RunAxiomAuditAsync(context, tools.Value, theoremName, timeout, cancellationToken).ConfigureAwait(false);
         var forbiddenAxioms = audit.Axioms.Where(axiom => !AllowedAxioms.Contains(axiom)).ToArray();
         var passed = audit.Execution.ExitCode == 0 && audit.FoundAxiomReport && forbiddenAxioms.Length == 0;
@@ -201,6 +215,7 @@ public sealed partial class LeanProofService
             return MissingToolchain("verify", context.WorkspaceRoot, context.RelativePath, theoremName: theoremName);
         }
 
+        context = await PrepareMathlibContextAsync(context, tools.Value, cancellationToken).ConfigureAwait(false);
         var stopwatch = Stopwatch.StartNew();
         var versions = await GetVersionsAsync(tools.Value, context.WorkspaceRoot, cancellationToken).ConfigureAwait(false);
         var compile = await RunLeanFileAsync(context, tools.Value, context.FilePath, timeout, cancellationToken).ConfigureAwait(false);
@@ -253,6 +268,193 @@ public sealed partial class LeanProofService
         if (SorryAxiomPattern().IsMatch(code)) result.Add("sorryAx");
         if (TrustCompilerPattern().IsMatch(code)) result.Add("Lean.trustCompiler");
         return result;
+    }
+
+    internal static bool ImportsMathlib(string source) =>
+        MathlibImportPattern().IsMatch(StripLeanCommentsAndStrings(source));
+
+    internal static async Task EnsurePinnedMathlibProjectFilesAsync(
+        string workspacePath,
+        CancellationToken cancellationToken = default)
+    {
+        var workspaceRoot = CanonicalWorkspace(workspacePath);
+        var gate = MathlibProjectGates.GetOrAdd(workspaceRoot, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var toolchainPath = Path.Combine(workspaceRoot, "lean-toolchain");
+            if (File.Exists(toolchainPath))
+            {
+                var configured = (await File.ReadAllTextAsync(toolchainPath, cancellationToken).ConfigureAwait(false)).Trim();
+                if (!configured.Equals(PinnedLeanToolchain, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Das vorhandene Lean-Projekt verwendet '{configured}' statt der für GO gepinnten Toolchain "
+                        + $"'{PinnedLeanToolchain}'.");
+                }
+            }
+            else
+            {
+                await WriteAtomicAsync(toolchainPath, PinnedLeanToolchain + Environment.NewLine, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            var lakefilePath = Path.Combine(workspaceRoot, "lakefile.lean");
+            var lakefileTomlPath = Path.Combine(workspaceRoot, "lakefile.toml");
+            if (!File.Exists(lakefilePath) && !File.Exists(lakefileTomlPath))
+            {
+                var lakefile = $$"""
+                    import Lake
+                    open Lake DSL
+
+                    package «GOProofs» where
+
+                    require mathlib from git
+                      "{{MathlibRepositoryUrl}}" @ "{{PinnedMathlibRevision}}"
+                    """ + Environment.NewLine;
+                await WriteAtomicAsync(lakefilePath, lakefile, cancellationToken).ConfigureAwait(false);
+            }
+
+            await EnsureGitIgnoreEntryAsync(workspaceRoot, "/.lake/", cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private static async Task<LeanFileContext> PrepareMathlibContextAsync(
+        LeanFileContext context,
+        LeanTools tools,
+        CancellationToken cancellationToken)
+    {
+        var source = await File.ReadAllTextAsync(context.FilePath, cancellationToken).ConfigureAwait(false);
+        if (!ImportsMathlib(source)) return context;
+
+        var projectRoot = HasLakeProject(context.ProjectRoot) ? context.ProjectRoot : context.WorkspaceRoot;
+        if (!HasLakeProject(projectRoot))
+        {
+            await EnsurePinnedMathlibProjectFilesAsync(projectRoot, cancellationToken).ConfigureAwait(false);
+        }
+        if (!ProjectDeclaresMathlib(projectRoot))
+        {
+            throw new InvalidOperationException(
+                "Die Lean-Datei importiert Mathlib, das vorhandene Lake-Projekt deklariert die Abhängigkeit aber nicht. "
+                + $"Ergänze Mathlib revisionsgenau mit {PinnedMathlibRevision}.");
+        }
+
+        await EnsureMathlibDependenciesAsync(projectRoot, tools, cancellationToken).ConfigureAwait(false);
+        return context with { ProjectRoot = projectRoot };
+    }
+
+    private static async Task EnsureMathlibDependenciesAsync(
+        string projectRoot,
+        LeanTools tools,
+        CancellationToken cancellationToken)
+    {
+        var markerPath = Path.Combine(projectRoot, ".lake", $".go-mathlib-{PinnedMathlibRevision}-ready");
+        if (File.Exists(markerPath)) return;
+
+        var gate = MathlibProjectGates.GetOrAdd(projectRoot, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (File.Exists(markerPath)) return;
+
+            var update = await RunProcessAsync(
+                tools.Lake,
+                ["update"],
+                projectRoot,
+                MathlibPreparationTimeout,
+                cancellationToken).ConfigureAwait(false);
+            if (update.ExitCode != 0 || update.TimedOut)
+            {
+                throw new InvalidOperationException(
+                    "Die gepinnte Mathlib-Abhängigkeit konnte nicht aufgelöst werden: " + Limit(update.Output, 4000));
+            }
+
+            var cache = await RunProcessAsync(
+                tools.Lake,
+                ["exe", "cache", "get"],
+                projectRoot,
+                MathlibPreparationTimeout,
+                cancellationToken).ConfigureAwait(false);
+            if (cache.ExitCode != 0 || cache.TimedOut)
+            {
+                throw new InvalidOperationException(
+                    "Der vorkompilierte Mathlib-Cache konnte nicht bereitgestellt werden: " + Limit(cache.Output, 4000));
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(markerPath)!);
+            await WriteAtomicAsync(markerPath, PinnedMathlibRevision + Environment.NewLine, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private static bool ProjectDeclaresMathlib(string projectRoot)
+    {
+        foreach (var name in new[] { "lakefile.lean", "lakefile.toml" })
+        {
+            var path = Path.Combine(projectRoot, name);
+            if (File.Exists(path)
+                && Regex.IsMatch(File.ReadAllText(path), @"\bmathlib\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static async Task EnsureGitIgnoreEntryAsync(
+        string workspaceRoot,
+        string entry,
+        CancellationToken cancellationToken)
+    {
+        var path = Path.Combine(workspaceRoot, ".gitignore");
+        var current = File.Exists(path)
+            ? await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false)
+            : string.Empty;
+        if (current.ReplaceLineEndings("\n").Split('\n').Any(line => line.Trim().Equals(entry, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        var prefix = current.Length == 0 || current.EndsWith('\n') || current.EndsWith('\r')
+            ? current
+            : current + Environment.NewLine;
+        await WriteAtomicAsync(
+            path,
+            prefix + "# GO: reproduzierbare Lean-Abhängigkeiten" + Environment.NewLine + entry + Environment.NewLine,
+            cancellationToken,
+            overwrite: true).ConfigureAwait(false);
+    }
+
+    private static async Task WriteAtomicAsync(
+        string path,
+        string content,
+        CancellationToken cancellationToken,
+        bool overwrite = false)
+    {
+        var temporaryPath = path + ".go-tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            await File.WriteAllTextAsync(
+                temporaryPath,
+                content,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                cancellationToken).ConfigureAwait(false);
+            File.Move(temporaryPath, path, overwrite);
+        }
+        finally
+        {
+            try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     private static async Task<AxiomAudit> RunAxiomAuditAsync(
@@ -660,6 +862,9 @@ public sealed partial class LeanProofService
 
     [GeneratedRegex(@"\bLean\.trustCompiler\b")]
     private static partial Regex TrustCompilerPattern();
+
+    [GeneratedRegex(@"(?m)^\s*import\s+[^\r\n]*\bMathlib(?:\.|\s|$)", RegexOptions.CultureInvariant)]
+    private static partial Regex MathlibImportPattern();
 
     [GeneratedRegex(@"does not depend on any axioms", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex NoAxiomsPattern();

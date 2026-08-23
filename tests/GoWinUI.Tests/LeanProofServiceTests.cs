@@ -5,6 +5,90 @@ namespace GoWinUI.Tests;
 
 public sealed class LeanProofServiceTests
 {
+    [Fact]
+    public async Task ManagedMathlibProjectIsPinnedAndKeepsGeneratedPackagesOutOfGit()
+    {
+        var workspace = CreateWorkspace();
+        try
+        {
+            await LeanProofService.EnsurePinnedMathlibProjectFilesAsync(workspace);
+
+            Assert.Equal(
+                LeanProofService.PinnedLeanToolchain,
+                (await File.ReadAllTextAsync(Path.Combine(workspace, "lean-toolchain"))).Trim());
+            var lakefile = await File.ReadAllTextAsync(Path.Combine(workspace, "lakefile.lean"));
+            Assert.Contains(LeanProofService.MathlibRepositoryUrl, lakefile, StringComparison.Ordinal);
+            Assert.Contains(LeanProofService.PinnedMathlibRevision, lakefile, StringComparison.Ordinal);
+            Assert.Contains(
+                "/.lake/",
+                await File.ReadAllTextAsync(Path.Combine(workspace, ".gitignore")),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("import Mathlib\n", true)]
+    [InlineData("import Mathlib.Data.Set.Basic\n", true)]
+    [InlineData("-- import Mathlib\nimport Lean\n", false)]
+    [InlineData("import Lean\n", false)]
+    public void MathlibImportsAreDetectedOutsideComments(string source, bool expected)
+    {
+        Assert.Equal(expected, LeanProofService.ImportsMathlib(source));
+    }
+
+    [Fact]
+    public async Task LiveManagedMathlibWorkspaceCompilesAndAuditsItsPinnedTheorem()
+    {
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable("GO_RUN_MATHLIB_LIVE_TESTS"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var workspace = Environment.GetEnvironmentVariable("GO_MATHLIB_TEST_WORKSPACE");
+        Assert.True(Directory.Exists(workspace), "GO_MATHLIB_TEST_WORKSPACE muss auf den vorbereiteten Workspace zeigen.");
+        var result = await new LeanProofService().VerifyAsync(
+            workspace!,
+            "proofs/foundations-logic-set-theory/formal/proof.lean",
+            "cantor_powerSet_cardinality",
+            TimeSpan.FromMinutes(30));
+
+        Assert.True(result.Available && result.Passed, result.Message);
+        Assert.Equal(
+            ["Classical.choice", "Quot.sound", "propext"],
+            result.Axioms.Order(StringComparer.Ordinal).ToArray());
+        Assert.Empty(result.ForbiddenConstructs);
+    }
+
+    [Fact]
+    public async Task LivePhyMaProofManifestsUseTheManagedMathlibVerifier()
+    {
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable("GO_RUN_MATHLIB_LIVE_TESTS"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var workspace = Environment.GetEnvironmentVariable("GO_MATHLIB_TEST_WORKSPACE");
+        Assert.True(Directory.Exists(workspace), "GO_MATHLIB_TEST_WORKSPACE muss auf den vorbereiteten Workspace zeigen.");
+
+        var results = await new CodingProofVerifier(new LeanProofService()).VerifyAllAsync(workspace!);
+
+        Assert.Equal(3, results.Count);
+        Assert.All(results, result => Assert.True(result.Passed, $"{result.ManifestPath}: {result.Detail}"));
+        var formal = Assert.Single(results, result => result.Kind == CodingProofKind.Formal);
+        Assert.Contains("cantor_powerSet_cardinality", formal.Detail, StringComparison.Ordinal);
+        Assert.Contains("Classical.choice", formal.Detail, StringComparison.Ordinal);
+    }
+
     private static readonly HashSet<string> AllowedAxioms = new(StringComparer.Ordinal)
     {
         "propext", "Classical.choice", "Quot.sound",
@@ -140,6 +224,49 @@ public sealed class LeanProofServiceTests
 
             Assert.True(result.Passed, result.Detail);
             Assert.Contains("Identity.result", result.Detail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task IntervalCertifiedManifestMayUseAKernelCheckedLeanCertificate()
+    {
+        var workspace = CreateWorkspace();
+        try
+        {
+            var service = new LeanProofService();
+            if (!await RequireLiveLeanAsync(service, workspace)) return;
+            var proofDirectory = Directory.CreateDirectory(Path.Combine(workspace, "proofs", "interval-bound"));
+            var artifact = Path.Combine(proofDirectory.FullName, "IntervalBound.lean");
+            await File.WriteAllTextAsync(
+                artifact,
+                "def boundedValue : Nat := 4\ntheorem IntervalBound.result : boundedValue ≤ 5 := by decide\n");
+            await using var stream = File.OpenRead(artifact);
+            var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream));
+            await File.WriteAllTextAsync(
+                Path.Combine(proofDirectory.FullName, "proof.json"),
+                $$"""
+                {
+                  "caseId": "interval-bound",
+                  "kind": "interval-certified",
+                  "statement": "Der berechnete natürliche Wert liegt nachweislich innerhalb der geschlossenen Schranke.",
+                  "assumptions": [],
+                  "validityDomain": "Natürliche Zahlen im Lean-Kernel.",
+                  "artifact": "proofs/interval-bound/IntervalBound.lean",
+                  "sourceSha256": "{{hash}}",
+                  "theoremName": "IntervalBound.result"
+                }
+                """);
+
+            var result = Assert.Single(await new CodingProofVerifier(service).VerifyAllAsync(workspace));
+
+            Assert.Equal(CodingProofKind.IntervalCertified, result.Kind);
+            Assert.True(result.IsProof);
+            Assert.True(result.Passed, result.Detail);
+            Assert.Contains("Lean verify erfolgreich", result.Detail, StringComparison.Ordinal);
         }
         finally
         {

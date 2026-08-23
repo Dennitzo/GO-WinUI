@@ -94,6 +94,37 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Theory]
+    [InlineData("npm.cmd", "install")]
+    [InlineData("node", "--version")]
+    [InlineData("pnpm.cmd", "install")]
+    [InlineData("yarn.cmd", "install")]
+    [InlineData("bun", "install")]
+    [InlineData("cargo", "fetch")]
+    [InlineData("go", "mod")]
+    [InlineData("dotnet", "restore")]
+    public void WorkspaceFrameworkSetupProcessesAreAccepted(string executable, string firstArgument)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var processArguments = firstArgument == "mod"
+            ? new[] { "mod", "download" }
+            : new[] { firstArgument };
+        var proposal = Create(
+            ClientToolNames.ProcessRun,
+            ToolRiskClass.Process,
+            new
+            {
+                executable,
+                arguments = processArguments,
+                workingDirectory = ".",
+                purpose = "setup",
+                startMode = "wait",
+            },
+            now);
+
+        LocalToolBroker.ValidateProposal(proposal, now);
+    }
+
+    [Theory]
     [InlineData("pip", "install")]
     [InlineData("pip3.exe", "uninstall")]
     public void GlobalPythonPackageMutationsAreRejected(string executable, string command)

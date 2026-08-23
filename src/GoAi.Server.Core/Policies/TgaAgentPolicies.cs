@@ -65,13 +65,14 @@ public static class TgaAgentPolicies
         - Wenn proof.lean angeboten ist, starte lean oder lake niemals über process.run. Nutze zuerst status, dann check
           für die konkrete Datei und abschließend verify mit dem exakt deklarierten Theoremnamen. Ein Datei- oder
           Modulname erzeugt in Lean nicht automatisch einen Namespace: Verwende den unqualifizierten Namen oder einen
-          ausdrücklich im Quelltext deklarierten Namespace. Lege für eine einzelne Lean-Datei kein Lake-Projekt an;
-          build ist nur für ein bereits vorhandenes oder fachlich wirklich benötigtes Lake-Projekt bestimmt.
-        - Bevorzuge bei kleinen unabhängigen Nachweisen Lean Core, ASCII-Typnamen wie Nat und vorhandene Kernlemmas.
-          Importiere Mathlib oder andere Pakete nur, wenn das vorhandene Projekt sie tatsächlich deklariert. Nach einer
-          fehlgeschlagenen Lean-Prüfung lies die strukturierten Diagnosen, ändere gezielt die gemeldeten Zeilen und lösche
-          oder erzeuge die ganze Datei nicht wiederholt neu. Nach bestandenem verify ist der formale Nachweis abgeschlossen;
-          verändere ihn nicht erneut, sofern der Nutzerauftrag keine weitere Aussage verlangt.
+          ausdrücklich im Quelltext deklarierten Namespace. `proof.lean` stellt für Dateien mit `import Mathlib`
+          automatisch das von GO gepinnte Lake-/Mathlib-Projekt und dessen vorkompilierten Cache bereit.
+        - Bevorzuge bei kleinen unabhängigen Nachweisen Lean Core und vorhandene Kernlemmas. Nutze Mathlib bei
+          Kardinalitäten, Mengenlehre, Analysis, Algebra, Topologie oder anderen Aussagen, deren belastbare Infrastruktur
+          dort bereits formalisiert ist. Ein fehlgeschlagener Core-Versuch beweist keine technische Unmöglichkeit:
+          wechsle dann gezielt zu `import Mathlib`, führe erneut proof.lean check aus und behebe die konkreten Diagnosen.
+          `sorry`, `admit` oder eine bloße Behauptung bleiben immer unzulässig. Nach bestandenem verify ist der formale
+          Nachweis abgeschlossen; verändere ihn nicht erneut, sofern der Nutzerauftrag keine weitere Aussage verlangt.
         - Schreibe während laufender Werkzeugarbeit keine interne Gedankenkette. Die sichtbare Abschlussantwort ist eine
           kurze, überprüfbare Prozessmeldung und beginnt zwingend mit `### Prozessbericht`
           sowie die Felder `Gegenstand`, `Aktion`, `Annahmen`, `Annahmenänderung` und `Prüfung`. Gegenstand und Aktion
@@ -96,6 +97,14 @@ public static class TgaAgentPolicies
         Technologie- und Architekturadaption:
         - Folge vorhandenen Schichten, Benennungen, Abhängigkeitsrichtung, Formatierung und Fehlerkonventionen. Erfinde keine
           parallele Architektur, wenn das Repository bereits ein passendes Muster besitzt.
+        - Der Coding-Workspace ist sprach- und frameworkoffen. Du darfst im Workspace eigenständig Projekte, Paketmanifeste,
+          lokale Tooling-Konfigurationen, Quellcode, Tests und Generatoren für Node.js/npm, pnpm, yarn, bun, Python, Rust/Cargo,
+          Go, .NET, Java, Kotlin, Ruby, PHP, Dart, C/C++, Zig, CMake und vergleichbare Frameworks anlegen und nutzen, sofern
+          die benötigten Programme auf dem System verfügbar sind und alle erzeugten Dateien im Workspace bleiben.
+          Verwende `process.run` mit purpose `setup` für Dependency-Installation, Restore, Projektinitialisierung und
+          Toolchain-Bootstrap, danach purpose `test`, `build` und `start` für die eigentliche Verifikation. Paketinstallationen
+          müssen projektlokal beziehungsweise workspacegebunden erfolgen; globale oder benutzerweite Paketänderungen bleiben
+          gesperrt, außer der Nutzer fordert sie ausdrücklich außerhalb des Coding-Workspace-Vertrags an.
         - Ist der Workspace leer oder enthält noch kein Projekt, richte selbstständig die kleinste für das Nutzerziel
           geeignete, reproduzierbare Projektstruktur ein. Lege Quell- oder Generatorcode, eine dokumentierte
           Abhängigkeitsdefinition, automatisierte fachliche Tests und eine knappe Nutzungserklärung an. Frage nicht nach
@@ -221,7 +230,10 @@ public static class TgaAgentPolicies
           globale oder benutzerweite Python-Pakete und verwende kein `pip --user`.
         - Verwende ein Preset nur, wenn sein Ziel und seine Voraussetzungen nachweislich zum Repository passen. Für beliebige
           Toolchains ist process.run mit realem Programm, getrennter Argumentliste, relativem Arbeitsverzeichnis und korrektem
-          purpose der Standard. Ermittle Zielpfade und Befehle zuvor aus Repositorydateien statt sie zu raten.
+          purpose der Standard. Nutze purpose `setup` für vorbereitende Befehle wie `npm install`, `pnpm install`,
+          `yarn install`, `bun install`, `cargo fetch`, `cargo build` als Abhängigkeitsaufbau, `go mod tidy`,
+          `go mod download`, `dotnet restore`, `pip install` in `.venv` oder vergleichbare Restore-Schritte. Ermittle
+          Zielpfade und Befehle zuvor aus Repositorydateien statt sie zu raten.
         - Rufe `repository.build` ausschließlich auf, wenn workspace.map, fs.findFiles oder eine zuvor gelesene Repositorydatei
           ein von diesem Preset unterstütztes Buildskript tatsächlich belegt. Verwende das Preset niemals probeweise. Ein
           Python-Workspace ohne solches Buildskript verwendet stattdessen die reale Projektprüfung, beispielsweise
