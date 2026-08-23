@@ -6,8 +6,8 @@ param(
 
     [string] $Workspace,
 
-    [ValidateSet('qwen3-coder-next', 'ud', 'openai/gpt-oss-120b')]
-    [string] $Model = 'qwen3-coder-next',
+    [ValidateSet('qwen3.8-27b', 'qwen3-coder-next', 'openai/gpt-oss-120b')]
+    [string] $Model = 'qwen3.8-27b',
 
     [ValidateRange(1, 1000)]
     [int] $Iterations = 3,

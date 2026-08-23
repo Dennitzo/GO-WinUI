@@ -496,7 +496,14 @@ public sealed class LocalToolBroker(
         {
             throw new DirectoryNotFoundException("Der angeforderte Pfad ist kein Ordner.");
         }
-        var entries = Directory.EnumerateFileSystemEntries(path)
+        var explicitlyListingGeneratedPath = WorkspaceRepositoryIndex.IsAutomaticallyIgnoredPath(Relative(path), isDirectory: true);
+        var candidates = Directory.EnumerateFileSystemEntries(path)
+            .Where(item => explicitlyListingGeneratedPath
+                || !WorkspaceRepositoryIndex.IsAutomaticallyIgnoredPath(Relative(item), Directory.Exists(item)))
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .Take(501)
+            .ToArray();
+        var entries = candidates
             .Take(500)
             .Select(item =>
             {
@@ -512,7 +519,7 @@ public sealed class LocalToolBroker(
                 };
             })
             .ToArray();
-        return Task.FromResult<object>(new { path = Relative(path), entries, truncated = entries.Length == 500 });
+        return Task.FromResult<object>(new { path = Relative(path), entries, truncated = candidates.Length > 500 });
     }
 
     private Task<object> StatAsync(JsonElement arguments, CancellationToken cancellationToken)

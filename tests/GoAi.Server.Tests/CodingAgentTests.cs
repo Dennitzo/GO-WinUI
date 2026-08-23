@@ -28,6 +28,31 @@ public sealed class CodingAgentTests
         Assert.Equal(expected, RunProcessor.ShouldAddCodingMutationProgressGuidance(rounds));
     }
 
+    [Fact]
+    public void ReasoningOnlyResponseAtTheOutputLimitIsDetected()
+    {
+        var exhausted = new LmChatResult(
+            Content: null,
+            ToolCalls: [],
+            InputTokens: 59_000,
+            OutputTokens: 8_191,
+            HadReasoning: true,
+            ReasoningTokens: 8_191);
+        var useful = exhausted with
+        {
+            ToolCalls =
+            [
+                new LmToolCall(
+                    "call-1",
+                    ClientToolNames.FileSystemReadText,
+                    JsonSerializer.SerializeToElement(new { path = "README.md" })),
+            ],
+        };
+
+        Assert.True(RunProcessor.IsReasoningBudgetExhausted(exhausted, 8_192));
+        Assert.False(RunProcessor.IsReasoningBudgetExhausted(useful, 8_192));
+    }
+
     [Theory]
     [InlineData(ClientToolNames.ProcessRun, 5, 0, false)]
     [InlineData(ClientToolNames.ProcessRun, 6, 0, true)]
@@ -426,6 +451,7 @@ public sealed class CodingAgentTests
         Assert.Contains("Zielgröße nicht selbst als erwarteten Null-", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Numerische Verifikation muss geschlossen fehlschlagen", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("niemals in ein Nullresiduum", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("niemals mehr als vier", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("Button.Flyout", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("GO-WinUI", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("Build-Portable.ps1", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);

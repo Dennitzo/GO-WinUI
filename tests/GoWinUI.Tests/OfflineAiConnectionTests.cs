@@ -143,7 +143,7 @@ public sealed class OfflineAiConnectionTests
 
         var restored = await store.LoadAsync();
         Assert.True(restored.IsAiConnectionEnabled);
-        Assert.Equal(9, restored.Version);
+        Assert.Equal(11, restored.Version);
     }
 
     private static async Task ServeProbeResponsesAsync(

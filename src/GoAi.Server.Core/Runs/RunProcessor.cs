@@ -215,6 +215,7 @@ public sealed class RunProcessor : BackgroundService
         var verificationRequired = checkpoint.VerificationRequired;
         var verificationFailed = checkpoint.VerificationFailed;
         var repairReminderCount = checkpoint.RepairReminderCount;
+        var reasoningBudgetRetryCount = 0;
         var finalSynthesisRequested = checkpoint.FinalSynthesisRequested;
         var failedToolFingerprints = new HashSet<string>(checkpoint.FailedToolFingerprints ?? [], StringComparer.Ordinal);
         // Tool names are never disabled globally after one bad call. Coding models
@@ -698,8 +699,9 @@ public sealed class RunProcessor : BackgroundService
                     modelMessages,
                     modelTools,
                     maximumOutputTokens,
-                    selection.Role,
-                    cancellationToken).ConfigureAwait(false);
+                    modelRole: selection.Role,
+                    reasoningEffort: request.ReasoningEffort,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
             roundCount++;
@@ -725,7 +727,19 @@ public sealed class RunProcessor : BackgroundService
                         return;
                     }
 
+                    var reasoningBudgetExhausted = IsReasoningBudgetExhausted(
+                        response,
+                        maximumOutputTokens);
+                    reasoningBudgetRetryCount = reasoningBudgetExhausted
+                        ? reasoningBudgetRetryCount + 1
+                        : 0;
                     repairReminderCount++;
+                    if (reasoningBudgetRetryCount > 1)
+                    {
+                        throw new CodingEmptyResponseException(
+                            "Das Coding-Modell hat sein Ausgabebudget wiederholt vollständig für internes Reasoning verbraucht, "
+                            + "ohne einen Tool-Call oder eine sichtbare Antwort zu liefern. Der Workspace und bereits ausgeführte Aktionen bleiben unverändert erhalten.");
+                    }
                     if (repairReminderCount > 4)
                     {
                         throw new CodingEmptyResponseException(
@@ -738,7 +752,9 @@ public sealed class RunProcessor : BackgroundService
                         CodingVerificationStageOrder.Where(stage => !verificationStages.Contains(stage)));
                     messages.Add(new LmChatMessage(
                         "system",
-                        "Die letzte Modellantwort war leer und wird nicht als Fehler des Workspace gewertet. Setze den Lauf jetzt fort. "
+                        (reasoningBudgetExhausted
+                            ? "Der letzte Modellaufruf hat das Ausgabebudget vollständig für internes Reasoning verwendet. Antworte jetzt unmittelbar mit genau dem nächsten nativen Tool-Call oder einer knappen Abschlussantwort; wiederhole nicht die Analyse. "
+                            : "Die letzte Modellantwort war leer und wird nicht als Fehler des Workspace gewertet. Setze den Lauf jetzt fort. ")
                         + (verificationRequired && missingStages.Length > 0
                             ? $"Noch fehlende Verifikationsstufen: {missingStages}. Führe die nächste fehlende Stufe mit einem nativen Tool-Call aus."
                             : "Nutze einen nativen Tool-Call, falls noch Arbeit erforderlich ist; andernfalls liefere den gültigen sichtbaren Prozessbericht.")));
@@ -1737,6 +1753,16 @@ public sealed class RunProcessor : BackgroundService
     internal static bool ShouldAddCodingMutationProgressGuidance(int consecutiveRoundsWithoutMutation) =>
         consecutiveRoundsWithoutMutation >= CodingMutationProgressGuidanceThreshold
         && (consecutiveRoundsWithoutMutation - CodingMutationProgressGuidanceThreshold) % 3 == 0;
+
+    internal static bool IsReasoningBudgetExhausted(
+        LmChatResult response,
+        int maximumOutputTokens) =>
+        response.HadReasoning
+        && response.ToolCalls.Count == 0
+        && string.IsNullOrWhiteSpace(response.Content)
+        && response.ReasoningTokens > 0
+        && response.OutputTokens >= Math.Max(1, maximumOutputTokens - 16)
+        && response.ReasoningTokens >= response.OutputTokens - 4;
 
     internal static bool ShouldBlockRepeatedReplaceText(
         LmToolCall call,

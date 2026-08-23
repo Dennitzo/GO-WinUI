@@ -81,6 +81,48 @@ public sealed class LmStudioClientTests
         Assert.Contains(matches, static model => model.Role == "code" && model.ContextTokens == 131_072);
     }
 
+    [Fact]
+    public async Task UnconfiguredLlmWithoutToolUseIsNotAdvertisedInGoModelSelection()
+    {
+        using var context = new TestServerContext();
+        var handler = new ModelStatusHandler("""
+            {
+              "models": [{
+                "type": "llm",
+                "key": "legacy-non-tool-llm",
+                "display_name": "Legacy Non Tool LLM",
+                "loaded_instances": [],
+                "max_context_length": 1048576,
+                "capabilities": {
+                  "vision": false,
+                  "trained_for_tool_use": false
+                }
+              }, {
+                "type": "llm",
+                "key": "tool-trained-llm",
+                "display_name": "Tool Trained LLM",
+                "loaded_instances": [],
+                "max_context_length": 131072,
+                "capabilities": {
+                  "vision": false,
+                  "trained_for_tool_use": true
+                }
+              }]
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        var status = await client.GetStatusAsync();
+
+        Assert.DoesNotContain(status.Models, static model => model.Id == "legacy-non-tool-llm");
+        Assert.Contains(status.Models, static model => model.Id == "tool-trained-llm" && model.Role == "general");
+    }
+
     [Theory]
     [InlineData("89504E470D0A1A0A00000000", "image/png")]
     [InlineData("FFD8FFE000104A464946", "image/jpeg")]
@@ -120,7 +162,11 @@ public sealed class LmStudioClientTests
                   "arguments": "{\"operation\":\"add\",\"left\":[2],\"right\":[3]}"
                 }
               ],
-              "usage": { "input_tokens": 120, "output_tokens": 24 }
+              "usage": {
+                "input_tokens": 120,
+                "output_tokens": 24,
+                "output_tokens_details": { "reasoning_tokens": 18 }
+              }
             }
             """);
         using var http = new HttpClient(handler);
@@ -153,6 +199,8 @@ public sealed class LmStudioClientTests
         Assert.Equal("math.evaluate", call.Name);
         Assert.Equal(120, result.InputTokens);
         Assert.Equal(24, result.OutputTokens);
+        Assert.True(result.HadReasoning);
+        Assert.Equal(18, result.ReasoningTokens);
 
         using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
         var root = request.RootElement;
@@ -194,7 +242,7 @@ public sealed class LmStudioClientTests
             NullLogger<LmStudioClient>.Instance);
 
         _ = await client.CompleteChatAsync(
-            "ud",
+            "qwen3.8-27b",
             [
                 new LmChatMessage("system", "Unveränderliche Grundrichtlinie"),
                 new LmChatMessage("user", "Ändere und prüfe das Projekt."),
@@ -298,8 +346,8 @@ public sealed class LmStudioClientTests
     }
 
     [Theory]
+    [InlineData("qwen3.8-27b", "qwen38-resident")]
     [InlineData("qwen3-coder-next", "qwen-resident")]
-    [InlineData("ud", "deepseek-resident")]
     public async Task CompatibleResidentCodingModelIsReusedWithoutAProcessMarker(
         string modelId,
         string expectedInstanceId)
@@ -379,7 +427,7 @@ public sealed class LmStudioClientTests
     }
 
     [Fact]
-    public async Task DeepSeekCoderUsesItsPublishedAgentSamplingProfile()
+    public async Task Qwen38CoderUsesPublishedLowReasoningSamplingProfile()
     {
         using var context = new TestServerContext();
         var handler = new RecordingHandler("""
@@ -400,7 +448,7 @@ public sealed class LmStudioClientTests
             NullLogger<LmStudioClient>.Instance);
 
         _ = await client.CompleteChatAsync(
-            "ud",
+            "qwen3.8-27b",
             [new LmChatMessage("user", "Analysiere und ändere das Projekt.")],
             [],
             modelRole: "code");
@@ -409,8 +457,43 @@ public sealed class LmStudioClientTests
         var root = request.RootElement;
         Assert.Equal(1.0, root.GetProperty("temperature").GetDouble(), 3);
         Assert.Equal(0.95, root.GetProperty("top_p").GetDouble(), 3);
-        Assert.False(root.TryGetProperty("top_k", out _));
-        Assert.False(root.TryGetProperty("reasoning", out _));
+        Assert.Equal(20, root.GetProperty("top_k").GetInt32());
+        Assert.Equal(0.0, root.GetProperty("min_p").GetDouble(), 3);
+        Assert.Equal(0.0, root.GetProperty("presence_penalty").GetDouble(), 3);
+        Assert.Equal(1.0, root.GetProperty("repetition_penalty").GetDouble(), 3);
+        Assert.Equal("low", root.GetProperty("reasoning").GetProperty("effort").GetString());
+    }
+
+    [Fact]
+    public async Task Qwen38CoderForwardsTheSelectedXHighReasoningEffort()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {
+              "status": "completed",
+              "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "Erledigt" }]
+              }],
+              "usage": { "input_tokens": 20, "output_tokens": 4 }
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.CompleteChatAsync(
+            "qwen3.8-27b",
+            [new LmChatMessage("user", "Analysiere das Projekt gründlich.")],
+            [],
+            modelRole: "code",
+            reasoningEffort: "xhigh");
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        Assert.Equal("xhigh", request.RootElement.GetProperty("reasoning").GetProperty("effort").GetString());
     }
 
     [Fact]
@@ -479,6 +562,38 @@ public sealed class LmStudioClientTests
         var root = request.RootElement;
         Assert.Equal(0.2, root.GetProperty("temperature").GetDouble(), 3);
         Assert.Equal("low", root.GetProperty("reasoning").GetProperty("effort").GetString());
+    }
+
+    [Fact]
+    public async Task GptOssGeneralRoleForwardsTheSelectedMediumReasoningEffort()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {
+              "status": "completed",
+              "output": [{
+                "type": "message",
+                "content": [{ "type": "output_text", "text": "Antwort" }]
+              }],
+              "usage": { "input_tokens": 20, "output_tokens": 4 }
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.CompleteChatAsync(
+            "openai/gpt-oss-120b",
+            [new LmChatMessage("user", "Erkläre die Gleichung.")],
+            [],
+            modelRole: "general",
+            reasoningEffort: "medium");
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        Assert.Equal("medium", request.RootElement.GetProperty("reasoning").GetProperty("effort").GetString());
     }
 
     [Fact]
@@ -632,6 +747,31 @@ public sealed class LmStudioClientTests
             item.GetProperty("role").GetString() == "assistant" && item.TryGetProperty("tool_calls", out _));
         Assert.Contains(messages.EnumerateArray(), static item =>
             item.GetProperty("role").GetString() == "tool" && item.GetProperty("tool_call_id").GetString() == "call_previous");
+    }
+
+    [Fact]
+    public async Task Qwen38CompatibilityFallbackKeepsLowReasoning()
+    {
+        using var context = new TestServerContext();
+        var handler = new ResponsesCompatibilityHandler();
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+
+        _ = await client.CompleteChatAsync(
+            "qwen3.8-27b",
+            [new LmChatMessage("user", "Arbeite am Repository weiter.")],
+            [],
+            modelRole: "code");
+
+        using var request = JsonDocument.Parse(handler.RequestBodies[1]);
+        var root = request.RootElement;
+        Assert.Equal("qwen3.8-27b", root.GetProperty("model").GetString());
+        Assert.Equal("low", root.GetProperty("reasoning_effort").GetString());
+        Assert.Equal(20, root.GetProperty("top_k").GetInt32());
     }
 
     private sealed class RecordingHandler(string responseJson, int failuresBeforeSuccess = 0) : HttpMessageHandler

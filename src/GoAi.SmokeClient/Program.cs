@@ -113,7 +113,7 @@ async Task<object> RunLiveSmokeAsync()
         ["filesystem", "code"],
         respondToClientTools: true);
     EnsureToolEvent(code, ClientToolNames.FileSystemReadText, clientSide: true);
-    EnsureCompletedWithModel(code, "ud");
+    EnsureCompletedWithModel(code, "qwen3.8-27b");
 
     var embedding = await CreateAndCompleteRunAsync(
         RunMode.General,

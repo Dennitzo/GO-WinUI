@@ -8,18 +8,18 @@ public sealed record CodingModelProfile(
 
 public static class CodingModelCatalog
 {
-    public const string DeepSeekV4FlashId = "ud";
+    public const string Qwen38BId = "qwen3.8-27b";
     public const string Qwen3CoderNextId = "qwen3-coder-next";
     public const string GptOss120BId = "openai/gpt-oss-120b";
-    public const string DefaultModelId = DeepSeekV4FlashId;
+    public const string DefaultModelId = Qwen38BId;
 
     public static IReadOnlyList<CodingModelProfile> Models { get; } =
     [
         new(
-            DeepSeekV4FlashId,
-            "DeepSeek-V4-Flash-0731 · UD-IQ2_M",
+            Qwen38BId,
+            "Qwen3.8-27B · Q8_0",
             262_144,
-            "deepseek-agent"),
+            "qwen38-coder"),
         new(
             Qwen3CoderNextId,
             "Qwen3-Coder-Next · Q6_K",

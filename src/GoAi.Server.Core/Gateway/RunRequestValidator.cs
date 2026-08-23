@@ -201,6 +201,25 @@ public static class RunRequestValidator
             throw new ArgumentException(
                 "preferredCodeModelId is only valid in code mode and must name a supported coding model.");
         }
+        if (request.ReasoningEffort is { } reasoningEffort)
+        {
+            var reasoningModelId = request.Mode == RunMode.Code
+                ? request.PreferredCodeModelId
+                : request.PreferredGeneralModelId;
+            var reasoningRole = request.Mode == RunMode.Code ? "code" : "general";
+            var reasoningProfile = ModelReasoningProfiles.Resolve(reasoningModelId, reasoningRole);
+            if (string.IsNullOrWhiteSpace(reasoningModelId)
+                || reasoningEffort.Length > 16
+                || reasoningEffort.Any(char.IsControl)
+                || !reasoningProfile.Supports(reasoningEffort))
+            {
+                var supported = reasoningProfile.SupportedEfforts.Count == 0
+                    ? "keine steuerbare Stufe"
+                    : string.Join(", ", reasoningProfile.SupportedEfforts);
+                throw new ArgumentException(
+                    $"reasoningEffort '{reasoningEffort}' wird vom ausgewählten Modell nicht unterstützt ({supported}).");
+            }
+        }
         if (request.Limits?.MaximumOutputTokens is { } maximumOutputTokens
             && maximumOutputTokens is < 1 or > 65_536)
         {

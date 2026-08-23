@@ -13,6 +13,10 @@ public sealed class CodingRunTraceServiceTests
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly string[] PhysicsSmokeArguments = ["physics_solver.py", "--smoke"];
     private static readonly string[] DotNetTestArguments = ["test"];
+    private static readonly string[] LeanForbiddenConstructs = ["sorry"];
+    private static readonly string[] FindFilePatterns = ["*.cs", "*.xaml", "*.md", "*.json", "*.lean"];
+    private static readonly string[] TraceSearchQueries = ["Coding-Ablauf", "fs.list"];
+    private static readonly string[] TraceSearchGlobs = ["*.cs", "*.js", "*.xaml"];
 
     [Fact]
     public async Task TraceIsPersistedAndReloadedByAssistantMessage()
@@ -152,6 +156,96 @@ public sealed class CodingRunTraceServiceTests
     }
 
     [Fact]
+    public void TraceExtractsReadableTargetsForReadOnlyFileTools()
+    {
+        var listRoot = Proposal(
+            ClientToolNames.FileSystemList,
+            ToolRiskClass.ReadOnly,
+            new { path = "." });
+        var listDirectory = Proposal(
+            ClientToolNames.FileSystemList,
+            ToolRiskClass.ReadOnly,
+            new { directory = "src/GoWinUI.App" });
+        var readText = Proposal(
+            ClientToolNames.FileSystemReadText,
+            ToolRiskClass.ReadOnly,
+            new { path = "src/App.xaml.cs", startLine = 20, endLine = 40 });
+        var legacyReadFile = Proposal(
+            "fs.readFile",
+            ToolRiskClass.ReadOnly,
+            new { path = "README.md" });
+        var readMany = Proposal(
+            ClientToolNames.FileSystemReadMany,
+            ToolRiskClass.ReadOnly,
+            new
+            {
+                items = new object[]
+                {
+                    new { path = "src/App.xaml.cs", startLine = 20, endLine = 40 },
+                    new { path = "src/MainWindow.xaml" },
+                    new { path = "tests/AppTests.cs", startLine = 5 },
+                    new { path = "README.md" },
+                    new { path = "docs/Architecture.md" },
+                },
+            });
+        var findFiles = Proposal(
+            ClientToolNames.FileSystemFindFiles,
+            ToolRiskClass.ReadOnly,
+            new { path = "src", patterns = FindFilePatterns });
+        var search = Proposal(
+            ClientToolNames.FileSystemSearch,
+            ToolRiskClass.ReadOnly,
+            new
+            {
+                path = ".",
+                queries = TraceSearchQueries,
+                includeGlobs = TraceSearchGlobs,
+            });
+
+        Assert.Equal(".", CodingRunTraceService.ExtractTarget(listRoot));
+        Assert.Equal("src/GoWinUI.App", CodingRunTraceService.ExtractTarget(listDirectory));
+        Assert.Equal("src/App.xaml.cs:20-40", CodingRunTraceService.ExtractTarget(readText));
+        Assert.Equal("README.md", CodingRunTraceService.ExtractTarget(legacyReadFile));
+        var readManyTarget = CodingRunTraceService.ExtractTarget(readMany);
+        Assert.NotNull(readManyTarget);
+        Assert.Contains("src/App.xaml.cs:20-40", readManyTarget, StringComparison.Ordinal);
+        Assert.Contains("src/MainWindow.xaml", readManyTarget, StringComparison.Ordinal);
+        Assert.Contains("(+1 weitere)", readManyTarget, StringComparison.Ordinal);
+        var findTarget = CodingRunTraceService.ExtractTarget(findFiles);
+        Assert.NotNull(findTarget);
+        Assert.Contains("src: *.cs, *.xaml, *.md, *.json", findTarget, StringComparison.Ordinal);
+        Assert.Contains("(+1 weitere)", findTarget, StringComparison.Ordinal);
+        var searchTarget = CodingRunTraceService.ExtractTarget(search);
+        Assert.NotNull(searchTarget);
+        Assert.Contains(". · Suche: Coding-Ablauf, fs.list", searchTarget, StringComparison.Ordinal);
+        Assert.Contains("Include: *.cs, *.js, *.xaml", searchTarget, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TraceExtractsCompactTargetsForGenericArrayBasedTools()
+    {
+        var proposal = Proposal(
+            "custom.batchInspect",
+            ToolRiskClass.ReadOnly,
+            new
+            {
+                items = new object[]
+                {
+                    new { path = "src/App.xaml.cs" },
+                    new { target = "tests/AppTests.cs" },
+                    new { query = "SQLite locked" },
+                    new { documentName = "Planung.pdf" },
+                    new { fileName = "README.md" },
+                },
+            });
+
+        var target = CodingRunTraceService.ExtractTarget(proposal);
+
+        Assert.NotNull(target);
+        Assert.Contains("items: src/App.xaml.cs, tests/AppTests.cs, SQLite locked, Planung.pdf (+1 weitere)", target, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task PowerShellConsoleIsPersistedAndReloadedWithOutput()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -228,6 +322,69 @@ public sealed class CodingRunTraceServiceTests
         Assert.Equal("dotnet test", console.Command);
         Assert.Equal("test", console.Purpose);
         Assert.Equal("running", console.Status);
+    }
+
+    [Fact]
+    public void LeanProofCreatesAPowerShellConsoleWithDiagnostics()
+    {
+        var proposal = Proposal(
+            ClientToolNames.LeanProof,
+            ToolRiskClass.Process,
+            new
+            {
+                operation = "verify",
+                path = "proofs/cantor/formal/proof.lean",
+                theoremName = "PhyMa.Cantor.cantor_no_surj",
+                timeoutSeconds = 120,
+            });
+        var result = new ClientToolResult(
+            proposal.ProposalId,
+            "completed",
+            JsonSerializer.SerializeToElement(new
+            {
+                operation = "verify",
+                available = true,
+                passed = false,
+                timedOut = false,
+                cancelled = false,
+                leanVersion = "Lean 4.22.0",
+                lakeVersion = "Lake 5.0.0",
+                project = "PhyMa",
+                path = "proofs/cantor/formal/proof.lean",
+                theoremName = "PhyMa.Cantor.cantor_no_surj",
+                exitCode = 2,
+                diagnostics = new[]
+                {
+                    new
+                    {
+                        severity = "error",
+                        file = "proofs/cantor/formal/proof.lean",
+                        line = 12,
+                        column = 7,
+                        message = "unsolved goals",
+                    },
+                },
+                axioms = Array.Empty<string>(),
+                forbiddenConstructs = LeanForbiddenConstructs,
+                durationMilliseconds = 913,
+                message = "Der Lean-Quelltext enthÃ¤lt unzulÃ¤ssige Beweiskonstrukte.",
+            }),
+            null,
+            null);
+
+        var running = CodingRunTraceService.CreateProcessConsole(proposal);
+        var completed = CodingRunTraceService.CreateProcessConsole(proposal, result);
+
+        Assert.NotNull(running);
+        Assert.Contains("proof.lean verify proofs/cantor/formal/proof.lean", running.Command, StringComparison.Ordinal);
+        Assert.Contains("-TheoremName PhyMa.Cantor.cantor_no_surj", running.Command, StringComparison.Ordinal);
+        Assert.Equal("verify", running.Purpose);
+        Assert.NotNull(completed);
+        Assert.Equal("failed", completed.Status);
+        Assert.Equal(2, completed.ExitCode);
+        Assert.Contains("Lean 4.22.0", completed.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("unsolved goals", completed.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("Verbotene Konstrukte: sorry", completed.StandardError, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -335,6 +492,7 @@ public sealed class CodingRunTraceServiceTests
         Assert.DoesNotContain("elements.messageList.append(currentCodingPanels)", app, StringComparison.Ordinal);
         Assert.Contains("id=\"coding-workspace\"", html, StringComparison.Ordinal);
         Assert.Contains("id=\"coding-workspace-toggle\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"coding-workspace-maximize\"", html, StringComparison.Ordinal);
         Assert.Contains("id=\"coding-workspace-close\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("body.classList.add(\"message-body--coding\")", app, StringComparison.Ordinal);
         Assert.Contains("Coding-Ablauf", app, StringComparison.Ordinal);
@@ -344,6 +502,9 @@ public sealed class CodingRunTraceServiceTests
         Assert.Contains("Coding-Modell wird geladen", app, StringComparison.Ordinal);
         Assert.Contains("list.scrollTop = list.scrollHeight", app, StringComparison.Ordinal);
         Assert.Contains("function attachCodingPanelMaximize(panel, header, label, panelKind)", app, StringComparison.Ordinal);
+        Assert.Contains("function setCodingWorkspaceMaximized(maximized)", app, StringComparison.Ordinal);
+        Assert.Contains("function captureMaximizedCodingWorkspaceScroll()", app, StringComparison.Ordinal);
+        Assert.Contains("elements.codingWorkspaceMaximize.addEventListener(\"click\"", app, StringComparison.Ordinal);
         Assert.Contains("codingPanelMaximizeIcon", app, StringComparison.Ordinal);
         Assert.Contains("state.maximizedCodingPanelKind === panelKind", app, StringComparison.Ordinal);
         Assert.Contains("captureMaximizedCodingPanelScroll();", app, StringComparison.Ordinal);
@@ -365,6 +526,9 @@ public sealed class CodingRunTraceServiceTests
         Assert.Contains("grid-template-columns: repeat(2, minmax(0, 1fr))", styles, StringComparison.Ordinal);
         Assert.Contains(".message-coding-panels > .message-code-diff { grid-column: 1 / -1; }", styles, StringComparison.Ordinal);
         Assert.Contains(".coding-panel--maximized", styles, StringComparison.Ordinal);
+        Assert.Contains(".coding-workspace--maximized", styles, StringComparison.Ordinal);
+        Assert.Contains("body.coding-workspace-maximized", styles, StringComparison.Ordinal);
+        Assert.Contains(".coding-workspace__maximize", styles, StringComparison.Ordinal);
         Assert.Contains(".coding-workspace", styles, StringComparison.Ordinal);
         Assert.Contains("opacity: 1; pointer-events: auto", styles, StringComparison.Ordinal);
 

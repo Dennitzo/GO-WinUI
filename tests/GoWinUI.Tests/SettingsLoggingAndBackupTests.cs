@@ -52,7 +52,7 @@ public sealed class SettingsLoggingAndBackupTests
         });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(9, restored.Version);
+        Assert.Equal(11, restored.Version);
         Assert.Equal("#8FBD45", restored.AccentColor);
         Assert.Equal("#8FBD45", restored.BackgroundColor);
     }
@@ -69,7 +69,7 @@ public sealed class SettingsLoggingAndBackupTests
         });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(9, restored.Version);
+        Assert.Equal(11, restored.Version);
         Assert.Equal("openai/gpt-oss-120b", restored.SelectedModel);
     }
 
@@ -94,8 +94,34 @@ public sealed class SettingsLoggingAndBackupTests
         await settings.SaveAsync(new AppSettings { Version = 5 });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(9, restored.Version);
+        Assert.Equal(11, restored.Version);
         Assert.False(restored.IsAiConnectionEnabled);
+    }
+
+    [Fact]
+    public async Task VersionNineSettingsMigrateCodingModelToQwen38Default()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+
+        await settings.SaveAsync(new AppSettings { Version = 9, SelectedCodingModel = "legacy-coding-model" });
+
+        var restored = await settings.LoadAsync();
+        Assert.Equal(11, restored.Version);
+        Assert.Equal(AppSettings.DefaultSelectedCodingModel, restored.SelectedCodingModel);
+    }
+
+    [Fact]
+    public async Task VersionTenReasoningMigratesToModelAutomaticAndCurrentValuesPersist()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+
+        await settings.SaveAsync(new AppSettings { Version = 10, ReasoningEffort = "high" });
+        Assert.Equal("auto", (await settings.LoadAsync()).ReasoningEffort);
+
+        await settings.SaveAsync(new AppSettings { Version = 11, ReasoningEffort = "xhigh" });
+        Assert.Equal("xhigh", (await settings.LoadAsync()).ReasoningEffort);
     }
 
     [Fact]

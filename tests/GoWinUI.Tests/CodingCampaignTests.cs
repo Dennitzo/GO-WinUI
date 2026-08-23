@@ -1348,6 +1348,50 @@ public sealed class CodingCampaignTests
     }
 
     [Fact]
+    public async Task ValidationGatedSolutionsGeneratePdfBeforeValidation()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "gated-pdf-workspace")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(workspace, "foundation.txt"), "ready");
+        var solutions = Directory.CreateDirectory(Path.Combine(workspace, "solutions"));
+        var source = Path.Combine(solutions.FullName, "candidate.md");
+        await File.WriteAllTextAsync(
+            source,
+            """
+            # Validierte Lösung
+
+            Für die geometrische Summe gilt
+
+            $$
+            \sum_{k=0}^{n} q^k = \frac{1-q^{n+1}}{1-q}.
+            $$
+            """);
+        var chats = environment.Get<IChatRepository>();
+        var session = await CreateCodingSessionAsync(chats, workspace, "PDF-Workflow");
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        using var exporter = new CodingSolutionPdfExporter(NullLogger<CodingSolutionPdfExporter>.Instance);
+        var definition = new FakeCampaignDefinition
+        {
+            PublishSolutionsOnlyAfterValidation = true,
+            PublishableSolutionDocuments = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "solutions/candidate.md",
+            },
+            RequiredPdfRelativePath = "solutions/candidate.pdf",
+        };
+        using var service = CreateService(environment, chats, settings, new FakeCampaignAgent(chats), definition, exporter);
+
+        await service.SelectAsync(session.Id, definition.Descriptor.Id);
+
+        var pdf = Path.ChangeExtension(source, ".pdf");
+        Assert.True(File.Exists(pdf));
+        Assert.True(new FileInfo(pdf).Length >= 1024);
+        Assert.Single(
+            await chats.ListMessagesAsync(session.Id),
+            static message => message.ToolExecution?.Tool == "coding.workflow.solution");
+    }
+
+    [Fact]
     public async Task SolutionPdfExporterRendersEscapedKatexAndAtomicallyUpdatesExistingPdf()
     {
         var workspace = CreateTemporaryWorkspace();
@@ -1389,14 +1433,16 @@ public sealed class CodingCampaignTests
         IChatRepository chats,
         SettingsCoordinator settings,
         ICodingCampaignAgent agent,
-        ICodingCampaignDefinition definition) => new(
+        ICodingCampaignDefinition definition,
+        CodingSolutionPdfExporter? solutionPdfExporter = null) => new(
             environment.Get<ICodingCampaignRepository>(),
             chats,
             environment.Get<IChatArtifactRepository>(),
             new CodingCampaignCatalog([definition]),
             agent,
             settings,
-            NullLogger<CodingCampaignService>.Instance);
+            NullLogger<CodingCampaignService>.Instance,
+            solutionPdfExporter);
 
     private static async Task<ChatSession> CreateCodingSessionAsync(
         IChatRepository chats,
@@ -1599,6 +1645,8 @@ public sealed class CodingCampaignTests
             get => Volatile.Read(ref _promptExceptionsRemaining);
             init => _promptExceptionsRemaining = value;
         }
+        public IReadOnlySet<string>? PublishableSolutionDocuments { get; init; }
+        public string? RequiredPdfRelativePath { get; init; }
         public bool HasFoundation(string workspacePath) => File.Exists(Path.Combine(workspacePath, "foundation.txt"));
         public int ReadIteration(string workspacePath) { _ = workspacePath; return 0; }
         public string GetChallenge(int iteration) => "Iteration " + iteration;
@@ -1645,7 +1693,26 @@ public sealed class CodingCampaignTests
                         []));
                 }
             }
+            if (!string.IsNullOrWhiteSpace(RequiredPdfRelativePath))
+            {
+                var pdfPath = Path.Combine(
+                    workspacePath,
+                    RequiredPdfRelativePath.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(pdfPath) || new FileInfo(pdfPath).Length < 1024)
+                {
+                    return Task.FromResult(new CodingCampaignValidationResult(
+                        false,
+                        [$"Erwartete LÃ¶sungs-PDF fehlt oder ist leer: {RequiredPdfRelativePath}."],
+                        []));
+                }
+            }
             return Task.FromResult(CodingCampaignValidationResult.Success);
+        }
+
+        public IReadOnlySet<string>? GetPublishableSolutionDocuments(string workspacePath)
+        {
+            _ = workspacePath;
+            return PublishableSolutionDocuments;
         }
     }
 }

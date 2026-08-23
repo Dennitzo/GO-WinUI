@@ -92,6 +92,7 @@ public partial class App : Application
                 services.AddSingleton<CodingProofVerifier>();
                 services.AddSingleton<ICodingCampaignDefinition, EinsteinCodingCampaignDefinition>();
                 services.AddSingleton<ICodingCampaignDefinition, PhyMaCodingCampaignDefinition>();
+                services.AddSingleton<ICodingCampaignDefinition, PromptDrivenCodingCampaignDefinition>();
                 services.AddSingleton<ICodingCampaignDefinition, TheoreticalPhysicsCodingCampaignDefinition>();
                 services.AddSingleton<ICodingCampaignDefinition, TgaVentilationCodingCampaignDefinition>();
                 services.AddSingleton<CodingCampaignCatalog>();

@@ -363,7 +363,7 @@ tr:last-child td { border-bottom: 0; }
 .coding-workspace { width: min(820px, 100%); margin: 0 auto 8px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border)); border-radius: 14px; background: color-mix(in srgb, var(--accent) 7%, var(--surface-raised)); box-shadow: 0 6px 20px color-mix(in srgb, var(--background-accent) 7%, transparent); }
 .coding-workspace[hidden] { display: none; }
 .coding-workspace__header { display: flex; align-items: stretch; min-height: 40px; }
-.coding-workspace__toggle { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; padding: 7px 10px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.coding-workspace__toggle { order: 0; display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; padding: 7px 10px; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .coding-workspace__toggle:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .coding-workspace__toggle > svg:first-child { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .coding-workspace__status { min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
@@ -371,10 +371,23 @@ tr:last-child td { border-bottom: 0; }
 .coding-workspace__status[data-status="failed"] { color: var(--danger); }
 .coding-workspace__chevron { width: 17px; height: 17px; margin-left: auto; fill: none; stroke: var(--muted); stroke-width: 1.8; transition: transform .16s ease; }
 .coding-workspace.is-open .coding-workspace__chevron { transform: rotate(180deg); }
-.coding-workspace__close { flex: 0 0 38px; width: 38px; border: 0; border-left: 1px solid color-mix(in srgb, var(--border) 72%, transparent); background: transparent; color: var(--muted); cursor: pointer; font: 20px/1 "Segoe UI", sans-serif; }
+.coding-workspace__maximize { order: 1; display: grid; flex: 0 0 38px; place-items: center; width: 38px; border: 0; border-left: 1px solid color-mix(in srgb, var(--border) 72%, transparent); background: transparent; color: var(--muted); cursor: pointer; }
+.coding-workspace__maximize:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--text); }
+.coding-workspace__maximize:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent); outline-offset: -3px; }
+.coding-workspace__maximize svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.coding-workspace__close { order: 2; flex: 0 0 38px; width: 38px; border: 0; border-left: 1px solid color-mix(in srgb, var(--border) 72%, transparent); background: transparent; color: var(--muted); cursor: pointer; font: 20px/1 "Segoe UI", sans-serif; }
 .coding-workspace__close:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
 .coding-workspace__content { max-height: min(58vh, 680px); padding: 10px; overflow: auto; border-top: 1px solid var(--border); }
 .coding-workspace__content[hidden] { display: none; }
+body.coding-workspace-maximized { overflow: hidden; }
+.coding-workspace--maximized { position: fixed !important; inset: 12px !important; z-index: 1000; display: flex !important; flex-direction: column; width: auto !important; max-width: none !important; height: auto !important; max-height: none !important; margin: 0 !important; overflow: hidden !important; border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); background: var(--surface-solid); box-shadow: 0 24px 80px rgb(0 0 0 / 48%); }
+.coding-workspace--maximized .coding-workspace__header { flex: 0 0 auto; background: var(--surface-solid); }
+.coding-workspace--maximized .coding-workspace__content { flex: 1 1 auto; max-height: none; overflow: auto; scrollbar-gutter: stable; }
+.coding-workspace--maximized .message-coding-panels { --coding-panel-viewport-height: calc((100vh - 218px) / 2); align-items: stretch; }
+.coding-workspace--maximized .message-coding-trace,
+.coding-workspace--maximized .message-coding-powershell,
+.coding-workspace--maximized .message-code-diff { min-height: 0; }
+.coding-workspace--maximized .message-code-diff__content { max-height: calc((100vh - 218px) / 2); }
 .live-caption { width: min(820px, 100%); margin: 0 auto 8px; padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border)); border-radius: 13px; background: color-mix(in srgb, var(--accent) 8%, var(--surface-raised)); box-shadow: 0 6px 20px color-mix(in srgb, var(--background-accent) 8%, transparent); }
 .live-caption__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .live-caption__header > div { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
@@ -443,6 +456,8 @@ tr:last-child td { border-bottom: 0; }
 .tools-menu-anchor { position: relative; }
 .tools-menu { position: absolute; left: 0; bottom: calc(100% + 10px); z-index: 20; width: min(430px, calc(100vw - 44px)); padding: 9px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface-solid); box-shadow: var(--shadow); }
 .tools-menu__title { padding: 7px 9px 8px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.reasoning-model { padding: 0 9px 6px; color: var(--muted); font-size: 11px; line-height: 1.35; }
+.reasoning-options:empty::before { display: block; padding: 7px 9px 9px; color: var(--muted); content: "Dieses Modell besitzt keine steuerbare Reasoning-Stufe."; font-size: 12px; }
 .reasoning-option, .service-option { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 36px; padding: 7px 9px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
 .reasoning-option:hover, .service-option:hover { background: var(--surface-hover); }
 .service-option.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }

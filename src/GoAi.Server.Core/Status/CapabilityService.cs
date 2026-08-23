@@ -17,11 +17,11 @@ public sealed class CapabilityService
         GoAiProtocol.Version,
         typeof(CapabilityService).Assembly.GetName().Version?.ToString() ?? "1.0.0",
         [
-            new ModelCapability(_options.GeneralModelId, "general", _options.GeneralContextLength, true, false, false),
+            CreateModelCapability(_options.GeneralModelId, "general", _options.GeneralContextLength, true, false),
             .. CodingModelCatalog.Models.Select(static profile =>
-                new ModelCapability(profile.Id, "code", profile.ContextLength, true, false, false)),
-            new ModelCapability(_options.VisionModelId, "vision", 65536, true, true, false),
-            new ModelCapability(_options.EmbeddingModelId, "embedding", 8192, false, false, false),
+                CreateModelCapability(profile.Id, "code", profile.ContextLength, true, false)),
+            CreateModelCapability(_options.VisionModelId, "vision", 65536, true, true),
+            CreateModelCapability(_options.EmbeddingModelId, "embedding", 8192, false, false),
         ],
         [
             "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
@@ -71,4 +71,23 @@ public sealed class CapabilityService
             1_000,
             10_000,
             true));
+
+    private static ModelCapability CreateModelCapability(
+        string modelId,
+        string role,
+        int contextTokens,
+        bool supportsTools,
+        bool supportsVision)
+    {
+        var reasoning = ModelReasoningProfiles.Resolve(modelId, role);
+        return new ModelCapability(
+            modelId,
+            role,
+            contextTokens,
+            supportsTools,
+            supportsVision,
+            false,
+            reasoning.SupportedEfforts,
+            reasoning.DefaultEffort);
+    }
 }

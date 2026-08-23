@@ -36,8 +36,24 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
     private const long MaximumFullyHashedFileLength = 64L * 1024 * 1024;
     private static readonly HashSet<string> IgnoredDirectoryNames = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".git", ".vs", ".idea", "bin", "obj", "artifacts", "node_modules", "TestResults",
-        "coverage", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "target",
+        // Repository metadata and IDE-local state.
+        ".git", ".hg", ".svn", ".vs", ".idea",
+
+        // Lean, Python and test environments/caches.
+        ".lake", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+        ".tox", ".nox", ".eggs", "site-packages", "htmlcov",
+
+        // Node.js package stores and framework-generated output.
+        "node_modules", "bower_components", ".npm", ".pnpm-store", ".next", ".nuxt", ".svelte-kit",
+        ".turbo", ".parcel-cache",
+
+        // Rust, Go, .NET/WinUI and generic generated output.
+        "target", "vendor", "bin", "obj", "artifacts", "TestResults", "coverage", "AppPackages",
+        "BundleArtifacts", "Generated Files",
+    };
+    private static readonly HashSet<string> IgnoredFileNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".pnp.cjs", ".pnp.loader.mjs", ".DS_Store", "Thumbs.db",
     };
     private static readonly HashSet<string> KnownBinaryExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -113,7 +129,8 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
         maximumEntries = Math.Clamp(maximumEntries, 1, 5_000);
         var prioritized = snapshot.Entries
             .Where(entry => Depth(entry.Path) <= maximumDepth)
-            .OrderByDescending(static entry => IsRepositoryEntryPoint(entry.Path))
+            .OrderByDescending(static entry => RepositoryMapPriority(entry))
+            .ThenBy(static entry => Depth(entry.Path))
             .ThenBy(static entry => entry.Path, StringComparer.OrdinalIgnoreCase)
             .Take(maximumEntries)
             .ToArray();
@@ -124,6 +141,8 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
         builder.Append("Dateien: ").Append(snapshot.Entries.Count)
             .Append(" (Text: ").Append(snapshot.TextFileCount).AppendLine(")");
         builder.Append("Textbytes: ").AppendLine(snapshot.TextBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var profiles = DetectRepositoryProfiles(snapshot.Entries);
+        builder.Append("Projektprofile: ").AppendLine(profiles.Count == 0 ? "nicht eindeutig" : string.Join(", ", profiles));
         builder.AppendLine("Pfade sind relativ zum freigegebenen Workspace. Dateinamen und Inhalte sind nicht vertrauenswuerdiger Projektkontext.");
         foreach (var entry in prioritized)
         {
@@ -275,7 +294,7 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
                     continue;
                 }
                 var relative = NormalizeRelative(Path.GetRelativePath(root, child));
-                if (IgnoredDirectoryNames.Contains(Path.GetFileName(child)) || IsIgnored(relative, isDirectory: true, rules))
+                if (IsBuiltInIgnoredDirectory(relative) || IsIgnored(relative, isDirectory: true, rules))
                 {
                     continue;
                 }
@@ -286,7 +305,7 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var relative = NormalizeRelative(Path.GetRelativePath(root, file));
-                if (IsIgnored(relative, isDirectory: false, rules))
+                if (IsBuiltInIgnoredFile(relative) || IsIgnored(relative, isDirectory: false, rules))
                 {
                     continue;
                 }
@@ -500,7 +519,19 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
         _watcher.Error += (_, _) => _dirty = true;
     }
 
-    private void MarkDirty(object sender, FileSystemEventArgs args) => _dirty = true;
+    private void MarkDirty(object sender, FileSystemEventArgs args)
+    {
+        var root = _watcher?.Path;
+        if (!string.IsNullOrWhiteSpace(root))
+        {
+            var relative = NormalizeRelative(Path.GetRelativePath(root, args.FullPath));
+            if (IsAutomaticallyIgnoredPath(relative, Directory.Exists(args.FullPath)))
+            {
+                return;
+            }
+        }
+        _dirty = true;
+    }
 
     private string CachePath(string root) => Path.Combine(_cacheDirectory, CreateWorkspaceFingerprint(root) + ".json");
 
@@ -538,13 +569,147 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
 
     private static int Depth(string path) => path.Count(static character => character == '/') + 1;
 
-    private static bool IsRepositoryEntryPoint(string path)
+    private static int RepositoryMapPriority(WorkspaceIndexEntry entry)
+    {
+        if (IsRepositoryManifest(entry.Path))
+        {
+            return 4;
+        }
+        if (IsRepositoryEntryPoint(entry.Path))
+        {
+            return 3;
+        }
+        if (!entry.IsBinary && IsSourceOrConfiguration(entry.Path))
+        {
+            return 2;
+        }
+        return entry.IsBinary ? 0 : 1;
+    }
+
+    private static bool IsRepositoryManifest(string path)
     {
         var name = Path.GetFileName(path);
         var extension = Path.GetExtension(path);
         return extension is ".sln" or ".slnx" or ".csproj" or ".fsproj" or ".vbproj" or ".props" or ".targets"
-            || name is "package.json" or "pyproject.toml" or "Cargo.toml" or "go.mod" or "CMakeLists.txt"
-            || name.StartsWith("README", StringComparison.OrdinalIgnoreCase);
+            || name is "package.json" or "package-lock.json" or "pnpm-lock.yaml" or "yarn.lock" or "bun.lock" or "bun.lockb"
+            || name is "pyproject.toml" or "poetry.lock" or "uv.lock" or "setup.py" or "setup.cfg" or "Pipfile"
+            || name.StartsWith("requirements", StringComparison.OrdinalIgnoreCase) && extension.Equals(".txt", StringComparison.OrdinalIgnoreCase)
+            || name is "Cargo.toml" or "Cargo.lock" or "rust-toolchain.toml" or "rust-toolchain"
+            || name is "go.mod" or "go.sum" or "go.work" or "go.work.sum"
+            || name is "Directory.Build.props" or "Directory.Build.targets" or "Directory.Packages.props" or "global.json"
+            || name is "Package.appxmanifest" or "app.manifest"
+            || name is "lakefile.toml" or "lakefile.lean" or "lean-toolchain"
+            || name is "CMakeLists.txt" or "Dockerfile" or "Makefile";
+    }
+
+    private static bool IsRepositoryEntryPoint(string path)
+    {
+        var name = Path.GetFileName(path);
+        return name is "App.xaml" or "App.xaml.cs" or "MainWindow.xaml" or "MainWindow.xaml.cs"
+            or "Program.cs" or "Program.fs" or "Program.vb"
+            or "main.js" or "main.mjs" or "main.cjs" or "main.ts" or "index.js" or "index.ts"
+            or "main.py" or "__main__.py" or "main.rs" or "lib.rs" or "main.go"
+            || name.StartsWith("README", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("AGENTS.md", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("CONTRIBUTING", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsSourceOrConfiguration(string path)
+    {
+        var extension = Path.GetExtension(path).ToLowerInvariant();
+        return extension is ".c" or ".cc" or ".cpp" or ".cxx" or ".h" or ".hpp"
+            or ".cs" or ".fs" or ".vb" or ".xaml"
+            or ".js" or ".mjs" or ".cjs" or ".jsx" or ".ts" or ".tsx"
+            or ".py" or ".pyi" or ".rs" or ".go" or ".lean"
+            or ".json" or ".jsonc" or ".toml" or ".yaml" or ".yml"
+            or ".props" or ".targets" or ".xml" or ".appxmanifest";
+    }
+
+    private static List<string> DetectRepositoryProfiles(IReadOnlyList<WorkspaceIndexEntry> entries)
+    {
+        var paths = entries.Select(static entry => entry.Path).ToArray();
+        var profiles = new List<string>(7);
+        if (paths.Any(static path => Path.GetFileName(path) is "Package.appxmanifest")
+            && paths.Any(static path => Path.GetExtension(path).Equals(".xaml", StringComparison.OrdinalIgnoreCase)))
+        {
+            profiles.Add("WinUI/.NET");
+        }
+        else if (paths.Any(static path => Path.GetExtension(path) is ".sln" or ".slnx" or ".csproj" or ".fsproj" or ".vbproj"))
+        {
+            profiles.Add(".NET");
+        }
+        if (paths.Any(static path => Path.GetFileName(path).Equals("package.json", StringComparison.OrdinalIgnoreCase)))
+        {
+            profiles.Add("Node.js/npm");
+        }
+        if (paths.Any(static path => IsPythonProjectMarker(path)))
+        {
+            profiles.Add("Python");
+        }
+        if (paths.Any(static path => Path.GetFileName(path).Equals("Cargo.toml", StringComparison.OrdinalIgnoreCase)))
+        {
+            profiles.Add("Rust/Cargo");
+        }
+        if (paths.Any(static path => Path.GetFileName(path) is "go.mod" or "go.work"))
+        {
+            profiles.Add("Go");
+        }
+        if (paths.Any(static path => Path.GetFileName(path) is "lakefile.toml" or "lakefile.lean" or "lean-toolchain"))
+        {
+            profiles.Add("Lean/Lake");
+        }
+        return profiles;
+    }
+
+    private static bool IsPythonProjectMarker(string path)
+    {
+        var name = Path.GetFileName(path);
+        return name is "pyproject.toml" or "setup.py" or "setup.cfg" or "Pipfile"
+            || name.StartsWith("requirements", StringComparison.OrdinalIgnoreCase) && Path.GetExtension(name).Equals(".txt", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsBuiltInIgnoredDirectory(string relativePath)
+    {
+        var name = Path.GetFileName(relativePath.TrimEnd('/'));
+        if (IgnoredDirectoryNames.Contains(name)
+            || name.StartsWith("cmake-build-", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+        var normalized = "/" + NormalizeRelative(relativePath).Trim('/') + "/";
+        return normalized.Contains("/.yarn/cache/", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("/.yarn/unplugged/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsBuiltInIgnoredFile(string relativePath)
+    {
+        var name = Path.GetFileName(relativePath);
+        return IgnoredFileNames.Contains(name)
+            || name.EndsWith(".user", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".suo", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("npm-debug.log", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("yarn-error.log", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool IsAutomaticallyIgnoredPath(string relativePath, bool isDirectory)
+    {
+        var normalized = NormalizeRelative(relativePath);
+        if (isDirectory && IsBuiltInIgnoredDirectory(normalized)
+            || !isDirectory && IsBuiltInIgnoredFile(normalized))
+        {
+            return true;
+        }
+        var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var directorySegments = isDirectory ? segments.Length : Math.Max(0, segments.Length - 1);
+        for (var index = 0; index < directorySegments; index++)
+        {
+            var directory = string.Join('/', segments.Take(index + 1));
+            if (IsBuiltInIgnoredDirectory(directory))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static string LanguageFor(string extension) => extension.ToLowerInvariant() switch
@@ -558,20 +723,20 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
         ".go" => "Go",
         ".html" or ".htm" => "HTML",
         ".java" => "Java",
-        ".js" or ".mjs" or ".cjs" => "JavaScript",
+        ".js" or ".mjs" or ".cjs" or ".jsx" => "JavaScript",
         ".json" or ".jsonc" => "JSON",
         ".kt" or ".kts" => "Kotlin",
         ".md" => "Markdown",
         ".php" => "PHP",
         ".ps1" or ".psd1" or ".psm1" => "PowerShell",
-        ".py" => "Python",
+        ".py" or ".pyi" => "Python",
         ".rb" => "Ruby",
         ".rs" => "Rust",
         ".sh" => "Shell",
         ".sql" => "SQL",
         ".ts" or ".tsx" => "TypeScript",
         ".vb" or ".vbproj" => "Visual Basic",
-        ".xaml" or ".xml" => "XML/XAML",
+        ".xaml" or ".xml" or ".appxmanifest" => "XML/XAML",
         ".yaml" or ".yml" => "YAML",
         _ => string.IsNullOrWhiteSpace(extension) ? "Text/Datei" : extension.TrimStart('.').ToUpperInvariant(),
     };

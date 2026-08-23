@@ -60,7 +60,9 @@ public sealed record LmChatResult(
     string? Content,
     IReadOnlyList<LmToolCall> ToolCalls,
     int InputTokens,
-    int OutputTokens);
+    int OutputTokens,
+    bool HadReasoning = false,
+    int ReasoningTokens = 0);
 
 public sealed class LmStudioContextLengthException(
     string modelId,

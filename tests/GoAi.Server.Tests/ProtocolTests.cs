@@ -65,6 +65,24 @@ public sealed class ProtocolTests
     }
 
     [Fact]
+    public void CapabilitiesAdvertiseTheRealReasoningLevelsPerModel()
+    {
+        var snapshot = new CapabilityService(Options.Create(new GoAiServerOptions())).GetSnapshot();
+
+        var general = Assert.Single(snapshot.Models, static model => model.Role == "general");
+        Assert.Equal(["low", "medium", "high"], general.ReasoningEfforts);
+        Assert.Equal("low", general.DefaultReasoningEffort);
+
+        var qwen38 = Assert.Single(snapshot.Models, static model => model.Id == CodingModelCatalog.Qwen38BId);
+        Assert.Equal(["low", "medium", "xhigh"], qwen38.ReasoningEfforts);
+        Assert.Equal("low", qwen38.DefaultReasoningEffort);
+
+        var qwenCoder = Assert.Single(snapshot.Models, static model => model.Id == CodingModelCatalog.Qwen3CoderNextId);
+        Assert.Empty(qwenCoder.ReasoningEfforts!);
+        Assert.Null(qwenCoder.DefaultReasoningEffort);
+    }
+
+    [Fact]
     public void UnknownContractPropertiesAreRejected()
     {
         const string json = """

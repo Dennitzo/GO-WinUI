@@ -15,7 +15,7 @@ den aktuellen beziehungsweise letzten Lauf.
   -Continuous
 ```
 
-Als Coding-Modell sind `ud` (DeepSeek V4 Flash), `qwen3-coder-next` und
+Als Coding-Modell sind `qwen3.8-27b` (Qwen3.8-27B Q8_0), `qwen3-coder-next` und
 `openai/gpt-oss-120b` zulässig. GO verwendet für alle drei denselben
 Workspace-, Tool-, Diff- und Verifikationsvertrag.
 

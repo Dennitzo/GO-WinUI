@@ -12,6 +12,9 @@
     conversationRefreshPending: false,
     codingWorkspaceOpen: false,
     codingWorkspaceSessionId: null,
+    codingWorkspaceMaximized: false,
+    codingWorkspaceMaximizedScrollTop: 0,
+    codingWorkspaceMaximizedScrollLeft: 0,
     assistantMode: "general",
     workflowOverlayMode: "workflow",
     selectedCampaignDefinitionId: null,
@@ -25,6 +28,7 @@
     pendingWorkflowTitle: null,
     isRunning: false,
     model: null,
+    reasoningProfiles: { general: null, code: null },
     contextUsed: 0,
     contextLimit: 8192,
     contextWasTruncated: false,
@@ -149,6 +153,8 @@
     send: byId("send"),
     stop: byId("stop"),
     reasoning: byId("reasoning"),
+    reasoningModel: byId("reasoning-model"),
+    reasoningOptions: byId("reasoning-options"),
     toolsButton: byId("tools-button"),
     toolsMenu: byId("tools-menu"),
     workspaceButton: byId("workspace-button"),
@@ -163,6 +169,7 @@
     codingWorkspaceToggle: byId("coding-workspace-toggle"),
     codingWorkspaceStatus: byId("coding-workspace-status"),
     codingWorkspaceClose: byId("coding-workspace-close"),
+    codingWorkspaceMaximize: byId("coding-workspace-maximize"),
     codingWorkspaceContent: byId("coding-workspace-content"),
     liveCaption: byId("live-caption"),
     liveCaptionTitle: byId("live-caption-title"),
@@ -847,6 +854,12 @@
     state.maximizedCodingPanelScrollLeft = panel.scrollLeft;
   }
 
+  function captureMaximizedCodingWorkspaceScroll() {
+    if (!state.codingWorkspaceMaximized || elements.codingWorkspaceContent.hidden) return;
+    state.codingWorkspaceMaximizedScrollTop = elements.codingWorkspaceContent.scrollTop;
+    state.codingWorkspaceMaximizedScrollLeft = elements.codingWorkspaceContent.scrollLeft;
+  }
+
   function maximizedCodingPanelUsesAutoScroll(panelKind) {
     return panelKind === "trace" || panelKind === "powershell";
   }
@@ -871,7 +884,53 @@
     document.body.classList.remove("coding-panel-maximized");
   }
 
+  function clearCodingWorkspaceMaximizedState() {
+    state.codingWorkspaceMaximized = false;
+    state.codingWorkspaceMaximizedScrollTop = 0;
+    state.codingWorkspaceMaximizedScrollLeft = 0;
+    document.body.classList.remove("coding-workspace-maximized");
+    elements.codingWorkspace.classList.remove("coding-workspace--maximized");
+    if (elements.codingWorkspaceMaximize) {
+      elements.codingWorkspaceMaximize.innerHTML = codingPanelMaximizeIcon;
+      elements.codingWorkspaceMaximize.title = "Coding-Fenster maximieren";
+      elements.codingWorkspaceMaximize.setAttribute("aria-label", "Coding-Fenster maximieren");
+      elements.codingWorkspaceMaximize.setAttribute("aria-pressed", "false");
+    }
+  }
+
+  function restoreMaximizedCodingWorkspaceScroll() {
+    requestAnimationFrame(() => {
+      if (!state.codingWorkspaceMaximized
+        || !elements.codingWorkspace.classList.contains("coding-workspace--maximized")) return;
+      elements.codingWorkspaceContent.scrollTop = state.codingWorkspaceMaximizedScrollTop;
+      elements.codingWorkspaceContent.scrollLeft = state.codingWorkspaceMaximizedScrollLeft;
+    });
+  }
+
+  function setCodingWorkspaceMaximized(maximized) {
+    if (!maximized) {
+      clearCodingWorkspaceMaximizedState();
+      return;
+    }
+
+    clearCodingPanelMaximizedState();
+    state.codingWorkspaceOpen = true;
+    state.codingWorkspaceMaximized = true;
+    elements.codingWorkspaceContent.hidden = false;
+    elements.codingWorkspace.classList.add("is-open", "coding-workspace--maximized");
+    document.body.classList.add("coding-workspace-maximized");
+    elements.codingWorkspaceToggle.setAttribute("aria-expanded", "true");
+    if (elements.codingWorkspaceMaximize) {
+      elements.codingWorkspaceMaximize.innerHTML = codingPanelRestoreIcon;
+      elements.codingWorkspaceMaximize.title = "Coding-Fenster wiederherstellen";
+      elements.codingWorkspaceMaximize.setAttribute("aria-label", "Coding-Fenster wiederherstellen");
+      elements.codingWorkspaceMaximize.setAttribute("aria-pressed", "true");
+    }
+    restoreMaximizedCodingWorkspaceScroll();
+  }
+
   function setCodingPanelMaximized(panel, button, label, maximized) {
+    if (maximized) clearCodingWorkspaceMaximizedState();
     const panelKind = panel.dataset.codingPanelKind || label;
     for (const otherPanel of document.querySelectorAll(".coding-panel--maximized")) {
       if (otherPanel === panel) continue;
@@ -1193,6 +1252,9 @@
 
   function setCodingWorkspaceExpanded(expanded) {
     state.codingWorkspaceOpen = Boolean(expanded) && isCodingWorkspaceActive();
+    if (!state.codingWorkspaceOpen) {
+      clearCodingWorkspaceMaximizedState();
+    }
     renderCodingWorkspace();
   }
 
@@ -1203,6 +1265,7 @@
       elements.codingWorkspaceContent.replaceChildren();
       state.codingWorkspaceOpen = false;
       clearCodingPanelMaximizedState();
+      clearCodingWorkspaceMaximizedState();
       return;
     }
 
@@ -1221,6 +1284,14 @@
     elements.codingWorkspaceStatus.dataset.status = runStatus;
     elements.codingWorkspaceToggle.setAttribute("aria-expanded", String(state.codingWorkspaceOpen));
     elements.codingWorkspace.classList.toggle("is-open", state.codingWorkspaceOpen);
+    elements.codingWorkspace.classList.toggle("coding-workspace--maximized", state.codingWorkspaceMaximized);
+    document.body.classList.toggle("coding-workspace-maximized", state.codingWorkspaceMaximized);
+    if (elements.codingWorkspaceMaximize) {
+      elements.codingWorkspaceMaximize.innerHTML = state.codingWorkspaceMaximized ? codingPanelRestoreIcon : codingPanelMaximizeIcon;
+      elements.codingWorkspaceMaximize.title = state.codingWorkspaceMaximized ? "Coding-Fenster wiederherstellen" : "Coding-Fenster maximieren";
+      elements.codingWorkspaceMaximize.setAttribute("aria-label", elements.codingWorkspaceMaximize.title);
+      elements.codingWorkspaceMaximize.setAttribute("aria-pressed", String(state.codingWorkspaceMaximized));
+    }
     elements.codingWorkspaceContent.hidden = !state.codingWorkspaceOpen;
     if (!state.codingWorkspaceOpen) {
       elements.codingWorkspaceContent.replaceChildren();
@@ -1228,6 +1299,7 @@
     }
 
     captureMaximizedCodingPanelScroll();
+    captureMaximizedCodingWorkspaceScroll();
     const oldDiff = elements.codingWorkspaceContent.querySelector(".message-code-diff__content");
     const oldDiffScrollTop = oldDiff?.scrollTop || 0;
     const oldDiffScrollLeft = oldDiff?.scrollLeft || 0;
@@ -1252,6 +1324,7 @@
         nextDiff.scrollLeft = oldDiffScrollLeft;
       }
     });
+    restoreMaximizedCodingWorkspaceScroll();
   }
 
   function sanitizeVisibleMessageContent(value) {
@@ -1996,14 +2069,89 @@
     return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
   }
 
-  function setReasoning(value) {
-    const validValue = ["low", "medium", "high"].includes(value) ? value : "medium";
-    elements.reasoning.value = validValue;
-    for (const option of document.querySelectorAll(".reasoning-option")) {
-      const active = option.dataset.reasoning === validValue;
-      option.classList.toggle("active", active);
-      option.setAttribute("aria-checked", String(active));
+  const reasoningLabels = Object.freeze({
+    low: "Niedrig",
+    medium: "Mittel",
+    high: "Hoch",
+    xhigh: "Sehr hoch"
+  });
+  const nonReasoningToolModels = Object.freeze({
+    audioAnalysis: "Audioanalyse-Pipeline",
+    imageAnalysis: "Bildanalyse-Pipeline",
+    imageGeneration: "Bildgenerierung",
+    textToSpeech: "Supertonic",
+    videoAnalysis: "Videoanalyse-Pipeline"
+  });
+
+  function activeReasoningProfile() {
+    if (Object.prototype.hasOwnProperty.call(nonReasoningToolModels, state.selectedToolAction)) {
+      return {
+        modelId: nonReasoningToolModels[state.selectedToolAction],
+        supportedEfforts: [],
+        defaultEffort: null,
+        selectedEffort: "auto"
+      };
     }
+    const codeActive = state.selectedToolAction === "code"
+      || state.persistentToolAction === "code"
+      || state.assistantMode === "code";
+    return codeActive ? state.reasoningProfiles.code : state.reasoningProfiles.general;
+  }
+
+  function setReasoning(value) {
+    const profile = activeReasoningProfile();
+    const supported = Array.isArray(profile?.supportedEfforts)
+      ? profile.supportedEfforts.filter(item => Object.prototype.hasOwnProperty.call(reasoningLabels, item))
+      : [];
+    const requested = typeof value === "string" ? value : profile?.selectedEffort;
+    const validValue = supported.includes(requested)
+      ? requested
+      : supported.includes(profile?.selectedEffort)
+        ? profile.selectedEffort
+        : supported.includes(profile?.defaultEffort)
+          ? profile.defaultEffort
+          : "auto";
+
+    elements.reasoning.replaceChildren();
+    elements.reasoningOptions.replaceChildren();
+    elements.reasoningModel.textContent = profile?.modelId
+      ? `Aktives Modell: ${profile.modelId}`
+      : "Aktives Modell: Modellautomatik";
+
+    if (supported.length === 0) {
+      const item = document.createElement("option");
+      item.value = "auto";
+      item.textContent = "Modellautomatik";
+      elements.reasoning.append(item);
+      elements.reasoning.value = "auto";
+      if (profile) profile.selectedEffort = "auto";
+      return;
+    }
+
+    for (const effort of supported) {
+      const selectOption = document.createElement("option");
+      selectOption.value = effort;
+      selectOption.textContent = reasoningLabels[effort];
+      elements.reasoning.append(selectOption);
+
+      const button = document.createElement("button");
+      button.className = "reasoning-option";
+      button.type = "button";
+      button.setAttribute("role", "menuitemradio");
+      button.dataset.reasoning = effort;
+      const label = document.createElement("span");
+      label.textContent = reasoningLabels[effort];
+      const check = document.createElement("span");
+      check.className = "option-check";
+      check.textContent = "✓";
+      button.append(label, check);
+      const active = effort === validValue;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-checked", String(active));
+      elements.reasoningOptions.append(button);
+    }
+    elements.reasoning.value = validValue;
+    if (profile) profile.selectedEffort = validValue;
   }
 
   function setToolsMenuOpen(open) {
@@ -2279,7 +2427,8 @@
       pendingDraft = null;
       post("campaign.run", {
         sessionId: state.activeSessionId,
-        instruction: prompt || null
+        instruction: prompt || null,
+        reasoningEffort: elements.reasoning.value
       });
       elements.prompt.value = "";
       return;
@@ -2433,6 +2582,7 @@
     }
     renderCodingWorkspace();
     renderWorkspace();
+    setReasoning(null);
   }
 
   function clearCompletedOneShotToolAction() {
@@ -2518,9 +2668,11 @@
     }
     if ((previousSessionId && previousSessionId !== state.activeSessionId) || !activeCodingMode) {
       clearCodingPanelMaximizedState();
+      clearCodingWorkspaceMaximizedState();
     }
     state.isRunning = Boolean(payload.isRunning);
     state.model = payload.model || null;
+    state.reasoningProfiles = payload.reasoningProfiles || state.reasoningProfiles;
     if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
     if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
     state.contextWasTruncated = Boolean(payload.contextWasTruncated);
@@ -2546,7 +2698,7 @@
       catch { /* WebView storage is optional. */ }
     }
     elements.prompt.value = payload.draft || "";
-    setReasoning(payload.reasoningEffort || "medium");
+    setReasoning(payload.reasoningEffort || null);
     renderSessions();
     renderSessionPin();
     renderMessages(currentSessionMessagesChanged);
@@ -3090,7 +3242,7 @@
   }
 
   restoreSessionsCollapsed();
-  setReasoning("medium");
+  setReasoning("auto");
 
   elements.toggleSessions.addEventListener("click", () => {
     const collapsed = !elements.appShell.classList.contains("sessions-collapsed");
@@ -3139,9 +3291,16 @@
   elements.codingWorkspaceToggle.addEventListener("click", () => {
     setCodingWorkspaceExpanded(!state.codingWorkspaceOpen);
   });
+  elements.codingWorkspaceMaximize.addEventListener("click", event => {
+    event.preventDefault();
+    event.stopPropagation();
+    setCodingWorkspaceMaximized(!state.codingWorkspaceMaximized);
+    renderCodingWorkspace();
+  });
   elements.codingWorkspaceClose.addEventListener("click", event => {
     event.preventDefault();
     event.stopPropagation();
+    clearCodingWorkspaceMaximizedState();
     selectToolAction(null);
   });
   elements.composerSpeechPause.addEventListener("click", () => {
@@ -3202,12 +3361,12 @@
     setToolsMenuOpen(elements.toolsMenu.hidden);
   });
   elements.toolsMenu.addEventListener("click", event => event.stopPropagation());
-  for (const option of document.querySelectorAll(".reasoning-option")) {
-    option.addEventListener("click", () => {
-      setReasoning(option.dataset.reasoning);
-      setToolsMenuOpen(false);
-    });
-  }
+  elements.reasoningOptions.addEventListener("click", event => {
+    const option = event.target.closest(".reasoning-option[data-reasoning]");
+    if (!option) return;
+    setReasoning(option.dataset.reasoning);
+    setToolsMenuOpen(false);
+  });
   for (const option of document.querySelectorAll(".service-option[data-tool-action]")) {
     const visual = toolVisuals[option.dataset.toolAction];
     if (visual) option.prepend(createToolIcon(visual[1]));

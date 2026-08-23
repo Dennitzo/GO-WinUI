@@ -475,6 +475,10 @@ public sealed class CodingCampaignService(
         ICodingCampaignDefinition definition,
         CancellationToken cancellationToken)
     {
+        var preparationIssues = await PreparePublishableSolutionPdfsAsync(
+            state,
+            definition,
+            cancellationToken).ConfigureAwait(false);
         CodingCampaignValidationResult validation;
         try
         {
@@ -488,6 +492,11 @@ public sealed class CodingCampaignService(
                 false,
                 [$"Die unabhängige Workflow-Abnahme konnte den aktuellen Workspace-Stand nicht vollständig prüfen: {VisibleError(exception)}"],
                 []);
+        }
+
+        if (preparationIssues.Count > 0)
+        {
+            validation = MergeValidationIssues(validation, preparationIssues);
         }
 
         state = state with
@@ -667,6 +676,10 @@ public sealed class CodingCampaignService(
         ICodingCampaignDefinition definition,
         CancellationToken cancellationToken)
     {
+        var preparationIssues = await PreparePublishableSolutionPdfsAsync(
+            state,
+            definition,
+            cancellationToken).ConfigureAwait(false);
         if (definition.PublishSolutionsOnlyAfterValidation)
         {
             CodingCampaignValidationResult validation;
@@ -682,6 +695,11 @@ public sealed class CodingCampaignService(
                     []);
             }
 
+            if (preparationIssues.Count > 0)
+            {
+                validation = MergeValidationIssues(validation, preparationIssues);
+            }
+
             state = state with
             {
                 ValidationJson = SerializeValidation(validation),
@@ -694,6 +712,56 @@ public sealed class CodingCampaignService(
             }
         }
         await PublishSolutionsAsync(state, definition, "Vorhandene Lösung", cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<string>> PreparePublishableSolutionPdfsAsync(
+        CodingCampaignState state,
+        ICodingCampaignDefinition definition,
+        CancellationToken cancellationToken)
+    {
+        if (solutionPdfExporter is null)
+        {
+            return [];
+        }
+
+        var publishableDocuments = definition.GetPublishableSolutionDocuments(state.WorkspacePath);
+        if (publishableDocuments is null || publishableDocuments.Count == 0)
+        {
+            return [];
+        }
+
+        var issues = new List<string>();
+        foreach (var relativePath in publishableDocuments.OrderBy(static item => item, StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var fullPath = Path.GetFullPath(Path.Combine(
+                state.WorkspacePath,
+                relativePath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!IsInsideWorkspace(state.WorkspacePath, fullPath))
+            {
+                issues.Add($"LÃ¶sungs-PDF konnte nicht vorbereitet werden, weil der Pfad auÃŸerhalb des Workspace liegt: {relativePath}.");
+                continue;
+            }
+            if (!File.Exists(fullPath) || !SolutionExtensions.Contains(Path.GetExtension(fullPath)))
+            {
+                continue;
+            }
+
+            try
+            {
+                _ = await solutionPdfExporter.EnsureCurrentAsync(
+                    fullPath,
+                    sourceChanged: IsPdfMissingOrStale(fullPath),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+            {
+                issues.Add($"LÃ¶sungs-PDF fÃ¼r {relativePath} konnte nicht erzeugt werden: {VisibleError(exception)}");
+                OutputPublicationFailed(logger, fullPath, exception);
+            }
+        }
+
+        return issues;
     }
 
     private async Task PublishVerifiedSolutionsAsync(
@@ -1198,6 +1266,33 @@ public sealed class CodingCampaignService(
 
     private static TimeSpan RetryDelay(int restartCount) =>
         TimeSpan.FromSeconds(Math.Min(30, Math.Max(2, restartCount * 2)));
+
+    private static CodingCampaignValidationResult MergeValidationIssues(
+        CodingCampaignValidationResult validation,
+        IReadOnlyList<string> issues) =>
+        issues.Count == 0
+            ? validation
+            : new CodingCampaignValidationResult(
+                false,
+                validation.Issues.Concat(issues).Distinct(StringComparer.Ordinal).ToArray(),
+                validation.Proofs);
+
+    private static bool IsPdfMissingOrStale(string sourcePath)
+    {
+        var pdfPath = Path.ChangeExtension(sourcePath, ".pdf");
+        if (!File.Exists(pdfPath)) return true;
+        var source = new FileInfo(sourcePath);
+        var pdf = new FileInfo(pdfPath);
+        return pdf.Length < 1024 || pdf.LastWriteTimeUtc < source.LastWriteTimeUtc.AddSeconds(-2);
+    }
+
+    private static bool IsInsideWorkspace(string workspacePath, string path)
+    {
+        var root = Path.GetFullPath(workspacePath);
+        var candidate = Path.GetFullPath(path);
+        root = Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar;
+        return candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string SerializeValidation(CodingCampaignValidationResult validation) =>
         JsonSerializer.Serialize(new PersistedValidation(validation.Issues, validation.Proofs), JsonOptions);

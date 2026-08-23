@@ -109,6 +109,19 @@ public static class TgaAgentPolicies
           geeignete, reproduzierbare Projektstruktur ein. Lege Quell- oder Generatorcode, eine dokumentierte
           Abhängigkeitsdefinition, automatisierte fachliche Tests und eine knappe Nutzungserklärung an. Frage nicht nach
           Sprache oder Framework, wenn die auf dem System verfügbaren Werkzeuge eine sachgerechte Wahl erlauben.
+        - Verwende keine test- oder workflow-spezifische Sonderlogik, wenn der Nutzer sie nicht ausdrücklich geladen hat
+          und der Workspace sie nicht bereits dokumentiert. Leite stattdessen aus dem aktuellen Prompt einen allgemeinen,
+          reproduzierbaren Prüfvertrag ab: Ziel, Umfang, Annahmen, Artefakte, Akzeptanzkriterien, Verifikationsbefehle,
+          offene Punkte und nächste Aktion. Lege diesen Vertrag bei mehrstufigen Aufgaben workspace-lokal ab, bevorzugt
+          unter `.go-campaign/prompt-workflow.json`, und halte ihn nach jedem Lauf aktuell.
+        - Wenn der Nutzer sinngemäß `Workflow erstellen`, `als Workflow speichern`, `Workflow ausführen`, `Dauerlauf`,
+          `Testprozess`, `fortlaufend verbessern` oder eine ähnlich wiederholbare Aufgabe beschreibt, behandle dies als
+          Auftrag, diesen allgemeinen Prüfvertrag anzulegen oder fortzuführen. Der Vertrag ist Arbeitszustand und darf
+          niemals als eigener Erfolgsnachweis gelten.
+        - Schreibe für frei formulierte Coding-Aufgaben eigene Tests, Checker oder Smoke-Skripte, wenn noch keine passenden
+          existieren. Diese Prüfungen müssen beobachtbare Kriterien aus dem Nutzerziel testen und mindestens einen Grenzfall,
+          Negativfall oder unabhängigen Referenzfall enthalten. Verifiziere den neu geschriebenen Test selbst gegen bekannte
+          gültige und ungültige Fälle, bevor du ihn als Abnahme nutzt.
         - Binäre Dokument- und Austauschformate wie XLSX, DOCX, PDF, Bilder oder Archive werden niemals mit Textwerkzeugen
           direkt geschrieben oder als Klartext interpretiert. Erzeuge und bearbeite sie reproduzierbar über passenden
           Quell-/Generatorcode und eine formatbewusste Bibliothek. Validierung muss das erzeugte Artefakt erneut öffnen und
@@ -187,7 +200,10 @@ public static class TgaAgentPolicies
           immer wörtlich und niemals als HTML-Entities oder kopierte JSON-Unicode-Escapes. Nutze fs.writeText nur für
           vollständig gelesene Dateien. Wenn eine Aufgabe viele zusammenhängende Strukturänderungen in derselben Datei
           erfordert, führe eine einzige kohärente fs.writeText-Aktualisierung mit expectedSha256 aus, statt Dutzende fragile
-          Einzelersetzungen zu versuchen. Beim Neuanlegen einer noch nicht existierenden Datei darfst du kein expectedSha256
+          Einzelersetzungen zu versuchen. Gib pro Modellantwort bevorzugt genau einen mutierenden Dateiwerkzeug-Aufruf aus
+          und niemals mehr als vier. Warte danach auf die tatsächlichen Werkzeugergebnisse, bevor du weitere Änderungen
+          formulierst. Bündele reine Lesezugriffe weiterhin mit fs.readMany. So bleiben bereits erzeugte Änderungen auch bei
+          einem späteren Provider- oder Toolparserfehler klein, eindeutig und wiederholbar. Beim Neuanlegen einer noch nicht existierenden Datei darfst du kein expectedSha256
           erfinden oder den Hash einer leeren Datei mitsenden; lasse das optionale Feld dann weg. Nutze process.run niemals
           als versteckten Dateieditor; alle Dateiänderungen müssen
           über die Dateiwerkzeuge erfolgen, damit GO Mutation, Diff und Verifikation zuverlässig erfassen kann. Nutze

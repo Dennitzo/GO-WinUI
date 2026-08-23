@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://go-preview.local data: blob:; media-src 'self' https://go-preview.local; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
   <title>GO AI Assistent</title>
   <link rel="stylesheet" href="vendor/katex/0.16.10/katex.min.css">
-  <link rel="stylesheet" href="styles.css?v=20260821-2">
+  <link rel="stylesheet" href="styles.css?v=20260823-1">
 </head>
 <body>
   <div id="app-shell" class="app-shell">
@@ -76,6 +76,9 @@
               <svg class="coding-workspace__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
             </button>
             <button id="coding-workspace-close" class="coding-workspace__close" type="button" title="Coding deaktivieren" aria-label="Coding deaktivieren">×</button>
+            <button id="coding-workspace-maximize" class="coding-workspace__maximize" type="button" title="Coding-Fenster maximieren" aria-label="Coding-Fenster maximieren" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></svg>
+            </button>
           </header>
           <div id="coding-workspace-content" class="coding-workspace__content" hidden></div>
         </section>
@@ -109,9 +112,8 @@
                 </button>
                 <div id="tools-menu" class="tools-menu" role="menu" hidden>
                   <div class="tools-menu__title">Schlussfolgern</div>
-                  <button class="reasoning-option" type="button" role="menuitemradio" data-reasoning="low"><span>Niedrig</span><span class="option-check">✓</span></button>
-                  <button class="reasoning-option" type="button" role="menuitemradio" data-reasoning="medium"><span>Mittel</span><span class="option-check">✓</span></button>
-                  <button class="reasoning-option" type="button" role="menuitemradio" data-reasoning="high"><span>Hoch</span><span class="option-check">✓</span></button>
+                  <div id="reasoning-model" class="reasoning-model" aria-live="polite"></div>
+                  <div id="reasoning-options" class="reasoning-options"></div>
                   <div class="tools-menu__title tools-menu__section">Aktionen</div>
                   <div class="tools-menu__actions">
                   <button class="service-option" type="button" role="menuitem" data-tool-action="audioAnalysis"><span>Audio analysieren</span></button>
@@ -145,9 +147,7 @@
                 <span id="context-label">0%</span>
               </div>
               <select id="reasoning" hidden aria-label="Reasoning-Aufwand">
-                <option value="low">Niedrig</option>
-                <option value="medium" selected>Mittel</option>
-                <option value="high">Hoch</option>
+                <option value="auto" selected>Modellautomatik</option>
               </select>
             </div>
 
@@ -259,6 +259,6 @@
   <script src="bridge.js?v=20260821-2"></script>
   <script src="voice.js?v=20260822-2"></script>
   <script src="markdown.js?v=20260821-1"></script>
-  <script src="app.js?v=20260822-6"></script>
+  <script src="app.js?v=20260823-1"></script>
 </body>
 </html>

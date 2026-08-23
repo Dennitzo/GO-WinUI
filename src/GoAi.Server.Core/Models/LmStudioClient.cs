@@ -42,7 +42,7 @@ public sealed partial class LmStudioClient : IDisposable
         _logger = logger;
         _cliModelLoader = cliModelLoader;
         _httpClient.BaseAddress = EnsureTrailingSlash(_options.LmStudioUri);
-        // Coding requests, especially with the large DeepSeek profile and a long
+        // Coding requests, especially with large local profiles and a long
         // prompt prefix, can legitimately take longer than 30 minutes. The run
         // processor already owns the authoritative timeout and cancellation token,
         // so a second HttpClient timeout must not terminate an otherwise healthy run.
@@ -303,7 +303,7 @@ public sealed partial class LmStudioClient : IDisposable
             ["input"] = input,
             ["stream"] = true,
         };
-        ApplySamplingProfile(body, modelId, includeReasoning: true, modelRole: "general");
+        ApplySamplingProfile(body, modelId, includeReasoning: true, modelRole: "general", requestedReasoningEffort: null);
         using var request = await CreateRequestAsync(HttpMethod.Post, "v1/responses", body, cancellationToken).ConfigureAwait(false);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
         using var response = await _httpClient.SendAsync(
@@ -368,7 +368,7 @@ public sealed partial class LmStudioClient : IDisposable
             tools,
             maximumOutputTokens,
             modelRole: "general",
-            cancellationToken);
+            cancellationToken: cancellationToken);
 
     public async Task<LmChatResult> CompleteChatAsync(
         string modelId,
@@ -376,6 +376,7 @@ public sealed partial class LmStudioClient : IDisposable
         IReadOnlyList<LmToolDefinition> tools,
         int maximumOutputTokens = 8_192,
         string modelRole = "general",
+        string? reasoningEffort = null,
         CancellationToken cancellationToken = default)
     {
         await BeginModelOperationAsync(cancellationToken).ConfigureAwait(false);
@@ -402,7 +403,7 @@ public sealed partial class LmStudioClient : IDisposable
             ["max_output_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
             ["store"] = false,
         };
-        ApplySamplingProfile(body, modelId, includeReasoning: true, modelRole);
+        ApplySamplingProfile(body, modelId, includeReasoning: true, modelRole, reasoningEffort);
         if (toolPayload.Length > 0)
         {
             body["tools"] = toolPayload;
@@ -424,6 +425,7 @@ public sealed partial class LmStudioClient : IDisposable
                 tools,
                 maximumOutputTokens,
                 modelRole,
+                reasoningEffort,
                 cancellationToken).ConfigureAwait(false);
         }
         catch (HttpRequestException exception) when (
@@ -436,6 +438,7 @@ public sealed partial class LmStudioClient : IDisposable
                 tools,
                 maximumOutputTokens,
                 modelRole,
+                reasoningEffort,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -455,11 +458,20 @@ public sealed partial class LmStudioClient : IDisposable
 
         var textParts = new List<string>();
         var calls = new List<LmToolCall>();
+        var hadReasoning = false;
         foreach (var item in output.EnumerateArray())
         {
             var type = item.TryGetProperty("type", out var typeElement) && typeElement.ValueKind == JsonValueKind.String
                 ? typeElement.GetString()
                 : null;
+            if (string.Equals(type, "reasoning", StringComparison.Ordinal))
+            {
+                // Reasoning text remains private. We only retain its presence and
+                // token count so the agent can distinguish provider budget exhaustion
+                // from an actually empty model response.
+                hadReasoning = true;
+                continue;
+            }
             if (string.Equals(type, "message", StringComparison.Ordinal))
             {
                 if (!item.TryGetProperty("content", out var messageContent)
@@ -511,14 +523,19 @@ public sealed partial class LmStudioClient : IDisposable
 
         var inputTokens = 0;
         var outputTokens = 0;
+        var reasoningTokens = 0;
         if (root.TryGetProperty("usage", out var usage))
         {
             inputTokens = TryReadInt32(usage, "input_tokens");
             outputTokens = TryReadInt32(usage, "output_tokens");
+            if (usage.TryGetProperty("output_tokens_details", out var outputDetails))
+            {
+                reasoningTokens = TryReadInt32(outputDetails, "reasoning_tokens");
+            }
         }
 
         var content = textParts.Count == 0 ? null : string.Join("\n", textParts);
-        return new LmChatResult(content, calls, inputTokens, outputTokens);
+        return new LmChatResult(content, calls, inputTokens, outputTokens, hadReasoning, reasoningTokens);
         }
         finally
         {
@@ -984,6 +1001,12 @@ public sealed partial class LmStudioClient : IDisposable
         foreach (var raw in rawModels.Where(raw => configured.All(item =>
                      !string.Equals(item.Id, raw.Key, StringComparison.OrdinalIgnoreCase))))
         {
+            if (string.Equals(raw.Type, "llm", StringComparison.OrdinalIgnoreCase)
+                && raw.Capabilities?.TrainedForToolUse == false)
+            {
+                continue;
+            }
+
             var loaded = raw.LoadedInstances is { Count: > 0 };
             configured.Add(new ModelRuntimeStatus(
                 raw.Key,
@@ -1079,6 +1102,7 @@ public sealed partial class LmStudioClient : IDisposable
         IReadOnlyList<LmToolDefinition> tools,
         int maximumOutputTokens,
         string modelRole,
+        string? reasoningEffort,
         CancellationToken cancellationToken)
     {
         var body = new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -1088,7 +1112,7 @@ public sealed partial class LmStudioClient : IDisposable
             ["stream"] = false,
             ["max_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
         };
-        ApplySamplingProfile(body, modelId, includeReasoning: false, modelRole);
+        ApplySamplingProfile(body, modelId, includeReasoning: false, modelRole, reasoningEffort);
         if (tools.Count > 0)
         {
             body["tools"] = tools.Select(static tool => new
@@ -1229,27 +1253,61 @@ public sealed partial class LmStudioClient : IDisposable
         Dictionary<string, object?> body,
         string modelId,
         bool includeReasoning,
-        string modelRole)
+        string modelRole,
+        string? requestedReasoningEffort)
     {
+        var reasoningProfile = ModelReasoningProfiles.Resolve(modelId, modelRole);
+        var reasoningEffort = reasoningProfile.Resolve(requestedReasoningEffort);
         if (string.Equals(modelRole, "code", StringComparison.OrdinalIgnoreCase)
             && CodingModelCatalog.TryGet(modelId, out var codingProfile))
         {
-            body["temperature"] = 1.0;
             if (string.Equals(codingProfile.SamplingProfile, "gpt-oss-coder", StringComparison.Ordinal))
             {
                 // OpenAI recommends temperature=1 and top_p=1 for gpt-oss.
                 // High reasoning is reserved for the coding role; the same
                 // physical model keeps the existing low-effort general profile.
+                body["temperature"] = 1.0;
                 body["top_p"] = 1.0;
-                if (includeReasoning)
+                if (includeReasoning && reasoningEffort is not null)
                 {
-                    body["reasoning"] = new { effort = "high" };
+                    body["reasoning"] = new { effort = reasoningEffort };
+                }
+                else if (!includeReasoning && reasoningEffort is not null)
+                {
+                    body["reasoning_effort"] = reasoningEffort;
                 }
                 return;
             }
 
-            // Qwen and DeepSeek use their published exploratory agent profile
-            // and must not receive gpt-oss-specific reasoning options.
+            if (string.Equals(codingProfile.SamplingProfile, "qwen38-coder", StringComparison.Ordinal))
+            {
+                // Qwen3.8 thinks at xhigh by default. With an 8K response budget,
+                // long repository turns can otherwise spend the entire response on
+                // private reasoning and return neither text nor a function call.
+                // Keep reasoning enabled at the model's published low setting and
+                // use the matching official thinking-mode sampling profile.
+                body["temperature"] = 1.0;
+                body["top_p"] = 0.95;
+                body["top_k"] = 20;
+                body["min_p"] = 0.0;
+                body["presence_penalty"] = 0.0;
+                body["repetition_penalty"] = 1.0;
+                if (includeReasoning && reasoningEffort is not null)
+                {
+                    body["reasoning"] = new { effort = reasoningEffort };
+                }
+                else if (reasoningEffort is not null)
+                {
+                    // Chat Completions uses the OpenAI-compatible field name.
+                    // This keeps the compatibility fallback from silently returning
+                    // to Qwen3.8's xhigh default.
+                    body["reasoning_effort"] = reasoningEffort;
+                }
+                return;
+            }
+
+            // Qwen3-Coder-Next keeps its established non-reasoning agent profile.
+            body["temperature"] = 1.0;
             body["top_p"] = 0.95;
             if (string.Equals(codingProfile.SamplingProfile, "qwen-coder", StringComparison.Ordinal))
             {
@@ -1258,10 +1316,26 @@ public sealed partial class LmStudioClient : IDisposable
             return;
         }
 
-        body["temperature"] = 0.2;
-        if (includeReasoning)
+        if (string.Equals(reasoningProfile.Family, ModelReasoningProfiles.Qwen38Family, StringComparison.Ordinal))
         {
-            body["reasoning"] = new { effort = "low" };
+            body["temperature"] = 1.0;
+            body["top_p"] = 0.95;
+            body["top_k"] = 20;
+            body["min_p"] = 0.0;
+            body["presence_penalty"] = 0.0;
+            body["repetition_penalty"] = 1.0;
+        }
+        else
+        {
+            body["temperature"] = 0.2;
+        }
+        if (includeReasoning && reasoningEffort is not null)
+        {
+            body["reasoning"] = new { effort = reasoningEffort };
+        }
+        else if (!includeReasoning && reasoningEffort is not null)
+        {
+            body["reasoning_effort"] = reasoningEffort;
         }
     }
 

@@ -132,6 +132,12 @@ public sealed class CodingRunTraceService
 
     internal static string? ExtractTarget(ToolProposal proposal)
     {
+        var specialized = ExtractSpecializedTarget(proposal);
+        if (!string.IsNullOrWhiteSpace(specialized))
+        {
+            return specialized;
+        }
+
         foreach (var name in new[] { "path", "target", "destination", "source", "directory", "workingDirectory" })
         {
             if (proposal.Arguments.ValueKind == JsonValueKind.Object
@@ -158,6 +164,248 @@ public sealed class CodingRunTraceService
         }
 
         return null;
+    }
+
+    private static string? ExtractSpecializedTarget(ToolProposal proposal)
+    {
+        if (proposal.Arguments.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (string.Equals(proposal.Name, ClientToolNames.FileSystemReadMany, StringComparison.Ordinal))
+        {
+            return ExtractReadManyTarget(proposal.Arguments);
+        }
+
+        if (string.Equals(proposal.Name, ClientToolNames.FileSystemFindFiles, StringComparison.Ordinal))
+        {
+            return ExtractFindFilesTarget(proposal.Arguments);
+        }
+
+        if (string.Equals(proposal.Name, ClientToolNames.FileSystemList, StringComparison.Ordinal))
+        {
+            return ExtractDirectoryTarget(proposal.Arguments);
+        }
+
+        if (string.Equals(proposal.Name, ClientToolNames.FileSystemSearch, StringComparison.Ordinal))
+        {
+            return ExtractSearchTarget(proposal.Arguments);
+        }
+
+        if (string.Equals(proposal.Name, ClientToolNames.FileSystemReadText, StringComparison.Ordinal)
+            || string.Equals(proposal.Name, ClientToolNames.FileSystemStat, StringComparison.Ordinal)
+            || string.Equals(proposal.Name, "fs.readFile", StringComparison.Ordinal))
+        {
+            var path = ReadString(proposal.Arguments, "path");
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return null;
+            }
+            return NormalizeTarget(FormatPathRange(
+                path,
+                ReadInteger(proposal.Arguments, "startLine"),
+                ReadInteger(proposal.Arguments, "endLine")));
+        }
+
+        if (proposal.Name.StartsWith("documents.", StringComparison.Ordinal))
+        {
+            return ExtractDocumentTarget(proposal.Arguments);
+        }
+
+        var compact = ExtractCompactArgumentSummary(proposal.Arguments);
+        if (!string.IsNullOrWhiteSpace(compact))
+        {
+            return compact;
+        }
+
+        return null;
+    }
+
+    private static string? ExtractDirectoryTarget(JsonElement arguments)
+    {
+        var path = ReadString(arguments, "path")
+            ?? ReadString(arguments, "directory")
+            ?? ReadString(arguments, "root")
+            ?? ".";
+        return NormalizeTarget(path);
+    }
+
+    private static string? ExtractReadManyTarget(JsonElement arguments)
+    {
+        if (!arguments.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var count = items.GetArrayLength();
+        var values = items.EnumerateArray()
+            .Where(static item => item.ValueKind == JsonValueKind.Object)
+            .Select(static item =>
+            {
+                var path = ReadString(item, "path");
+                return string.IsNullOrWhiteSpace(path)
+                    ? null
+                    : FormatPathRange(path, ReadInteger(item, "startLine"), ReadInteger(item, "endLine"));
+            })
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => value!)
+            .Take(4)
+            .ToArray();
+        if (values.Length == 0)
+        {
+            return null;
+        }
+
+        var suffix = count > values.Length ? $" (+{count - values.Length} weitere)" : string.Empty;
+        return Limit(string.Join(", ", values.Select(NormalizeTarget)) + suffix, 320);
+    }
+
+    private static string? ExtractFindFilesTarget(JsonElement arguments)
+    {
+        var root = ReadString(arguments, "path");
+        root = string.IsNullOrWhiteSpace(root) ? "." : root;
+        var patterns = ReadStringArray(arguments, "patterns");
+        if (patterns.Length == 0)
+        {
+            patterns = ReadStringArray(arguments, "includeGlobs");
+        }
+        if (patterns.Length == 0)
+        {
+            return NormalizeTarget(root);
+        }
+
+        var displayed = patterns.Take(4).ToArray();
+        var suffix = patterns.Length > displayed.Length ? $" (+{patterns.Length - displayed.Length} weitere)" : string.Empty;
+        return Limit($"{NormalizeTarget(root)}: {string.Join(", ", displayed)}{suffix}", 320);
+    }
+
+    private static string? ExtractSearchTarget(JsonElement arguments)
+    {
+        var root = ReadString(arguments, "path")
+            ?? ReadString(arguments, "directory")
+            ?? ".";
+        var queries = ReadStringArray(arguments, "queries");
+        var query = ReadString(arguments, "query");
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            queries = [query!, .. queries];
+        }
+
+        var includeGlobs = ReadStringArray(arguments, "includeGlobs");
+        var excludeGlobs = ReadStringArray(arguments, "excludeGlobs");
+        var parts = new List<string> { NormalizeTarget(root) };
+        if (queries.Length > 0)
+        {
+            parts.Add("Suche: " + JoinLimited(queries, 3));
+        }
+        if (includeGlobs.Length > 0)
+        {
+            parts.Add("Include: " + JoinLimited(includeGlobs, 3));
+        }
+        if (excludeGlobs.Length > 0)
+        {
+            parts.Add("Exclude: " + JoinLimited(excludeGlobs, 2));
+        }
+        return Limit(string.Join(" · ", parts), 320);
+    }
+
+    private static string? ExtractDocumentTarget(JsonElement arguments)
+    {
+        var documentName = ReadString(arguments, "documentName")
+            ?? ReadString(arguments, "fileName")
+            ?? ReadString(arguments, "name");
+        var query = ReadString(arguments, "query");
+        var page = ReadInteger(arguments, "page");
+        var startPage = ReadInteger(arguments, "startPage");
+        var endPage = ReadInteger(arguments, "endPage");
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(documentName))
+        {
+            parts.Add(documentName!);
+        }
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            parts.Add("Suche: " + query);
+        }
+        if (page is { } singlePage)
+        {
+            parts.Add($"S. {singlePage}");
+        }
+        else if (startPage is not null || endPage is not null)
+        {
+            parts.Add($"S. {startPage?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?"}-{endPage?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?"}");
+        }
+        return parts.Count == 0 ? null : Limit(string.Join(" · ", parts), 320);
+    }
+
+    private static string? ExtractCompactArgumentSummary(JsonElement arguments)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        foreach (var arrayName in new[] { "paths", "files", "items", "queries", "patterns", "includeGlobs", "excludeGlobs" })
+        {
+            var values = ReadCompactArray(arguments, arrayName);
+            if (values.Length > 0)
+            {
+                return Limit($"{arrayName}: {JoinLimited(values, 4)}", 320);
+            }
+        }
+
+        return null;
+    }
+
+    private static string[] ReadCompactArray(JsonElement owner, string name)
+    {
+        if (owner.ValueKind != JsonValueKind.Object
+            || !owner.TryGetProperty(name, out var array)
+            || array.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return array.EnumerateArray()
+            .Select(static item => item.ValueKind switch
+            {
+                JsonValueKind.String => item.GetString(),
+                JsonValueKind.Object => ReadString(item, "path")
+                    ?? ReadString(item, "target")
+                    ?? ReadString(item, "query")
+                    ?? ReadString(item, "pattern")
+                    ?? ReadString(item, "documentName")
+                    ?? ReadString(item, "fileName"),
+                _ => null,
+            })
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Select(static value => NormalizeTarget(value!))
+            .ToArray();
+    }
+
+    private static string JoinLimited(string[] values, int maximum)
+    {
+        var displayed = values.Take(maximum).ToArray();
+        var suffix = values.Length > displayed.Length ? $" (+{values.Length - displayed.Length} weitere)" : string.Empty;
+        return string.Join(", ", displayed) + suffix;
+    }
+
+    private static string FormatPathRange(string path, int? startLine, int? endLine)
+    {
+        if (startLine is null && endLine is null)
+        {
+            return path;
+        }
+        if (startLine is { } start && endLine is { } end)
+        {
+            return $"{path}:{start}-{end}";
+        }
+        if (startLine is { } onlyStart)
+        {
+            return $"{path}:{onlyStart}";
+        }
+        return $"{path}:1-{endLine}";
     }
 
     internal static string DescribeResult(ClientToolResult result)
@@ -208,14 +456,24 @@ public sealed class CodingRunTraceService
         }
 
         var exitCode = result is null ? null : ReadInteger(result.Result, "exitCode");
+        var passed = result is null ? null : ReadBoolean(result.Result, "passed");
         var status = result is null
             ? "running"
             : !string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase)
                 || exitCode is not null and not 0
+                || passed == false
                     ? "failed"
                     : "completed";
-        var standardOutput = result is null ? null : FilterConsoleNoise(ReadString(result.Result, "standardOutput"));
-        var standardError = result is null ? null : FilterConsoleNoise(ReadString(result.Result, "standardError"));
+        var standardOutput = result is null
+            ? null
+            : proposal.Name == ClientToolNames.LeanProof
+                ? FilterConsoleNoise(FormatLeanConsoleOutput(result.Result))
+                : FilterConsoleNoise(ReadString(result.Result, "standardOutput"));
+        var standardError = result is null
+            ? null
+            : proposal.Name == ClientToolNames.LeanProof
+                ? FilterConsoleNoise(FormatLeanConsoleError(result.Result, result.Message, status))
+                : FilterConsoleNoise(ReadString(result.Result, "standardError"));
         if (result is not null
             && !string.Equals(status, "completed", StringComparison.Ordinal)
             && string.IsNullOrWhiteSpace(standardError)
@@ -265,6 +523,51 @@ public sealed class CodingRunTraceService
             command = string.Join(' ', new[] { executable }.Concat(arguments).Select(QuotePowerShellArgument));
             workingDirectory = ReadString(proposal.Arguments, "workingDirectory") ?? ".";
             purpose = ReadString(proposal.Arguments, "purpose")?.ToLowerInvariant() ?? "inspect";
+            return true;
+        }
+
+        if (proposal.Name == ClientToolNames.LeanProof)
+        {
+            var operation = ReadString(proposal.Arguments, "operation");
+            if (string.IsNullOrWhiteSpace(operation))
+            {
+                return false;
+            }
+
+            var path = ReadString(proposal.Arguments, "path");
+            var leanTarget = ReadString(proposal.Arguments, "target");
+            var theoremName = ReadString(proposal.Arguments, "theoremName");
+            var timeoutSeconds = ReadInteger(proposal.Arguments, "timeoutSeconds");
+            var arguments = new List<string> { "proof.lean", operation };
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                arguments.Add(path);
+            }
+            if (!string.IsNullOrWhiteSpace(leanTarget))
+            {
+                arguments.Add("-Target");
+                arguments.Add(leanTarget);
+            }
+            if (!string.IsNullOrWhiteSpace(theoremName))
+            {
+                arguments.Add("-TheoremName");
+                arguments.Add(theoremName);
+            }
+            if (timeoutSeconds is { } timeout)
+            {
+                arguments.Add("-TimeoutSeconds");
+                arguments.Add(timeout.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            command = string.Join(' ', arguments.Select(QuotePowerShellArgument));
+            workingDirectory = ".";
+            purpose = operation switch
+            {
+                "check" => "test",
+                "verify" or "axioms" => "verify",
+                "build" => "build",
+                _ => "inspect",
+            };
             return true;
         }
 
@@ -354,6 +657,158 @@ public sealed class CodingRunTraceService
             }
         }
         return null;
+    }
+
+    private static bool? ReadBoolean(JsonElement owner, string name)
+    {
+        if (owner.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+        foreach (var property in owner.EnumerateObject())
+        {
+            if (property.NameEquals(name)
+                || string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return property.Value.ValueKind switch
+                {
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    _ => null,
+                };
+            }
+        }
+        return null;
+    }
+
+    private static string? FormatLeanConsoleOutput(JsonElement result)
+    {
+        if (result.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var lines = new List<string>();
+        AddLine("Operation", ReadString(result, "operation"));
+        AddLine("Projekt", ReadString(result, "project"));
+        AddLine("Pfad", ReadString(result, "path"));
+        AddLine("Target", ReadString(result, "target"));
+        AddLine("Theorem", ReadString(result, "theoremName"));
+        AddLine("Lean", ReadString(result, "leanVersion"));
+        AddLine("Lake", ReadString(result, "lakeVersion"));
+        if (ReadInteger(result, "durationMilliseconds") is { } duration)
+        {
+            lines.Add($"Dauer: {duration} ms");
+        }
+        if (ReadBoolean(result, "available") is { } available)
+        {
+            lines.Add($"Toolchain verfÃ¼gbar: {(available ? "ja" : "nein")}");
+        }
+        if (ReadBoolean(result, "passed") is { } passed)
+        {
+            lines.Add($"Bestanden: {(passed ? "ja" : "nein")}");
+        }
+
+        var axioms = ReadStringArray(result, "axioms");
+        if (axioms.Length > 0)
+        {
+            lines.Add("Axiome: " + string.Join(", ", axioms));
+        }
+
+        var diagnostics = FormatLeanDiagnostics(result);
+        if (diagnostics.Length > 0)
+        {
+            lines.Add("Diagnosen:");
+            lines.AddRange(diagnostics);
+        }
+
+        AddLine("Meldung", ReadString(result, "message"));
+        return lines.Count == 0 ? null : string.Join('\n', lines);
+
+        void AddLine(string label, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                lines.Add($"{label}: {value}");
+            }
+        }
+    }
+
+    private static string? FormatLeanConsoleError(JsonElement result, string? resultMessage, string status)
+    {
+        if (!string.Equals(status, "failed", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var lines = new List<string>();
+        var message = ReadString(result, "message") ?? resultMessage;
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            lines.Add(message);
+        }
+
+        var forbidden = ReadStringArray(result, "forbiddenConstructs");
+        if (forbidden.Length > 0)
+        {
+            lines.Add("Verbotene Konstrukte: " + string.Join(", ", forbidden));
+        }
+
+        var diagnostics = FormatLeanDiagnostics(result);
+        if (diagnostics.Length > 0)
+        {
+            lines.Add("Diagnosen:");
+            lines.AddRange(diagnostics);
+        }
+
+        return lines.Count == 0 ? null : string.Join('\n', lines);
+    }
+
+    private static string[] FormatLeanDiagnostics(JsonElement owner)
+    {
+        if (owner.ValueKind != JsonValueKind.Object
+            || !owner.TryGetProperty("diagnostics", out var diagnostics)
+            || diagnostics.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var lines = new List<string>();
+        foreach (var diagnostic in diagnostics.EnumerateArray())
+        {
+            if (diagnostic.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var severity = ReadString(diagnostic, "severity") ?? "diagnostic";
+            var file = ReadString(diagnostic, "file") ?? ".";
+            var line = ReadInteger(diagnostic, "line");
+            var column = ReadInteger(diagnostic, "column");
+            var message = ReadString(diagnostic, "message") ?? string.Empty;
+            var location = line is { } lineNumber && column is { } columnNumber
+                ? $"{file}:{lineNumber}:{columnNumber}"
+                : file;
+            lines.Add($"{location}: {severity}: {message}".TrimEnd());
+        }
+        return lines.ToArray();
+    }
+
+    private static string[] ReadStringArray(JsonElement owner, string name)
+    {
+        if (owner.ValueKind != JsonValueKind.Object
+            || !owner.TryGetProperty(name, out var array)
+            || array.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return array.EnumerateArray()
+            .Where(static item => item.ValueKind == JsonValueKind.String)
+            .Select(static item => item.GetString())
+            .Where(static item => !string.IsNullOrWhiteSpace(item))
+            .Select(static item => item!)
+            .ToArray();
     }
 
     public async Task<int> ImportLegacyAsync(CancellationToken cancellationToken = default)

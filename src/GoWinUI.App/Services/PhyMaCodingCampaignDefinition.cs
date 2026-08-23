@@ -8,6 +8,7 @@ namespace GoWinUI.App.Services;
 public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerifier) : ICodingCampaignDefinition
 {
     internal const string BookRelativePath = "solutions/PhyMa.md";
+    internal const string PdfRelativePath = "solutions/PhyMa.pdf";
     internal const string CatalogRelativePath = "phyma_catalog.json";
     private const string BookRevisionMarkerPrefix = "<!-- phyma-revision:";
     private const string UnitMarkerPrefix = "<!-- phyma-unit:";
@@ -71,6 +72,12 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
     {
         "reference", "boundary", "limit", "generic",
     };
+    private static readonly Regex DetailedValidationHeadingPattern = new(
+        @"(?im)^\s*(?:#{2,6}\s+|\*\*)\s*(?:Analytischer Cross-Check|Analytische Gegenprüfung|Numerische Validierung|Numerische Gegenprüfung)\b",
+        RegexOptions.CultureInvariant);
+    private static readonly Regex DetailedNumericalEvidencePattern = new(
+        @"(?i)\b(?:absoluteError|relativeError|maxAbsoluteError|maxRelativeError|Referenzstichprobe|Randstichprobe|Stichprobentabelle|Fehlerwert|Toleranzliste)\b",
+        RegexOptions.CultureInvariant);
 
     private static readonly string[] Challenges =
     [
@@ -129,6 +136,7 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         Autoritative Dateien und Verzeichnisse:
 
         - `{{BookRelativePath}}`: einziges fortlaufendes Buchmanuskript in KaTeX-kompatiblem Markdown;
+        - `{{PdfRelativePath}}`: daraus gerenderte, lesbare A4-Buch-PDF mit sichtbaren Formeln;
         - `{{CatalogRelativePath}}`: einziger maschinenlesbarer Katalog für Revision, Themenfahrplan und validierte Einheiten;
         - `test_phyma.py`: unabhängige Vertrags- und Konsistenztests für Katalog, Belege und numerische Daten;
         - `lean-toolchain` mit `{{LeanProofService.PinnedLeanToolchain}}` und ein Lake-Projekt mit der gepinnten
@@ -140,15 +148,22 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         - `simulation_data/<unitId>.json` mit reproduzierbaren Stichproben und Fehlerwerten;
         - optional fachlich relevante Abbildungen unter `visualizations/`.
 
+        `proofs/` und `simulation_data/` sind autoritative Verzeichnisse: Jedes dort abgelegte JSON-Manifest und jede
+        Simulationsdaten-Datei muss in genau einer `units`-Einheit über `formalManifest`, `analyticManifest`,
+        `numericalManifest` beziehungsweise `numericalData` referenziert sein. Unfertige Entwürfe gehören nicht in
+        diese Verzeichnisse. Wenn du bereits gültige Artefakte erzeugt hast, integriere sie im selben Lauf atomar in
+        Katalog, Buch und PDF, statt sie als Nebenprodukt liegenzulassen.
+
         Erzeuge und aktualisiere nach jeder bestandenen Abnahme eine für Menschen lesbare A4-PDF
-        `solutions/PhyMa.pdf`, die `solutions/PhyMa.md` mit korrekt gerendertem KaTeX/LaTeX wiedergibt. Nutze dafür
+        `{{PdfRelativePath}}`, die `{{BookRelativePath}}` mit korrekt gerendertem KaTeX/LaTeX wiedergibt. Nutze dafür
         die GO-PDF-Exportlogik oder eine gleichwertige lokale HTML/Chromium-Renderstrecke; rohe LaTeX-Quellen,
         ungerenderte Formeln oder ein leeres Platzhalter-PDF gelten nicht als Ergebnis. Lege dabei kein zweites
         Buchmanuskript an. Beginne mit einem Vorwort, einer Inhaltsübersicht, einer konsistenten
         Notations- und Einheitenkonvention sowie mindestens einer belastbar validierten mathematischen und einer
         belastbar validierten physikalischen Lerneinheit. Formuliere wie in einem guten Fachbuch: Motivation,
-        Definitionen, Voraussetzungen, Satz oder physikalisches Gesetz, schrittweise Herleitung, Beispiele,
-        Gültigkeitsbereich, Interpretation, Verbindungen zu anderen Kapiteln und Grenzen der Aussage.
+        Definitionen, Voraussetzungen, Satz oder physikalisches Gesetz, schrittweise Herleitung, einen didaktisch
+        aufbereiteten Lean-Beweis mit Theoremname, Beispiele, Gültigkeitsbereich, Interpretation, Verbindungen zu
+        anderen Kapiteln und Grenzen der Aussage.
 
         `{{CatalogRelativePath}}` enthält exakt eine positive ganzzahlige `revision`, `book` mit dem Wert
         `{{BookRelativePath}}`, `roadmap` und `units`. Der Themenfahrplan enthält jeden der folgenden IDs genau einmal:
@@ -160,10 +175,10 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         Buchinhalt und enthält:
 
         - `id`, `title`, `discipline`, `field`, `status: validated`, `statement` und `validityDomain`;
-        - nicht leere Listen `definitions`, `assumptions` und `formalCoverage`;
-        - `formalCoverage` enthält `definitions`, `assumptions`, `theorem` und `derivation`;
+        - nicht leere Listen `definitions` und `assumptions`;
+        - das Objekt `formalCoverage` enthält nicht leere Texte für `definitions`, `assumptions`, `theorem` und `derivation`;
         - `formalLibrary` ist `lean-core`, `mathlib`, `physlib` oder `leancert`;
-        - `crossChecks` enthält `alternative-derivation` und mindestens einen weiteren unabhängigen Check aus
+        - das Objekt `crossChecks` enthält `alternative-derivation` und mindestens einen weiteren unabhängigen Check aus
           `dimensional-analysis`, `limit-case`, `special-case`, `symmetry`, `conservation-law`, `invariant` oder
           `independent-algebra`;
         - `formalManifest`, `analyticManifest`, `numericalManifest` und `numericalData` als relative Workspacepfade.
@@ -199,9 +214,19 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         Checker. `interval-certified` darf einen Python-Zertifikatschecker oder einen Lean-/LeanCert-Nachweis mit
         `theoremName` verwenden. Numerische Evidenz allein ist kein mathematischer Beweis.
 
+        Buchdarstellung: `solutions/PhyMa.md` und die daraus erzeugte PDF zeigen den formalen Lean-Beweis lesbar und
+        aufbereitet: benannter Lean-Satz, Kerndefinitionen, wichtige Lemmas beziehungsweise Beweisschritte und die
+        fachliche Bedeutung. Analytische und numerische Checker bleiben Validierungsartefakte und werden nicht als
+        Herleitungsschritte, Stichprobentabellen, Fehlerwerte oder Toleranzlisten im Buch ausgeschrieben. Im Buch steht
+        dafür nur ein kurzer Validierungsstatus, der auf getrennte Artefakte verweist.
+
         Führe alle Checker, `test_phyma.py`, Syntaxprüfungen und begrenzte Laufzeit-Smokes aus. Repariere Fehler ohne
         Prüfungen abzuschwächen. Halte Abhängigkeiten gepinnt, nutze bei Python eine lokale `.venv`, schreibe striktes
         RFC-8259-JSON ohne NaN oder Infinity und halte Caches sowie generierte Umgebungen aus Git.
+        `test_phyma.py` ist kein Platzhalter: Halte diesen Test als lokalen Spiegel der GO-Abnahme aktuell. Er muss
+        mindestens Mathe- und Physik-Einheiten, eindeutige Buchmarker, keine doppelten Kapitel, keine nicht
+        referenzierten JSON-Artefakte unter `proofs/` oder `simulation_data/`, aktuelle PDF-Erzeugung und das strikte
+        Manifest-/Numerikschema prüfen.
         """;
 
     public string BuildIterationPrompt(int iteration, string challenge) => $$"""
@@ -234,17 +259,25 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         eigenen Axiomen oder unvollständigen importierten Beweisen ist nicht bestanden. Bezeichne numerische
         Stichproben ohne Zertifikat ausschließlich als Evidenz.
 
-        Aktualisiere nach erfolgreicher fachlicher Änderung `solutions/PhyMa.md`, `solutions/PhyMa.pdf`,
+        Aktualisiere nach erfolgreicher fachlicher Änderung `{{BookRelativePath}}`, `{{PdfRelativePath}}`,
         `phyma_catalog.json`, die drei Beweismanifeste, Checker, numerischen Daten und betroffene Tests konsistent.
         Die PDF muss das Buch im A4-Buchformat mit gerendertem KaTeX darstellen; rohe Formelquellen oder ein
         Platzhalter-PDF reichen nicht. Schreibe neue Inhalte in den passenden bestehenden Abschnitt oder in genau
         einen neuen Abschnitt mit neuer `phyma-unit`; doppelte Einträge in `solutions/PhyMa.md` sind ungültig.
+        Lasse keine autoritativen Nebenartefakte zurück: Jedes JSON unter `proofs/` und jede JSON-Datei unter
+        `simulation_data/` muss von genau einer Katalogeinheit referenziert sein und im Buch höchstens als kompakter
+        Validierungsstatus genannt werden. Falls solche
+        Artefakte bereits existieren, integriere oder repariere sie zuerst, bevor du ein neues Thema beginnst.
         Erhöhe die Revision und den
         Revisionsmarker nur bei echter inhaltlicher Verbesserung. Das Buch muss weiterhin flüssig lesbar sein und
-        Definitionen, Voraussetzungen, Herleitung, Beispiele, Interpretation, Cross-Checks und Grenzen enthalten.
+        Definitionen, Voraussetzungen, Herleitung, einen aufbereiteten Lean-Beweis, Beispiele, Interpretation,
+        kompakten Validierungsstatus und Grenzen enthalten. Analytische und numerische Prüfdetails gehören in Checker,
+        Manifeste und `simulation_data`, nicht als ausformulierte Buchabschnitte in `solutions/PhyMa.md`.
         Führe anschließend alle betroffenen Checker, Lean verify, `test_phyma.py`, Syntax-/Buildprüfung und einen
         begrenzten Smoke-Test aus. Der Dauerworkflow endet nach einer bestandenen Revision nicht, sondern sucht danach
         selbstständig die nächste fachlich wertvolle Lücke.
+        Wenn `test_phyma.py` schwächer ist als diese Anforderungen, erweitere zuerst den Test und lasse ihn
+        fehlschlagen, bevor du die fachliche Reparatur abschließt.
         """;
 
     public string BuildCorrectionPrompt(int iteration, string challenge, IReadOnlyList<string> issues) => $$"""
@@ -256,7 +289,9 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         Repariere die Ursachen im bestehenden Manuskript, Katalog, Lean-Nachweis, analytischen Checker, numerischen
         Checker, den Simulationsdaten und Tests. Schwäche kein Gate und entferne keine fachliche Aussage nur, um eine
         Prüfung zu umgehen. Stelle sicher, dass alle drei Manifeste exakt dieselbe Kernaussage und denselben `caseId`
-        prüfen, ihre Artefakte tatsächlich ausgeführt wurden und ihre SHA-256-Werte aktuell sind. Verwende weder
+        prüfen, ihre Artefakte tatsächlich ausgeführt wurden und ihre SHA-256-Werte aktuell sind. Wenn die Abnahme
+        nicht referenzierte Beweis- oder Simulationsartefakte meldet, integriere sie in genau eine Katalogeinheit und
+        den zugehörigen Buchabschnitt oder entferne unfertige Entwürfe aus den autoritativen Verzeichnissen. Verwende weder
         `sorry`, `admit`, eigene Axiome noch Compilervertrauen. Prüfe Grenzfälle und Fehlerwerte neu, aktualisiere das
         Buch didaktisch konsistent und führe danach sämtliche drei Gates sowie `test_phyma.py` erneut aus.
         """;
@@ -277,6 +312,7 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         var bookPath = Path.Combine(workspacePath, BookRelativePath.Replace('/', Path.DirectorySeparatorChar));
         var catalogPath = Path.Combine(workspacePath, CatalogRelativePath);
         RequireNonEmptyFile(bookPath, BookRelativePath, issues);
+        ValidateBookPdf(workspacePath, bookPath, issues);
         RequireNonEmptyFile(catalogPath, CatalogRelativePath, issues);
         RequireNonEmptyFile(Path.Combine(workspacePath, "test_phyma.py"), "test_phyma.py", issues);
         RequireDirectory(Path.Combine(workspacePath, "proofs"), "proofs/", issues);
@@ -383,6 +419,8 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         ValidateBookShell(book, revision, issues);
         ValidateNoDuplicateBookEntries(book, issues);
         var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var referencedProofManifests = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var referencedNumericalData = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var hasMathematics = false;
         var hasPhysics = false;
         foreach (var unit in units.EnumerateArray())
@@ -406,7 +444,7 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
             hasMathematics |= discipline == "mathematics";
             hasPhysics |= discipline == "physics";
             RequireEnum(unit, id, "status", new HashSet<string>(StringComparer.Ordinal) { "validated" }, issues);
-            var field = RequireEnum(unit, id, "field", RoadmapFieldIds.ToHashSet(StringComparer.Ordinal), issues);
+            var field = ReadRoadmapField(unit, id, issues);
             _ = field;
             RequireEnum(unit, id, "formalLibrary", AllowedFormalLibraries, issues);
             RequireNonEmptyStringArray(unit, id, "definitions", issues);
@@ -418,6 +456,10 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
             var analyticManifest = RequireRelativeFile(unit, id, "analyticManifest", workspacePath, "proofs", issues);
             var numericalManifest = RequireRelativeFile(unit, id, "numericalManifest", workspacePath, "proofs", issues);
             var numericalData = RequireRelativeFile(unit, id, "numericalData", workspacePath, "simulation_data", issues);
+            AddIfNotNull(referencedProofManifests, formalManifest);
+            AddIfNotNull(referencedProofManifests, analyticManifest);
+            AddIfNotNull(referencedProofManifests, numericalManifest);
+            AddIfNotNull(referencedNumericalData, numericalData);
             if (new[] { formalManifest, analyticManifest, numericalManifest }
                 .Where(static path => path is not null)
                 .Distinct(StringComparer.OrdinalIgnoreCase).Count() != 3)
@@ -429,11 +471,67 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
             ValidateProofGate(id, analyticManifest, CodingProofKind.Symbolic, proofs, issues);
             ValidateNumericalProofGate(id, numericalManifest, numericalData, workspacePath, proofs, issues);
             ValidateIndependentArtifacts(id, formalManifest, analyticManifest, numericalManifest, workspacePath, issues);
-            ValidateBookUnit(book, id, ReadString(unit, "title") ?? id, issues);
+            ValidateBookUnit(workspacePath, book, id, ReadString(unit, "title") ?? id, formalManifest, issues);
         }
 
         if (!hasMathematics) issues.Add("PhyMa enthält noch keine validierte mathematische Lerneinheit.");
         if (!hasPhysics) issues.Add("PhyMa enthält noch keine validierte physikalische Lerneinheit.");
+        ValidateNoOrphanedAuthoritativeArtifacts(workspacePath, referencedProofManifests, referencedNumericalData, issues);
+    }
+
+    private static void AddIfNotNull(HashSet<string> values, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value)) values.Add(NormalizeRelativePath(value));
+    }
+
+    private static void ValidateNoOrphanedAuthoritativeArtifacts(
+        string workspacePath,
+        HashSet<string> referencedProofManifests,
+        HashSet<string> referencedNumericalData,
+        List<string> issues)
+    {
+        foreach (var relative in EnumerateAuthoritativeJsonFiles(workspacePath, "proofs"))
+        {
+            if (!referencedProofManifests.Contains(relative))
+            {
+                issues.Add(
+                    $"Autoritatives Beweismanifest ist nicht im Katalog referenziert: {relative}. "
+                    + "Integriere es in genau eine units-Einheit oder verschiebe unfertige Entwürfe aus proofs/.");
+            }
+        }
+
+        foreach (var relative in EnumerateAuthoritativeJsonFiles(workspacePath, "simulation_data"))
+        {
+            if (!referencedNumericalData.Contains(relative))
+            {
+                issues.Add(
+                    $"Autoritative Simulationsdaten sind nicht im Katalog referenziert: {relative}. "
+                    + "Integriere sie in genau eine units-Einheit oder verschiebe unfertige Entwürfe aus simulation_data/.");
+            }
+        }
+    }
+
+    private static IEnumerable<string> EnumerateAuthoritativeJsonFiles(string workspacePath, string relativeDirectory)
+    {
+        var root = Path.Combine(workspacePath, relativeDirectory);
+        if (!Directory.Exists(root)) yield break;
+
+        foreach (var file in Directory.EnumerateFiles(root, "*.json", SearchOption.AllDirectories)
+                     .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            if (IsIgnoredWorkspacePath(file)) continue;
+            yield return NormalizeRelativePath(Path.GetRelativePath(workspacePath, file));
+        }
+    }
+
+    private static bool IsIgnoredWorkspacePath(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        return normalized.Contains("/.git/", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("/.lake/", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("/.venv/", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("/node_modules/", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("/__pycache__/", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void ValidateBookShell(string book, int revision, List<string> issues)
@@ -446,6 +544,43 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         RequireBookConcept(book, ["Notation", "Konvention"], "Notations- und Konventionsabschnitt", issues);
         if (revision > 0 && !book.Contains($"{BookRevisionMarkerPrefix}{revision} -->", StringComparison.OrdinalIgnoreCase))
             issues.Add($"Das Buch enthält nicht den zur Katalogrevision {revision} passenden Revisionsmarker.");
+    }
+
+    private static void ValidateBookPdf(string workspacePath, string bookPath, List<string> issues)
+    {
+        var pdfPath = Path.Combine(workspacePath, PdfRelativePath.Replace('/', Path.DirectorySeparatorChar));
+        if (!File.Exists(pdfPath))
+        {
+            issues.Add($"Pflichtartefakt fehlt oder ist leer: {PdfRelativePath}");
+            return;
+        }
+
+        var info = new FileInfo(pdfPath);
+        if (info.Length < 1024)
+        {
+            issues.Add($"Pflichtartefakt ist zu klein oder kein lesbarer PDF-Export: {PdfRelativePath}");
+            return;
+        }
+
+        Span<byte> header = stackalloc byte[5];
+        using (var stream = File.OpenRead(pdfPath))
+        {
+            if (stream.Read(header) != header.Length
+                || header[0] != (byte)'%'
+                || header[1] != (byte)'P'
+                || header[2] != (byte)'D'
+                || header[3] != (byte)'F'
+                || header[4] != (byte)'-')
+            {
+                issues.Add($"Pflichtartefakt ist keine PDF-Datei mit gültigem Header: {PdfRelativePath}");
+            }
+        }
+
+        if (File.Exists(bookPath)
+            && info.LastWriteTimeUtc.AddSeconds(2) < File.GetLastWriteTimeUtc(bookPath))
+        {
+            issues.Add($"{PdfRelativePath} ist älter als {BookRelativePath} und muss aus dem aktuellen Buch neu gerendert werden.");
+        }
     }
 
     private static void ValidateNoDuplicateBookEntries(string book, List<string> issues)
@@ -483,7 +618,13 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         return Regex.Replace(withoutMarkup, @"\s+", " ", RegexOptions.CultureInvariant).Trim();
     }
 
-    private static void ValidateBookUnit(string book, string id, string title, List<string> issues)
+    private static void ValidateBookUnit(
+        string workspacePath,
+        string book,
+        string id,
+        string title,
+        string? formalManifest,
+        List<string> issues)
     {
         var marker = $"{UnitMarkerPrefix}{id} -->";
         var start = book.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
@@ -500,23 +641,84 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
         RequireBookConcept(section, ["Voraussetzung", "Annahme"], $"Voraussetzungen in Einheit {id}", issues);
         RequireBookConcept(section, ["Satz", "Theorem", "Gesetz"], $"Satz oder Gesetz in Einheit {id}", issues);
         RequireBookConcept(section, ["Herleitung", "Beweis"], $"Herleitung in Einheit {id}", issues);
-        RequireBookConcept(section, ["Analytischer Cross-Check", "Analytische Gegenprüfung"], $"analytischen Cross-Check in Einheit {id}", issues);
-        RequireBookConcept(section, ["Numerische Validierung", "Numerische Gegenprüfung"], $"numerische Validierung in Einheit {id}", issues);
+        ValidateFormalProofPresentation(workspacePath, section, id, formalManifest, issues);
+        RequireBookConcept(section, ["Beispiel", "Stichprobe", "Anwendung"], $"Beispiele in Einheit {id}", issues);
+        RequireBookConcept(section, ["Interpretation", "Bedeutung", "Einordnung"], $"Interpretation in Einheit {id}", issues);
+        ValidateValidationEvidenceIsSummarizedOnly(section, id, issues);
         RequireBookConcept(section, ["Gültigkeitsbereich", "Gültigkeit"], $"Gültigkeitsbereich in Einheit {id}", issues);
         if (!section.Contains('$') && !section.Contains("\\(", StringComparison.Ordinal))
             issues.Add($"Einheit {id}: Es fehlt eine KaTeX-kompatibel begrenzte mathematische Formel.");
     }
 
+    private static void ValidateFormalProofPresentation(
+        string workspacePath,
+        string section,
+        string id,
+        string? formalManifest,
+        List<string> issues)
+    {
+        RequireBookConcept(
+            section,
+            ["Formaler Lean-Beweis", "Lean-Beweis", "formalisierter Beweis", "formaler Beweis"],
+            $"aufbereiteten Lean-Beweis in Einheit {id}",
+            issues);
+        var theoremName = ReadFormalTheoremName(workspacePath, formalManifest);
+        if (theoremName is null)
+        {
+            return;
+        }
+
+        var theoremMentioned = section.Contains(theoremName, StringComparison.Ordinal)
+            || section.Contains(theoremName.Split('.').Last(), StringComparison.Ordinal);
+        if (!theoremMentioned)
+        {
+            issues.Add($"Einheit {id}: Der Buchabschnitt nennt den geprüften Lean-Theoremnamen {theoremName} nicht.");
+        }
+    }
+
+    private static void ValidateValidationEvidenceIsSummarizedOnly(
+        string section,
+        string id,
+        List<string> issues)
+    {
+        RequireBookConcept(
+            section,
+            ["Validierungsstatus", "Validierungsartefakte", "Validierung bestanden", "getrennte Validierung"],
+            $"kompakten Validierungsstatus in Einheit {id}",
+            issues);
+        if (DetailedValidationHeadingPattern.IsMatch(section))
+        {
+            issues.Add($"Einheit {id}: Analytische und numerische Prüfungen dürfen in solutions/PhyMa.md nicht als eigene ausführliche Buchabschnitte erscheinen.");
+        }
+        if (DetailedNumericalEvidencePattern.IsMatch(section))
+        {
+            issues.Add($"Einheit {id}: Numerische Stichproben, Fehlerwerte und Toleranzlisten gehören in simulation_data und nicht in das lesbare Buch.");
+        }
+    }
+
+    private static string? ReadFormalTheoremName(string workspacePath, string? formalManifest)
+    {
+        if (formalManifest is null) return null;
+        var manifest = ResolveInside(workspacePath, formalManifest);
+        if (manifest is null || !TryReadJson(manifest, out var document, out _)) return null;
+        using (document)
+        {
+            return ReadString(document.RootElement, "theoremName");
+        }
+    }
+
     private static void ValidateFormalCoverage(JsonElement unit, string id, List<string> issues)
     {
-        var coverage = ReadStringArray(unit, "formalCoverage");
+        var coverage = ReadStringSet(unit, "formalCoverage", requireObjectValues: true, id, issues);
         foreach (var required in RequiredFormalCoverage.Where(required => !coverage.Contains(required, StringComparer.Ordinal)))
             issues.Add($"Einheit {id}: formale Abdeckung fehlt für {required}.");
     }
 
     private static void ValidateCrossChecks(JsonElement unit, string id, List<string> issues)
     {
-        var values = ReadStringArray(unit, "crossChecks").Distinct(StringComparer.Ordinal).ToArray();
+        var values = ReadStringSet(unit, "crossChecks", requireObjectValues: true, id, issues)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
         if (!values.Contains("alternative-derivation", StringComparer.Ordinal))
             issues.Add($"Einheit {id}: Der analytische Cross-Check benötigt eine alternative Herleitung.");
         if (values.Count(value => AllowedCrossChecks.Contains(value)) < 2)
@@ -631,7 +833,8 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
                     issues.Add($"Einheit {id}, Stichprobe {index}: Eintrag ist kein Objekt.");
                     continue;
                 }
-                RequireString(sample, id, "name", issues);
+                if (ReadString(sample, "name") is null && ReadString(sample, "label") is null)
+                    issues.Add($"Einheit {id}, Stichprobe {index}: name oder label fehlt.");
                 var kind = ReadString(sample, "kind") ?? string.Empty;
                 if (!AllowedNumericalSampleKinds.Contains(kind))
                     issues.Add($"Einheit {id}, Stichprobe {index}: kind muss reference, boundary, limit oder generic sein.");
@@ -641,8 +844,8 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
                     || input.ValueKind != JsonValueKind.Object
                     || !input.EnumerateObject().Any())
                     issues.Add($"Einheit {id}, Stichprobe {index}: input muss ein nicht leeres Objekt sein.");
-                var observed = ReadFinite(sample, "observed", id, index, issues);
-                var reference = ReadFinite(sample, "reference", id, index, issues);
+                var observed = ReadFiniteAlias(sample, "observed", "actual", id, index, issues);
+                var reference = ReadFiniteAlias(sample, "reference", "expected", id, index, issues);
                 var absolute = ReadFiniteNonNegative(sample, "absoluteError", id, issues);
                 var relative = ReadFiniteNonNegative(sample, "relativeError", id, issues);
                 if (observed is { } observedValue && reference is { } referenceValue)
@@ -748,8 +951,11 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
             issues.Add($"Einheit {id}: Referenzierte Datei fehlt oder ist leer: {relative}.");
             return null;
         }
-        return relative;
+        return NormalizeRelativePath(relative);
     }
+
+    private static string NormalizeRelativePath(string relativePath) =>
+        relativePath.Replace('\\', '/').Trim();
 
     private static string? ResolveInside(string workspacePath, string relativePath)
     {
@@ -877,6 +1083,95 @@ public sealed class PhyMaCodingCampaignDefinition(CodingProofVerifier proofVerif
             return null;
         }
         return number;
+    }
+
+    private static double? ReadFiniteAlias(
+        JsonElement owner,
+        string primary,
+        string alias,
+        string id,
+        int sampleIndex,
+        List<string> issues)
+    {
+        if (owner.TryGetProperty(primary, out var primaryValue)
+            && primaryValue.TryGetDouble(out var primaryNumber)
+            && double.IsFinite(primaryNumber))
+        {
+            return primaryNumber;
+        }
+        if (owner.TryGetProperty(alias, out var aliasValue)
+            && aliasValue.TryGetDouble(out var aliasNumber)
+            && double.IsFinite(aliasNumber))
+        {
+            return aliasNumber;
+        }
+
+        issues.Add($"Einheit {id}, Stichprobe {sampleIndex}: {primary} oder {alias} fehlt oder ist nicht endlich.");
+        return null;
+    }
+
+    private static string? ReadRoadmapField(JsonElement unit, string id, List<string> issues)
+    {
+        var field = ReadString(unit, "field");
+        var roadmapId = ReadString(unit, "roadmapId");
+        var value = field ?? roadmapId;
+        if (value is null || !RoadmapFieldIds.Contains(value, StringComparer.Ordinal))
+        {
+            issues.Add($"Eintrag {id}: field fehlt oder ist ungültig.");
+            return null;
+        }
+        if (field is not null
+            && roadmapId is not null
+            && !field.Equals(roadmapId, StringComparison.Ordinal))
+        {
+            issues.Add($"Eintrag {id}: field und roadmapId widersprechen sich.");
+        }
+        return value;
+    }
+
+    private static string[] ReadStringSet(
+        JsonElement owner,
+        string property,
+        bool requireObjectValues,
+        string id,
+        List<string> issues)
+    {
+        if (!owner.TryGetProperty(property, out var value))
+        {
+            issues.Add($"Einheit {id}: {property} fehlt.");
+            return [];
+        }
+
+        if (value.ValueKind == JsonValueKind.Array)
+        {
+            return value.EnumerateArray()
+                .Where(static item => item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+                .Select(static item => item.GetString()!.Trim())
+                .ToArray();
+        }
+
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            var keys = new List<string>();
+            foreach (var item in value.EnumerateObject())
+            {
+                if (string.IsNullOrWhiteSpace(item.Name))
+                {
+                    continue;
+                }
+                if (requireObjectValues
+                    && (item.Value.ValueKind != JsonValueKind.String
+                        || string.IsNullOrWhiteSpace(item.Value.GetString())))
+                {
+                    issues.Add($"Einheit {id}: {property}.{item.Name} muss einen nicht leeren Erklärungstext enthalten.");
+                }
+                keys.Add(item.Name.Trim());
+            }
+            return keys.ToArray();
+        }
+
+        issues.Add($"Einheit {id}: {property} muss ein Objekt oder eine Textliste sein.");
+        return [];
     }
 
     private static void CompareMaximum(string id, string name, double declared, double calculated, List<string> issues)

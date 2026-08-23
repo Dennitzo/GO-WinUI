@@ -903,7 +903,10 @@ components:
           maxLength: 512
         preferredCodeModelId:
           type: string
-          enum: [ud, qwen3-coder-next]
+          enum: [qwen3.8-27b, qwen3-coder-next, openai/gpt-oss-120b]
+        reasoningEffort:
+          description: Vom ausgewählten Modell tatsächlich unterstützte Reasoning-Stufe.
+          enum: [low, medium, high, xhigh]
         documentContext:
           $ref: "#/components/schemas/DocumentContextDescriptor"
         sessionContext:
@@ -1225,6 +1228,12 @@ components:
           type: boolean
         isFallback:
           type: boolean
+        reasoningEfforts:
+          type: array
+          items:
+            enum: [low, medium, high, xhigh]
+        defaultReasoningEffort:
+          enum: [low, medium, high, xhigh]
     ModelStatusSnapshot:
       type: object
       additionalProperties: false
@@ -1280,7 +1289,7 @@ components:
       required: [modelId, displayName, contextTokens, loaded]
       properties:
         modelId:
-          enum: [ud, qwen3-coder-next]
+          enum: [qwen3.8-27b, qwen3-coder-next, openai/gpt-oss-120b]
         displayName:
           type: string
         contextTokens:

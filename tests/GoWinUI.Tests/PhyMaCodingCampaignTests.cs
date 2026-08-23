@@ -11,8 +11,19 @@ public sealed class PhyMaCodingCampaignTests
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
     private static readonly string[] CatalogDefinitions = ["Alle verwendeten Größen werden vor dem Satz explizit definiert."];
     private static readonly string[] CatalogAssumptions = ["Die im Gültigkeitsbereich genannten Voraussetzungen gelten."];
-    private static readonly string[] FormalCoverage = ["definitions", "assumptions", "theorem", "derivation"];
-    private static readonly string[] AnalyticalCrossChecks = ["alternative-derivation", "limit-case", "dimensional-analysis"];
+    private static readonly Dictionary<string, string> FormalCoverage = new(StringComparer.Ordinal)
+    {
+        ["definitions"] = "Die verwendeten Begriffe sind im Lean-Artefakt als Definitionen oder Strukturen angelegt.",
+        ["assumptions"] = "Die Voraussetzungen des Satzes sind im Theoremtyp explizit sichtbar.",
+        ["theorem"] = "Der zentrale Satz besitzt einen benannten theoremName.",
+        ["derivation"] = "Der Beweis wird durch den Lean-Kernel geprüft.",
+    };
+    private static readonly Dictionary<string, string> AnalyticalCrossChecks = new(StringComparer.Ordinal)
+    {
+        ["alternative-derivation"] = "Eine zweite symbolische Herleitung prüft die Kernaussage.",
+        ["limit-case"] = "Grenzfälle werden separat ausgewertet.",
+        ["dimensional-analysis"] = "Ein Strukturcheck prüft die Konsistenz der verwendeten Größen.",
+    };
     [Fact]
     public void WorkflowContractRequiresAContinuousBookAndThreeIndependentValidationGates()
     {
@@ -30,10 +41,19 @@ public sealed class PhyMaCodingCampaignTests
         Assert.Contains("solutions/PhyMa.pdf", bootstrap, StringComparison.Ordinal);
         Assert.Contains("korrekt gerendertem KaTeX", bootstrap, StringComparison.Ordinal);
         Assert.Contains("rohe LaTeX-Quellen", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("aufbereiteten Lean-Beweis", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("Buchdarstellung", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("nur ein kurzer Validierungsstatus", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("formalCoverage` enthält nicht leere Texte", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("das Objekt `crossChecks`", bootstrap, StringComparison.Ordinal);
         Assert.Contains("solutions/PhyMa.pdf", iteration, StringComparison.Ordinal);
         Assert.Contains("A4-Buchformat mit gerendertem KaTeX", iteration, StringComparison.Ordinal);
+        Assert.Contains("Analytische und numerische Prüfdetails gehören in Checker", iteration, StringComparison.Ordinal);
         Assert.Contains("nur einmal vorkommen", bootstrap, StringComparison.Ordinal);
         Assert.Contains("doppelte Einträge", iteration, StringComparison.Ordinal);
+        Assert.Contains("lokalen Spiegel der GO-Abnahme", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("referenzierten JSON-Artefakte", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("test_phyma.py` schwächer", iteration, StringComparison.Ordinal);
         Assert.Contains("proof.lean verify", bootstrap, StringComparison.Ordinal);
         Assert.Contains("leanprover/lean4:v4.30.0", bootstrap, StringComparison.Ordinal);
         Assert.Contains("v4.30.0", bootstrap, StringComparison.Ordinal);
@@ -190,7 +210,8 @@ public sealed class PhyMaCodingCampaignTests
                     "addition-commutativity",
                     "Kommutativität der Addition",
                     "$a+b=b+a$",
-                    "reellen Zahlen"));
+                    "reellen Zahlen",
+                    "phyma_addition_commutative"));
 
             var result = PhyMaCodingCampaignDefinition.ValidateWorkspaceArtifacts(fixture.Workspace, fixture.Proofs);
 
@@ -201,6 +222,138 @@ public sealed class PhyMaCodingCampaignTests
             Assert.Contains(result.Issues, issue =>
                 issue.Contains("Kommutativität der Addition", StringComparison.Ordinal)
                 && issue.Contains("mehrfach", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(fixture.Workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RevisionIsRejectedWhenBookListsAnalyticalOrNumericalValidationSteps()
+    {
+        var fixture = CreateValidFixture();
+        try
+        {
+            File.AppendAllText(
+                fixture.BookPath,
+                """
+
+                ## Ausführliche Prüfdetails
+
+                **Analytischer Cross-Check.** Diese Detaildarstellung gehört nicht in das Buch.
+
+                **Numerische Validierung.** Eine Stichprobentabelle mit absoluteError und relativeError gehört in
+                simulation_data.
+                """);
+
+            var result = PhyMaCodingCampaignDefinition.ValidateWorkspaceArtifacts(fixture.Workspace, fixture.Proofs);
+
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Issues, issue =>
+                issue.Contains("nicht als eigene ausführliche Buchabschnitte", StringComparison.Ordinal));
+            Assert.Contains(result.Issues, issue =>
+                issue.Contains("Numerische Stichproben", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(fixture.Workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RevisionIsRejectedWhenBookOmitsTheFormalLeanTheoremName()
+    {
+        var fixture = CreateValidFixture();
+        try
+        {
+            File.WriteAllText(
+                fixture.BookPath,
+                File.ReadAllText(fixture.BookPath).Replace("phyma_addition_commutative", "nicht_genannter_satz", StringComparison.Ordinal));
+
+            var result = PhyMaCodingCampaignDefinition.ValidateWorkspaceArtifacts(fixture.Workspace, fixture.Proofs);
+
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Issues, issue =>
+                issue.Contains("Lean-Theoremnamen phyma_addition_commutative", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(fixture.Workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RevisionIsRejectedWhenAuthoritativeArtifactsAreNotReferencedByCatalog()
+    {
+        var fixture = CreateValidFixture();
+        try
+        {
+            var orphanProofDirectory = Directory.CreateDirectory(
+                Path.Combine(fixture.Workspace, "proofs", "orphan-topic", "formal"));
+            File.WriteAllText(
+                Path.Combine(orphanProofDirectory.FullName, "proof.json"),
+                JsonSerializer.Serialize(
+                    new
+                    {
+                        caseId = "orphan-topic",
+                        kind = "formal",
+                        statement = "Dieses Manifest darf nicht neben dem Katalog liegen bleiben.",
+                        assumptions = Array.Empty<string>(),
+                        validityDomain = "Testfixture mit endlichen Eingaben.",
+                        artifact = "proofs/orphan-topic/formal/Proof.lean",
+                        sourceSha256 = new string('A', 64),
+                        theoremName = "orphan_topic",
+                    },
+                    IndentedJson));
+            File.WriteAllText(
+                Path.Combine(fixture.Workspace, "simulation_data", "orphan-topic.json"),
+                JsonSerializer.Serialize(
+                    new
+                    {
+                        caseId = "orphan-topic",
+                        method = "Unreferenzierte Testdaten.",
+                        samples = Array.Empty<object>(),
+                    },
+                    IndentedJson));
+
+            var result = PhyMaCodingCampaignDefinition.ValidateWorkspaceArtifacts(fixture.Workspace, fixture.Proofs);
+
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Issues, issue =>
+                issue.Contains("Autoritatives Beweismanifest", StringComparison.Ordinal)
+                && issue.Contains("proofs/orphan-topic/formal/proof.json", StringComparison.Ordinal));
+            Assert.Contains(result.Issues, issue =>
+                issue.Contains("Autoritative Simulationsdaten", StringComparison.Ordinal)
+                && issue.Contains("simulation_data/orphan-topic.json", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(fixture.Workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RevisionIsRejectedWhenAuthoritativeBookPdfIsMissingOrStale()
+    {
+        var fixture = CreateValidFixture();
+        try
+        {
+            var pdfPath = Path.ChangeExtension(fixture.BookPath, ".pdf");
+            File.Delete(pdfPath);
+
+            var missing = PhyMaCodingCampaignDefinition.ValidateWorkspaceArtifacts(fixture.Workspace, fixture.Proofs);
+
+            Assert.False(missing.IsValid);
+            Assert.Contains(missing.Issues, issue => issue.Contains("solutions/PhyMa.pdf", StringComparison.Ordinal));
+
+            WriteMinimalPdf(pdfPath);
+            File.SetLastWriteTimeUtc(pdfPath, File.GetLastWriteTimeUtc(fixture.BookPath).AddMinutes(-5));
+
+            var stale = PhyMaCodingCampaignDefinition.ValidateWorkspaceArtifacts(fixture.Workspace, fixture.Proofs);
+
+            Assert.False(stale.IsValid);
+            Assert.Contains(stale.Issues, issue => issue.Contains("älter als", StringComparison.Ordinal));
         }
         finally
         {
@@ -277,6 +430,7 @@ public sealed class PhyMaCodingCampaignTests
 
         var bookPath = Path.Combine(workspace, "solutions", "PhyMa.md");
         File.WriteAllText(bookPath, BuildBook());
+        WriteMinimalPdf(Path.ChangeExtension(bookPath, ".pdf"));
 
         var units = new[]
         {
@@ -402,17 +556,20 @@ public sealed class PhyMaCodingCampaignTests
 
             Skalare stehen kursiv, Vektoren fett und physikalische Größen werden konsistent im SI-System angegeben.
 
-            {{BuildBookUnit("addition-commutativity", "Kommutativität der Addition", "$a+b=b+a$", "reellen Zahlen")}}
+            {{BuildBookUnit("addition-commutativity", "Kommutativität der Addition", "$a+b=b+a$", "reellen Zahlen", "phyma_addition_commutative")}}
 
-            {{BuildBookUnit("uniform-linear-motion", "Gleichförmige geradlinige Bewegung", "$x(t)=x_0+v t$", "klassischen Mechanik")}}
+            {{BuildBookUnit("uniform-linear-motion", "Gleichförmige geradlinige Bewegung", "$x(t)=x_0+v t$", "klassischen Mechanik", "phyma_uniform_motion_zero_time")}}
             """;
     }
 
-    private static string BuildBookUnit(string id, string title, string equation, string domain)
+    private static string BuildBookUnit(string id, string title, string equation, string domain, string theoremName)
     {
         var explanation = string.Join(' ', Enumerable.Repeat(
             $"Die Einheit {title} entwickelt die Aussage aus den eingeführten Begriffen, erklärt jeden Rechenschritt und ordnet das Ergebnis in den übergeordneten Zusammenhang ein.",
             15));
+        var leanExplanation = string.Join(' ', Enumerable.Repeat(
+            $"Der formale Lean-Beweis `{theoremName}` bindet die Definitionen, Voraussetzungen und den Satz an eine vom Kernel geprüfte Beweiskette.",
+            5));
         return $$"""
             <!-- phyma-unit:{{id}} -->
             ## {{title}}
@@ -425,11 +582,19 @@ public sealed class PhyMaCodingCampaignTests
 
             **Herleitung und Beweis.** {{explanation}}
 
-            **Analytischer Cross-Check.** Eine alternative Herleitung sowie Symmetrie-, Dimensions- und Grenzfalltests
-            bestätigen dieselbe Aussage unabhängig von der ersten Rechnung.
+            **Formaler Lean-Beweis.** {{leanExplanation}} Der Theoremname lautet `{{theoremName}}`. Die Darstellung
+            übersetzt den geprüften Lean-Kern in lesbare Fachsprache, ohne eine ungeprüfte Behauptung als Beweis
+            auszugeben.
 
-            **Numerische Validierung.** Referenz-, reguläre und Randstichproben werden mit einer getrennten Implementierung
-            ausgewertet; absolute und relative Fehler bleiben innerhalb der dokumentierten Toleranzen.
+            **Validierungsstatus.** Die formale Lean-Prüfung, der getrennte analytische Checker und die unabhängige
+            numerische Evidenz sind als separate Artefakte im Katalog referenziert und bestanden. Ihre Detaildaten
+            bleiben in den Manifesten und Simulationsdaten, damit das Buch selbst als Lehrtext lesbar bleibt.
+
+            **Beispiel.** Ein konkreter Beispielwert zeigt, wie die Formel im Alltag des jeweiligen Gebietes angewendet
+            wird und welche Zwischenschritte für Leserinnen und Leser nachvollziehbar bleiben müssen.
+
+            **Interpretation.** Das Resultat erklärt, welche Struktur erhalten bleibt, warum die Aussage fachlich
+            nützlich ist und wo ihre Grenzen gegenüber allgemeineren Modellen liegen.
 
             **Gültigkeitsbereich.** Die Aussage gilt innerhalb der {{domain}} und wird außerhalb dieses Bereichs nicht
             ohne zusätzliche Voraussetzungen verallgemeinert.
@@ -509,6 +674,16 @@ public sealed class PhyMaCodingCampaignTests
     {
         using var stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
+    private static void WriteMinimalPdf(string path)
+    {
+        var content = "%PDF-1.7\n"
+                      + "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+                      + "2 0 obj << /Type /Pages /Count 0 >> endobj\n"
+                      + "trailer << /Root 1 0 R >>\n"
+                      + "%%EOF\n";
+        File.WriteAllText(path, content + new string(' ', 1200), Encoding.ASCII);
     }
 
     private static string Normalize(string path) => path.Replace('\\', '/');

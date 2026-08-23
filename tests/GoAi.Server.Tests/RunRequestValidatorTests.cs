@@ -67,7 +67,7 @@ public sealed class RunRequestValidatorTests
     }
 
     [Theory]
-    [InlineData(CodingModelCatalog.DeepSeekV4FlashId)]
+    [InlineData(CodingModelCatalog.Qwen38BId)]
     [InlineData(CodingModelCatalog.Qwen3CoderNextId)]
     [InlineData(CodingModelCatalog.GptOss120BId)]
     public void EveryCatalogCodingModelIsAccepted(string modelId)
@@ -94,6 +94,52 @@ public sealed class RunRequestValidatorTests
         var error = Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request));
 
         Assert.Contains("supported coding model", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ReasoningEffortMustMatchTheSelectedModelsRealProfile()
+    {
+        var qwen38 = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Bearbeite das Projekt.")])],
+            PreferredCodeModelId: CodingModelCatalog.Qwen38BId,
+            ReasoningEffort: "xhigh");
+        var gptOss = qwen38 with
+        {
+            PreferredCodeModelId = CodingModelCatalog.GptOss120BId,
+            ReasoningEffort = "high",
+        };
+
+        RunRequestValidator.Validate(qwen38);
+        RunRequestValidator.Validate(gptOss);
+
+        var unsupportedQwenEffort = Assert.Throws<ArgumentException>(() =>
+            RunRequestValidator.Validate(qwen38 with { ReasoningEffort = "high" }));
+        Assert.Contains("nicht unterstützt", unsupportedQwenEffort.Message, StringComparison.OrdinalIgnoreCase);
+
+        var fixedCoderEffort = Assert.Throws<ArgumentException>(() =>
+            RunRequestValidator.Validate(qwen38 with
+            {
+                PreferredCodeModelId = CodingModelCatalog.Qwen3CoderNextId,
+                ReasoningEffort = "low",
+            }));
+        Assert.Contains("keine steuerbare Stufe", fixedCoderEffort.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GeneralReasoningRequiresAnExplicitCompatibleModel()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.General,
+            [new RunMessage("user", [new ContentPart("text", "Erkläre das Ergebnis.")])],
+            PreferredGeneralModelId: "openai/gpt-oss-120b",
+            ReasoningEffort: "medium");
+
+        RunRequestValidator.Validate(request);
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
+            request with { PreferredGeneralModelId = "unknown/model" }));
     }
 
     [Fact]

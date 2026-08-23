@@ -1,7 +1,9 @@
+using GoAi.Contracts;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Chat;
 using GoWinUI.Core.Models;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -27,6 +29,10 @@ public sealed class AssistantCoordinator(
 {
     private const string DefaultSessionTitle = "Neue Sitzung";
     private const string DefaultSystemPrompt = "GO ist ein lokales Arbeitstool für TGA-Fachplanung. Unterstütze Fachplaner bei technischer Gebäudeausrüstung, Anlagenkonzepten, Berechnungen, Koordination und Dokumentation. GO ist hier ein Produktname und nicht die Programmiersprache Go. Weise auf Unsicherheit, fehlende Projektdaten und erforderliche fachliche Prüfungen hin; erfinde keine Norminhalte, Quellen oder Projektangaben.";
+    private static readonly JsonSerializerOptions PromptWorkflowContractJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+    };
     private readonly SemaphoreSlim _chatGate = new(1, 1);
     private CancellationTokenSource? _activeChatCancellation;
     private string? _activeDiagnosticSessionId;
@@ -231,6 +237,17 @@ public sealed class AssistantCoordinator(
             null,
             pages,
             contextLimit));
+        var generalReasoningProfile = ToReasoningProfileDto(
+            settings.Current.SelectedModel,
+            "general",
+            settings.Current.ReasoningEffort);
+        var codingReasoningProfile = ToReasoningProfileDto(
+            settings.Current.SelectedCodingModel,
+            "code",
+            settings.Current.ReasoningEffort);
+        var activeReasoningEffort = session.PersistentToolAction == PersistentToolAction.Code
+            ? codingReasoningProfile.SelectedEffort
+            : generalReasoningProfile.SelectedEffort;
         return new
         {
             sessions = sessions.Select(ToSessionDto),
@@ -251,7 +268,12 @@ public sealed class AssistantCoordinator(
                 && (settings.Current.AiProvider == AiProviderKind.GoAiServer ? goAi?.IsRunning == true : orchestrator.IsRunning),
             model = settings.Current.AiProvider == AiProviderKind.GoAiServer ? "GO AI Server" : settings.Current.SelectedModel,
             provider = settings.Current.AiProvider.ToString(),
-            reasoningEffort = settings.Current.ReasoningEffort,
+            reasoningEffort = activeReasoningEffort,
+            reasoningProfiles = new
+            {
+                general = generalReasoningProfile,
+                code = codingReasoningProfile,
+            },
             contextUsed = context.EstimatedTokens,
             contextLimit,
             contextWasTruncated = context.WasTruncated,
@@ -495,6 +517,15 @@ public sealed class AssistantCoordinator(
                 var campaignSessionId = GetOptionalGuid(envelope.Payload, "sessionId")
                     ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
                 var instruction = GetOptionalString(envelope.Payload, "instruction", 100_000);
+                var requestedReasoning = GetOptionalString(envelope.Payload, "reasoningEffort", 20);
+                var codingReasoning = NormalizeReasoningSelection(
+                    settings.Current.SelectedCodingModel,
+                    "code",
+                    requestedReasoning ?? settings.Current.ReasoningEffort,
+                    rejectUnsupported: requestedReasoning is not null);
+                await settings.UpdateAsync(
+                    current => current with { ReasoningEffort = codingReasoning },
+                    cancellationToken).ConfigureAwait(false);
                 await chats.SaveDraftAsync(campaignSessionId, string.Empty, cancellationToken).ConfigureAwait(false);
                 await emit(
                     "campaign.changed",
@@ -836,13 +867,7 @@ public sealed class AssistantCoordinator(
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
         session = await EnsureSessionWorkspaceAsync(session, cancellationToken).ConfigureAwait(false);
-        var reasoning = GetOptionalString(envelope.Payload, "reasoningEffort", 20)
-            ?? settings.Current.ReasoningEffort;
-        await settings.UpdateAsync(current => current with
-        {
-            ActiveSessionId = sessionId,
-            ReasoningEffort = reasoning,
-        }, cancellationToken).ConfigureAwait(false);
+        var requestedReasoning = GetOptionalString(envelope.Payload, "reasoningEffort", 20);
         await chats.SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
         var explicitTool = GetOptionalString(envelope.Payload, "toolAction", 40);
         var match = await ResolvePromptMatchAsync(
@@ -850,6 +875,17 @@ public sealed class AssistantCoordinator(
             prompt,
             explicitTool,
             cancellationToken).ConfigureAwait(false);
+        var isCodingRun = match?.Trigger.Action == PromptTriggerAction.Code;
+        var reasoning = NormalizeReasoningSelection(
+            isCodingRun ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel,
+            isCodingRun ? "code" : "general",
+            requestedReasoning ?? settings.Current.ReasoningEffort,
+            rejectUnsupported: requestedReasoning is not null);
+        await settings.UpdateAsync(current => current with
+        {
+            ActiveSessionId = sessionId,
+            ReasoningEffort = reasoning,
+        }, cancellationToken).ConfigureAwait(false);
         var speechMessageId = GetOptionalGuid(envelope.Payload, "speechMessageId");
         if (match?.Trigger.Action == PromptTriggerAction.TextToSpeech)
         {
@@ -1014,6 +1050,54 @@ public sealed class AssistantCoordinator(
         PersistentToolAction.Audiobook => "audiobook",
         _ => null,
     };
+
+    private static ReasoningProfileDto ToReasoningProfileDto(
+        string? modelId,
+        string role,
+        string? requestedEffort)
+    {
+        var profile = ModelReasoningProfiles.Resolve(modelId, role);
+        return new ReasoningProfileDto(
+            modelId ?? string.Empty,
+            role,
+            profile.SupportedEfforts,
+            profile.DefaultEffort,
+            profile.Resolve(
+                string.Equals(requestedEffort?.Trim(), ModelReasoningProfiles.Automatic, StringComparison.OrdinalIgnoreCase)
+                    ? null
+                    : requestedEffort)
+                ?? ModelReasoningProfiles.Automatic);
+    }
+
+    private static string NormalizeReasoningSelection(
+        string? modelId,
+        string role,
+        string? requestedEffort,
+        bool rejectUnsupported)
+    {
+        var profile = ModelReasoningProfiles.Resolve(modelId, role);
+        var requested = requestedEffort?.Trim();
+        var isAutomatic = string.IsNullOrWhiteSpace(requested)
+            || string.Equals(requested, ModelReasoningProfiles.Automatic, StringComparison.OrdinalIgnoreCase);
+        if (rejectUnsupported && !isAutomatic && !profile.Supports(requested))
+        {
+            var supported = profile.SupportedEfforts.Count == 0
+                ? "keine steuerbare Stufe"
+                : string.Join(", ", profile.SupportedEfforts);
+            throw new InvalidOperationException(
+                $"Das aktive Modell '{modelId}' unterstützt Reasoning '{requested}' nicht ({supported}).");
+        }
+
+        return profile.Resolve(isAutomatic ? null : requested)
+            ?? ModelReasoningProfiles.Automatic;
+    }
+
+    private sealed record ReasoningProfileDto(
+        string ModelId,
+        string Role,
+        IReadOnlyList<string> SupportedEfforts,
+        string? DefaultEffort,
+        string SelectedEffort);
 
     private async Task EmitGoAiUpdateAsync(
         GoAiAssistantUpdate update,
@@ -1466,10 +1550,23 @@ public sealed class AssistantCoordinator(
         CancellationToken cancellationToken)
     {
         var messageId = GetRequiredGuid(envelope.Payload, "messageId");
-        var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
+        var session = await EnsureSessionWorkspaceAsync(
+            await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
         var message = (await chats.ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false))
             .FirstOrDefault(item => item.Id == messageId)
             ?? throw new InvalidOperationException("Die Nachricht wurde nicht gefunden.");
+        if (IsCodingWorkflowSession(session))
+        {
+            await CreatePromptWorkflowFromCodingMessageAsync(
+                session,
+                message,
+                emit,
+                envelope.RequestId,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         var title = GeneralAgentResponseParser.CreateWorkflowTitle(message.Content);
         var contextSummary = string.IsNullOrWhiteSpace(message.ContextSummary)
             ? GeneralAgentResponseParser.CreateContextSummary(null, message.Content)
@@ -1494,6 +1591,166 @@ public sealed class AssistantCoordinator(
                 tags = Array.Empty<string>(),
             },
         }, envelope.RequestId);
+    }
+
+    private async Task CreatePromptWorkflowFromCodingMessageAsync(
+        ChatSession session,
+        ChatMessage message,
+        Func<string, object, string?, Task> emit,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        var campaignService = campaigns
+            ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
+        if (message.Role != ChatRole.Assistant)
+        {
+            throw new InvalidOperationException("Nur AI-Nachrichten können als Coding-Workflow gespeichert werden.");
+        }
+
+        var content = (message.Content ?? string.Empty).Trim();
+        if (content.Length == 0)
+        {
+            throw new InvalidOperationException("Die AI-Nachricht enthält keinen Workflow-Inhalt.");
+        }
+
+        if (string.IsNullOrWhiteSpace(session.WorkspacePath) || !Directory.Exists(session.WorkspacePath))
+        {
+            throw new DirectoryNotFoundException("Wähle zuerst einen verfügbaren Workspace für die Coding-Sitzung aus.");
+        }
+
+        var workspace = Path.GetFullPath(session.WorkspacePath);
+        var campaignDirectory = Path.Combine(workspace, ".go-campaign");
+        Directory.CreateDirectory(campaignDirectory);
+        var title = GeneralAgentResponseParser.CreateWorkflowTitle(content);
+        var sourceFileName = "prompt-workflow-source.md";
+        var sourceRelativePath = ".go-campaign/" + sourceFileName;
+        await WriteAtomicUtf8Async(
+            Path.Combine(campaignDirectory, sourceFileName),
+            BuildPromptWorkflowSourceMarkdown(title, message, content),
+            cancellationToken).ConfigureAwait(false);
+        await WriteAtomicUtf8Async(
+            Path.Combine(workspace, PromptDrivenCodingCampaignDefinition.ContractRelativePath.Replace('/', Path.DirectorySeparatorChar)),
+            BuildPromptWorkflowContractJson(title, message, content, sourceRelativePath),
+            cancellationToken).ConfigureAwait(false);
+
+        var snapshot = await campaignService.SelectAsync(
+            session.Id,
+            PromptDrivenCodingCampaignDefinition.DescriptorId,
+            cancellationToken).ConfigureAwait(false);
+        await recentActivity.RecordAsync(
+            $"Coding-Workflow „{title}“ aus AI-Nachricht gespeichert",
+            CancellationToken.None).ConfigureAwait(false);
+        await emit("campaign.changed", snapshot, requestId).ConfigureAwait(false);
+        await emit("session.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), requestId).ConfigureAwait(false);
+    }
+
+    private static bool IsCodingWorkflowSession(ChatSession session) =>
+        session.AssistantMode == AssistantMode.Code
+        || session.PersistentToolAction == PersistentToolAction.Code;
+
+    private static string BuildPromptWorkflowSourceMarkdown(
+        string title,
+        ChatMessage message,
+        string content) => $"""
+        # {title}
+
+        Quelle: AI-Nachricht `{message.Id:D}` vom {message.UpdatedAt:O}
+
+        {TruncateForWorkflow(content, 250_000)}
+        """;
+
+    private static string BuildPromptWorkflowContractJson(
+        string title,
+        ChatMessage message,
+        string content,
+        string sourceRelativePath)
+    {
+        var excerpt = TruncateForWorkflow(content, 20_000);
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
+        var contract = new
+        {
+            schema = "go.prompt-workflow.v1",
+            title,
+            objective = $"Den aus der gespeicherten AI-Nachricht „{title}“ abgeleiteten Coding-Workflow reproduzierbar im Workspace umsetzen, prüfen und fortlaufend verbessern.",
+            iteration = 0,
+            scope = new
+            {
+                source = "ai-message-footer",
+                sourceMessageId = message.Id,
+                sourceMessageUpdatedAt = message.UpdatedAt,
+                sourceMessageSha256 = hash,
+                sourceDocument = sourceRelativePath,
+                sourceExcerpt = excerpt,
+            },
+            assumptions = new[]
+            {
+                "Die ausgewählte AI-Nachricht ist der fachliche Ausgangspunkt des gespeicherten Coding-Workflows.",
+                "Alle Änderungen und Prüfungen bleiben auf den freigegebenen Workspace begrenzt.",
+            },
+            acceptanceCriteria = new[]
+            {
+                "Der Workflow-Vertrag bleibt unter .go-campaign/prompt-workflow.json aktuell und nachvollziehbar.",
+                "Relevante Code-, Test-, Dokumentations- oder Artefaktänderungen werden im Workspace erzeugt und geprüft.",
+                "Jeder ausgeführte Schritt dokumentiert reale Prüfungen, offene Punkte und die nächste sinnvolle Aktion.",
+            },
+            verificationCommands = new[]
+            {
+                new { purpose = "test", command = "Projektabhängige Tests durch den Coding-Agenten bestimmen und ausführen." },
+                new { purpose = "build", command = "Projektabhängigen Build oder Syntaxcheck ausführen, sofern vorhanden." },
+            },
+            artifacts = new object[]
+            {
+                new { path = sourceRelativePath, kind = "source-message", description = "Ursprüngliche AI-Nachricht als Workflow-Quelle." },
+            },
+            openQuestions = Array.Empty<string>(),
+            lastRun = new
+            {
+                status = "saved",
+                changedFiles = new[] { PromptDrivenCodingCampaignDefinition.ContractRelativePath, sourceRelativePath },
+                checks = Array.Empty<string>(),
+                nextAction = "Workflow über den Promptbutton starten; der Coding-Agent leitet den nächsten Schritt aus Vertrag und Workspace ab.",
+            },
+        };
+        return JsonSerializer.Serialize(contract, PromptWorkflowContractJsonOptions);
+    }
+
+    private static string TruncateForWorkflow(string value, int maximumLength)
+    {
+        var normalized = value.Replace("\r\n", "\n").Replace('\r', '\n').Trim();
+        if (normalized.Length <= maximumLength)
+        {
+            return normalized;
+        }
+
+        return normalized[..maximumLength].TrimEnd()
+            + "\n\n[Auszug gekürzt; vollständige Quelle bleibt in der ursprünglichen Chatnachricht erhalten.]";
+    }
+
+    private static async Task WriteAtomicUtf8Async(
+        string path,
+        string content,
+        CancellationToken cancellationToken)
+    {
+        var directory = Path.GetDirectoryName(path)
+            ?? throw new InvalidOperationException("Der Zielpfad ist ungültig.");
+        Directory.CreateDirectory(directory);
+        var temporaryPath = Path.Combine(directory, Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            await File.WriteAllTextAsync(
+                temporaryPath,
+                content,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                cancellationToken).ConfigureAwait(false);
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
     }
 
     private static object ToSessionDto(ChatSession session) => new

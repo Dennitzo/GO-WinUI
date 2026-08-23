@@ -34,7 +34,9 @@ public sealed record ModelCapability(
     int ContextTokens,
     bool SupportsTools,
     bool SupportsVision,
-    bool IsFallback);
+    bool IsFallback,
+    IReadOnlyList<string>? ReasoningEfforts = null,
+    string? DefaultReasoningEffort = null);
 
 public sealed record ModelStatusSnapshot(
     bool ProviderReachable,

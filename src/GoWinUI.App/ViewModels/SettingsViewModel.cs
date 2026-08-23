@@ -70,7 +70,7 @@ public sealed partial class SettingsViewModel(
     public partial string SelectedCodingModel { get; set; } = AppSettings.DefaultSelectedCodingModel;
 
     [ObservableProperty]
-    public partial string ReasoningEffort { get; set; } = "medium";
+    public partial string ReasoningEffort { get; set; } = "auto";
 
     [ObservableProperty]
     public partial bool HasStoredApiKey { get; set; }

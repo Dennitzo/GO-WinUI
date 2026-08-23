@@ -95,7 +95,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         var lastActivityAt = lastActivityText is null ? null : settings.LastActivityAt;
         return settings with
         {
-            Version = 9,
+            Version = 11,
             GoAiServerUrl = goAiServerUrl.TrimEnd('/'),
             GoAiProtocolVersion = string.IsNullOrWhiteSpace(settings.GoAiProtocolVersion)
                 ? "1.0"
@@ -115,9 +115,8 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             SelectedModel = string.IsNullOrWhiteSpace(settings.SelectedModel)
                 ? AppSettings.DefaultSelectedModel
                 : settings.SelectedModel.Trim(),
-            SelectedCodingModel = settings.Version < 9 || string.IsNullOrWhiteSpace(settings.SelectedCodingModel)
-                ? AppSettings.DefaultSelectedCodingModel
-                : settings.SelectedCodingModel.Trim(),
+            SelectedCodingModel = NormalizeCodingModel(settings.Version, settings.SelectedCodingModel),
+            ReasoningEffort = NormalizeReasoningEffort(settings.Version, settings.ReasoningEffort),
             AccentColor = accentColor,
             BackgroundColor = backgroundColor,
             NavigationPaneWidth = Math.Clamp(settings.NavigationPaneWidth, 280, 520),
@@ -127,6 +126,30 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             LastActivityAt = lastActivityAt,
             Window = window,
         };
+    }
+
+    private static string NormalizeCodingModel(int settingsVersion, string? value)
+    {
+        var normalized = value?.Trim();
+        if (settingsVersion < 10 || string.IsNullOrWhiteSpace(normalized))
+        {
+            return AppSettings.DefaultSelectedCodingModel;
+        }
+
+        return normalized;
+    }
+
+    private static string NormalizeReasoningEffort(int settingsVersion, string? value)
+    {
+        if (settingsVersion < 11)
+        {
+            return "auto";
+        }
+
+        var normalized = value?.Trim().ToLowerInvariant();
+        return normalized is "low" or "medium" or "high" or "xhigh"
+            ? normalized
+            : "auto";
     }
 
     private static string? NormalizeFingerprint(string? value)

@@ -15,7 +15,7 @@ public sealed class ModelRouterTests
         var code = router.Select(CreateRequest(RunMode.Code, "TGA erklären"));
 
         Assert.Equal(context.Options.GeneralModelId, general.ModelId);
-        Assert.Equal("ud", context.Options.CodeModelId);
+        Assert.Equal("qwen3.8-27b", context.Options.CodeModelId);
         Assert.Equal(context.Options.CodeModelId, code.ModelId);
     }
 

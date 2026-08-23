@@ -55,7 +55,8 @@ public sealed record RunRequest(
     string? PreferredCodeModelId = null,
     DocumentContextDescriptor? DocumentContext = null,
     SessionContextDescriptor? SessionContext = null,
-    ConversationProfile? ConversationProfile = null);
+    ConversationProfile? ConversationProfile = null,
+    string? ReasoningEffort = null);
 
 public sealed record DocumentContextDescriptor(
     DocumentContextMode Mode,

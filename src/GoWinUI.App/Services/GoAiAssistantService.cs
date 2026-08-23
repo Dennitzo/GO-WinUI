@@ -1185,6 +1185,17 @@ public sealed class GoAiAssistantService(
         long currentEventId) =>
         currentEventId > previousEventId ? 0 : consecutiveReconnectAttempts;
 
+    internal static string CodingContextTraceFingerprint(ContextChangedEvent context) =>
+        string.Join(
+            "|",
+            context.LoadedFiles.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            context.WasCompacted ? "1" : "0",
+            context.ContextMode?.Trim().ToLowerInvariant() ?? "none",
+            context.DocumentTokens.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            context.DocumentPages.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            context.HistoryWasCompacted ? "1" : "0",
+            context.Detail?.Trim() ?? string.Empty);
+
     private async Task<ChatMessage> StreamRunAsync(
         GoAiRunRecord localRun,
         ChatMessage assistant,
@@ -1197,6 +1208,7 @@ public sealed class GoAiAssistantService(
         var content = assistant.Content;
         var model = localRun.SelectedModel;
         var collectedArtifacts = (await artifacts.ListForMessageAsync(assistant.Id, cancellationToken).ConfigureAwait(false)).ToList();
+        string? lastCodingContextTraceFingerprint = null;
 
         async Task TraceCodingAsync(
             string stage,
@@ -1387,19 +1399,35 @@ public sealed class GoAiAssistantService(
                         var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
                         if (context is not null)
                         {
-                            await TraceCodingAsync(
-                                "context",
-                                "completed",
-                                context.WasCompacted ? "Repositorykontext verdichtet" : "Repositorykontext bereit",
-                                context.Detail ?? $"{context.LoadedFiles:N0} Quelldateien geladen",
-                                serverEventId: item.Id,
-                                traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                            var contextDetail = string.IsNullOrWhiteSpace(context.Detail)
+                                ? context.LoadedFiles > 0
+                                    ? $"{context.LoadedFiles:N0} Quelldateien im aktuellen Lauf geladen"
+                                    : "Repositoryübersicht und Sitzungsregeln stehen dem Coding-Modell zur Verfügung."
+                                : context.Detail.Trim();
+                            var contextTraceFingerprint = CodingContextTraceFingerprint(context);
+                            if (!string.Equals(
+                                    lastCodingContextTraceFingerprint,
+                                    contextTraceFingerprint,
+                                    StringComparison.Ordinal))
+                            {
+                                await TraceCodingAsync(
+                                    "context",
+                                    "completed",
+                                    context.WasCompacted
+                                        ? "Repositorykontext verdichtet"
+                                        : context.LoadedFiles > 0
+                                            ? "Repositorykontext aktualisiert"
+                                            : "Repositorykontext bereit",
+                                    contextDetail,
+                                    serverEventId: item.Id,
+                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                                lastCodingContextTraceFingerprint = contextTraceFingerprint;
+                            }
                             await PublishStatusAsync(new(
                                 GoAiAssistantUpdateKind.Status,
                                 assistant,
                                 Status: context.WasCompacted ? "Kontext verdichtet" : "Repositorykontext bereit",
-                                Detail: context.Detail
-                                    ?? $"{context.LoadedFiles:N0} Quelldateien geladen",
+                                Detail: contextDetail,
                                 Model: model,
                                 ContextUsed: context.EstimatedInputTokens,
                                 ContextLimit: context.ContextLimit,
@@ -2032,6 +2060,10 @@ public sealed class GoAiAssistantService(
         {
             throw new InvalidOperationException("In den Einstellungen ist kein Coding-Modell ausgewählt.");
         }
+        var reasoningEffort = ModelReasoningProfiles.ResolveEffort(
+            coding ? preferredCodeModel : preferredGeneralModel,
+            coding ? "code" : "general",
+            settings.Current.ReasoningEffort);
         var codingModelDisplayName = DescribeCodingModel(preferredCodeModel);
 
         DocumentRunContext? documentContext = null;
@@ -2187,7 +2219,8 @@ public sealed class GoAiAssistantService(
             PreferredCodeModelId: coding ? preferredCodeModel : null,
             DocumentContext: documentContext?.Descriptor,
             SessionContext: sessionContext.Descriptor,
-            ConversationProfile: audiobook ? ConversationProfile.Audiobook : ConversationProfile.General);
+            ConversationProfile: audiobook ? ConversationProfile.Audiobook : ConversationProfile.General,
+            ReasoningEffort: reasoningEffort);
     }
 
     internal static int CalculateDocumentHistoryReserveTokens(
@@ -2663,7 +2696,7 @@ public sealed class GoAiAssistantService(
 
     private static string DescribeCodingModel(string? modelId) => modelId switch
     {
-        "ud" => "DeepSeek-V4-Flash-0731 · UD-IQ2_M",
+        "qwen3.8-27b" => "Qwen3.8-27B · Q8_0",
         "qwen3-coder-next" => "Qwen3-Coder-Next · Q6_K",
         "openai/gpt-oss-120b" => "gpt-oss-120b",
         _ => string.IsNullOrWhiteSpace(modelId) ? "Coding-Agent" : modelId,

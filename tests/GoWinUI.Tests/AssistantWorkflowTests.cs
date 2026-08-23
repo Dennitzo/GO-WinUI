@@ -4,6 +4,7 @@ using GoWinUI.App.ViewModels;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure;
+using GoAi.Contracts;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Text.Json;
 
@@ -11,6 +12,26 @@ namespace GoWinUI.Tests;
 
 public sealed class AssistantWorkflowTests
 {
+    [Fact]
+    public void CodingContextTraceIgnoresTokenOnlyRetryChanges()
+    {
+        var first = new ContextChangedEvent(
+            51_226,
+            262_144,
+            26,
+            false,
+            ContextMode: "none");
+        var retry = first with { EstimatedInputTokens = 51_337 };
+        var additionalFiles = retry with { LoadedFiles = 27 };
+
+        Assert.Equal(
+            GoAiAssistantService.CodingContextTraceFingerprint(first),
+            GoAiAssistantService.CodingContextTraceFingerprint(retry));
+        Assert.NotEqual(
+            GoAiAssistantService.CodingContextTraceFingerprint(first),
+            GoAiAssistantService.CodingContextTraceFingerprint(additionalFiles));
+    }
+
     [Fact]
     public void WorkspacePickerIsAcceptedByNativeAndWebBridgeContracts()
     {
@@ -67,10 +88,10 @@ public sealed class AssistantWorkflowTests
         Assert.InRange(AssistantPage.PdfA4HeightInches, 11.692, 11.693);
         Assert.InRange(AssistantPage.PdfBookMarginLeftInches, .944, .946);
         Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
-        Assert.Contains("styles.css?v=20260821-2", html, StringComparison.Ordinal);
+        Assert.Contains("styles.css?v=20260823-1", html, StringComparison.Ordinal);
         Assert.Contains("markdown.js?v=20260821-1", html, StringComparison.Ordinal);
         Assert.Contains("voice.js?v=20260822-2", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260822-6", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260823-1", html, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
@@ -358,6 +379,23 @@ public sealed class AssistantWorkflowTests
         Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("audioCapture.start"));
         Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("audioCapture.stop"));
         Assert.False(AssistantWebBridge.IsIncomingTypeAllowed("audioCapture.audio"));
+    }
+
+    [Fact]
+    public void ToolsMenuRendersOnlyTheActiveModelsSupportedReasoningLevels()
+    {
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+
+        Assert.Contains("id=\"reasoning-model\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"reasoning-options\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-reasoning=\"low\"", html, StringComparison.Ordinal);
+        Assert.Contains("reasoningProfiles: { general: null, code: null }", app, StringComparison.Ordinal);
+        Assert.Contains("xhigh: \"Sehr hoch\"", app, StringComparison.Ordinal);
+        Assert.Contains("profile.supportedEfforts", app, StringComparison.Ordinal);
+        Assert.Contains("reasoningEffort: elements.reasoning.value", app, StringComparison.Ordinal);
+        Assert.Contains("Aktives Modell:", app, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -1559,6 +1597,70 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public async Task SavingWorkflowFromMessageInCodingModeCreatesPromptDrivenCodingWorkflow()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var workspace = Path.Combine(environment.Directory, "coding-workspace");
+        Directory.CreateDirectory(workspace);
+        var session = await chats.CreateSessionAsync("Coding");
+        await chats.SetAssistantContextAsync(session.Id, AssistantMode.Code, workspace, "fingerprint");
+        await chats.SetPersistentToolActionAsync(session.Id, PersistentToolAction.Code);
+        await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id });
+        var message = await chats.AddMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            """
+            ### Analyse
+
+            Erstelle einen reproduzierbaren Testworkflow, der Projektdateien liest, kleine Änderungen prüft und
+            die Verifikation nachvollziehbar dokumentiert.
+            """,
+            MessageStatus.Completed);
+        using var campaignService = CreatePromptCampaignService(environment, chats, settings);
+        using var coordinator = CreateCoordinator(
+            environment,
+            settings,
+            CreateRecentActivity(settings),
+            campaigns: campaignService);
+        var emittedTypes = new List<string>();
+        using var payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(new { messageId = message.Id }));
+        var envelope = new WebBridgeEnvelope(
+            AssistantWebBridge.ProtocolVersion,
+            "workflow.createFromMessage",
+            Guid.NewGuid().ToString("D"),
+            payloadDocument.RootElement.Clone());
+
+        await coordinator.HandleAsync(
+            envelope,
+            (type, _, _) =>
+            {
+                emittedTypes.Add(type);
+                return Task.CompletedTask;
+            });
+
+        var contractPath = Path.Combine(workspace, ".go-campaign", "prompt-workflow.json");
+        var sourcePath = Path.Combine(workspace, ".go-campaign", "prompt-workflow-source.md");
+        Assert.True(File.Exists(contractPath));
+        Assert.True(File.Exists(sourcePath));
+        using var contract = JsonDocument.Parse(await File.ReadAllTextAsync(contractPath));
+        Assert.Equal("go.prompt-workflow.v1", contract.RootElement.GetProperty("schema").GetString());
+        Assert.Equal("ai-message-footer", contract.RootElement.GetProperty("scope").GetProperty("source").GetString());
+        Assert.Equal(message.Id, contract.RootElement.GetProperty("scope").GetProperty("sourceMessageId").GetGuid());
+        Assert.Contains("Erstelle einen reproduzierbaren Testworkflow", await File.ReadAllTextAsync(sourcePath), StringComparison.Ordinal);
+
+        var campaign = await environment.Get<ICodingCampaignRepository>().GetForSessionAsync(session.Id);
+        Assert.NotNull(campaign);
+        Assert.Equal(PromptDrivenCodingCampaignDefinition.DescriptorId, campaign.DefinitionId);
+        Assert.Equal(CodingCampaignStatus.Stopped, campaign.Status);
+        Assert.Contains("campaign.changed", emittedTypes);
+        Assert.Contains("session.changed", emittedTypes);
+        Assert.DoesNotContain("workflow.draft", emittedTypes);
+    }
+
+    [Fact]
     public async Task OpeningSessionsAlwaysEmitsTheExactVisibleDatabaseRowsForThatSession()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -1646,7 +1748,8 @@ public sealed class AssistantWorkflowTests
         TestEnvironment environment,
         SettingsCoordinator settings,
         RecentActivityService recentActivity,
-        ILmStudioClient? lmStudio = null) => new(
+        ILmStudioClient? lmStudio = null,
+        CodingCampaignService? campaigns = null) => new(
             environment.Get<IChatRepository>(),
             environment.Get<IWorkflowRepository>(),
             environment.Get<IDocumentIngestor>(),
@@ -1659,7 +1762,20 @@ public sealed class AssistantWorkflowTests
             environment.Get<IConversationSnapshotRepository>(),
             null,
             settings,
-            recentActivity);
+            recentActivity,
+            campaigns: campaigns);
+
+    private static CodingCampaignService CreatePromptCampaignService(
+        TestEnvironment environment,
+        IChatRepository chats,
+        SettingsCoordinator settings) => new(
+            environment.Get<ICodingCampaignRepository>(),
+            chats,
+            environment.Get<IChatArtifactRepository>(),
+            new CodingCampaignCatalog([new PromptDrivenCodingCampaignDefinition()]),
+            new UnexpectedCampaignAgent(),
+            settings,
+            NullLogger<CodingCampaignService>.Instance);
 
     private static async Task HandleAsync(
         AssistantCoordinator coordinator,
@@ -1719,5 +1835,28 @@ public sealed class AssistantWorkflowTests
             await Task.CompletedTask;
             yield break;
         }
+    }
+
+    private sealed class UnexpectedCampaignAgent : ICodingCampaignAgent
+    {
+        public bool IsRunning => false;
+
+        public Task<ChatMessage> SendAsync(
+            Guid sessionId,
+            string prompt,
+            PromptTriggerMatch? trigger,
+            Func<GoAiAssistantUpdate, Task> update,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Der Footer darf beim Speichern keinen Coding-Lauf starten.");
+
+        public Task<ChatMessage> SendWorkflowStepAsync(
+            Guid sessionId,
+            string prompt,
+            PromptTriggerMatch? trigger,
+            Func<GoAiAssistantUpdate, Task> update,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("Der Footer darf beim Speichern keinen Coding-Lauf starten.");
+
+        public Task CancelCurrentAndWaitAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 }

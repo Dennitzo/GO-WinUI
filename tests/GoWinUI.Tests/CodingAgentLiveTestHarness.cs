@@ -54,7 +54,7 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
         this.modelId = modelId;
         modelDisplayName = modelId.ToLowerInvariant() switch
         {
-            "ud" => "DeepSeek-V4-Flash-0731",
+            "qwen3.8-27b" => "Qwen3.8-27B",
             "openai/gpt-oss-120b" => "gpt-oss-120b",
             _ => "Qwen3-Coder-Next",
         };
