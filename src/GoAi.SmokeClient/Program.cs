@@ -55,6 +55,9 @@ switch (options.Command)
     case "live-smoke":
         await WriteAsync(await RunLiveSmokeAsync());
         break;
+    case "web-research-smoke":
+        await WriteAsync(await RunWebResearchSmokeAsync());
+        break;
     default:
         throw new ArgumentException($"Unknown command: {options.Command}");
 }
@@ -80,6 +83,52 @@ async Task<object> RunBasicSmokeAsync()
         capabilities.ProtocolVersion,
         configuredModels = models.Models.Count,
         gpuCount = gpu.Devices.Count,
+    };
+}
+
+async Task<object> RunWebResearchSmokeAsync()
+{
+    var accepted = await client.CreateRunAsync(
+        new RunRequest(
+            GoAiProtocol.Version,
+            options.Mode,
+            [new RunMessage("user", [new ContentPart("text", "[GO_WEB_RESEARCH_REQUEST]\nRechercheauftrag:\n" + options.Prompt)])],
+            AllowedServerTools: ["web.search", "web.fetch"]),
+        $"web-research-smoke-{Guid.NewGuid():N}");
+    var run = await CompleteRunAsync(client, accepted.RunId);
+    var startedTools = run.Events
+        .Where(static item => item.Type == RunEventTypes.ServerToolStarted)
+        .Select(static item => item.Data.TryGetProperty("tool", out var tool) ? tool.GetString() : null)
+        .Where(static name => name is not null)
+        .ToArray();
+    var modelStages = run.Events
+        .Where(static item => item.Type == RunEventTypes.ModelGeneration)
+        .Select(static item => item.Data.Deserialize<ModelGenerationEvent>(GoAiProtocol.CreateJsonOptions())?.State)
+        .Where(static state => state is not null)
+        .ToArray();
+
+    Ensure(startedTools.Count(static name => name == "web.search") == 1,
+        "The staged research run did not execute exactly one web.search call.");
+    var fetchCount = startedTools.Count(static name => name == "web.fetch");
+    Ensure(fetchCount is >= 1 and <= 3,
+        $"The staged research run executed an invalid web.fetch count: {fetchCount}.");
+    Ensure(modelStages.Contains("webResearchSearchPlanning", StringComparer.Ordinal),
+        "The staged research run did not execute the isolated search-planning model run.");
+    Ensure(modelStages.Contains("webResearchSourceSelection", StringComparer.Ordinal),
+        "The staged research run did not execute isolated source-selection model runs.");
+    Ensure(modelStages.Contains("webResearchSynthesis", StringComparer.Ordinal),
+        "The staged research run did not execute the tool-free evidence synthesis.");
+    Ensure(run.Events.Any(static item => item.Type == RunEventTypes.TextDelta),
+        "The staged research run produced no final answer text.");
+
+    return new
+    {
+        passed = true,
+        runId = run.Snapshot.RunId,
+        model = run.Snapshot.SelectedModel,
+        webSearchCalls = 1,
+        webFetchCalls = fetchCount,
+        stages = modelStages.Distinct(StringComparer.Ordinal).ToArray(),
     };
 }
 

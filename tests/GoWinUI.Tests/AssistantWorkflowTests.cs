@@ -1094,6 +1094,20 @@ public sealed class AssistantWorkflowTests
         Assert.DoesNotContain("youtube.search", tools);
     }
 
+    [Theory]
+    [InlineData("Nutze Websuche für die aktuelle WinUI API.")]
+    [InlineData("Recherchiere im Web und implementiere danach die Änderung.")]
+    [InlineData("Suche im Web nach der offiziellen Spezifikation.")]
+    public void ExplicitCodingWebResearchEnablesOnlyTheStagedResearchTools(string prompt)
+    {
+        var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.Code, prompt);
+
+        Assert.Contains("web.search", tools);
+        Assert.Contains("web.fetch", tools);
+        Assert.Contains("math.evaluate", tools);
+        Assert.DoesNotContain("youtube.search", tools);
+    }
+
     [Fact]
     public void GeneralWebSearchActionReceivesSearchAndSafePageFetchTools()
     {
@@ -1109,11 +1123,12 @@ public sealed class AssistantWorkflowTests
 
         var transformed = GoAiAssistantService.BuildWebResearchPrompt(prompt);
 
-        Assert.Contains("zuerst web.search", transformed, StringComparison.Ordinal);
-        Assert.Contains("web.fetch", transformed, StringComparison.Ordinal);
-        Assert.Contains("tatsächlich abgerufenen Seiteninhalte", transformed, StringComparison.Ordinal);
+        Assert.Contains("[GO_WEB_RESEARCH_REQUEST]", transformed, StringComparison.Ordinal);
+        Assert.Contains("isolierten SDK-Schritten", transformed, StringComparison.Ordinal);
+        Assert.Contains("Evidenzdossier", transformed, StringComparison.Ordinal);
         Assert.Contains("Titel und URL", transformed, StringComparison.Ordinal);
-        Assert.Contains("keine rohe Trefferliste", transformed, StringComparison.Ordinal);
+        Assert.DoesNotContain("web.search", transformed, StringComparison.Ordinal);
+        Assert.DoesNotContain("web.fetch", transformed, StringComparison.Ordinal);
         Assert.EndsWith(prompt, transformed, StringComparison.Ordinal);
     }
 

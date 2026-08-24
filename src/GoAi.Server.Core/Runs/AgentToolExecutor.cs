@@ -94,7 +94,8 @@ public sealed class AgentToolExecutor
             or TimeoutException
             or TaskCanceledException
             or IOException
-            or InvalidDataException;
+            or InvalidDataException
+            or JsonException;
 
     internal static ResearchToolFailure DescribeResearchFailure(string toolName, Exception exception)
     {

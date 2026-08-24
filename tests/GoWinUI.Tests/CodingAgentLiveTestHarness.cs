@@ -2,6 +2,7 @@ using GoAi.Client;
 using GoAi.Contracts;
 using GoWinUI.App.Services;
 using GoWinUI.BricsCad.Protocol;
+using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure;
 using System.Diagnostics;
 using System.Globalization;
@@ -174,16 +175,19 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
             textBytes = index.TextBytes,
             index.IsTruncated,
         });
+        var modelPrompt = GoAiAssistantService.BuildCodingPrompt(prompt);
 
         var accepted = await client.CreateRunAsync(
             new RunRequest(
                 GoAiProtocol.Version,
                 RunMode.Code,
-                [new RunMessage("user", [new ContentPart("text", prompt)])],
+                [new RunMessage("user", [new ContentPart("text", modelPrompt)])],
                 ClientCapabilities: ["code", "filesystem", "process", "pdf"],
                 Limits: new RunLimits(8_192, 262_144, 14_400),
                 SessionId: sessionId,
-                AllowedServerTools: [],
+                AllowedServerTools: GoAiAssistantService.GetAllowedServerTools(
+                    PromptTriggerAction.Code,
+                    prompt),
                 Workspace: descriptor,
                 ConversationProfile: ConversationProfile.General,
                 PreferredCodeModelId: modelId),

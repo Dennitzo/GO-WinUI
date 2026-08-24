@@ -249,6 +249,23 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
+    public void CodingRunsAcceptExplicitStagedWebResearchTools()
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest(["code"]) with
+        {
+            Mode = RunMode.Code,
+            AllowedServerTools = ["web.search", "web.fetch", "math.evaluate"],
+        };
+
+        var tools = catalog.GetAvailableTools(request);
+
+        Assert.Contains(tools, static tool => tool.Name == "web.search");
+        Assert.Contains(tools, static tool => tool.Name == "web.fetch");
+        Assert.True(StagedWebResearchPipeline.IsRequested(request, tools));
+    }
+
+    [Fact]
     public void NullServerToolAllowListRetainsProtocolCompatibility()
     {
         var tools = new AgentToolCatalog().GetAvailableTools(CreateRequest(null));

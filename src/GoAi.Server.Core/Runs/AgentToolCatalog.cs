@@ -12,13 +12,6 @@ public sealed class AgentToolCatalog
         "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
         "image.generate", "math.evaluate", "context.embed", "context.retrieve",
     ];
-    // Web research remains available to the dedicated general-chat workflow.
-    // It is deliberately excluded from native coding predictions because an
-    // isolated SDK qualification reproduces an LM Studio channel termination
-    // for these tools while multi-round workspace tools remain stable.
-    private static readonly HashSet<string> CodingExcludedServerTools =
-        new(["web.search", "web.fetch"], StringComparer.Ordinal);
-
     private readonly Dictionary<string, AgentToolSpec> _tools = CreateTools();
 
     public IReadOnlyList<AgentToolSpec> GetAvailableTools(RunRequest request)
@@ -30,10 +23,6 @@ public sealed class AgentToolCatalog
             if (!_tools.TryGetValue(name, out var tool) || !tool.ServerSide)
             {
                 throw new ArgumentException($"Unknown or unavailable server tool: {name}");
-            }
-            if (request.Mode == RunMode.Code && CodingExcludedServerTools.Contains(name))
-            {
-                continue;
             }
             names.Add(name);
         }

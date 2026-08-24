@@ -2014,27 +2014,66 @@ public sealed partial class LmStudioClient : IDisposable
         Func<LmStudioNativeAgentProgress, CancellationToken, ValueTask>? nativeProgress,
         CancellationToken cancellationToken)
     {
-        var result = await _nativeAgentClient!.CompleteAsync(
-            new LmStudioNativeAgentRequest(
-                modelId,
-                messages,
-                tools,
-                maximumOutputTokens,
-                requireToolCall,
-                requiredToolName,
-                CreateNativeSampling(modelId, modelRole, reasoningEffort, maximumOutputTokens),
-                nativeProgress),
-            cancellationToken).ConfigureAwait(false);
-
-        if (TryNormalizeCodingAgentResult(
-                result,
-                tools,
-                requireToolCall,
-                requiredToolName,
-                out var normalized,
-                out var validationError))
+        IReadOnlyList<LmChatMessage> currentMessages = messages;
+        LmChatResult? accumulatedUsage = null;
+        var validationError = string.Empty;
+        for (var attempt = 1; attempt <= 2; attempt++)
         {
-            return normalized;
+            LmChatResult result;
+            try
+            {
+                result = await _nativeAgentClient!.CompleteAsync(
+                    new LmStudioNativeAgentRequest(
+                        modelId,
+                        currentMessages,
+                        tools,
+                        maximumOutputTokens,
+                        requireToolCall,
+                        requiredToolName,
+                        CreateNativeSampling(modelId, modelRole, reasoningEffort, maximumOutputTokens),
+                        nativeProgress),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (LmStudioNativeAgentException exception) when (
+                attempt < 2
+                && tools.Count == 1
+                && !cancellationToken.IsCancellationRequested
+                && IsRecoverableNativeAgentFailure(exception))
+            {
+                validationError = exception.Code;
+                currentMessages = CreateNativeToolRetryMessages(
+                    messages,
+                    validationError,
+                    exception.RawContent);
+                continue;
+            }
+
+            accumulatedUsage = accumulatedUsage is null
+                ? result
+                : CombineUsage(accumulatedUsage, result);
+            if (TryNormalizeCodingAgentResult(
+                    result,
+                    tools,
+                    requireToolCall,
+                    requiredToolName,
+                    out var normalized,
+                    out validationError))
+            {
+                return accumulatedUsage with
+                {
+                    Content = normalized.Content,
+                    ToolCalls = normalized.ToolCalls,
+                };
+            }
+            if (attempt < 2 && tools.Count == 1)
+            {
+                currentMessages = CreateNativeToolRetryMessages(
+                    messages,
+                    validationError,
+                    failedRawContent: null);
+                continue;
+            }
+            break;
         }
 
         throw new InvalidDataException(

@@ -622,7 +622,7 @@ public sealed class CodingAgentTests
     }
 
     [Fact]
-    public void GeneralWebResearchPolicyRequiresFetchingPagesInsteadOfReturningSnippets()
+    public void GeneralWebResearchPolicyDescribesTheIsolatedSdkStages()
     {
         var request = new RunRequest(
             GoAiProtocol.Version,
@@ -635,10 +635,11 @@ public sealed class CodingAgentTests
             request,
             ["web.search", "web.fetch"]);
 
-        Assert.Contains("Verbindliche Webrecherche", policy, StringComparison.Ordinal);
-        Assert.Contains("Suchtreffer und Snippets sind nur Wegweiser", policy, StringComparison.Ordinal);
+        Assert.Contains("Gestufte Webrecherche", policy, StringComparison.Ordinal);
+        Assert.Contains("getrennten SDK-Läufen", policy, StringComparison.Ordinal);
         Assert.Contains("web.fetch", policy, StringComparison.Ordinal);
         Assert.Contains("Titel und URL", policy, StringComparison.Ordinal);
+        Assert.Contains("keine Web-Werkzeugschemas", policy, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -655,7 +656,7 @@ public sealed class CodingAgentTests
             request,
             ["math.evaluate"]);
 
-        Assert.DoesNotContain("Verbindliche Webrecherche", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Gestufte Webrecherche", policy, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1153,5 +1154,34 @@ public sealed class CodingAgentTests
             47, 48, verificationRequired: false, verificationFailed: false, coreVerificationComplete: false, hasIntegratedVerifier: true));
         Assert.False(RunProcessor.ShouldForceIntegratedCodingVerification(
             47, 48, true, verificationFailed: false, coreVerificationComplete: false, hasIntegratedVerifier: false));
+    }
+
+    [Theory]
+    [InlineData("curl", "-s", "https://example.com", true)]
+    [InlineData("wget.exe", "https://example.com", "", true)]
+    [InlineData("web", "", "", true)]
+    [InlineData("pwsh", "-Command", "Invoke-RestMethod https://example.com", true)]
+    [InlineData("powershell.exe", "-Command", "dotnet test", false)]
+    [InlineData("dotnet", "test", "", false)]
+    public void StagedWebResearchBlocksOnlyDirectProcessBasedHttpBypasses(
+        string executable,
+        string firstArgument,
+        string secondArgument,
+        bool expected)
+    {
+        var arguments = string.IsNullOrEmpty(secondArgument)
+            ? new[] { firstArgument }
+            : new[] { firstArgument, secondArgument };
+        var call = new LmToolCall(
+            "process-call",
+            ClientToolNames.ProcessRun,
+            JsonSerializer.SerializeToElement(new
+            {
+                executable,
+                arguments,
+                purpose = "inspect",
+            }));
+
+        Assert.Equal(expected, RunProcessor.IsStagedWebResearchProcessBypass(call));
     }
 }

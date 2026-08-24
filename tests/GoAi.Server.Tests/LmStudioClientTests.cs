@@ -97,6 +97,53 @@ public sealed class LmStudioClientTests
     }
 
     [Fact]
+    public async Task GeneralResearchToolUsesOneNamedSchemaAndOneNativeCorrectionAttempt()
+    {
+        using var context = new TestServerContext();
+        var native = new RecordingNativeAgentClient(
+            static _ => new LmChatResult("kein Tool", [], 10, 3),
+            static _ =>
+            {
+                using var arguments = JsonDocument.Parse(
+                    """{"query":"offizielle WebView2 API","maximumResults":8,"language":"de-DE"}""");
+                return new LmChatResult(
+                    null,
+                    [new LmToolCall("call_search", "web.search", arguments.RootElement.Clone())],
+                    12,
+                    5);
+            });
+        using var client = new LmStudioClient(
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance,
+            native);
+        using var schema = JsonDocument.Parse(
+            """{"type":"object","properties":{"query":{"type":"string"},"maximumResults":{"type":"integer"},"language":{"type":"string"}},"required":["query"],"additionalProperties":false}""");
+
+        var result = await client.CompleteChatAsync(
+            "gpt-oss-120b",
+            [new LmChatMessage("user", "Suche die offizielle API.")],
+            [new LmToolDefinition("web.search", "SearXNG", schema.RootElement.Clone())],
+            modelRole: "general",
+            requireToolCall: true,
+            requiredToolName: "web.search");
+
+        Assert.Equal(2, native.Requests.Count);
+        Assert.All(native.Requests, static request =>
+        {
+            Assert.True(request.RequireToolCall);
+            Assert.Equal("web.search", request.RequiredToolName);
+            Assert.Equal("web.search", Assert.Single(request.Tools).Name);
+        });
+        Assert.Contains(
+            native.Requests[1].Messages,
+            static message => message.Content?.Contains("[GO_NATIVE_TOOL_RETRY]", StringComparison.Ordinal) == true);
+        Assert.Equal(22, result.InputTokens);
+        Assert.Equal(8, result.OutputTokens);
+        Assert.Equal("web.search", Assert.Single(result.ToolCalls).Name);
+    }
+
+    [Fact]
     public async Task ProductionCodingPathUsesNativeSdkWithoutAnyHttpCompletionRequest()
     {
         using var context = new TestServerContext();
