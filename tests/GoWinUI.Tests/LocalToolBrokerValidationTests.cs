@@ -25,19 +25,6 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Fact]
-    public void DocumentRenderPdfPresetIsAcceptedWithAWorkspaceRelativeTarget()
-    {
-        var now = DateTimeOffset.UtcNow;
-        var proposal = Create(
-            ClientToolNames.ProcessRunPreset,
-            ToolRiskClass.Process,
-            new { preset = "document.renderPdf", target = "solutions/PhyMa.md" },
-            now);
-
-        LocalToolBroker.ValidateProposal(proposal, now);
-    }
-
-    [Fact]
     public void LeanVerifyUsesTypedProcessContract()
     {
         var now = DateTimeOffset.UtcNow;

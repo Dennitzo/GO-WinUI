@@ -25,10 +25,6 @@ public sealed class LocalToolBroker(
     private const int MaximumProcessStreamCharacters = 1_900_000;
     private const string EmptyContentSha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
-    private static readonly HashSet<string> SupportedPdfSourceExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".md", ".txt", ".tex", ".json",
-    };
     private static readonly HashSet<string> ReadOnlyGitCommands = new(StringComparer.OrdinalIgnoreCase)
     {
         "blame", "cat-file", "check-attr", "check-ignore", "count-objects", "describe", "diff",
@@ -167,7 +163,8 @@ public sealed class LocalToolBroker(
             ClientToolNames.FileSystemWriteText or ClientToolNames.FileSystemReplaceText or ClientToolNames.FileSystemMove
                 or ClientToolNames.FileSystemProposePatch or ClientToolNames.FileSystemProposeCreate
                 or ClientToolNames.FileSystemProposeDelete => ToolRiskClass.LocalMutation,
-            ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun or ClientToolNames.LeanProof => ToolRiskClass.Process,
+            ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun
+                or ClientToolNames.LeanProof => ToolRiskClass.Process,
             ClientToolNames.BricsCadMove or ClientToolNames.BricsCadAction => ToolRiskClass.CadMutation,
             _ => throw new InvalidDataException($"Das Clientwerkzeug '{proposal.Name}' ist nicht freigegeben."),
         };
@@ -277,7 +274,7 @@ public sealed class LocalToolBroker(
             case ClientToolNames.ProcessRunPreset:
                 ValidateProperties(arguments, ["preset"], ["preset", "workspace", "target"]);
                 var preset = ValidateString(arguments, "preset", 1, 64);
-                if (preset is not ("git.status" or "git.diff" or "dotnet.build" or "dotnet.test" or "repository.build" or "repository.verify" or "repository.start" or "code.run" or "code.test" or "document.renderPdf"))
+                if (preset is not ("git.status" or "git.diff" or "dotnet.build" or "dotnet.test" or "repository.build" or "repository.verify" or "repository.start" or "code.run" or "code.test"))
                 {
                     throw new InvalidDataException("Das angeforderte Prozess-Preset ist nicht freigegeben.");
                 }
@@ -1196,8 +1193,6 @@ public sealed class LocalToolBroker(
             case "git.diff":
                 var gitDiff = await RunGitDiffAsync(workspace, cancellationToken).ConfigureAwait(false);
                 return Bounded(new { preset, gitDiff.ExitCode, gitDiff.StandardOutput, gitDiff.StandardError });
-            case "document.renderPdf":
-                return await RenderDocumentPdfAsync(workspace, arguments, cancellationToken).ConfigureAwait(false);
             case "dotnet.build":
                 fileName = "dotnet";
                 commandArguments = BuildDotNetPresetArguments("build", ResolveOptionalPresetTarget(arguments));
@@ -1236,85 +1231,6 @@ public sealed class LocalToolBroker(
             result = result with { StandardOutput = SummarizeGitStatus(result.StandardOutput) };
         }
         return Bounded(new { preset, result.ExitCode, result.StandardOutput, result.StandardError });
-    }
-
-    private async Task<object> RenderDocumentPdfAsync(
-        string workspace,
-        JsonElement arguments,
-        CancellationToken cancellationToken)
-    {
-        var source = ResolvePath(RequiredString(arguments, "target"), requireExisting: true);
-        if (!File.Exists(source))
-        {
-            throw new InvalidDataException("document.renderPdf erwartet eine vorhandene Quelldatei, keinen Ordner.");
-        }
-        if (!SupportedPdfSourceExtensions.Contains(Path.GetExtension(source)))
-        {
-            throw new InvalidDataException(
-                "document.renderPdf rendert ausschlieÃŸlich Markdown-/Text-/TeX-/JSON-Quellen Ã¼ber den GO-KaTeX-Renderer. "
-                + "Erzeuge keine eigene HTML/CDN-PDF-Strecke, sondern pflege ein Manuskript als Markdown und rendere daraus.");
-        }
-
-        var output = Path.ChangeExtension(source, ".pdf");
-        var script = Path.Combine(AppContext.BaseDirectory, "Assets", "Scripts", "export-coding-solution.ps1");
-        var webAssets = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        if (!File.Exists(script) || !Directory.Exists(webAssets))
-        {
-            return Bounded(new
-            {
-                preset = "document.renderPdf",
-                ExitCode = -1,
-                StandardOutput = string.Empty,
-                StandardError = "Die lokalen GO-Ressourcen fÃ¼r den KaTeX-PDF-Export fehlen.",
-            });
-        }
-
-        var result = await RunProcessAsync(
-            "powershell.exe",
-            [
-                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-File", script,
-                "-SourcePath", source,
-                "-WebAssetsPath", webAssets,
-                "-OutputPath", output,
-            ],
-            workspace,
-            null,
-            TimeSpan.FromMinutes(3),
-            cancellationToken).ConfigureAwait(false);
-
-        var exists = File.Exists(output);
-        var length = exists ? new FileInfo(output).Length : 0;
-        if (result.ExitCode != 0 || length < 1024)
-        {
-            return Bounded(new
-            {
-                preset = "document.renderPdf",
-                source = Relative(source),
-                output = Relative(output),
-                ExitCode = result.ExitCode == 0 ? -1 : result.ExitCode,
-                result.StandardOutput,
-                StandardError = string.Join(Environment.NewLine, new[]
-                {
-                    result.StandardError,
-                    exists ? string.Empty : "Die PDF-Datei wurde nicht erzeugt.",
-                    exists && length < 1024 ? "Die PDF-Datei ist zu klein oder leer." : string.Empty,
-                }.Where(static value => !string.IsNullOrWhiteSpace(value))),
-            });
-        }
-
-        return Bounded(new
-        {
-            preset = "document.renderPdf",
-            source = Relative(source),
-            output = Relative(output),
-            outputBytes = length,
-            renderer = "GO Markdown + KaTeX + Chromium",
-            katex = "validated",
-            ExitCode = result.ExitCode,
-            result.StandardOutput,
-            result.StandardError,
-        });
     }
 
     private async Task<ProcessResult> RunGitDiffAsync(string workspace, CancellationToken cancellationToken)

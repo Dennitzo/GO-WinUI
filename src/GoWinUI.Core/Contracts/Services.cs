@@ -257,24 +257,9 @@ public interface ICodingCampaignRepository
     Task DeleteForSessionAsync(Guid sessionId, CancellationToken cancellationToken = default);
 }
 
-public interface ILmStudioClient
-{
-    Task<IReadOnlyList<LmModel>> ListModelsAsync(CancellationToken cancellationToken = default);
-    Task<bool> TestConnectionAsync(CancellationToken cancellationToken = default);
-    IAsyncEnumerable<LmDelta> StreamAsync(LmChatRequest request, CancellationToken cancellationToken = default);
-}
-
 public interface IContextAssembler
 {
     ContextBuildResult Build(ContextBuildRequest request);
-}
-
-public interface IChatOrchestrator
-{
-    event EventHandler<ChatStreamUpdate>? StreamUpdated;
-    bool IsRunning { get; }
-    Task<ChatMessage> SendAsync(Guid sessionId, string prompt, string model, string systemPrompt, string? reasoningEffort = null, CancellationToken cancellationToken = default);
-    void Cancel();
 }
 
 public interface ISettingsStore

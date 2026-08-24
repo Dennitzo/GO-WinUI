@@ -20,7 +20,7 @@ using (var rejectedClient = new TcpClient(AddressFamily.InterNetwork))
     using NetworkStream rejectedStream = rejectedClient.GetStream();
     await BridgeJsonFraming.WriteAsync(rejectedStream, CreateHello(new string('0', 64)));
     using var rejectionTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-    JsonObject? rejectedFrame = await new BridgeFrameReader().ReadObjectAsync(rejectedStream, rejectionTimeout.Token);
+    JsonObject? rejectedFrame = await ReadRejectedFrameAsync(rejectedStream, rejectionTimeout.Token);
     if (rejectedFrame is not null) throw new InvalidOperationException("Invalid hello was not rejected.");
 }
 
@@ -111,6 +111,20 @@ if (File.Exists(BridgeRendezvousFile.ActivePath)) throw new InvalidOperationExce
 client.Dispose();
 try { await pluginLoop; } catch (IOException) { } catch (ObjectDisposedException) { }
 Console.WriteLine("Protocol host smoke passed.");
+
+static async Task<JsonObject?> ReadRejectedFrameAsync(
+    NetworkStream stream,
+    CancellationToken cancellationToken)
+{
+    try
+    {
+        return await new BridgeFrameReader().ReadObjectAsync(stream, cancellationToken);
+    }
+    catch (IOException)
+    {
+        return null;
+    }
+}
 
 static BridgeHelloMessage CreateHello(string token)
 {

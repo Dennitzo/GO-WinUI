@@ -1,8 +1,11 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Security;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Wordprocessing;
 using Microsoft.Extensions.Options;
 using System.Globalization;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
@@ -10,12 +13,17 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml;
+using UglyToad.PdfPig;
+using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
 
 namespace GoAi.Server.Core.Research;
 
 public sealed partial class WebResearchService
 {
-    private const int MaximumFetchBytes = 5 * 1024 * 1024;
+    private const int MaximumFetchBytes = 25 * 1024 * 1024;
+    private const int MaximumExtractedCharacters = 512_000;
+    private const long MaximumOfficeUncompressedBytes = 64L * 1024 * 1024;
+    private const int MaximumDocumentPages = 500;
     private const int MaximumRedirects = 5;
     private const string BrowserCompatibleUserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -309,17 +317,20 @@ public sealed partial class WebResearchService
             response.EnsureSuccessStatusCode();
             if (response.Content.Headers.ContentLength is > MaximumFetchBytes)
             {
-                throw new HttpRequestException("Fetch response exceeds the 5 MiB limit.");
+                throw new HttpRequestException("Fetch response exceeds the 25 MiB limit.");
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
             var bytes = await ReadBoundedAsync(stream, MaximumFetchBytes, cancellationToken).ConfigureAwait(false);
-            var mediaType = response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
-            var content = DecodeContent(bytes, response.Content.Headers.ContentType?.CharSet);
-            if (mediaType.Contains("html", StringComparison.OrdinalIgnoreCase))
-            {
-                content = NormalizeHtml(content);
-            }
+            var mediaType = DetectMediaType(
+                current,
+                response.Content.Headers.ContentType?.MediaType,
+                bytes);
+            var content = ExtractFetchedContent(
+                bytes,
+                mediaType,
+                response.Content.Headers.ContentType?.CharSet,
+                cancellationToken);
 
             return new WebFetchResponse(current.ToString(), mediaType, content, true, DateTimeOffset.UtcNow, redirects);
         }
@@ -333,7 +344,9 @@ public sealed partial class WebResearchService
         request.Headers.TryAddWithoutValidation("User-Agent", BrowserCompatibleUserAgent);
         request.Headers.TryAddWithoutValidation(
             "Accept",
-            "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8");
+            "text/html,application/xhtml+xml,application/pdf," +
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document," +
+            "application/rtf,text/plain;q=0.9,*/*;q=0.8");
         request.Headers.TryAddWithoutValidation("Accept-Language", "de-DE,de;q=0.9,en;q=0.7");
         return request;
     }
@@ -457,13 +470,294 @@ public sealed partial class WebResearchService
 
             if (output.Length + read > maximum)
             {
-                throw new HttpRequestException("Fetch response exceeds the 5 MiB limit.");
+                throw new HttpRequestException("Fetch response exceeds the 25 MiB limit.");
             }
 
             output.Write(buffer, 0, read);
         }
 
         return output.ToArray();
+    }
+
+    internal static string DetectMediaType(Uri source, string? declaredMediaType, byte[] bytes)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(bytes);
+        if (bytes.AsSpan().StartsWith("%PDF-"u8))
+        {
+            return "application/pdf";
+        }
+
+        if (LooksLikeZip(bytes) && ContainsWordDocument(bytes))
+        {
+            return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        }
+
+        var extension = Path.GetExtension(source.AbsolutePath).ToLowerInvariant();
+        var extensionMediaType = extension switch
+        {
+            ".pdf" => "application/pdf",
+            ".docx" or ".docm" or ".dotx" or ".dotm" =>
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".doc" => "application/msword",
+            ".rtf" => "application/rtf",
+            ".html" or ".htm" => "text/html",
+            ".json" => "application/json",
+            ".xml" => "application/xml",
+            ".md" => "text/markdown",
+            ".csv" => "text/csv",
+            ".txt" => "text/plain",
+            _ => null,
+        };
+        var normalizedDeclared = string.IsNullOrWhiteSpace(declaredMediaType)
+            ? null
+            : declaredMediaType.Trim().ToLowerInvariant();
+        return normalizedDeclared is null or "application/octet-stream" or "binary/octet-stream"
+            ? extensionMediaType ?? normalizedDeclared ?? "application/octet-stream"
+            : normalizedDeclared;
+    }
+
+    internal static string ExtractFetchedContent(
+        byte[] bytes,
+        string mediaType,
+        string? charset,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        if (string.IsNullOrWhiteSpace(mediaType))
+        {
+            throw new ArgumentException("A response media type is required.", nameof(mediaType));
+        }
+
+        var normalized = mediaType.Trim().ToLowerInvariant();
+        if (normalized is "application/pdf" or "application/x-pdf")
+        {
+            return ExtractPdf(bytes, cancellationToken);
+        }
+        if (IsOpenXmlWordMediaType(normalized))
+        {
+            return ExtractOpenXmlWord(bytes, cancellationToken);
+        }
+        if (normalized is "application/msword")
+        {
+            throw new InvalidDataException(
+                "Legacy Word .doc files cannot be safely extracted. Use DOCX or RTF instead.");
+        }
+
+        var decoded = DecodeContent(bytes, charset);
+        if (normalized.Contains("html", StringComparison.Ordinal))
+        {
+            return NormalizeHtml(decoded);
+        }
+        if (normalized is "application/rtf" or "text/rtf")
+        {
+            return LimitExtractedContent(RtfToText(decoded));
+        }
+        if (normalized.StartsWith("text/", StringComparison.Ordinal)
+            || normalized is "application/json" or "application/xml" or "application/xhtml+xml"
+            || normalized.EndsWith("+json", StringComparison.Ordinal)
+            || normalized.EndsWith("+xml", StringComparison.Ordinal)
+            || normalized == "application/octet-stream" && LooksLikeText(bytes))
+        {
+            return LimitExtractedContent(decoded);
+        }
+
+        throw new InvalidDataException($"Unsupported web response media type {mediaType}.");
+    }
+
+    private static string ExtractPdf(byte[] bytes, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var stream = new MemoryStream(bytes, writable: false);
+            using var document = PdfDocument.Open(stream);
+            var result = new StringBuilder(Math.Min(MaximumExtractedCharacters, bytes.Length * 2));
+            var pageNumber = 0;
+            foreach (var page in document.GetPages())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                pageNumber++;
+                if (pageNumber > MaximumDocumentPages)
+                {
+                    AppendBounded(result, $"\n[PDF nach {MaximumDocumentPages} Seiten gekürzt]");
+                    break;
+                }
+
+                if (!AppendBounded(
+                    result,
+                    $"\n\n[Seite {pageNumber}]\n{ContentOrderTextExtractor.GetText(page).Trim()}"))
+                {
+                    break;
+                }
+            }
+
+            return CompleteDocumentExtraction(result, "PDF");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is not InvalidDataException)
+        {
+            throw new InvalidDataException("PDF text extraction failed.", exception);
+        }
+    }
+
+    private static string ExtractOpenXmlWord(byte[] bytes, CancellationToken cancellationToken)
+    {
+        try
+        {
+            ValidateOfficeArchive(bytes);
+            using var stream = new MemoryStream(bytes, writable: false);
+            using var document = WordprocessingDocument.Open(stream, false);
+            var mainPart = document.MainDocumentPart
+                ?? throw new InvalidDataException("DOCX contains no main document part.");
+            var body = mainPart.Document?.Body
+                ?? throw new InvalidDataException("DOCX contains no document body.");
+            var result = new StringBuilder(Math.Min(MaximumExtractedCharacters, bytes.Length * 2));
+            AppendWordParagraphs(result, body.Descendants<Paragraph>(), cancellationToken);
+            foreach (var header in mainPart.HeaderParts)
+            {
+                AppendWordParagraphs(result, header.Header?.Descendants<Paragraph>() ?? [], cancellationToken);
+            }
+            foreach (var footer in mainPart.FooterParts)
+            {
+                AppendWordParagraphs(result, footer.Footer?.Descendants<Paragraph>() ?? [], cancellationToken);
+            }
+
+            return CompleteDocumentExtraction(result, "DOCX");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is not InvalidDataException)
+        {
+            throw new InvalidDataException("DOCX text extraction failed.", exception);
+        }
+    }
+
+    private static void AppendWordParagraphs(
+        StringBuilder result,
+        IEnumerable<Paragraph> paragraphs,
+        CancellationToken cancellationToken)
+    {
+        foreach (var paragraph in paragraphs)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var text = string.Concat(paragraph.Descendants<Text>().Select(static node => node.Text)).Trim();
+            if (text.Length > 0 && !AppendBounded(result, text + Environment.NewLine))
+            {
+                return;
+            }
+        }
+    }
+
+    private static void ValidateOfficeArchive(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: false);
+        if (archive.Entries.Count > 10_000
+            || !archive.Entries.Any(static entry =>
+                string.Equals(entry.FullName, "word/document.xml", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidDataException("The downloaded archive is not a valid Word document.");
+        }
+
+        long totalLength = 0;
+        foreach (var entry in archive.Entries)
+        {
+            totalLength = checked(totalLength + entry.Length);
+            if (totalLength > MaximumOfficeUncompressedBytes)
+            {
+                throw new InvalidDataException("The Word document exceeds the safe decompressed size limit.");
+            }
+        }
+    }
+
+    private static string CompleteDocumentExtraction(StringBuilder result, string documentType)
+    {
+        var text = result.ToString().Trim();
+        if (text.Length == 0)
+        {
+            throw new InvalidDataException(
+                $"The {documentType} document contains no extractable text.");
+        }
+
+        return LimitExtractedContent(text);
+    }
+
+    private static bool AppendBounded(StringBuilder result, string value)
+    {
+        var remaining = MaximumExtractedCharacters - result.Length;
+        if (remaining <= 0)
+        {
+            return false;
+        }
+        if (value.Length <= remaining)
+        {
+            result.Append(value);
+            return true;
+        }
+
+        result.Append(value.AsSpan(0, remaining));
+        return false;
+    }
+
+    private static string LimitExtractedContent(string content) => content.Length <= MaximumExtractedCharacters
+        ? content.Trim()
+        : content[..MaximumExtractedCharacters].TrimEnd() + "\n[Dokumentauszug gekürzt]";
+
+    private static bool IsOpenXmlWordMediaType(string mediaType) => mediaType is
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or
+        "application/vnd.ms-word.document.macroenabled.12" or
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.template" or
+        "application/vnd.ms-word.template.macroenabled.12";
+
+    private static bool LooksLikeZip(byte[] bytes) => bytes.Length >= 4
+        && bytes[0] == (byte)'P'
+        && bytes[1] == (byte)'K'
+        && bytes[2] is 3 or 5 or 7
+        && bytes[3] is 4 or 6 or 8;
+
+    private static bool ContainsWordDocument(byte[] bytes)
+    {
+        try
+        {
+            using var stream = new MemoryStream(bytes, writable: false);
+            using var archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: false);
+            return archive.Entries.Any(static entry =>
+                string.Equals(entry.FullName, "word/document.xml", StringComparison.OrdinalIgnoreCase));
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+    }
+
+    private static bool LooksLikeText(byte[] bytes)
+    {
+        if (bytes.Length == 0)
+        {
+            return true;
+        }
+
+        var sampleLength = Math.Min(bytes.Length, 8_192);
+        var controls = 0;
+        for (var index = 0; index < sampleLength; index++)
+        {
+            var value = bytes[index];
+            if (value == 0)
+            {
+                return false;
+            }
+            if (value < 0x20 && value is not (byte)'\r' and not (byte)'\n' and not (byte)'\t')
+            {
+                controls++;
+            }
+        }
+
+        return controls * 100 < sampleLength * 2;
     }
 
     private static string DecodeContent(byte[] bytes, string? charset)
@@ -479,6 +773,49 @@ public sealed partial class WebResearchService
         }
 
         return encoding.GetString(bytes);
+    }
+
+    private static string RtfToText(string rtf)
+    {
+        var result = new StringBuilder(rtf.Length);
+        var depth = 0;
+        var skipDepth = -1;
+        for (var index = 0; index < rtf.Length; index++)
+        {
+            var current = rtf[index];
+            if (current == '{') { depth++; continue; }
+            if (current == '}') { if (depth == skipDepth) skipDepth = -1; depth--; continue; }
+            if (skipDepth >= 0) continue;
+            if (current != '\\') { result.Append(current); continue; }
+            if (++index >= rtf.Length) break;
+            current = rtf[index];
+            if (current is '\\' or '{' or '}') { result.Append(current); continue; }
+            if (current == '*') { skipDepth = depth; continue; }
+            if (current == '\'')
+            {
+                if (index + 2 < rtf.Length
+                    && byte.TryParse(
+                        rtf.AsSpan(index + 1, 2),
+                        NumberStyles.HexNumber,
+                        CultureInfo.InvariantCulture,
+                        out var hex))
+                {
+                    result.Append((char)hex);
+                    index += 2;
+                }
+                continue;
+            }
+
+            var start = index;
+            while (index < rtf.Length && char.IsLetter(rtf[index])) index++;
+            var word = rtf[start..index];
+            while (index < rtf.Length && (char.IsDigit(rtf[index]) || rtf[index] == '-')) index++;
+            if (index < rtf.Length && rtf[index] != ' ') index--;
+            if (word is "par" or "line") result.AppendLine();
+            else if (word == "tab") result.Append('\t');
+        }
+
+        return result.ToString().Trim();
     }
 
     private static string NormalizeHtml(string html)

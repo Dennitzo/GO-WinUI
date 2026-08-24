@@ -360,46 +360,36 @@ public partial class App : Application
         IReadOnlyList<ServiceStatusSnapshot>? serviceStatus = null;
         try
         {
-            if (currentSettings.AiProvider == AiProviderKind.GoAiServer)
-            {
-                using var client = await GetService<GoAiConnectionService>()
-                    .CreateClientAsync(cancellationToken)
-                    .ConfigureAwait(false);
-                var healthTask = client.GetReadyHealthAsync(cancellationToken);
-                var capabilitiesTask = client.GetCapabilitiesAsync(cancellationToken);
+            using var client = await GetService<GoAiConnectionService>()
+                .CreateClientAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var healthTask = client.GetReadyHealthAsync(cancellationToken);
+            var capabilitiesTask = client.GetCapabilitiesAsync(cancellationToken);
 
-                // Readiness may legitimately be degraded because one optional
-                // model is still downloading. Capabilities is authenticated and
-                // therefore proves that this client can use the gateway.
-                var health = await healthTask.ConfigureAwait(false);
-                var capabilities = await capabilitiesTask.ConfigureAwait(false);
-                connected = string.Equals(
-                    health.ProtocolVersion,
+            // Readiness may legitimately be degraded because one optional
+            // model is still downloading. Capabilities is authenticated and
+            // therefore proves that this client can use the gateway.
+            var health = await healthTask.ConfigureAwait(false);
+            var capabilities = await capabilitiesTask.ConfigureAwait(false);
+            connected = string.Equals(
+                health.ProtocolVersion,
+                currentSettings.GoAiProtocolVersion,
+                StringComparison.Ordinal)
+                && string.Equals(
+                    capabilities.ProtocolVersion,
                     currentSettings.GoAiProtocolVersion,
-                    StringComparison.Ordinal)
-                    && string.Equals(
-                        capabilities.ProtocolVersion,
-                        currentSettings.GoAiProtocolVersion,
-                        StringComparison.Ordinal);
-                serverReady = connected
-                    && string.Equals(health.Status, "ready", StringComparison.OrdinalIgnoreCase);
+                    StringComparison.Ordinal);
+            serverReady = connected
+                && string.Equals(health.Status, "ready", StringComparison.OrdinalIgnoreCase);
 
-                // Diagnostic endpoints enrich individual service chips but must
-                // never downgrade an already authenticated gateway connection.
-                var gpuTask = client.GetGpuStatusAsync(cancellationToken);
-                var modelTask = client.GetModelStatusAsync(cancellationToken);
-                var serviceTask = client.GetServiceStatusAsync(cancellationToken);
-                gpuStatus = await AwaitOptionalStatusAsync(gpuTask, cancellationToken).ConfigureAwait(false);
-                modelStatus = await AwaitOptionalStatusAsync(modelTask, cancellationToken).ConfigureAwait(false);
-                serviceStatus = await AwaitOptionalStatusAsync(serviceTask, cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                connected = await GetService<ILmStudioClient>()
-                    .TestConnectionAsync(cancellationToken)
-                    .ConfigureAwait(false);
-                serverReady = connected;
-            }
+            // Diagnostic endpoints enrich individual service chips but must
+            // never downgrade an already authenticated gateway connection.
+            var gpuTask = client.GetGpuStatusAsync(cancellationToken);
+            var modelTask = client.GetModelStatusAsync(cancellationToken);
+            var serviceTask = client.GetServiceStatusAsync(cancellationToken);
+            gpuStatus = await AwaitOptionalStatusAsync(gpuTask, cancellationToken).ConfigureAwait(false);
+            modelStatus = await AwaitOptionalStatusAsync(modelTask, cancellationToken).ConfigureAwait(false);
+            serviceStatus = await AwaitOptionalStatusAsync(serviceTask, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

@@ -17,6 +17,7 @@ public sealed class AgentToolCatalogTests
 
         Assert.DoesNotContain(withoutClient, static tool => !tool.ServerSide);
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.FileSystemReadText);
+        Assert.DoesNotContain(withCode, static tool => tool.Name == ClientToolNames.FileSystemReadMany);
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.FileSystemReplaceText);
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.ProcessRunPreset);
         Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.LeanProof);
@@ -97,16 +98,79 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
-    public void ProcessPresetAdvertisesDeterministicKatexPdfRendering()
+    public void ProcessPresetDoesNotExposePdfAsAModelTool()
     {
         var catalog = new AgentToolCatalog();
         var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
         var preset = catalog.Resolve(ClientToolNames.ProcessRunPreset, tools);
-        using var renderPdf = JsonDocument.Parse("""{"preset":"document.renderPdf","target":"solutions/PhyMa.md"}""");
+        Assert.DoesNotContain("document.renderPdf", preset.Description, StringComparison.Ordinal);
+        Assert.DoesNotContain("document.renderPdf", preset.Schema.GetRawText(), StringComparison.Ordinal);
+    }
 
-        catalog.Validate(preset, renderPdf.RootElement);
-        Assert.Contains("document.renderPdf", preset.Description, StringComparison.Ordinal);
-        Assert.Contains("document.renderPdf", preset.Schema.GetRawText(), StringComparison.Ordinal);
+    [Theory]
+    [InlineData("Erzeuge eine PDF aus dem Lehrbuch.")]
+    [InlineData("Aktualisiere die vorhandene pdf-Datei.")]
+    [InlineData("Render both PDFs with KaTeX.")]
+    [InlineData("Erzeuge eine PDF-Datei.")]
+    public void PdfCodingPromptsDoNotAdvertiseAModelPdfTool(string prompt)
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest(["code", "process", "pdf"]) with
+        {
+            Mode = RunMode.Code,
+            Messages = [new RunMessage("user", [new ContentPart("text", prompt)])],
+        };
+
+        var tools = catalog.GetAvailableTools(request);
+
+        Assert.DoesNotContain(tools, static tool => tool.Name == "document.renderPdf");
+    }
+
+    [Fact]
+    public void DedicatedPdfToolDoesNotLeakIntoUnrelatedOrLegacyCodingRuns()
+    {
+        var catalog = new AgentToolCatalog();
+        var unrelated = CreateRequest(["code", "process", "pdf"]) with
+        {
+            Mode = RunMode.Code,
+            Messages =
+            [
+                new RunMessage("user", [new ContentPart("text", "Erzeuge zuerst eine PDF.")]),
+                new RunMessage("assistant", [new ContentPart("text", "Erledigt.")]),
+                new RunMessage(
+                    "user",
+                    [
+                        new ContentPart("text", "Analysiere jetzt nur den C#-Parser."),
+                        new ContentPart("text", "[GO_WORKSPACE]\nWorkspace: PDF-Projekt"),
+                    ]),
+            ],
+        };
+        var legacyClient = unrelated with
+        {
+            Messages = [new RunMessage("user", [new ContentPart("text", "Erzeuge eine PDF.")])],
+            ClientCapabilities = ["code", "process"],
+        };
+
+        Assert.DoesNotContain(
+            catalog.GetAvailableTools(unrelated),
+            static tool => tool.Name == "document.renderPdf");
+        Assert.DoesNotContain(
+            catalog.GetAvailableTools(legacyClient),
+            static tool => tool.Name == "document.renderPdf");
+    }
+
+    [Fact]
+    public void PdfToolIsNotAvailableToCodingRuns()
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest(["code", "process", "pdf"]) with
+        {
+            Mode = RunMode.Code,
+            Messages = [new RunMessage("user", [new ContentPart("text", "Erzeuge eine PDF.")])],
+        };
+        Assert.Throws<InvalidOperationException>(() => catalog.Resolve(
+            "document.renderPdf",
+            catalog.GetAvailableTools(request)));
     }
 
     [Fact]
@@ -167,7 +231,7 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
-    public void CodingRunsAlwaysReceiveSearchAndSafePageFetchTools()
+    public void CodingRunsExcludeWebResearchFromTheNativeToolCatalog()
     {
         var catalog = new AgentToolCatalog();
         var request = CreateRequest(["code"]) with
@@ -178,8 +242,8 @@ public sealed class AgentToolCatalogTests
 
         var tools = catalog.GetAvailableTools(request);
 
-        Assert.Contains(tools, static tool => tool.Name == "web.search");
-        Assert.Contains(tools, static tool => tool.Name == "web.fetch");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "web.search");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "web.fetch");
         Assert.DoesNotContain(tools, static tool => tool.Name == "youtube.search");
         Assert.DoesNotContain(tools, static tool => tool.Name == "image.generate");
     }
@@ -189,6 +253,20 @@ public sealed class AgentToolCatalogTests
     {
         var tools = new AgentToolCatalog().GetAvailableTools(CreateRequest(null));
         Assert.Contains(tools, static tool => tool.Name == "image.generate");
+    }
+
+    [Fact]
+    public void CodingContextPreparationAdvertisesNoTools()
+    {
+        var request = CreateRequest([]) with
+        {
+            Mode = RunMode.Code,
+            AllowedServerTools = [],
+            PreferredCodeModelId = GoAi.Server.Core.Configuration.CodingModelCatalog.Qwen38BId,
+            ConversationProfile = ConversationProfile.ContextPreparation,
+        };
+
+        Assert.Empty(new AgentToolCatalog().GetAvailableTools(request));
     }
 
     private static RunRequest CreateRequest(IReadOnlyList<string>? capabilities) => new(

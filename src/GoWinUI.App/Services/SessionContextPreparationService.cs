@@ -39,10 +39,16 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(history);
-        ArgumentException.ThrowIfNullOrWhiteSpace(currentPrompt);
+        ArgumentNullException.ThrowIfNull(currentPrompt);
         ArgumentNullException.ThrowIfNull(progress);
 
         profile = coding ? SessionContextProfile.Code : profile;
+        if (coding || profile == SessionContextProfile.Code)
+        {
+            return CreateCurrentPromptOnlyCodingContext(knownContextLength);
+        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(currentPrompt);
+
         var eligible = SelectEligibleHistory(history, profile);
         var historyRevision = CreateHistoryRevision(eligible);
         var (modelId, contextLength) = await ResolveModelAsync(
@@ -189,7 +195,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                     await progress(new(
                         1,
                         "Sitzungsverlauf wird aufbereitet",
-                        $"{older.Length:N0} ältere Nachrichten überschreiten das Modellfenster von {contextLength:N0} Token.")).ConfigureAwait(false);
+                            $"{older.Length:N0} ältere Nachrichten überschreiten das Modellfenster von {contextLength:N0} Token.")).ConfigureAwait(false);
                     preparedText = await PrepareHistoryAsync(
                         client,
                         sessionId,
@@ -265,7 +271,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                 sessionId,
                 SplitText(combinedHistory.ToString(), CalculatePreparationInputCharacters(contextLength)),
                 modelId,
-                coding,
+                coding: false,
                 profile,
                 contextLength,
                 finalTarget,
@@ -290,7 +296,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                     sessionId,
                     SplitText(preparedText, CalculatePreparationInputCharacters(contextLength)),
                     modelId,
-                    coding,
+                    coding: false,
                     profile,
                     contextLength,
                     Math.Max(256, historyBudget - 768),
@@ -336,6 +342,12 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             contextLength,
             CacheHit: reusedPersistentHistory);
     }
+
+    internal static SessionRunContext CreateCurrentPromptOnlyCodingContext(int? knownContextLength = null) => new(
+        [],
+        new SessionContextDescriptor(Hash("coding-current-prompt-only-v1"), 0, 0, 0),
+        Math.Max(2_048, knownContextLength ?? 262_144),
+        CacheHit: false);
 
     private async Task<SessionContextPreparation?> FindReusablePreparationAsync(
         Guid sessionId,
@@ -539,8 +551,9 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         int targetCharacters,
         CancellationToken cancellationToken)
     {
-        var instruction = profile == SessionContextProfile.Audiobook
-            ? $"""
+        var instruction = profile switch
+        {
+            SessionContextProfile.Audiobook => $"""
                 Erzeuge aus dem folgenden älteren Hörbuch-Sitzungsverlauf eine verlustarme, persistente Story-Chronik.
                 Zielumfang: höchstens {targetCharacters:N0} Zeichen. Schreibe keine neue Szene und antworte nicht auf alte Nutzerprompts.
                 Bewahre strukturiert und widerspruchsfrei:
@@ -555,8 +568,20 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                 - als CONTINUATION_ANCHOR die letzten zusammenhängenden Absätze der neuesten erzählten Szene möglichst wörtlich.
                 Trenne bereits geschehene Ereignisse eindeutig von zukünftigen Serienvorgaben. Kürze Wiederholungen, aber erfinde,
                 löse oder verändere keine Handlung. Der Szenenanker darf niemals linear abgeschnitten werden.
-                """
-            : $"""
+                """,
+            SessionContextProfile.Code => $"""
+                Verdichte den folgenden älteren Coding-Sitzungsverlauf zu einer verlustarmen, persistenten Arbeitschronik.
+                Zielumfang: höchstens {targetCharacters:N0} Zeichen. Antworte nicht auf alte Prompts und plane keinen neuen Arbeitsschritt.
+                Bewahre strukturiert und eindeutig:
+                - die aktuelle Nutzerabsicht und alle später hinzugekommenen oder geänderten Anweisungen;
+                - Workspacezustand, relevante relative Pfade, bereits gelesene Evidenz und deren belastbare Ergebnisse;
+                - tatsächlich durchgeführte Dateiänderungen, Builds, Tests, Starts, Webrecherche und formale Prüfungen;
+                - konkrete Fehlerdiagnosen, behobene Ursachen, weiterhin offene Fehler und noch ausstehende Verifikation;
+                - technische Entscheidungen, Annahmen, Versionen, Zahlen, Grenzwerte und externe Quellen, soweit sie für die Fortsetzung nötig sind.
+                Führe identische Kampagnenprompts und wiederholte Statusmeldungen genau einmal zusammen. Trenne sicher belegte Ergebnisse von
+                Vorschlägen und offenen Hypothesen. Erfinde keine Datei, Änderung, Prüfung oder Lösung. Gib ausschließlich die Arbeitschronik aus.
+                """,
+            _ => $"""
                 Verdichte den folgenden älteren GO-Sitzungsverlauf für die verlustarme Weiterverwendung in derselben Sitzung.
                 Zielumfang: höchstens {targetCharacters:N0} Zeichen.
                 Bewahre konkrete Entscheidungen, Nutzerpräferenzen, bereits ausgeführte Aktionen, offene Aufgaben,
@@ -564,25 +589,17 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                 Trenne sicher feststehende Ergebnisse von offenen oder unsicheren Punkten. Erfinde nichts.
                 Entferne nur Wiederholungen, Höflichkeitsfloskeln und nicht mehr relevante Zwischenformulierungen.
                 Schreibe eine strukturierte deutsche Sitzungschronik, keine Antwort auf eine alte Nutzerfrage.
-                """;
+                """,
+        };
         var parts = new List<ContentPart> { new("text", Text: instruction) };
         parts.AddRange(SplitContentParts(historyBlock));
-        var request = new RunRequest(
-            GoAiProtocol.Version,
-            coding ? RunMode.Code : RunMode.General,
-            [new RunMessage("user", parts)],
-            ClientCapabilities: [],
-            Limits: new RunLimits(
-                MaximumOutputTokens: Math.Clamp((targetCharacters + 5) / 6, 64, 8_192),
-                MaximumContextTokens: Math.Clamp(contextLength, 1_024, 262_144),
-                TimeoutSeconds: 3_600),
-            SessionId: sessionId.ToString("D"),
-            AllowedServerTools: [],
-            PreferredGeneralModelId: coding ? null : modelId,
-            PreferredCodeModelId: coding ? modelId : null,
-            ConversationProfile: profile == SessionContextProfile.Audiobook
-                ? ConversationProfile.Audiobook
-                : ConversationProfile.General);
+        var request = CreatePreparationRunRequest(
+            sessionId,
+            parts,
+            modelId,
+            coding,
+            contextLength,
+            targetCharacters);
         var accepted = await client.CreateRunAsync(
             request,
             $"sessionprep-{Guid.NewGuid():N}",
@@ -611,7 +628,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                         var parsed = GeneralAgentResponseParser.Parse(content.ToString(), "Sitzungsverlauf verdichten");
                         if (string.IsNullOrWhiteSpace(parsed.Message))
                         {
-                            throw new InvalidDataException("General AI hat keine Sitzungsverdichtung erzeugt.");
+                            throw new InvalidDataException("Das ausgewählte AI-Modell hat keine Sitzungsverdichtung erzeugt.");
                         }
                         return parsed.Message.Trim();
                 }
@@ -631,6 +648,30 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             throw;
         }
     }
+
+    internal static RunRequest CreatePreparationRunRequest(
+        Guid sessionId,
+        IReadOnlyList<ContentPart> parts,
+        string modelId,
+        bool coding,
+        int contextLength,
+        int targetCharacters) => new(
+            GoAiProtocol.Version,
+            coding ? RunMode.Code : RunMode.General,
+            [new RunMessage("user", parts)],
+            ClientCapabilities: [],
+            Limits: new RunLimits(
+                MaximumOutputTokens: Math.Clamp((targetCharacters + 5) / 6, 64, 8_192),
+                MaximumContextTokens: Math.Clamp(contextLength, 1_024, 262_144),
+                TimeoutSeconds: 3_600),
+            SessionId: sessionId.ToString("D"),
+            AllowedServerTools: [],
+            PreferredGeneralModelId: coding ? null : modelId,
+            PreferredCodeModelId: coding ? modelId : null,
+            ConversationProfile: ConversationProfile.ContextPreparation,
+            ReasoningEffort: ModelReasoningProfiles.Resolve(modelId, coding ? "code" : "general").Supports("off")
+                ? "off"
+                : null);
 
     private static async Task<(string ModelId, int ContextLength)> ResolveModelAsync(
         GoAiClient client,
@@ -864,7 +905,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             : "persistente Sitzungschronik";
         return $"""
             [{marker}]
-            Der folgende ältere Verlauf von {messageCount:N0} Nachrichten wurde wegen des Modellfensters intern durch AI verdichtet.
+            Der folgende ältere Verlauf von {messageCount:N0} Nachrichten wurde zur stabilen Wiederverwendung und Einhaltung des Modellfensters intern durch AI verdichtet.
             Er reicht einschließlich Nachricht {throughMessage.Id:D} vom {throughMessage.CreatedAt:O}.
             Behandle ihn als {description}; neuere Originalnachrichten folgen danach unverändert.
 

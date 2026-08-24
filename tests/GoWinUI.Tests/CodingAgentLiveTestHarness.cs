@@ -141,7 +141,9 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
         string sessionId,
         string prompt,
         string idempotencyPrefix,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<ToolProposal, ClientToolResult, bool>? stopAfterTool = null,
+        Func<string, JsonElement, bool>? stopAfterServerTool = null)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         await CodingWorkflowMessageJournal.AppendAsync(
@@ -178,7 +180,7 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
                 GoAiProtocol.Version,
                 RunMode.Code,
                 [new RunMessage("user", [new ContentPart("text", prompt)])],
-                ClientCapabilities: ["code", "filesystem", "process"],
+                ClientCapabilities: ["code", "filesystem", "process", "pdf"],
                 Limits: new RunLimits(8_192, 262_144, 14_400),
                 SessionId: sessionId,
                 AllowedServerTools: [],
@@ -247,6 +249,15 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
                         accepted.RunId,
                         result,
                         cancellationToken).ConfigureAwait(false);
+                    if (stopAfterTool?.Invoke(proposal, result) == true)
+                    {
+                        log.Write("run.stop_requested_after_tool", new
+                        {
+                            proposal.Name,
+                            result.Status,
+                        }, accepted.RunId);
+                        await client.CancelRunAsync(accepted.RunId, CancellationToken.None).ConfigureAwait(false);
+                    }
                     break;
                 }
                 case RunEventTypes.TextDelta:
@@ -259,6 +270,33 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
                         deltaLength = delta.Length,
                         cumulativeLength = visibleText.Length,
                     }, accepted.RunId);
+                    break;
+                }
+                case RunEventTypes.ServerToolCompleted:
+                {
+                    var toolName = item.Data.TryGetProperty("tool", out var toolElement)
+                        && toolElement.ValueKind == JsonValueKind.String
+                        ? toolElement.GetString() ?? string.Empty
+                        : string.Empty;
+                    if (!string.IsNullOrWhiteSpace(toolName))
+                    {
+                        toolNames.Add(toolName);
+                    }
+                    log.Write("server_tool.completed", new
+                    {
+                        item.Id,
+                        tool = toolName,
+                        data = SanitizeJson(item.Data),
+                    }, accepted.RunId);
+                    if (!string.IsNullOrWhiteSpace(toolName)
+                        && stopAfterServerTool?.Invoke(toolName, item.Data) == true)
+                    {
+                        log.Write("run.stop_requested_after_server_tool", new
+                        {
+                            tool = toolName,
+                        }, accepted.RunId);
+                        await client.CancelRunAsync(accepted.RunId, CancellationToken.None).ConfigureAwait(false);
+                    }
                     break;
                 }
                 case RunEventTypes.RunFailed:

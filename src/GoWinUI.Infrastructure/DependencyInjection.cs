@@ -1,6 +1,5 @@
 using GoWinUI.Core.Chat;
 using GoWinUI.Core.Contracts;
-using GoWinUI.Infrastructure.AI;
 using GoWinUI.Infrastructure.Backup;
 using GoWinUI.Infrastructure.Documents;
 using GoWinUI.Infrastructure.Logging;
@@ -44,8 +43,6 @@ public static class DependencyInjection
         services.AddSingleton<RingBufferLoggerProvider>();
         services.AddSingleton<ISessionLog>(static provider => provider.GetRequiredService<RingBufferLoggerProvider>());
         services.AddSingleton<ILoggerProvider>(static provider => provider.GetRequiredService<RingBufferLoggerProvider>());
-        services.AddHttpClient<ILmStudioClient, LmStudioClient>(static client => client.Timeout = Timeout.InfiniteTimeSpan);
-        services.AddSingleton<IChatOrchestrator, ChatOrchestrator>();
         return services;
     }
 }

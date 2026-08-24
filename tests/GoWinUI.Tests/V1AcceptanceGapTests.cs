@@ -1,7 +1,4 @@
 using System.IO.Compression;
-using System.Net;
-using System.Net.Http.Headers;
-using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -9,7 +6,6 @@ using System.Text.Json.Nodes;
 using GoWinUI.Core.Chat;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
-using GoWinUI.Infrastructure.AI;
 using GoWinUI.Infrastructure.Documents;
 using GoWinUI.Infrastructure.Storage;
 using Microsoft.Data.Sqlite;
@@ -68,94 +64,6 @@ public sealed class V1AcceptanceGapTests
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM binary_objects;";
         Assert.Equal(0L, Assert.IsType<long>(await command.ExecuteScalarAsync()));
-    }
-
-    [Fact]
-    public async Task ChatCancellationPersistsPartialAnswerAndCancelledRun()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Cancel");
-        var lmStudio = new BlockingAfterPartialLmStudio();
-        using var orchestrator = CreateOrchestrator(environment, lmStudio);
-
-        var send = orchestrator.SendAsync(session.Id, "Frage", "test-model", "Hilf mir.");
-        await lmStudio.WaitingForCancellation.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        orchestrator.Cancel();
-        var answer = await send.WaitAsync(TimeSpan.FromSeconds(5));
-
-        Assert.Equal(MessageStatus.Cancelled, answer.Status);
-        Assert.Equal("bereits empfangen", answer.Content);
-        var messages = await chats.ListMessagesAsync(session.Id);
-        var persistedAnswer = Assert.Single(messages, static message => message.Role == ChatRole.Assistant);
-        Assert.Equal(MessageStatus.Cancelled, persistedAnswer.Status);
-        Assert.Equal("bereits empfangen", persistedAnswer.Content);
-        var run = await ReadRunAsync(environment, persistedAnswer.Id);
-        Assert.Equal("cancelled", run.Status);
-        Assert.Null(run.Error);
-    }
-
-    [Fact]
-    public async Task ChatFailurePersistsPartialAnswerErrorAndFailedRun()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Fehler");
-        using var orchestrator = CreateOrchestrator(environment, new FailingAfterPartialLmStudio());
-
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            orchestrator.SendAsync(session.Id, "Frage", "test-model", "Hilf mir."));
-
-        Assert.Equal("simulierter Streamfehler", exception.Message);
-        var messages = await chats.ListMessagesAsync(session.Id);
-        var persistedAnswer = Assert.Single(messages, static message => message.Role == ChatRole.Assistant);
-        Assert.Equal(MessageStatus.Failed, persistedAnswer.Status);
-        Assert.Equal("Teilantwort vor Fehler", persistedAnswer.Content);
-        Assert.Equal("simulierter Streamfehler", persistedAnswer.Error);
-        var run = await ReadRunAsync(environment, persistedAnswer.Id);
-        Assert.Equal("failed", run.Status);
-        Assert.Equal("simulierter Streamfehler", run.Error);
-    }
-
-    [Fact]
-    public async Task MalformedSseEventIsIgnoredWithoutLosingFollowingDelta()
-    {
-        var handler = new QueueHandler(SseResponse(
-            "event: response.output_text.delta\ndata: {kein-json}\n\n" +
-            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Weiter\"}\n\n" +
-            "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"));
-        var client = new LmStudioClient(new HttpClient(handler), new StaticSettingsStore());
-        var deltas = new List<LmDelta>();
-
-        await foreach (var delta in client.StreamAsync(CreateLmRequest()))
-        {
-            deltas.Add(delta);
-        }
-
-        Assert.Equal("Weiter", string.Concat(deltas.Select(static delta => delta.Text)));
-        Assert.True(deltas[^1].IsCompleted);
-        Assert.Single(handler.Requests);
-    }
-
-    [Fact]
-    public async Task CancellationAfterFirstResponsesTokenDoesNotFallbackToChatEndpoint()
-    {
-        var firstEvent = Encoding.UTF8.GetBytes(
-            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Token\"}\n\n");
-        var content = new StreamContent(new FirstEventThenBlockingStream(firstEvent));
-        content.Headers.ContentType = new MediaTypeHeaderValue("text/event-stream");
-        var handler = new QueueHandler(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
-        var client = new LmStudioClient(new HttpClient(handler), new StaticSettingsStore());
-        using var cancellation = new CancellationTokenSource();
-        await using var enumerator = client.StreamAsync(CreateLmRequest(), cancellation.Token).GetAsyncEnumerator();
-
-        Assert.True(await enumerator.MoveNextAsync());
-        Assert.Equal("Token", enumerator.Current.Text);
-        cancellation.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => enumerator.MoveNextAsync().AsTask());
-
-        var request = Assert.Single(handler.Requests);
-        Assert.EndsWith("/v1/responses", request.RequestUri?.AbsoluteUri, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -235,38 +143,11 @@ public sealed class V1AcceptanceGapTests
         Assert.NotNull(await chats.GetSessionAsync(session.Id));
     }
 
-    private static ChatOrchestrator CreateOrchestrator(TestEnvironment environment, ILmStudioClient lmStudio) => new(
-        environment.Get<IChatRepository>(),
-        environment.Get<IDocumentIngestor>(),
-        lmStudio,
-        environment.Get<IContextAssembler>(),
-        environment.Get<SqliteDatabase>());
-
-    private static LmChatRequest CreateLmRequest() => new(
-        "local-model",
-        [new LmChatMessage(ChatRole.User, "Hallo")]);
-
-    private static HttpResponseMessage SseResponse(string body) => new(HttpStatusCode.OK)
-    {
-        Content = new StringContent(body, Encoding.UTF8, "text/event-stream"),
-    };
-
     private static async Task<SqliteConnection> OpenDatabaseAsync(TestEnvironment environment)
     {
         var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}");
         await connection.OpenAsync();
         return connection;
-    }
-
-    private static async Task<(string Status, string? Error)> ReadRunAsync(TestEnvironment environment, Guid assistantMessageId)
-    {
-        await using var connection = await OpenDatabaseAsync(environment);
-        await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT status,error FROM chat_runs WHERE assistant_message_id=$message;";
-        command.Parameters.AddWithValue("$message", assistantMessageId.ToString("D"));
-        await using var reader = await command.ExecuteReaderAsync();
-        Assert.True(await reader.ReadAsync());
-        return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1));
     }
 
     private sealed class CancelAfterCommittedImportStore(
@@ -293,110 +174,4 @@ public sealed class V1AcceptanceGapTests
             inner.DeleteIfUnreferencedAsync(id, cancellationToken);
     }
 
-    private sealed class BlockingAfterPartialLmStudio : ILmStudioClient
-    {
-        internal TaskCompletionSource WaitingForCancellation { get; } =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public Task<IReadOnlyList<LmModel>> ListModelsAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<LmModel>>([new("test-model", ContextLength: 8_192)]);
-
-        public Task<bool> TestConnectionAsync(CancellationToken cancellationToken = default) => Task.FromResult(true);
-
-        public async IAsyncEnumerable<LmDelta> StreamAsync(
-            LmChatRequest request,
-            [EnumeratorCancellation] CancellationToken cancellationToken = default)
-        {
-            yield return new("bereits empfangen");
-            WaitingForCancellation.TrySetResult();
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-        }
-    }
-
-    private sealed class FailingAfterPartialLmStudio : ILmStudioClient
-    {
-        public Task<IReadOnlyList<LmModel>> ListModelsAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<LmModel>>([new("test-model", ContextLength: 8_192)]);
-
-        public Task<bool> TestConnectionAsync(CancellationToken cancellationToken = default) => Task.FromResult(true);
-
-        public async IAsyncEnumerable<LmDelta> StreamAsync(
-            LmChatRequest request,
-            [EnumeratorCancellation] CancellationToken cancellationToken = default)
-        {
-            yield return new("Teilantwort vor Fehler");
-            await Task.Yield();
-            throw new InvalidOperationException("simulierter Streamfehler");
-        }
-    }
-
-    private sealed class StaticSettingsStore : ISettingsStore
-    {
-        public string SettingsPath => string.Empty;
-
-        public Task<AppSettings> LoadAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(new AppSettings());
-
-        public Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default) => Task.CompletedTask;
-    }
-
-    private sealed class QueueHandler(params HttpResponseMessage[] responses) : HttpMessageHandler
-    {
-        private readonly Queue<HttpResponseMessage> _responses = new(responses);
-
-        internal List<HttpRequestMessage> Requests { get; } = [];
-
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            Requests.Add(request);
-            return Task.FromResult(_responses.Dequeue());
-        }
-    }
-
-    private sealed class FirstEventThenBlockingStream(byte[] firstEvent) : Stream
-    {
-        private int _offset;
-
-        public override bool CanRead => true;
-        public override bool CanSeek => false;
-        public override bool CanWrite => false;
-        public override long Length => firstEvent.Length;
-        public override long Position { get => _offset; set => throw new NotSupportedException(); }
-
-        public override void Flush()
-        {
-        }
-
-        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-
-        public override Task<int> ReadAsync(
-            byte[] buffer,
-            int offset,
-            int count,
-            CancellationToken cancellationToken) =>
-            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
-
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
-        {
-            if (_offset < firstEvent.Length)
-            {
-                var count = Math.Min(buffer.Length, firstEvent.Length - _offset);
-                firstEvent.AsMemory(_offset, count).CopyTo(buffer);
-                _offset += count;
-                return ValueTask.FromResult(count);
-            }
-
-            return WaitForCancellationAsync(cancellationToken);
-        }
-
-        private static async ValueTask<int> WaitForCancellationAsync(CancellationToken cancellationToken)
-        {
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            return 0;
-        }
-
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-    }
 }

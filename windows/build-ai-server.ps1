@@ -19,6 +19,8 @@ $serverProject = Resolve-GoRepositoryPath -RelativePath 'src\GoAi.Server.App\GoA
 $gatewayProject = Resolve-GoRepositoryPath -RelativePath 'src\GoAi.Gateway\GoAi.Gateway.csproj'
 $clientProject = Resolve-GoRepositoryPath -RelativePath 'src\GoAi.Client\GoAi.Client.csproj'
 
+& (Join-Path $PSScriptRoot 'prepare-lmstudio-native-agent.ps1')
+
 Invoke-GoDotNet -CommandArguments @(
     'restore', $serverProject,
     '--runtime', 'win-x64',

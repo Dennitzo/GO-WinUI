@@ -2,9 +2,9 @@ using GoWinUI.App.Services;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 
 namespace GoWinUI.Tests;
 
@@ -13,42 +13,45 @@ public sealed class OfflineAiConnectionTests
     [Fact]
     public async Task MissingOptionalCodingModelIsReportedAsReachableButDegraded()
     {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        var server = ServeProbeResponsesAsync(listener,
-        [
-            (200, "OK", """
+        var probe = new ProbeHttpHandler(new Dictionary<string, (HttpStatusCode StatusCode, string Body)>
+        {
+            ["/v1/health/live"] = (HttpStatusCode.OK, """
                 {"status":"live","protocolVersion":"1.0","timestamp":"2026-08-20T07:29:18Z"}
                 """),
-            (200, "OK", """
+            ["/v1/capabilities"] = (HttpStatusCode.OK, """
                 {"protocolVersion":"1.0","serverVersion":"1.0","models":[],"serverTools":[],"clientTools":[],"uploadLimits":{},"mediaTypes":[],"supportsSseResume":true,"uploadChunkSize":8388608}
                 """),
-            (503, "Service Unavailable", """
+            ["/v1/health/ready"] = (HttpStatusCode.ServiceUnavailable, """
                 {"status":"notReady","protocolVersion":"1.0","timestamp":"2026-08-20T07:29:18Z","reason":"Erforderliche Modelle fehlen: qwen3-coder-next","repair":"Das Coding-Modell vollständig herunterladen."}
                 """),
-        ]);
+        });
         var store = new RecordingSettingsStore(new AppSettings
         {
             IsAiConnectionEnabled = true,
-            GoAiServerUrl = $"http://127.0.0.1:{port}",
+            GoAiServerUrl = "http://127.0.0.1:65000",
         });
         using var settings = new SettingsCoordinator(store);
         await settings.InitializeAsync();
         var secrets = new RecordingSecretStore("test-api-key");
+        var logger = new RecordingLogger<GoAiConnectionService>();
         using var connection = new GoAiConnectionService(
             settings,
             secrets,
-            NullLogger<GoAiConnectionService>.Instance);
+            logger,
+            () => probe);
 
-        var status = await connection.TestAsync().WaitAsync(TimeSpan.FromSeconds(10));
-        await server.WaitAsync(TimeSpan.FromSeconds(10));
-
-        Assert.True(status.IsReachable);
+        // The complete test suite deliberately runs CPU-heavy Lean, PDF and repository
+        // integration tests in parallel. Give the loopback probe enough scheduling headroom
+        // without weakening the production timeout/cancellation behavior under test.
+        var status = await connection.TestAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.True(status.IsReachable, $"{status.Message} {logger.LastException}");
         Assert.False(status.IsReady);
         Assert.Contains("Eingeschränkt", status.Message, StringComparison.Ordinal);
         Assert.Contains("qwen3-coder-next", status.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("nicht erreichbar", status.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(
+            ["/v1/health/live", "/v1/capabilities", "/v1/health/ready"],
+            probe.Paths);
     }
 
     [Fact]
@@ -146,35 +149,28 @@ public sealed class OfflineAiConnectionTests
         Assert.Equal(11, restored.Version);
     }
 
-    private static async Task ServeProbeResponsesAsync(
-        TcpListener listener,
-        IReadOnlyList<(int StatusCode, string Reason, string Body)> responses)
+    private sealed class ProbeHttpHandler(
+        IReadOnlyDictionary<string, (HttpStatusCode StatusCode, string Body)> responses)
+        : HttpMessageHandler
     {
-        foreach (var response in responses)
-        {
-            using var accepted = await listener.AcceptTcpClientAsync();
-            await using var stream = accepted.GetStream();
-            using var reader = new StreamReader(
-                stream,
-                Encoding.ASCII,
-                detectEncodingFromByteOrderMarks: false,
-                leaveOpen: true);
-            string? line;
-            do
-            {
-                line = await reader.ReadLineAsync();
-            }
-            while (!string.IsNullOrEmpty(line));
+        public List<string> Paths { get; } = [];
 
-            var body = Encoding.UTF8.GetBytes(response.Body);
-            var header = Encoding.ASCII.GetBytes(
-                $"HTTP/1.1 {response.StatusCode} {response.Reason}\r\n" +
-                "Content-Type: application/json; charset=utf-8\r\n" +
-                $"Content-Length: {body.Length}\r\n" +
-                "Connection: close\r\n\r\n");
-            await stream.WriteAsync(header);
-            await stream.WriteAsync(body);
-            await stream.FlushAsync();
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var path = request.RequestUri?.AbsolutePath ?? string.Empty;
+            Paths.Add(path);
+            if (!responses.TryGetValue(path, out var response))
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            }
+
+            return Task.FromResult(new HttpResponseMessage(response.StatusCode)
+            {
+                Content = new StringContent(response.Body, System.Text.Encoding.UTF8, "application/json"),
+            });
         }
     }
 
@@ -225,6 +221,29 @@ public sealed class OfflineAiConnectionTests
             cancellationToken.ThrowIfCancellationRequested();
             DeleteApiKeyCallCount++;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public Exception? LastException { get; private set; }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            _ = logLevel;
+            _ = eventId;
+            _ = state;
+            _ = formatter;
+            LastException = exception;
         }
     }
 }

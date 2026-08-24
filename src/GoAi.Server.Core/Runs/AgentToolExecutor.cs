@@ -13,6 +13,7 @@ namespace GoAi.Server.Core.Runs;
 
 public sealed class AgentToolExecutor
 {
+    private const int MaximumAgentFetchCharacters = 48_000;
     private const int MaximumToolResultBytes = 512 * 1024;
     private readonly WebResearchService _research;
     private readonly WorkerOrchestrator _workers;
@@ -87,9 +88,13 @@ public sealed class AgentToolExecutor
         }
     }
 
-    private static bool IsRecoverableResearchFailure(string toolName, Exception exception) =>
+    internal static bool IsRecoverableResearchFailure(string toolName, Exception exception) =>
         toolName is "web.search" or "web.fetch" or "youtube.search"
-        && exception is HttpRequestException or TimeoutException or TaskCanceledException or IOException;
+        && exception is HttpRequestException
+            or TimeoutException
+            or TaskCanceledException
+            or IOException
+            or InvalidDataException;
 
     internal static ResearchToolFailure DescribeResearchFailure(string toolName, Exception exception)
     {
@@ -643,9 +648,14 @@ public sealed class AgentToolExecutor
             errorMessage);
     }
 
-    private static WebFetchResponse TrimFetch(WebFetchResponse response) => response.Content.Length <= 256_000
+    internal static WebFetchResponse TrimFetch(WebFetchResponse response) =>
+        response.Content.Length <= MaximumAgentFetchCharacters
         ? response
-        : response with { Content = response.Content[..256_000] + "\n[Inhalt auf 256.000 Zeichen gekürzt]" };
+        : response with
+        {
+            Content = response.Content[..MaximumAgentFetchCharacters]
+                + "\n[Inhalt für den Agentenkontext auf 48.000 Zeichen gekürzt]",
+        };
 
     private static int GetInt(JsonElement value, string name, int fallback) =>
         value.TryGetProperty(name, out var property) && property.TryGetInt32(out var result) ? result : fallback;

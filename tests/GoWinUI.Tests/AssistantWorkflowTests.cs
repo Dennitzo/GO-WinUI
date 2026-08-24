@@ -1084,12 +1084,12 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void CodingAgentAlwaysReceivesSearchAndSafePageFetchTools()
+    public void CodingAgentKeepsWebResearchOutOfTheNativeToolChannel()
     {
         var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.Code);
 
-        Assert.Contains("web.search", tools);
-        Assert.Contains("web.fetch", tools);
+        Assert.DoesNotContain("web.search", tools);
+        Assert.DoesNotContain("web.fetch", tools);
         Assert.Contains("math.evaluate", tools);
         Assert.DoesNotContain("youtube.search", tools);
     }
@@ -1117,26 +1117,41 @@ public sealed class AssistantWorkflowTests
         Assert.EndsWith(prompt, transformed, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData("Nutze eine Websuche, um die aktuelle API zu prüfen.")]
-    [InlineData("Führe eine Web-Suche nach der offiziellen Dokumentation durch.")]
-    [InlineData("Use Web Search before implementing this feature.")]
-    public void CodingWebSearchPromptsRequireSearchAndRelevantPageFetches(string prompt)
-    {
-        var transformed = GoAiAssistantService.BuildCodingPrompt(prompt);
-
-        Assert.Contains("web.search", transformed, StringComparison.Ordinal);
-        Assert.Contains("web.fetch", transformed, StringComparison.Ordinal);
-        Assert.Contains("offizielle Dokumentation", transformed, StringComparison.Ordinal);
-        Assert.EndsWith(prompt, transformed, StringComparison.Ordinal);
-    }
-
     [Fact]
     public void OrdinaryCodingPromptIsNotForcedThroughWebResearch()
     {
         const string prompt = "Behebe den NullReferenceException-Test im vorhandenen Projekt.";
 
         Assert.Equal(prompt, GoAiAssistantService.BuildCodingPrompt(prompt));
+    }
+
+    [Theory]
+    [InlineData("Erstelle aus dem Manuskript eine PDF.")]
+    [InlineData("Render the PDFs again.")]
+    [InlineData("Behebe den PDF-Export.")]
+    public void CodingPdfPromptsUseTheDeterministicGoKatexExporter(string prompt)
+    {
+        var transformed = GoAiAssistantService.BuildCodingPrompt(prompt);
+
+        Assert.True(GoAiAssistantService.ContainsCodingPdfDirective(prompt));
+        Assert.DoesNotContain("document.renderPdf", transformed, StringComparison.Ordinal);
+        Assert.Contains("deterministisch", transformed, StringComparison.Ordinal);
+        Assert.Contains("KaTeX-kompatibel", transformed, StringComparison.Ordinal);
+        Assert.Contains("ReportLab", transformed, StringComparison.Ordinal);
+        Assert.EndsWith(prompt, transformed, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CodingPdfPromptDoesNotInjectWebToolsIntoTheNativeChannel()
+    {
+        const string prompt = "Nutze Websuche und erstelle danach eine PDF.";
+
+        var transformed = GoAiAssistantService.BuildCodingPrompt(prompt);
+
+        Assert.DoesNotContain("web.search", transformed, StringComparison.Ordinal);
+        Assert.DoesNotContain("web.fetch", transformed, StringComparison.Ordinal);
+        Assert.DoesNotContain("document.renderPdf", transformed, StringComparison.Ordinal);
+        Assert.Equal(1, transformed.Split("Coding-Auftrag:", StringSplitOptions.None).Length - 1);
     }
 
     [Theory]
@@ -1603,6 +1618,19 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public void CodingSessionContextUsesOnlyTheCurrentPromptAndWorkspace()
+    {
+        var context = SessionContextPreparationService.CreateCurrentPromptOnlyCodingContext(262_144);
+
+        Assert.Empty(context.Messages);
+        Assert.Equal(262_144, context.ContextLength);
+        Assert.Equal(0, context.Descriptor.OriginalMessageCount);
+        Assert.Equal(0, context.Descriptor.IncludedMessageCount);
+        Assert.Equal(0, context.Descriptor.EstimatedTokens);
+        Assert.False(context.Descriptor.PreparedByAi);
+    }
+
+    [Fact]
     public void SseReconnectBudgetResetsAfterPersistedEventProgress()
     {
         Assert.Equal(4, GoAiAssistantService.ReconnectAttemptsAfterProgress(4, 120, 120));
@@ -1640,17 +1668,16 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public async Task BuildingSessionSnapshotDoesNotContactLocalAi()
+    public async Task BuildingSessionSnapshotUsesGoAiServerStateOnly()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
-        var localAi = new UnexpectedLmStudioClient();
-        using var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings), localAi);
+        using var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
 
-        _ = await coordinator.BuildSnapshotAsync();
+        var snapshot = await coordinator.BuildSnapshotAsync();
 
-        Assert.Equal(0, localAi.ListModelsCallCount);
+        Assert.NotNull(snapshot);
     }
 
     [Fact]
@@ -1851,14 +1878,11 @@ public sealed class AssistantWorkflowTests
         TestEnvironment environment,
         SettingsCoordinator settings,
         RecentActivityService recentActivity,
-        ILmStudioClient? lmStudio = null,
         CodingCampaignService? campaigns = null) => new(
             environment.Get<IChatRepository>(),
             environment.Get<IWorkflowRepository>(),
             environment.Get<IDocumentIngestor>(),
-            lmStudio ?? environment.Get<ILmStudioClient>(),
             environment.Get<IContextAssembler>(),
-            environment.Get<IChatOrchestrator>(),
             environment.Get<IPromptTriggerRepository>(),
             environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(),
@@ -1916,28 +1940,6 @@ public sealed class AssistantWorkflowTests
                 return Task.CompletedTask;
             });
         return snapshot ?? throw new InvalidOperationException("Der Sitzungs-Snapshot wurde nicht emittiert.");
-    }
-
-    private sealed class UnexpectedLmStudioClient : ILmStudioClient
-    {
-        public int ListModelsCallCount { get; private set; }
-
-        public Task<IReadOnlyList<LmModel>> ListModelsAsync(CancellationToken cancellationToken = default)
-        {
-            ListModelsCallCount++;
-            throw new InvalidOperationException("A local UI snapshot must not query LM Studio.");
-        }
-
-        public Task<bool> TestConnectionAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(false);
-
-        public async IAsyncEnumerable<LmDelta> StreamAsync(
-            LmChatRequest request,
-            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
-        {
-            await Task.CompletedTask;
-            yield break;
-        }
     }
 
     private sealed class UnexpectedCampaignAgent : ICodingCampaignAgent

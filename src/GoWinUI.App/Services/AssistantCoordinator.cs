@@ -6,7 +6,6 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Threading.Channels;
 
 namespace GoWinUI.App.Services;
 
@@ -14,9 +13,7 @@ public sealed class AssistantCoordinator(
     IChatRepository chats,
     IWorkflowRepository workflows,
     IDocumentIngestor documents,
-    ILmStudioClient lmStudio,
     IContextAssembler contextAssembler,
-    IChatOrchestrator orchestrator,
     IPromptTriggerRepository promptTriggers,
     IAssistantAttachmentRepository attachments,
     IChatArtifactRepository artifacts,
@@ -34,10 +31,6 @@ public sealed class AssistantCoordinator(
         WriteIndented = true,
     };
     private static readonly string[] PromptWorkflowTags = ["Coding", "Prompt-Workflow"];
-    private readonly SemaphoreSlim _chatGate = new(1, 1);
-    private CancellationTokenSource? _activeChatCancellation;
-    private string? _activeDiagnosticSessionId;
-    private IReadOnlyList<LmModel> _knownModels = Array.Empty<LmModel>();
     private int _startupCodingRunsHandled;
 
     public Task SaveDraftAsync(Guid sessionId, string draft, CancellationToken cancellationToken = default)
@@ -148,8 +141,6 @@ public sealed class AssistantCoordinator(
         {
             return;
         }
-        _activeChatCancellation?.Cancel();
-        orchestrator.Cancel();
         if (goAi is not null)
         {
             await goAi.CancelCurrentAndWaitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -228,9 +219,7 @@ public sealed class AssistantCoordinator(
 
         // A snapshot is local UI state. Never make sidebar/session interaction wait for
         // LM Studio, which may take several seconds to time out when it is offline.
-        var contextLimit = settings.Current.AiProvider == AiProviderKind.GoAiServer
-            ? session.PersistentToolAction == PersistentToolAction.Code ? 262_144 : 131_072
-            : ResolveKnownContextLimit();
+        var contextLimit = session.PersistentToolAction == PersistentToolAction.Code ? 262_144 : 131_072;
         var context = contextAssembler.Build(new(
             DefaultSystemPrompt,
             string.IsNullOrWhiteSpace(session.Draft) ? "Nächste Benutzereingabe" : session.Draft,
@@ -266,8 +255,8 @@ public sealed class AssistantCoordinator(
             activeSessionId = session.Id,
             draft = session.Draft,
             isRunning = settings.Current.IsAiConnectionEnabled
-                && (settings.Current.AiProvider == AiProviderKind.GoAiServer ? goAi?.IsRunning == true : orchestrator.IsRunning),
-            model = settings.Current.AiProvider == AiProviderKind.GoAiServer ? "GO AI Server" : settings.Current.SelectedModel,
+                && goAi?.IsRunning == true,
+            model = "GO AI Server",
             provider = settings.Current.AiProvider.ToString(),
             reasoningEffort = activeReasoningEffort,
             reasoningProfiles = new
@@ -608,7 +597,7 @@ public sealed class AssistantCoordinator(
 
     private void EnsureContextCanChange()
     {
-        if (orchestrator.IsRunning || goAi?.IsRunning == true)
+        if (goAi?.IsRunning == true)
         {
             throw new InvalidOperationException("Anhänge und Dokumente können während eines laufenden AI-Auftrags nicht geändert werden.");
         }
@@ -777,15 +766,6 @@ public sealed class AssistantCoordinator(
             await goAi.CancelCurrentAndWaitAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
-        if (Guid.TryParse(Volatile.Read(ref _activeDiagnosticSessionId), out var diagnosticSessionId)
-            && diagnosticSessionId == sessionId)
-        {
-            _activeChatCancellation?.Cancel();
-            orchestrator.Cancel();
-            await _chatGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-            _chatGate.Release();
-        }
-
         await chats.DeleteSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
         if (settings.Current.ActiveSessionId == sessionId)
         {
@@ -804,7 +784,7 @@ public sealed class AssistantCoordinator(
         string requestId,
         CancellationToken cancellationToken)
     {
-        if (orchestrator.IsRunning || goAi?.IsRunning == true)
+        if (goAi?.IsRunning == true)
         {
             throw new InvalidOperationException("Die Sitzungen können während einer laufenden Antwort nicht gelöscht werden.");
         }
@@ -1237,226 +1217,6 @@ public sealed class AssistantCoordinator(
     private static bool IsCancelCommand(string prompt) =>
         prompt.Trim(' ', '.', ',', '!', '?').Equals("abbrechen", StringComparison.OrdinalIgnoreCase);
 
-    private async Task SendDiagnosticChatAsync(
-        WebBridgeEnvelope envelope,
-        Func<string, object, string?, Task> emit,
-        CancellationToken cancellationToken)
-    {
-        if (!_chatGate.Wait(0, cancellationToken))
-        {
-            throw new InvalidOperationException("Es läuft bereits eine Antwort.");
-        }
-
-        Guid? runningSessionId = null;
-        try
-        {
-            var prompt = GetRequiredString(envelope.Payload, "prompt", 100_000);
-            var sessionId = GetOptionalGuid(envelope.Payload, "sessionId")
-                ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
-            runningSessionId = sessionId;
-            Volatile.Write(ref _activeDiagnosticSessionId, sessionId.ToString("D"));
-            var model = await ResolveModelAsync(cancellationToken).ConfigureAwait(false);
-            var reasoning = GetOptionalString(envelope.Payload, "reasoningEffort", 20)
-                ?? settings.Current.ReasoningEffort;
-            await settings.UpdateAsync(current => current with
-            {
-                ActiveSessionId = sessionId,
-                ReasoningEffort = reasoning,
-            }, cancellationToken).ConfigureAwait(false);
-            await chats.SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
-
-            _ = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
-
-            _activeChatCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var updates = Channel.CreateUnbounded<ChatStreamUpdate>(new UnboundedChannelOptions
-            {
-                SingleReader = true,
-                SingleWriter = true,
-                AllowSynchronousContinuations = false,
-            });
-            EventHandler<ChatStreamUpdate> updateHandler = (_, update) =>
-            {
-                if (update.SessionId == sessionId)
-                {
-                    _ = updates.Writer.TryWrite(update);
-                }
-            };
-            orchestrator.StreamUpdated += updateHandler;
-            try
-            {
-                var sendTask = orchestrator.SendAsync(
-                    sessionId,
-                    prompt,
-                    model,
-                    DefaultSystemPrompt,
-                    reasoning,
-                    _activeChatCancellation.Token);
-                await Task.Delay(25, CancellationToken.None).ConfigureAwait(false);
-                await emit("session.changed", await BuildSnapshotAsync(CancellationToken.None), envelope.RequestId);
-                var started = false;
-
-                while (!sendTask.IsCompleted)
-                {
-                    while (updates.Reader.TryRead(out var update))
-                    {
-                        started = await EmitStreamUpdateAsync(update, started, emit, envelope.RequestId);
-                    }
-
-                    var updateAvailable = updates.Reader.WaitToReadAsync(CancellationToken.None).AsTask();
-                    _ = await Task.WhenAny(sendTask, updateAvailable).ConfigureAwait(false);
-                }
-
-                while (updates.Reader.TryRead(out var update))
-                {
-                    started = await EmitStreamUpdateAsync(update, started, emit, envelope.RequestId);
-                }
-
-                var completed = await sendTask.ConfigureAwait(false);
-                var updatedSession = await chats.GetSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException("Die Sitzung wurde nach dem AI-Lauf nicht gefunden.");
-                await recentActivity.RecordAsync(
-                    $"AI-Sitzung „{updatedSession.Title}“ bearbeitet",
-                    CancellationToken.None).ConfigureAwait(false);
-                await EmitCommittedMessageAsync(completed.Id, emit, envelope.RequestId).ConfigureAwait(false);
-                await emit(EventTypeFor(completed.Status), new
-                {
-                    message = ToMessageDto(completed),
-                    error = completed.Error,
-                    session = ToSessionDto(updatedSession),
-                }, envelope.RequestId);
-            }
-            finally
-            {
-                orchestrator.StreamUpdated -= updateHandler;
-                updates.Writer.TryComplete();
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            ChatMessage? final = null;
-            if (runningSessionId is { } sessionId)
-            {
-                final = (await chats.ListMessagesAsync(sessionId, CancellationToken.None).ConfigureAwait(false))
-                    .LastOrDefault(message => message.Role == ChatRole.Assistant);
-            }
-
-            if (final is not null)
-            {
-                await EmitCommittedMessageAsync(final.Id, emit, envelope.RequestId).ConfigureAwait(false);
-            }
-            await emit("chat.cancelled", new { message = final is null ? null : ToMessageDto(final) }, envelope.RequestId);
-        }
-        catch (Exception exception)
-        {
-            ChatMessage? final = null;
-            if (runningSessionId is { } sessionId)
-            {
-                final = (await chats.ListMessagesAsync(sessionId, CancellationToken.None).ConfigureAwait(false))
-                    .LastOrDefault(message => message.Role == ChatRole.Assistant);
-            }
-
-            if (final is not null)
-            {
-                await EmitCommittedMessageAsync(final.Id, emit, envelope.RequestId).ConfigureAwait(false);
-            }
-            await emit("chat.failed", new
-            {
-                message = final is null ? null : ToMessageDto(final),
-                error = exception.Message,
-            }, envelope.RequestId);
-        }
-        finally
-        {
-            Volatile.Write(ref _activeDiagnosticSessionId, null);
-            _activeChatCancellation?.Dispose();
-            _activeChatCancellation = null;
-            _chatGate.Release();
-        }
-    }
-
-    private async Task<bool> EmitStreamUpdateAsync(
-        ChatStreamUpdate update,
-        bool started,
-        Func<string, object, string?, Task> emit,
-        string requestId)
-    {
-        if (!started)
-        {
-            started = true;
-            await emit(
-                "conversation.snapshot",
-                await BuildConversationSnapshotAsync(update.SessionId, CancellationToken.None).ConfigureAwait(false),
-                requestId).ConfigureAwait(false);
-            await emit("chat.started", new
-            {
-                message = new
-                {
-                    id = update.MessageId,
-                    sessionId = update.SessionId,
-                    role = "assistant",
-                    content = update.Content,
-                    status = update.Status.ToString().ToLowerInvariant(),
-                    createdAt = DateTimeOffset.UtcNow,
-                    updatedAt = DateTimeOffset.UtcNow,
-                },
-                contextUsed = update.EstimatedContextTokens,
-                contextLimit = update.ContextLimit,
-                contextWasTruncated = update.ContextWasTruncated,
-                contextNotice = update.ContextNotice,
-            }, requestId);
-        }
-
-        if (update.Status == MessageStatus.Streaming)
-        {
-            await EmitCommittedMessageAsync(update.MessageId, emit, requestId).ConfigureAwait(false);
-            await emit("chat.delta", new
-            {
-                messageId = update.MessageId,
-                sessionId = update.SessionId,
-                content = update.Content,
-            }, requestId);
-        }
-
-        return started;
-    }
-
-    private async Task<string> ResolveModelAsync(CancellationToken cancellationToken)
-    {
-        if (!string.IsNullOrWhiteSpace(settings.Current.SelectedModel))
-        {
-            return settings.Current.SelectedModel;
-        }
-
-        var models = await lmStudio.ListModelsAsync(cancellationToken).ConfigureAwait(false);
-        _knownModels = models;
-        if (models.Count == 0)
-        {
-            throw new InvalidOperationException("LM Studio ist nicht erreichbar oder es ist kein Modell geladen.");
-        }
-
-        if (models.Count > 1)
-        {
-            throw new InvalidOperationException("Mehrere Modelle sind geladen. Wähle zuerst ein Modell in den Einstellungen.");
-        }
-
-        var model = models[0].Id;
-        await settings.UpdateAsync(current => current with { SelectedModel = model }, cancellationToken).ConfigureAwait(false);
-        return model;
-    }
-
-    private int ResolveKnownContextLimit()
-    {
-        var models = _knownModels;
-        var selected = settings.Current.SelectedModel;
-        var model = string.IsNullOrWhiteSpace(selected)
-            ? models.Count == 1 ? models[0] : null
-            : models.FirstOrDefault(candidate => string.Equals(candidate.Id, selected, StringComparison.Ordinal));
-        return model?.ContextLength is >= 2_048 and <= 10_000_000
-            ? model.ContextLength.Value
-            : 8_192;
-    }
-
     private async Task ListWorkflowsAsync(
         WebBridgeEnvelope envelope,
         Func<string, object, string?, Task> emit,
@@ -1472,7 +1232,7 @@ public sealed class AssistantCoordinator(
         Func<string, object, string?, Task> emit,
         CancellationToken cancellationToken)
     {
-        if (orchestrator.IsRunning || goAi?.IsRunning == true)
+        if (goAi?.IsRunning == true)
         {
             throw new InvalidOperationException("Ein Workflow kann nicht während einer laufenden Antwort eingefügt werden.");
         }
@@ -2193,9 +1953,6 @@ public sealed class AssistantCoordinator(
     public void Dispose()
     {
         campaigns?.DetachSinks();
-        _activeChatCancellation?.Cancel();
-        _activeChatCancellation?.Dispose();
-        _chatGate.Dispose();
     }
 
     private static string[] GetStringArray(

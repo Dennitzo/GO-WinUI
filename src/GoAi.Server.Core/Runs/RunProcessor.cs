@@ -8,6 +8,7 @@ using Microsoft.Extensions.Options;
 using GoAi.Server.Core.Configuration;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Text;
 
 namespace GoAi.Server.Core.Runs;
 
@@ -166,7 +167,7 @@ public sealed class RunProcessor : BackgroundService
             request.Limits?.MaximumContextTokens ?? selection.ContextLength);
         var maximumOutputTokens = request.Limits?.MaximumOutputTokens ?? 8_192;
         var availableTools = _toolCatalog.GetAvailableTools(request);
-        var codingRun = string.Equals(selection.Role, "code", StringComparison.Ordinal);
+        var codingRun = IsCodingAgentRun(selection.Role, request.ConversationProfile);
         var codingIntent = codingRun ? ClassifyCodingRequest(request) : CodingRequestIntent.Analysis;
         var maximumModelRounds = codingRun ? _options.MaximumCodingModelRounds : _options.MaximumModelRounds;
         var maximumToolCalls = codingRun ? _options.MaximumCodingToolCalls : _options.MaximumToolCalls;
@@ -233,6 +234,11 @@ public sealed class RunProcessor : BackgroundService
         var textMutationCountsSinceProcess = new Dictionary<string, int>(
             checkpoint.TextMutationCountsSinceProcess ?? new Dictionary<string, int>(),
             StringComparer.OrdinalIgnoreCase);
+        string? CurrentCodingCompletionBlocker() => CodingCompletionBlocker(
+            codingIntent,
+            successfulToolFingerprints.Count,
+            evidencePaths.Count,
+            mutatedPaths.Count);
 
         while (roundCount < maximumModelRounds)
         {
@@ -380,7 +386,7 @@ public sealed class RunProcessor : BackgroundService
                             {
                                 status = "failed",
                                 errorCode = "coding.search_no_progress",
-                                message = "Diese semantisch gleiche Suche wurde bereits ausgeführt. Nutze workspace.map, fs.findFiles, fs.readMany oder synthetisiere die vorhandene Evidenz.",
+                                message = "Diese semantisch gleiche Suche wurde bereits ausgeführt. Nutze workspace.map, fs.findFiles, einen gezielten fs.readText-Aufruf oder synthetisiere die vorhandene Evidenz.",
                             }, GoAiProtocol.CreateJsonOptions()),
                             ToolCallId: call.Id));
                         consecutiveEmptySearches++;
@@ -454,11 +460,7 @@ public sealed class RunProcessor : BackgroundService
                         if (ShouldForceCodingFinalizationAfterRedundantVerification(
                                 consecutiveRedundantVerifications,
                                 VerificationComplete(),
-                                CodingCompletionBlocker(
-                                    codingIntent,
-                                    successfulToolFingerprints.Count,
-                                    evidencePaths.Count,
-                                    mutatedPaths.Count)))
+                                CurrentCodingCompletionBlocker()))
                         {
                             await CompleteRunAsync(CreateVerifiedCodingFallbackResponse(mutatedPaths, verificationStages)).ConfigureAwait(false);
                             return;
@@ -562,7 +564,7 @@ public sealed class RunProcessor : BackgroundService
                         "system",
                         $"Fortschrittskontrolle: Der Änderungsauftrag besitzt nach {consecutiveRoundsWithoutMutation} Modellrunden noch keine erfolgreiche Workspace-Mutation. "
                         + "Die bereits gelesene Evidenz reicht jetzt für eine konkrete Entscheidung aus. Wähle den fachlich sinnvollsten offenen Schritt und führe die gezielte Workspace-Änderung mit einem nativen Dateitool aus. "
-                        + "Vorbereitende Inspektions-, Test- oder Generatoraufrufe ersetzen diese Änderung nicht. Falls genau eine zwingende Information fehlt, lade sie gebündelt mit fs.readMany; beginne keine weitere breite Repositoryanalyse."));
+                        + "Vorbereitende Inspektions-, Test- oder Generatoraufrufe ersetzen diese Änderung nicht. Falls genau eine zwingende Information fehlt, lies nur deren konkrete Datei beziehungsweise Zeilenbereich mit fs.readText; beginne keine weitere breite Repositoryanalyse."));
                 }
                 await SaveCheckpointAsync().ConfigureAwait(false);
             }
@@ -616,24 +618,56 @@ public sealed class RunProcessor : BackgroundService
 
             IReadOnlyList<LmChatMessage> modelMessages;
             CodingContextPlan contextPlan;
-            try
+            for (var compactionAttempt = 0; ; compactionAttempt++)
             {
-                contextPlan = CodingContextPlanner.Prepare(messages, contextLength, maximumOutputTokens);
-            }
-            catch (CodingContextBudgetException exception) when (request.DocumentContext is not null)
-            {
-                throw new DocumentContextBudgetException(
-                    exception.EstimatedTokens,
-                    exception.BudgetTokens,
-                    request.DocumentContext.Mode);
-            }
-            catch (CodingContextBudgetException exception) when (request.SessionContext is not null)
-            {
-                throw new SessionContextBudgetException(exception.EstimatedTokens, exception.BudgetTokens);
-            }
-            catch (CodingContextBudgetException exception) when (!codingRun)
-            {
-                throw new GeneralContextBudgetException(exception.EstimatedTokens, exception.BudgetTokens);
+                try
+                {
+                    contextPlan = CodingContextPlanner.Prepare(messages, contextLength, maximumOutputTokens);
+                    break;
+                }
+                catch (CodingContextBudgetException exception) when (codingRun && compactionAttempt < 4)
+                {
+                    await _repository.AppendEventAsync(
+                        runId,
+                        RunEventTypes.ContextChanged,
+                        new ContextChangedEvent(
+                            exception.EstimatedTokens,
+                            exception.BudgetTokens,
+                            evidencePaths.Count,
+                            true,
+                            $"Der interne Coding-Arbeitskontext wird durch {selection.ModelId} verdichtet; aktueller Prompt und Workspace bleiben unverändert.",
+                            "none",
+                            0,
+                            0,
+                            PreparationCompleted: false),
+                        cancellationToken).ConfigureAwait(false);
+                    messages = await CompactCodingRunMessagesWithModelAsync(
+                        runId,
+                        messages,
+                        selection.ModelId,
+                        selection.Role,
+                        contextLength,
+                        maximumOutputTokens,
+                        request.ReasoningEffort,
+                        exception.BudgetTokens,
+                        cancellationToken).ConfigureAwait(false);
+                    await SaveCheckpointAsync().ConfigureAwait(false);
+                }
+                catch (CodingContextBudgetException exception) when (request.DocumentContext is not null)
+                {
+                    throw new DocumentContextBudgetException(
+                        exception.EstimatedTokens,
+                        exception.BudgetTokens,
+                        request.DocumentContext.Mode);
+                }
+                catch (CodingContextBudgetException exception) when (request.SessionContext is not null)
+                {
+                    throw new SessionContextBudgetException(exception.EstimatedTokens, exception.BudgetTokens);
+                }
+                catch (CodingContextBudgetException exception) when (!codingRun)
+                {
+                    throw new GeneralContextBudgetException(exception.EstimatedTokens, exception.BudgetTokens);
+                }
             }
             if (roundCount == 0
                 && request.SessionContext is not null
@@ -681,10 +715,27 @@ public sealed class RunProcessor : BackgroundService
                     HistoryWasCompacted: request.SessionContext?.PreparedByAi == true),
                 cancellationToken).ConfigureAwait(false);
 
+            var requireCodingToolCall = ShouldRequireCodingToolCall(
+                codingRun,
+                finalSynthesisRequested,
+                verificationRequired,
+                VerificationComplete(),
+                CurrentCodingCompletionBlocker());
             var modelTools = availableTools
                 .Where(tool => !blockedToolNames.Contains(tool.Name))
                 .Select(static tool => tool.ToLmDefinition())
                 .ToArray();
+            Func<LmStudioNativeAgentProgress, CancellationToken, ValueTask>? nativeProgress = codingRun
+                ? (progress, token) => new ValueTask(_repository.AppendEventAsync(
+                    runId,
+                    RunEventTypes.ModelGeneration,
+                    new ModelGenerationEvent(
+                        progress.State,
+                        progress.ToolName,
+                        progress.ArgumentCharacters,
+                        progress.PromptProgress),
+                    token))
+                : null;
             LmChatResult response;
             var leaseMode = string.Equals(selection.Role, "general", StringComparison.Ordinal)
                 ? GpuLeaseMode.Shared
@@ -723,7 +774,10 @@ public sealed class RunProcessor : BackgroundService
                         selection.Role,
                         request.ReasoningEffort,
                         reasoningRecoveryRequired),
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                    cancellationToken: cancellationToken,
+                    requireToolCall: requireCodingToolCall,
+                    requiredToolName: null,
+                    nativeProgress: nativeProgress).ConfigureAwait(false);
             }
 
             roundCount++;
@@ -745,11 +799,7 @@ public sealed class RunProcessor : BackgroundService
                     }
 
                     if (VerificationComplete()
-                        && CodingCompletionBlocker(
-                            codingIntent,
-                            successfulToolFingerprints.Count,
-                            evidencePaths.Count,
-                            mutatedPaths.Count) is null)
+                        && CurrentCodingCompletionBlocker() is null)
                     {
                         await CompleteRunAsync(CreateVerifiedCodingFallbackResponse(mutatedPaths, verificationStages)).ConfigureAwait(false);
                         return;
@@ -794,11 +844,7 @@ public sealed class RunProcessor : BackgroundService
                     continue;
                 }
                 if (codingRun
-                    && CodingCompletionBlocker(
-                        codingIntent,
-                        successfulToolFingerprints.Count,
-                        evidencePaths.Count,
-                        mutatedPaths.Count) is { } completionBlocker)
+                    && CurrentCodingCompletionBlocker() is { } completionBlocker)
                 {
                     repairReminderCount++;
                     if (repairReminderCount > 6)
@@ -848,11 +894,7 @@ public sealed class RunProcessor : BackgroundService
                 if (codingRun && !IsValidCodingFinalResponse(response.Content))
                 {
                     if (VerificationComplete()
-                        && CodingCompletionBlocker(
-                            codingIntent,
-                            successfulToolFingerprints.Count,
-                            evidencePaths.Count,
-                            mutatedPaths.Count) is null)
+                        && CurrentCodingCompletionBlocker() is null)
                     {
                         await CompleteRunAsync(CreateVerifiedCodingFinalResponse(
                             response.Content,
@@ -865,11 +907,7 @@ public sealed class RunProcessor : BackgroundService
                     if (repairReminderCount > 4)
                     {
                         if (VerificationComplete()
-                            && CodingCompletionBlocker(
-                                codingIntent,
-                                successfulToolFingerprints.Count,
-                                evidencePaths.Count,
-                                mutatedPaths.Count) is null)
+                            && CurrentCodingCompletionBlocker() is null)
                         {
                             await CompleteRunAsync(CreateVerifiedCodingFallbackResponse(mutatedPaths, verificationStages)).ConfigureAwait(false);
                             return;
@@ -999,7 +1037,7 @@ public sealed class RunProcessor : BackgroundService
             messages.Add(new LmChatMessage(
                 "system",
                 "Suchstillstand erkannt: Wiederhole keine semantisch gleiche fs.search-Anfrage. "
-                + "Nutze die Repositorykarte, fs.findFiles und anschließend fs.readMany mit konkreten Pfaden. "
+                + "Nutze die Repositorykarte, fs.findFiles und anschließend einzelne, bereichsbegrenzte fs.readText-Aufrufe mit konkreten Pfaden. "
                 + "Wenn bereits Evidenz geladen wurde, synthetisiere daraus eine Antwort oder einen gezielten nächsten Schritt."));
             consecutiveEmptySearches = 0;
         }
@@ -1152,7 +1190,8 @@ public sealed class RunProcessor : BackgroundService
                 return;
             }
 
-            if (call.Name is not (ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun or ClientToolNames.LeanProof))
+            if (call.Name is not (ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun
+                or ClientToolNames.LeanProof))
             {
                 return;
             }
@@ -1407,6 +1446,245 @@ public sealed class RunProcessor : BackgroundService
             }
         }
         return messages;
+    }
+
+    private async Task<List<LmChatMessage>> CompactCodingRunMessagesWithModelAsync(
+        string runId,
+        List<LmChatMessage> messages,
+        string modelId,
+        string modelRole,
+        int contextLength,
+        int maximumOutputTokens,
+        string? requestedReasoningEffort,
+        int inputTokenBudget,
+        CancellationToken cancellationToken)
+    {
+        var anchorCount = FindCodingCompactionAnchorCount(messages);
+        if (anchorCount >= messages.Count)
+        {
+            throw new CodingContextBudgetException(
+                CodingContextPlanner.EstimateTokens(messages),
+                inputTokenBudget);
+        }
+
+        var targetCharacters = Math.Clamp(inputTokenBudget * 3 / 5, 8_000, 48_000);
+        var blocks = BuildCodingCompactionBlocks(
+            messages.Skip(anchorCount),
+            Math.Clamp(contextLength * 2, 48_000, 180_000));
+        var summaries = new List<string>(blocks.Count);
+        for (var index = 0; index < blocks.Count; index++)
+        {
+            summaries.Add(await SummarizeCodingContextBlockAsync(
+                runId,
+                modelId,
+                modelRole,
+                contextLength,
+                maximumOutputTokens,
+                requestedReasoningEffort,
+                blocks[index],
+                CalculateCodingCompactionTarget(targetCharacters, blocks.Count),
+                cancellationToken).ConfigureAwait(false));
+        }
+
+        var memory = string.Join("\n\n", summaries);
+        for (var pass = 0; memory.Length > targetCharacters && pass < 6; pass++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            memory = await SummarizeCodingContextBlockAsync(
+                runId,
+                modelId,
+                modelRole,
+                contextLength,
+                maximumOutputTokens,
+                requestedReasoningEffort,
+                memory,
+                Math.Max(4_000, targetCharacters - 1_024),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (string.IsNullOrWhiteSpace(memory))
+        {
+            throw new InvalidDataException("Das Coding-Modell hat keine interne Arbeitskontext-Verdichtung erzeugt.");
+        }
+
+        return CreateCompactedCodingMessages(messages, memory);
+    }
+
+    private async Task<string> SummarizeCodingContextBlockAsync(
+        string runId,
+        string modelId,
+        string modelRole,
+        int contextLength,
+        int maximumOutputTokens,
+        string? requestedReasoningEffort,
+        string block,
+        int targetCharacters,
+        CancellationToken cancellationToken)
+    {
+        var instruction = $"""
+            Du verdichtest ausschliesslich internen Arbeitsverlauf eines Coding-Agenten.
+            Zielumfang: hoechstens {targetCharacters:N0} Zeichen. Antworte nicht auf den Nutzerprompt und starte keinen neuen Plan.
+            Bewahre nur Fakten, die fuer die Fortsetzung dieses laufenden Coding-Runs noetig sind:
+            - gelesene relative Pfade, wichtige Codebereiche, Toolresultate und belastbare Beobachtungen;
+            - bereits ausgefuehrte Dateioperationen, Prozesslaeufe, Webrecherche, Lean- oder PDF-Validierung;
+            - konkrete Fehlerursachen, offene Pruefungen, Dateihashes, Versionen, Zahlen und Grenzwerte;
+            - aktuelle Hindernisse und naechste fachlich naheliegende Anschlussstellen.
+            Entferne Wiederholungen, alte Rohdaten, vollstaendige Dateidumps und redundante Tool-JSONs. Erfinde keine Datei,
+            keine Aenderung und keinen erfolgreichen Test. Gib nur die kompakte Arbeitsnotiz aus.
+            """;
+        var summaryMessages = new[]
+        {
+            new LmChatMessage("system", instruction),
+            new LmChatMessage("user", block),
+        };
+        var leaseMode = string.Equals(modelRole, "general", StringComparison.Ordinal)
+            ? GpuLeaseMode.Shared
+            : GpuLeaseMode.Exclusive;
+        await using var lease = await _scheduler.AcquireAsync(
+            $"llm-{modelRole}-context",
+            runId,
+            leaseMode,
+            cancellationToken).ConfigureAwait(false);
+        _ = await _workers.PrepareLmModelWithStatusAsync(
+            modelId,
+            contextLength,
+            async token => await _repository.AppendEventAsync(
+                runId,
+                RunEventTypes.ModelLoading,
+                new ModelLoadingEvent(modelId, "loading", contextLength, contextLength),
+                token).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+        var result = await _lmStudio.CompleteChatAsync(
+            modelId,
+            summaryMessages,
+            [],
+            Math.Clamp((targetCharacters + 5) / 6, 512, Math.Min(4_096, maximumOutputTokens)),
+            modelRole: modelRole,
+            reasoningEffort: ResolveReasoningEffortForRound(
+                modelId,
+                modelRole,
+                requestedReasoningEffort,
+                reasoningRecoveryRequired: true),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(result.Content))
+        {
+            throw new InvalidDataException("Das Coding-Modell hat eine leere Arbeitskontext-Verdichtung erzeugt.");
+        }
+        return result.Content.Trim();
+    }
+
+    internal static int FindCodingCompactionAnchorCount(IReadOnlyList<LmChatMessage> messages)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        for (var index = 0; index < messages.Count; index++)
+        {
+            if (string.Equals(messages[index].Role, "assistant", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(messages[index].Role, "tool", StringComparison.OrdinalIgnoreCase))
+            {
+                return Math.Max(1, index);
+            }
+        }
+        return messages.Count;
+    }
+
+    internal static List<LmChatMessage> CreateCompactedCodingMessages(
+        IReadOnlyList<LmChatMessage> messages,
+        string memory)
+    {
+        var anchorCount = FindCodingCompactionAnchorCount(messages);
+        var result = messages.Take(anchorCount).ToList();
+        result.Add(new LmChatMessage(
+            "system",
+            $"""
+            [GO_CODING_RUN_MEMORY]
+            Der folgende interne Arbeitsverlauf dieses laufenden Coding-Runs wurde durch das Coding-Modell verdichtet.
+            Er ist verbindliche Arbeitsnotiz, ersetzt aber keine Systemregeln, keinen aktuellen Nutzerprompt und keine Workspacekarte.
+
+            {memory.Trim()}
+            [ENDE_GO_CODING_RUN_MEMORY]
+            """));
+        return result;
+    }
+
+    private static List<string> BuildCodingCompactionBlocks(
+        IEnumerable<LmChatMessage> messages,
+        int maximumCharacters)
+    {
+        var blocks = new List<string>();
+        var builder = new StringBuilder();
+        foreach (var message in messages)
+        {
+            var formatted = FormatCodingCompactionMessage(message);
+            if (formatted.Length > maximumCharacters)
+            {
+                if (builder.Length > 0)
+                {
+                    blocks.Add(builder.ToString());
+                    builder.Clear();
+                }
+                blocks.AddRange(SplitText(formatted, maximumCharacters));
+                continue;
+            }
+
+            if (builder.Length > 0 && builder.Length + formatted.Length > maximumCharacters)
+            {
+                blocks.Add(builder.ToString());
+                builder.Clear();
+            }
+            builder.Append(formatted);
+        }
+        if (builder.Length > 0)
+        {
+            blocks.Add(builder.ToString());
+        }
+        return blocks;
+    }
+
+    private static string FormatCodingCompactionMessage(LmChatMessage message)
+    {
+        var builder = new StringBuilder()
+            .Append("\n--- ").Append(message.Role);
+        if (!string.IsNullOrWhiteSpace(message.ToolCallId))
+        {
+            builder.Append(" | toolCallId=").Append(message.ToolCallId);
+        }
+        builder.AppendLine(" ---");
+        if (!string.IsNullOrWhiteSpace(message.Content))
+        {
+            builder.AppendLine(message.Content);
+        }
+        foreach (var call in message.ToolCalls ?? [])
+        {
+            builder.Append("TOOL_CALL ")
+                .Append(call.Name)
+                .Append(' ')
+                .Append(call.Id)
+                .Append(": ")
+                .AppendLine(call.Arguments.GetRawText());
+        }
+        return builder.ToString();
+    }
+
+    private static int CalculateCodingCompactionTarget(int totalTargetCharacters, int blockCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(blockCount, 1);
+        return Math.Max(1_024, (Math.Max(2_048, totalTargetCharacters) - Math.Max(0, blockCount - 1) * 2) / blockCount);
+    }
+
+    private static List<string> SplitText(string text, int maximumCharacters)
+    {
+        var result = new List<string>();
+        for (var offset = 0; offset < text.Length;)
+        {
+            var length = Math.Min(maximumCharacters, text.Length - offset);
+            if (offset + length < text.Length && char.IsHighSurrogate(text[offset + length - 1]))
+            {
+                length--;
+            }
+            result.Add(text.Substring(offset, length));
+            offset += length;
+        }
+        return result;
     }
 
     private async Task<ClientToolResult> GetClientToolResultOrSuspendAsync(
@@ -1671,7 +1949,8 @@ public sealed class RunProcessor : BackgroundService
         CodingRequestIntent intent,
         int successfulToolCount,
         int evidencePathCount,
-        int mutatedPathCount)
+        int mutatedPathCount
+        )
     {
         if (successfulToolCount <= 0)
         {
@@ -1687,6 +1966,21 @@ public sealed class RunProcessor : BackgroundService
         }
         return null;
     }
+
+    internal static bool ShouldRequireCodingToolCall(
+        bool codingRun,
+        bool finalSynthesisRequested,
+        bool verificationRequired,
+        bool verificationComplete,
+        string? completionBlocker) =>
+        codingRun
+        && !finalSynthesisRequested
+        && (!string.IsNullOrWhiteSpace(completionBlocker)
+            || verificationRequired && !verificationComplete);
+
+    internal static bool IsCodingAgentRun(string role, ConversationProfile? profile) =>
+        string.Equals(role, "code", StringComparison.Ordinal)
+        && profile != ConversationProfile.ContextPreparation;
 
     internal static string CreateVerifiedCodingFallbackResponse(
         IReadOnlyCollection<string> mutatedPaths,
@@ -2237,6 +2531,10 @@ public sealed class RunProcessor : BackgroundService
                 Code: "coding.run_limit",
                 Message: limit.Message,
                 Retryable: false),
+            LmStudioGenerationTerminatedException => (
+                Code: "provider.generation_terminated",
+                Message: "LM Studio hat die Coding-Modellgenerierung wiederholt vor einem vollständigen Tool-Call beendet. Der Lauf kann mit unverändertem Workspace erneut gestartet werden.",
+                Retryable: true),
             HttpRequestException => (
                 Code: "provider.http_failed",
                 Message: "Der konfigurierte AI-Anbieter ist nicht erreichbar oder hat die Anfrage abgewiesen.",

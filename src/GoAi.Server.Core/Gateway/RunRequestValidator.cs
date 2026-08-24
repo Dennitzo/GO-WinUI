@@ -13,6 +13,7 @@ public static class RunRequestValidator
         "bricscad",
         "screenCapture",
         "documents",
+        "pdf",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
@@ -39,6 +40,16 @@ public static class RunRequestValidator
             && (request.Mode != RunMode.General || request.AllowedServerTools is not { Count: 0 }))
         {
             throw new ArgumentException("Audiobook runs require general mode and an explicit empty server-tool allow-list.");
+        }
+        if (request.ConversationProfile == ConversationProfile.ContextPreparation
+            && (request.Mode is not (RunMode.General or RunMode.Code)
+                || request.AllowedServerTools is not { Count: 0 }
+                || request.ClientCapabilities is not { Count: 0 }
+                || request.Workspace is not null
+                || request.DocumentContext is not null))
+        {
+            throw new ArgumentException(
+                "Context-preparation runs require general or code mode without tools, capabilities, workspace, or document descriptors.");
         }
         if (request.Workload is not null)
         {

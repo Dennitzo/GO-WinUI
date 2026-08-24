@@ -1,3 +1,6 @@
+using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Wordprocessing;
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Research;
@@ -6,6 +9,9 @@ using GoAi.Server.Core.Security;
 using Microsoft.Extensions.Options;
 using System.Net;
 using System.Text;
+using UglyToad.PdfPig.Core;
+using UglyToad.PdfPig.Fonts.Standard14Fonts;
+using UglyToad.PdfPig.Writer;
 
 namespace GoAi.Server.Tests;
 
@@ -20,7 +26,59 @@ public sealed class WebResearchServiceTests
         Assert.Contains("Mozilla/5.0", userAgent, StringComparison.Ordinal);
         Assert.Contains("GO-AI-Server/1.0", userAgent, StringComparison.Ordinal);
         Assert.Contains("text/html", string.Join(',', request.Headers.GetValues("Accept")), StringComparison.Ordinal);
+        Assert.Contains("application/pdf", string.Join(',', request.Headers.GetValues("Accept")), StringComparison.Ordinal);
+        Assert.Contains("wordprocessingml", string.Join(',', request.Headers.GetValues("Accept")), StringComparison.Ordinal);
         Assert.Contains("de-DE", string.Join(',', request.Headers.GetValues("Accept-Language")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FetchExtractsPdfTextAndPreservesPageEvidence()
+    {
+        var builder = new PdfDocumentBuilder();
+        var font = builder.AddStandard14Font(Standard14Font.Helvetica);
+        builder.AddPage(UglyToad.PdfPig.Content.PageSize.A4)
+            .AddText("Classical mechanics reference", 12, new PdfPoint(40, 780), font);
+        var bytes = builder.Build();
+
+        var mediaType = WebResearchService.DetectMediaType(
+            new Uri("https://example.com/reference"),
+            "application/octet-stream",
+            bytes);
+        var content = WebResearchService.ExtractFetchedContent(bytes, mediaType, null);
+
+        Assert.Equal("application/pdf", mediaType);
+        Assert.Contains("[Seite 1]", content, StringComparison.Ordinal);
+        Assert.Contains("Classical mechanics reference", content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FetchExtractsModernWordDocumentsWithoutExecutingContent()
+    {
+        using var stream = new MemoryStream();
+        using (var document = WordprocessingDocument.Create(
+            stream,
+            WordprocessingDocumentType.Document,
+            autoSave: true))
+        {
+            var mainPart = document.AddMainDocumentPart();
+            mainPart.Document = new Document(
+                new Body(
+                    new Paragraph(new Run(new Text("Newtonian mechanics"))),
+                    new Paragraph(new Run(new Text("Force equals mass times acceleration")))));
+        }
+        var bytes = stream.ToArray();
+
+        var mediaType = WebResearchService.DetectMediaType(
+            new Uri("https://example.com/download?id=42"),
+            "application/octet-stream",
+            bytes);
+        var content = WebResearchService.ExtractFetchedContent(bytes, mediaType, null);
+
+        Assert.Equal(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            mediaType);
+        Assert.Contains("Newtonian mechanics", content, StringComparison.Ordinal);
+        Assert.Contains("Force equals mass times acceleration", content, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -37,6 +95,36 @@ public sealed class WebResearchServiceTests
         Assert.False(failure.Retryable);
         Assert.Contains("HTTP 403", failure.Message, StringComparison.Ordinal);
         Assert.Contains("anderen Suchtreffer", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UnsupportedFetchedMediaTypeIsReturnedToTheAgentAsARecoverableToolFailure()
+    {
+        var exception = new InvalidDataException("Unsupported web response media type image/png.");
+
+        Assert.True(AgentToolExecutor.IsRecoverableResearchFailure("web.fetch", exception));
+        var failure = AgentToolExecutor.DescribeResearchFailure("web.fetch", exception);
+        Assert.Equal("web.fetch.unavailable", failure.ErrorCode);
+        Assert.True(failure.Retryable);
+        Assert.Contains("anderen Suchtreffer", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FetchedDocumentIsBoundedBeforeItEntersCodingToolHistory()
+    {
+        var response = new WebFetchResponse(
+            "https://example.com/large-reference",
+            "text/plain",
+            new string('x', 80_000),
+            IsUntrusted: true,
+            DateTimeOffset.UtcNow,
+            []);
+
+        var trimmed = AgentToolExecutor.TrimFetch(response);
+
+        Assert.StartsWith(new string('x', 48_000), trimmed.Content, StringComparison.Ordinal);
+        Assert.Contains("auf 48.000 Zeichen gekürzt", trimmed.Content, StringComparison.Ordinal);
+        Assert.True(trimmed.Content.Length < 49_000);
     }
 
     [Fact]

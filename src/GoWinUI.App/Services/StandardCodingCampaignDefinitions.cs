@@ -138,8 +138,8 @@ public sealed class PromptDrivenCodingCampaignDefinition() : ICodingCampaignDefi
         Referenzfälle oder eine unabhängige Zweitberechnung. Führe danach die engsten passenden Tests, Build- oder
         Syntaxprüfung und einen begrenzten Start-/Smoke-Lauf aus. Aktualisiere den Vertrag atomar mit den realen
         Ergebnissen. Wenn der Workflow ein Buch, eine Lösung oder eine Lehrtext-PDF erzeugt, pflege die Quelle als
-        Markdown/Text/TeX/JSON und rendere die PDF ausschließlich mit `process.runPreset` `document.renderPdf`; baue
-        dafür keine eigene HTML-, CDN-KaTeX- oder Direkt-PDF-Strecke. Wenn kein ausdrückliches Nutzerziel vorliegt, inspiziere README/Projektstruktur und wähle den
+        Markdown/Text/TeX/JSON und überlasse die PDF-Erzeugung anschließend dem deterministischen GO-KaTeX-Exporter; baue
+        dafür keine eigene HTML-, CDN-KaTeX- oder Direkt-PDF-Strecke und rufe kein PDF-Werkzeug auf. Wenn kein ausdrückliches Nutzerziel vorliegt, inspiziere README/Projektstruktur und wähle den
         kleinsten sicheren Qualitäts- oder Verifikationsschritt.
         """;
 
@@ -156,8 +156,8 @@ public sealed class PromptDrivenCodingCampaignDefinition() : ICodingCampaignDefi
 
         Erhöhe `iteration` nur bei einer echten Verbesserung oder einer bewusst dokumentierten Erkenntnis. Führe die
         im Vertrag passenden setup/test/build/start-Schritte aus, behebe Fehler selbstständig und schreibe bei
-        PDF-Artefakten `document.renderPdf` als Verifikations-/Buildschritt fest, damit KaTeX lokal durch GO gerendert
-        und validiert wird. Im Prozessbericht steht knapp, was aus dem Workflow-Vertrag abgeleitet wurde und welche
+        PDF-Artefakten den deterministischen GO-KaTeX-Exporter als Verifikations-/Buildschritt fest, damit KaTeX lokal durch GO gerendert
+        und validiert wird; rufe dafür kein PDF-Werkzeug auf. Im Prozessbericht steht knapp, was aus dem Workflow-Vertrag abgeleitet wurde und welche
         Prüfungen tatsächlich liefen.
         """;
 

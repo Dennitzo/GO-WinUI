@@ -211,7 +211,7 @@ public sealed class QwenCoderExcelLiveTests
                 GoAiProtocol.Version,
                 RunMode.Code,
                 [new RunMessage("user", [new ContentPart("text", prompt)])],
-                ClientCapabilities: ["code", "filesystem", "process"],
+                ClientCapabilities: ["code", "filesystem", "process", "pdf"],
                 Limits: new RunLimits(8_192, 262_144, 14_400),
                 SessionId: sessionId,
                 AllowedServerTools: [],

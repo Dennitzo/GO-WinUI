@@ -20,6 +20,7 @@ $serverProject = Resolve-GoRepositoryPath -RelativePath 'src\GoAi.Server.App\GoA
 $gatewayProject = Resolve-GoRepositoryPath -RelativePath 'src\GoAi.Gateway\GoAi.Gateway.csproj'
 $clientProject = Resolve-GoRepositoryPath -RelativePath 'src\GoAi.Client\GoAi.Client.csproj'
 $smokeProject = Resolve-GoRepositoryPath -RelativePath 'src\GoAi.SmokeClient\GoAi.SmokeClient.csproj'
+& (Join-Path $PSScriptRoot 'prepare-lmstudio-native-agent.ps1')
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $suffix = if ($Mode -eq 'SingleFile') { 'portable' } else { 'folder' }
     $OutputDirectory = Resolve-GoRepositoryPath -RelativePath ("artifacts\go-ai-server\{0}\{1}" -f $suffix, $RuntimeIdentifier)
@@ -139,13 +140,26 @@ foreach ($workerName in @('common', 'media', 'speech', 'image')) {
         Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
     }
 }
+$nativeAgentSource = Resolve-GoRepositoryPath -RelativePath 'workers\lmstudio-native-agent'
+$nativeAgentDestination = Join-Path $workerDirectory 'lmstudio-native-agent'
+New-Item -ItemType Directory -Path $nativeAgentDestination -Force | Out-Null
+foreach ($itemName in @('worker.cjs', 'package.json', 'package-lock.json', 'node_modules')) {
+    $source = Join-Path $nativeAgentSource $itemName
+    if (-not (Test-Path -LiteralPath $source)) {
+        throw "Native LM Studio agent publish input is missing: $source"
+    }
+    Copy-Item -LiteralPath $source -Destination $nativeAgentDestination -Recurse -Force
+}
+$nodeCommand = Get-Command node.exe -ErrorAction Stop
+Copy-Item -LiteralPath $nodeCommand.Source -Destination (Join-Path $nativeAgentDestination 'node.exe') -Force
 $scriptDirectory = Join-Path $OutputDirectory 'scripts'
 New-Item -ItemType Directory -Path $scriptDirectory -Force | Out-Null
 foreach ($scriptName in @(
     'common.ps1', 'bootstrap-ai-server.ps1', 'configure-lmstudio.ps1',
     'start-lmstudio-server.ps1', 'refresh-lmstudio-model-catalog.ps1',
     'download-ai-models.ps1', 'build-ai-workers.ps1', 'validate-ai-server-compose.ps1',
-    'deploy-ai-server.ps1', 'export-ai-client-bundle.ps1', 'live-smoke-ai-server.ps1'
+    'deploy-ai-server.ps1', 'export-ai-client-bundle.ps1', 'live-smoke-ai-server.ps1',
+    'prepare-lmstudio-native-agent.ps1'
 )) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $scriptName) -Destination $scriptDirectory -Force
 }
@@ -170,6 +184,8 @@ $manifest = [ordered]@{
     smokeClientSha256 = (Get-FileHash -LiteralPath (Join-Path $bundledSmokeDirectory 'GoAi.SmokeClient.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     openApiSha256 = (Get-FileHash -LiteralPath (Join-Path $apiDirectory 'go-ai-v1.yaml') -Algorithm SHA256).Hash.ToLowerInvariant()
     eventSchemaSha256 = (Get-FileHash -LiteralPath (Join-Path $apiDirectory 'run-events-v1.schema.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    nativeLmStudioAgentSha256 = (Get-FileHash -LiteralPath (Join-Path $nativeAgentDestination 'worker.cjs') -Algorithm SHA256).Hash.ToLowerInvariant()
+    nativeLmStudioSdkVersion = '1.5.0'
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 

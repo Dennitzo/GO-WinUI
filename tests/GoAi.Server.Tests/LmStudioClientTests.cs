@@ -10,6 +10,234 @@ namespace GoAi.Server.Tests;
 public sealed class LmStudioClientTests
 {
     [Fact]
+    public async Task ProductionModelOperationsUseNativeSdkWithoutHttpRequests()
+    {
+        using var context = new TestServerContext();
+        var native = new RecordingNativeAgentClient
+        {
+            Models = new LmStudioModelList(
+            [
+                new LmStudioModel(
+                    "llm",
+                    "qwen3-coder-next",
+                    "Qwen3 Coder Next",
+                    [],
+                    262_144,
+                    new LmStudioCapabilities(false, true)),
+            ]),
+            LoadResult = new LmStudioModelPreparation("qwen-sdk", WasAlreadyLoaded: false),
+        };
+        using var client = new LmStudioClient(
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance,
+            native);
+
+        var status = await client.GetStatusAsync();
+        var instance = await client.EnsureModelLoadedAsync("qwen3-coder-next", 32_768);
+
+        Assert.True(status.ProviderReachable);
+        Assert.Equal("qwen-sdk", instance);
+        Assert.Equal(2, native.ModelCatalogRequests);
+        Assert.Equal(1, native.LoadRequests);
+    }
+
+    [Fact]
+    public async Task ProductionEmbeddingAndVisionOperationsUseNativeSdkWithoutHttpRequests()
+    {
+        using var context = new TestServerContext();
+        var native = new RecordingNativeAgentClient
+        {
+            EmbeddingResult = [[0.25, 0.75]],
+            VisionResult = "SDK-Bildanalyse",
+        };
+        using var client = new LmStudioClient(
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance,
+            native);
+        Directory.CreateDirectory(context.Root);
+        var imagePath = Path.Combine(context.Root, "sdk-vision.png");
+        await File.WriteAllBytesAsync(
+            imagePath,
+            Convert.FromHexString("89504E470D0A1A0A00000000"));
+
+        var embeddings = await client.CreateEmbeddingsAsync("text-embedding-bge-m3", ["Test"]);
+        var vision = await client.AnalyzeImagesAsync("vision-model", "Analysiere.", [imagePath]);
+
+        Assert.Equal(0.25, embeddings[0][0]);
+        Assert.Equal("SDK-Bildanalyse", vision);
+        Assert.Equal(1, native.EmbeddingRequests);
+        Assert.Equal(1, native.VisionRequests);
+    }
+
+    [Fact]
+    public async Task ProductionGeneralPathUsesNativeSdkWithoutAnyHttpCompletionRequest()
+    {
+        using var context = new TestServerContext();
+        var native = new RecordingNativeAgentClient(static _ =>
+            new LmChatResult("Native SDK Antwort", [], 17, 4));
+        using var client = new LmStudioClient(
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance,
+            native);
+
+        var result = await client.CompleteChatAsync(
+            "gpt-oss-120b",
+            [new LmChatMessage("user", "Erkläre Volumenstrom.")],
+            [],
+            modelRole: "general");
+
+        Assert.Equal("Native SDK Antwort", result.Content);
+        var request = Assert.Single(native.Requests);
+        Assert.Equal("gpt-oss-120b", request.ModelId);
+        Assert.False(request.RequireToolCall);
+        Assert.Empty(request.Tools);
+    }
+
+    [Fact]
+    public async Task ProductionCodingPathUsesNativeSdkWithoutAnyHttpCompletionRequest()
+    {
+        using var context = new TestServerContext();
+        var native = new RecordingNativeAgentClient(static request =>
+        {
+            using var arguments = JsonDocument.Parse("{}");
+            return new LmChatResult(
+                null,
+                [new LmToolCall("call_map", "workspace.map", arguments.RootElement.Clone())],
+                31,
+                7);
+        });
+        using var client = new LmStudioClient(
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance,
+            native);
+        using var schema = JsonDocument.Parse(
+            """{"type":"object","properties":{},"additionalProperties":false}""");
+        var progress = new List<LmStudioNativeAgentProgress>();
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Kartiere den Workspace.")],
+            [new LmToolDefinition("workspace.map", "Workspacekarte", schema.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "workspace.map",
+            nativeProgress: (item, _) =>
+            {
+                progress.Add(item);
+                return ValueTask.CompletedTask;
+            });
+
+        Assert.Equal("workspace.map", Assert.Single(result.ToolCalls).Name);
+        var request = Assert.Single(native.Requests);
+        Assert.True(request.RequireToolCall);
+        Assert.Equal("workspace.map", request.RequiredToolName);
+        Assert.Contains(progress, static item => item.State == "toolCallGenerationNameReceived");
+    }
+
+    [Fact]
+    public async Task InvalidNativeToolCallIsRetriedOnlyThroughTheNativeSdk()
+    {
+        using var context = new TestServerContext();
+        var native = new RecordingNativeAgentClient(
+            static request =>
+            {
+                using var arguments = JsonDocument.Parse("{}");
+                return new LmChatResult(
+                    null,
+                    [new LmToolCall("call_bad", "unknown.tool", arguments.RootElement.Clone())],
+                    20,
+                    5);
+            },
+            static request =>
+            {
+                using var arguments = JsonDocument.Parse("{}");
+                return new LmChatResult(
+                    null,
+                    [new LmToolCall("call_map", "workspace.map", arguments.RootElement.Clone())],
+                    22,
+                    6);
+            });
+        using var client = new LmStudioClient(
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance,
+            native);
+        using var schema = JsonDocument.Parse(
+            """{"type":"object","properties":{},"additionalProperties":false}""");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Kartiere den Workspace.")],
+            [new LmToolDefinition("workspace.map", "Workspacekarte", schema.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "workspace.map");
+
+        Assert.Equal(2, native.Requests.Count);
+        Assert.Equal(42, result.InputTokens);
+        Assert.Equal(11, result.OutputTokens);
+        Assert.Contains(
+            native.Requests[1].Messages,
+            static message => message.Content?.Contains("[GO_NATIVE_TOOL_RETRY]", StringComparison.Ordinal) == true);
+        Assert.Equal("workspace.map", Assert.Single(result.ToolCalls).Name);
+    }
+
+    [Fact]
+    public async Task InterruptedNativeArgumentsRetryOnlyTheAlreadySelectedToolSchema()
+    {
+        using var context = new TestServerContext();
+        var native = new RecordingNativeAgentClient(
+            static _ => throw new LmStudioNativeAgentException(
+                "tool_generation_timeout",
+                "Argument generation stopped.",
+                toolName: "fs.readText"),
+            static request =>
+            {
+                Assert.Equal("fs.readText", request.RequiredToolName);
+                using var arguments = JsonDocument.Parse("""{"path":"README.md"}""");
+                return new LmChatResult(
+                    null,
+                    [new LmToolCall("call_read", "fs.readText", arguments.RootElement.Clone())],
+                    24,
+                    8);
+            });
+        using var client = new LmStudioClient(
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance,
+            native);
+        using var mapSchema = JsonDocument.Parse(
+            """{"type":"object","properties":{},"additionalProperties":false}""");
+        using var readSchema = JsonDocument.Parse(
+            """{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}""");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Lies die Projektbeschreibung.")],
+            [
+                new LmToolDefinition(
+                    "workspace.map",
+                    "Workspacekarte",
+                    mapSchema.RootElement.Clone()),
+                new LmToolDefinition(
+                    "fs.readText",
+                    "Textdatei lesen",
+                    readSchema.RootElement.Clone()),
+            ],
+            modelRole: "code",
+            requireToolCall: true);
+
+        Assert.Equal(2, native.Requests.Count);
+        Assert.Null(native.Requests[0].RequiredToolName);
+        Assert.Equal("fs.readText", native.Requests[1].RequiredToolName);
+        Assert.Equal("README.md", Assert.Single(result.ToolCalls).Arguments.GetProperty("path").GetString());
+    }
+
+    [Fact]
     public void ClientUsesTheRunCancellationInsteadOfAShortHttpTimeout()
     {
         using var context = new TestServerContext();
@@ -21,7 +249,6 @@ public sealed class LmStudioClientTests
             NullLogger<LmStudioClient>.Instance);
 
         Assert.Equal(Timeout.InfiniteTimeSpan, http.Timeout);
-        Assert.Equal(TimeSpan.FromHours(4), LmStudioCliModelLoader.LoadTimeout);
     }
 
     [Fact]
@@ -204,6 +431,7 @@ public sealed class LmStudioClientTests
 
         using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
         var root = request.RootElement;
+        Assert.False(root.GetProperty("stream").GetBoolean());
         Assert.Equal("/v1/responses", handler.RequestPath);
         Assert.False(root.TryGetProperty("messages", out _));
         Assert.False(root.GetProperty("store").GetBoolean());
@@ -217,6 +445,947 @@ public sealed class LmStudioClientTests
             item.TryGetProperty("type", out var type) && type.GetString() == "function_call");
         Assert.Contains(input.EnumerateArray(), static item =>
             item.TryGetProperty("type", out var type) && type.GetString() == "function_call_output");
+    }
+
+    [Fact(Skip = "Coding streaming is intentionally disabled; the atomic Chat Completions path is covered below.")]
+    public async Task CodingCompletionStopsAfterTheFirstCompleteStreamingToolCall()
+    {
+        using var context = new TestServerContext();
+        var handler = new StreamingResponsesHandler("""
+            data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_search","type":"function_call","call_id":"call_search","name":"web.search","arguments":""}}
+
+            data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_search","delta":"{\"query\":\"Mechanik\""}
+
+            data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_search","delta":",\"maximumResults\":10}"}
+
+            data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_search","name":"web.search","arguments":"{\"query\":\"Mechanik\",\"maximumResults\":10}"}
+
+            data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_read","type":"function_call","call_id":"call_read","name":"fs.readText","arguments":""}}
+
+            data: {"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc_read","delta":"{\"path\":\"never-read.md\"}"}
+
+            data: {"type":"response.completed","response":{"usage":{"input_tokens":40,"output_tokens":20}}}
+
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse("""
+            {"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}
+            """);
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("system", "Nutze genau ein Werkzeug."), new LmChatMessage("user", "Suche im Web")],
+            [new LmToolDefinition("web.search", "Suche", schemaDocument.RootElement.Clone())],
+            modelRole: "code");
+
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("call_search", call.Id);
+        Assert.Equal("web.search", call.Name);
+        Assert.Equal("Mechanik", call.Arguments.GetProperty("query").GetString());
+        Assert.Equal(10, call.Arguments.GetProperty("maximumResults").GetInt32());
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        Assert.True(request.RootElement.GetProperty("stream").GetBoolean());
+        Assert.False(request.RootElement.GetProperty("parallel_tool_calls").GetBoolean());
+    }
+
+    [Fact(Skip = "Coding streaming is intentionally disabled; the atomic Chat Completions path is covered below.")]
+    public async Task CodingToolStreamStillReturnsATextOnlyFinalAnswer()
+    {
+        using var context = new TestServerContext();
+        var handler = new StreamingResponsesHandler("""
+            data: {"type":"response.output_text.delta","delta":"### Prozessbericht\n\nFertig"}
+
+            data: {"type":"response.completed","response":{"usage":{"input_tokens":25,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0}}}}
+
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse("""
+            {"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}
+            """);
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Fasse die abgeschlossene Arbeit zusammen.")],
+            [new LmToolDefinition("fs.readText", "Lese", schemaDocument.RootElement.Clone())],
+            modelRole: "code");
+
+        Assert.Equal("### Prozessbericht\n\nFertig", result.Content);
+        Assert.Empty(result.ToolCalls);
+        Assert.Equal(25, result.InputTokens);
+        Assert.Equal(5, result.OutputTokens);
+    }
+
+    [Fact(Skip = "Coding streaming is intentionally disabled; the atomic Chat Completions path is covered below.")]
+    public async Task CodingToolRequirementIsForwardedToLmStudio()
+    {
+        using var context = new TestServerContext();
+        var handler = new StreamingResponsesHandler("""
+            data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_read","type":"function_call","call_id":"call_read","name":"fs.readText","arguments":""}}
+
+            data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_read","arguments":"{\"path\":\"README.md\"}"}
+
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse("""
+            {"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}
+            """);
+
+        _ = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Lies die Datei.")],
+            [new LmToolDefinition("fs.readText", "Lese", schemaDocument.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true);
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        Assert.Equal("required", request.RootElement.GetProperty("tool_choice").GetString());
+    }
+
+    [Fact(Skip = "Coding streaming is intentionally disabled; the atomic Chat Completions path is covered below.")]
+    public async Task TerminatedCodingStreamIsRetriedWithTheSameLoadedModel()
+    {
+        using var context = new TestServerContext();
+        var handler = new QueuedStreamingResponsesHandler(
+            """
+            data: {"type":"response.failed","response":{"error":{"message":"terminated"}}}
+
+            """,
+            """
+            data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_search","type":"function_call","call_id":"call_search","name":"web.search","arguments":""}}
+
+            data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_search","arguments":"{\"query\":\"Mechanik\"}"}
+
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse("""
+            {"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}
+            """);
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [
+                new LmChatMessage("system", "PRIMARY_POLICY_SENTINEL mit nativer Tool-Anweisung"),
+                new LmChatMessage("user", "Suche im Web."),
+            ],
+            [new LmToolDefinition("web.search", "Suche", schemaDocument.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true);
+
+        Assert.Equal(2, handler.RequestCount);
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("web.search", call.Name);
+        Assert.Equal("Mechanik", call.Arguments.GetProperty("query").GetString());
+    }
+
+    [Fact(Skip = "Coding streaming is intentionally disabled; the atomic Chat Completions path is covered below.")]
+    public async Task TerminatedCodingStreamFallsBackToChatCompletionsForTheCompleteToolCall()
+    {
+        using var context = new TestServerContext();
+        var handler = new TerminatedResponsesThenChatCompletionsHandler();
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse("""
+            {"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}
+            """);
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("system", "Nutze genau ein Werkzeug."), new LmChatMessage("user", "Suche im Web")],
+            [new LmToolDefinition("web.search", "Suche", schemaDocument.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true);
+
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("web.search", call.Name);
+        Assert.Equal("Mechanik", call.Arguments.GetProperty("query").GetString());
+        Assert.Equal(2, handler.ResponsesRequestCount);
+        Assert.Equal(1, handler.ChatCompletionsRequestCount);
+    }
+
+    [Fact]
+    public async Task RequiredCodingTurnPreservesPrimaryPolicyAndUsesOneAtomicNativeRequest()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {"choices":[{"message":{"role":"assistant","content":"{\"query\":\"Mechanik\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":40,"completion_tokens":12}}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse("""
+            {"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}
+            """);
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [
+                new LmChatMessage("system", "PRIMARY_POLICY_SENTINEL mit nativer Tool-Anweisung"),
+                new LmChatMessage("user", "Suche im Web."),
+            ],
+            [new LmToolDefinition("web.search", "Suche", schemaDocument.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "web.search");
+
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("web.search", call.Name);
+        Assert.Equal("Mechanik", call.Arguments.GetProperty("query").GetString());
+        Assert.Equal("/v1/chat/completions", handler.RequestPath);
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        Assert.False(request.RootElement.GetProperty("stream").GetBoolean());
+        var tool = Assert.Single(request.RootElement.GetProperty("tools").EnumerateArray());
+        Assert.Equal("web.search", tool.GetProperty("function").GetProperty("name").GetString());
+        Assert.Equal(
+            "string",
+            tool.GetProperty("function").GetProperty("parameters")
+                .GetProperty("properties").GetProperty("query").GetProperty("type").GetString());
+        Assert.Equal("required", request.RootElement.GetProperty("tool_choice").GetString());
+        Assert.False(request.RootElement.GetProperty("parallel_tool_calls").GetBoolean());
+        Assert.False(request.RootElement.TryGetProperty("response_format", out _));
+        Assert.Contains("PRIMARY_POLICY_SENTINEL", handler.RequestBody, StringComparison.Ordinal);
+        Assert.Equal(2, request.RootElement.GetProperty("messages").GetArrayLength());
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task MatchingParsedToolCallFromPlainArgumentResponseIsAcceptedWithoutRetry()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_native","type":"function","function":{"name":"web.search","arguments":"{\"query\":\"Mechanik\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":40,"completion_tokens":12}}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse("""
+            {"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}
+            """);
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Suche im Web.")],
+            [new LmToolDefinition("web.search", "Suche", schemaDocument.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "web.search");
+
+        Assert.Equal(1, handler.RequestCount);
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("call_native", call.Id);
+        Assert.Equal("web.search", call.Name);
+        Assert.Equal("Mechanik", call.Arguments.GetProperty("query").GetString());
+    }
+
+    [Fact]
+    public async Task InvalidNativeCodingArgumentsUseOneSchemaFreeRepairRequest()
+    {
+        using var context = new TestServerContext();
+        var handler = new SequenceRecordingHandler(
+            """
+            {"choices":[{"message":{"role":"assistant","content":"{\"unexpected\":true}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}
+            """,
+            """
+            {"choices":[{"message":{"role":"assistant","content":"```json\n{\"query\":\"Mechanik\"}\n```"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":3}}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse("""
+            {"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}
+            """);
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Suche im Web.")],
+            [new LmToolDefinition("web.search", "Suche", schemaDocument.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "web.search");
+
+        Assert.Equal(2, handler.RequestBodies.Count);
+        using var correctionRequest = JsonDocument.Parse(handler.RequestBodies[1]);
+        Assert.Contains(
+            correctionRequest.RootElement.GetProperty("messages").EnumerateArray(),
+            static message => message.GetProperty("content").GetString()?.Contains(
+                "vorherigen Argumente waren ungültig",
+                StringComparison.OrdinalIgnoreCase) == true);
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("Mechanik", call.Arguments.GetProperty("query").GetString());
+        Assert.Equal(11, result.InputTokens);
+        Assert.Equal(5, result.OutputTokens);
+    }
+
+    [Fact(Skip = "Replaced by the atomic multi-tool coding round tests below.")]
+    public async Task RequiredCodingTurnSelectsToolBeforeGeneratingItsRealArguments()
+    {
+        using var context = new TestServerContext();
+        var handler = new SequenceRecordingHandler(
+            """
+            {"choices":[{"message":{"role":"assistant","content":"2"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":2}}
+            """,
+            """
+            {"choices":[{"message":{"role":"assistant","content":"{\"path\":\"README.md\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":13,"completion_tokens":4}}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var emptySchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}");
+        using var readSchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Untersuche das Repository.")],
+            [
+                new LmToolDefinition("workspace.map", "Karte", emptySchema.RootElement.Clone()),
+                new LmToolDefinition("fs.readText", "Datei lesen", readSchema.RootElement.Clone()),
+            ],
+            modelRole: "code",
+            requireToolCall: true);
+
+        Assert.Equal(2, handler.RequestBodies.Count);
+        Assert.Equal(["/v1/chat/completions", "/v1/chat/completions"], handler.RequestPaths);
+        using var selectionRequest = JsonDocument.Parse(handler.RequestBodies[0]);
+        Assert.False(selectionRequest.RootElement.TryGetProperty("tools", out _));
+        Assert.False(selectionRequest.RootElement.TryGetProperty("response_format", out _));
+        Assert.False(selectionRequest.RootElement.GetProperty("stream").GetBoolean());
+        Assert.Equal(8, selectionRequest.RootElement.GetProperty("max_tokens").GetInt32());
+        var routingSystemText = selectionRequest.RootElement
+            .GetProperty("messages")
+            .EnumerateArray()
+            .Single(static message => string.Equals(
+                message.GetProperty("role").GetString(),
+                "system",
+                StringComparison.Ordinal))
+            .GetProperty("content")
+            .GetString();
+        Assert.Contains("workspace.map", routingSystemText, StringComparison.Ordinal);
+        Assert.Contains("fs.readText", routingSystemText, StringComparison.Ordinal);
+        using var argumentRequest = JsonDocument.Parse(handler.RequestBodies[1]);
+        var argumentTool = Assert.Single(argumentRequest.RootElement.GetProperty("tools").EnumerateArray());
+        Assert.Equal("fs.readText", argumentTool.GetProperty("function").GetProperty("name").GetString());
+        Assert.Equal("required", argumentRequest.RootElement.GetProperty("tool_choice").GetString());
+        Assert.False(argumentRequest.RootElement.TryGetProperty("response_format", out _));
+        Assert.Equal(
+            "string",
+            argumentTool.GetProperty("function").GetProperty("parameters")
+                .GetProperty("properties").GetProperty("path").GetProperty("type").GetString());
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("README.md", call.Arguments.GetProperty("path").GetString());
+        Assert.Equal(24, result.InputTokens);
+        Assert.Equal(6, result.OutputTokens);
+    }
+
+    [Fact(Skip = "Replaced by structured-history preservation in the atomic coding round tests below.")]
+    public async Task CodingToolNameSelectionFlattensPreviousToolHistoryWithoutNativeToolSchema()
+    {
+        using var context = new TestServerContext();
+        var handler = new SequenceRecordingHandler(
+            """
+            {"choices":[{"message":{"role":"assistant","content":"{\"name\":\"fs.readText\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":17,"completion_tokens":2}}
+            """,
+            """
+            {"choices":[{"message":{"role":"assistant","content":"{\"path\":\"README.md\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":19,"completion_tokens":4}}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var emptySchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}");
+        using var readSchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+        using var searchArguments = JsonDocument.Parse("{\"query\":\"Mechanik\"}");
+        using var fetchArguments = JsonDocument.Parse("{\"url\":\"https://example.org/mechanik\"}");
+        var fetchedPage = JsonSerializer.Serialize(new
+        {
+            success = true,
+            url = "https://example.org/mechanik",
+            mediaType = "text/html",
+            content = "ROUTER_SENTINEL_" + new string('x', 40_000),
+        });
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [
+                new LmChatMessage("system", "Arbeite im Workspace."),
+                new LmChatMessage("user", "Suche nach Mechanik."),
+                new LmChatMessage(
+                    "assistant",
+                    ToolCalls:
+                    [
+                        new LmToolCall(
+                            "call_search",
+                            "web.search",
+                            searchArguments.RootElement.Clone()),
+                    ]),
+                new LmChatMessage(
+                    "tool",
+                    "{\"results\":[{\"url\":\"https://example.org/mechanik\"}]}",
+                    ToolCallId: "call_search"),
+                new LmChatMessage(
+                    "assistant",
+                    ToolCalls:
+                    [
+                        new LmToolCall(
+                            "call_fetch",
+                            "web.fetch",
+                            fetchArguments.RootElement.Clone()),
+                    ]),
+                new LmChatMessage("tool", fetchedPage, ToolCallId: "call_fetch"),
+                new LmChatMessage("user", "Untersuche nun die lokale Dokumentation."),
+            ],
+            [
+                new LmToolDefinition("workspace.map", "Karte", emptySchema.RootElement.Clone()),
+                new LmToolDefinition("fs.readText", "Datei lesen", readSchema.RootElement.Clone()),
+            ],
+            modelRole: "code",
+            requireToolCall: true);
+
+        using var routingRequest = JsonDocument.Parse(handler.RequestBodies[0]);
+        Assert.False(routingRequest.RootElement.TryGetProperty("tools", out _));
+        var routingInput = routingRequest.RootElement.GetProperty("messages").EnumerateArray().ToArray();
+        Assert.All(routingInput, static item => Assert.False(item.TryGetProperty("tool_calls", out _)));
+        Assert.DoesNotContain(
+            routingInput,
+            static item => string.Equals(item.GetProperty("role").GetString(), "tool", StringComparison.Ordinal));
+        Assert.Contains(
+            routingInput,
+            static item => item.GetProperty("content").GetString()?.Contains(
+                "[GO_PREVIOUS_TOOL_CALLS] web.search",
+                StringComparison.Ordinal) == true);
+        Assert.Contains(
+            routingInput,
+            static item => item.GetProperty("content").GetString()?.Contains(
+                "[GO_PREVIOUS_TOOL_RESULT tool=web.search]",
+                StringComparison.Ordinal) == true);
+        Assert.DoesNotContain("ROUTER_SENTINEL", handler.RequestBodies[0], StringComparison.Ordinal);
+        Assert.Contains("https://example.org/mechanik", handler.RequestBodies[0], StringComparison.Ordinal);
+        Assert.Contains("contentCharacters=", handler.RequestBodies[0], StringComparison.Ordinal);
+
+        using var argumentRequest = JsonDocument.Parse(handler.RequestBodies[1]);
+        var argumentTool = Assert.Single(argumentRequest.RootElement.GetProperty("tools").EnumerateArray());
+        Assert.Equal("fs.readText", argumentTool.GetProperty("function").GetProperty("name").GetString());
+        Assert.Equal("required", argumentRequest.RootElement.GetProperty("tool_choice").GetString());
+        var argumentInput = argumentRequest.RootElement.GetProperty("messages").EnumerateArray().ToArray();
+        Assert.All(argumentInput, static item => Assert.False(item.TryGetProperty("tool_calls", out _)));
+        Assert.DoesNotContain(
+            argumentInput,
+            static item => string.Equals(item.GetProperty("role").GetString(), "tool", StringComparison.Ordinal));
+        Assert.Contains(
+            argumentInput,
+            static item => item.GetProperty("content").GetString()?.Contains(
+                "[GO_PREVIOUS_TOOL_RESULT tool=web.search]",
+                StringComparison.Ordinal) == true);
+        Assert.Contains("ROUTER_SENTINEL", handler.RequestBodies[1], StringComparison.Ordinal);
+        Assert.Equal("fs.readText", Assert.Single(result.ToolCalls).Name);
+    }
+
+    [Fact(Skip = "Replaced by schema-free coding action repair tests below.")]
+    public async Task AmbiguousCodingToolNameSelectionGetsOneTextOnlyCorrectionAttempt()
+    {
+        using var context = new TestServerContext();
+        var handler = new SequenceRecordingHandler(
+            """
+            {"choices":[{"message":{"role":"assistant","content":"Ich muss zuerst den nächsten Schritt prüfen."},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":8}}
+            """,
+            """
+            {"choices":[{"message":{"role":"assistant","content":"{\"name\":\"fs.readText\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":2}}
+            """,
+            """
+            {"choices":[{"message":{"role":"assistant","content":"{\"path\":\"README.md\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var emptySchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}");
+        using var readSchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Untersuche die lokale Dokumentation.")],
+            [
+                new LmToolDefinition("workspace.map", "Karte", emptySchema.RootElement.Clone()),
+                new LmToolDefinition("fs.readText", "Datei lesen", readSchema.RootElement.Clone()),
+            ],
+            modelRole: "code",
+            requireToolCall: true);
+
+        Assert.Equal(3, handler.RequestBodies.Count);
+        using var correctionRequest = JsonDocument.Parse(handler.RequestBodies[1]);
+        Assert.False(correctionRequest.RootElement.TryGetProperty("tools", out _));
+        Assert.Contains(
+            correctionRequest.RootElement.GetProperty("messages").EnumerateArray(),
+            static item => item.GetProperty("content").GetString()?.Contains(
+                "vorherige Werkzeugauswahl war nicht eindeutig",
+                StringComparison.OrdinalIgnoreCase) == true);
+        Assert.Equal("fs.readText", Assert.Single(result.ToolCalls).Name);
+        Assert.Equal(18, result.InputTokens);
+        Assert.Equal(13, result.OutputTokens);
+    }
+
+    [Fact(Skip = "Replaced by native channel termination recovery tests below.")]
+    public async Task TerminatedCodingToolRouterRetriesWithOnlyTheCurrentRequest()
+    {
+        using var context = new TestServerContext();
+        var handler = new ResponseSequenceHandler(
+            (HttpStatusCode.InternalServerError, "{\"error\":{\"message\":\"terminated\"}}"),
+            (HttpStatusCode.OK, """
+                {"choices":[{"message":{"role":"assistant","content":"2"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":2}}
+                """),
+            (HttpStatusCode.OK, """
+                {"choices":[{"message":{"role":"assistant","content":"{\"path\":\"README.md\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}
+                """));
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var emptySchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}");
+        using var readSchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [
+                new LmChatMessage("user", "Untersuche das Repository."),
+                new LmChatMessage("assistant", ToolCalls:
+                [
+                    new LmToolCall("call_old", "web.fetch", JsonDocument.Parse("{\"url\":\"https://example.org\"}").RootElement.Clone()),
+                ]),
+                new LmChatMessage("tool", new string('x', 20_000), ToolCallId: "call_old"),
+            ],
+            [
+                new LmToolDefinition("workspace.map", "Karte", emptySchema.RootElement.Clone()),
+                new LmToolDefinition("fs.readText", "Datei lesen", readSchema.RootElement.Clone()),
+            ],
+            modelRole: "code",
+            requireToolCall: true);
+
+        Assert.Equal(3, handler.RequestBodies.Count);
+        using var recoveryRequest = JsonDocument.Parse(handler.RequestBodies[1]);
+        Assert.Contains(
+            recoveryRequest.RootElement.GetProperty("messages").EnumerateArray(),
+            static item => item.GetProperty("content").GetString()?.Contains(
+                "vom Provider technisch beendet",
+                StringComparison.OrdinalIgnoreCase) == true);
+        Assert.DoesNotContain(new string('x', 1_201), handler.RequestBodies[1], StringComparison.Ordinal);
+        Assert.Equal("fs.readText", Assert.Single(result.ToolCalls).Name);
+        Assert.Equal(13, result.InputTokens);
+        Assert.Equal(5, result.OutputTokens);
+    }
+
+    [Fact(Skip = "The professional loop never guesses a workspace action after repeated provider failures.")]
+    public async Task RepeatedCodingToolRouterFailureFallsBackToSafeWorkspaceRead()
+    {
+        using var context = new TestServerContext();
+        var handler = new ResponseSequenceHandler(
+            (HttpStatusCode.InternalServerError, "{\"error\":{\"message\":\"terminated\"}}"),
+            (HttpStatusCode.InternalServerError, "{\"error\":{\"message\":\"Channel Error\"}}"),
+            (HttpStatusCode.OK, """
+                {"choices":[{"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":2}}
+                """));
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var emptySchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Analysiere den Workspace.")],
+            [
+                new LmToolDefinition("workspace.map", "Karte", emptySchema.RootElement.Clone()),
+                new LmToolDefinition("fs.list", "Ordner lesen", emptySchema.RootElement.Clone()),
+            ],
+            modelRole: "code",
+            requireToolCall: true);
+
+        Assert.Equal(3, handler.RequestBodies.Count);
+        using var argumentRequest = JsonDocument.Parse(handler.RequestBodies[2]);
+        var selectedSchema = Assert.Single(argumentRequest.RootElement.GetProperty("tools").EnumerateArray());
+        Assert.Equal(
+            "workspace.map",
+            selectedSchema.GetProperty("function").GetProperty("name").GetString());
+        Assert.Equal("workspace.map", Assert.Single(result.ToolCalls).Name);
+        Assert.Equal(7, result.InputTokens);
+        Assert.Equal(2, result.OutputTokens);
+    }
+
+    [Fact(Skip = "Replaced by the atomic optional-final coding round test below.")]
+    public async Task OptionalCodingTurnUsesSchemaFreeFinalSynthesisAfterNoToolWasSelected()
+    {
+        using var context = new TestServerContext();
+        var handler = new SequenceRecordingHandler(
+            """
+            {"choices":[{"message":{"role":"assistant","content":"{\"name\":\"__final__\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":1}}
+            """,
+            """
+            {"id":"resp_final","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Die Aufgabe ist vollständig abgeschlossen."}]}],"usage":{"input_tokens":9,"output_tokens":5}}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Schließe den Auftrag ab.")],
+            [
+                new LmToolDefinition("workspace.map", "Karte", schema.RootElement.Clone()),
+                new LmToolDefinition("fs.list", "Ordner lesen", schema.RootElement.Clone()),
+            ],
+            modelRole: "code",
+            requireToolCall: false);
+
+        Assert.Equal("Die Aufgabe ist vollständig abgeschlossen.", result.Content);
+        Assert.Equal(2, handler.RequestBodies.Count);
+        Assert.Equal(["/v1/chat/completions", "/v1/responses"], handler.RequestPaths);
+        using var selectionRequest = JsonDocument.Parse(handler.RequestBodies[0]);
+        Assert.False(selectionRequest.RootElement.TryGetProperty("tools", out _));
+        using var finalRequest = JsonDocument.Parse(handler.RequestBodies[1]);
+        Assert.False(finalRequest.RootElement.TryGetProperty("tools", out _));
+        Assert.Equal(16, result.InputTokens);
+        Assert.Equal(6, result.OutputTokens);
+    }
+
+    [Fact]
+    public async Task RequiredCodingRoundSelectsToolAndArgumentsInOneAtomicRequest()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {
+              "choices": [{
+                "message": {
+                  "role": "assistant",
+                  "content": null,
+                  "tool_calls": [{
+                    "id": "call_read",
+                    "type": "function",
+                    "function": { "name": "fs.readText", "arguments": "{\"path\":\"README.md\"}" }
+                  }]
+                },
+                "finish_reason": "tool_calls"
+              }],
+              "usage": { "prompt_tokens": 31, "completion_tokens": 7 }
+            }
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var emptySchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}");
+        using var readSchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+        using var previousArguments = JsonDocument.Parse("{\"path\":\"src\"}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [
+                new LmChatMessage("system", "Arbeite professionell im Workspace."),
+                new LmChatMessage("user", "Untersuche das Repository."),
+                new LmChatMessage("assistant", ToolCalls:
+                [
+                    new LmToolCall("call_previous", "fs.list", previousArguments.RootElement.Clone()),
+                ]),
+                new LmChatMessage("tool", "{\"entries\":[\"README.md\"]}", ToolCallId: "call_previous"),
+            ],
+            [
+                new LmToolDefinition("workspace.map", "Karte", emptySchema.RootElement.Clone()),
+                new LmToolDefinition("fs.readText", "Datei lesen", readSchema.RootElement.Clone()),
+            ],
+            modelRole: "code",
+            requireToolCall: true);
+
+        Assert.Equal(1, handler.RequestCount);
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("fs.readText", call.Name);
+        Assert.Equal("README.md", call.Arguments.GetProperty("path").GetString());
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        var root = request.RootElement;
+        Assert.Equal("/v1/chat/completions", handler.RequestPath);
+        Assert.Equal(2, root.GetProperty("tools").GetArrayLength());
+        Assert.Equal("required", root.GetProperty("tool_choice").GetString());
+        Assert.False(root.GetProperty("parallel_tool_calls").GetBoolean());
+        Assert.Contains(root.GetProperty("messages").EnumerateArray(), static message =>
+            message.GetProperty("role").GetString() == "assistant" && message.TryGetProperty("tool_calls", out _));
+        Assert.Contains(root.GetProperty("messages").EnumerateArray(), static message =>
+            message.GetProperty("role").GetString() == "tool" && message.GetProperty("tool_call_id").GetString() == "call_previous");
+    }
+
+    [Fact]
+    public async Task NativeChannelTerminationUsesSchemaFreeValidatedRepair()
+    {
+        using var context = new TestServerContext();
+        var handler = new ResponseSequenceHandler(
+            (HttpStatusCode.InternalServerError, "{\"error\":{\"message\":\"terminated\"}}"),
+            (HttpStatusCode.OK, """
+                {
+                  "choices": [{
+                    "message": {
+                      "role": "assistant",
+                      "content": "{\"kind\":\"tool\",\"name\":\"fs.readText\",\"arguments\":{\"path\":\"README.md\"}}"
+                    },
+                    "finish_reason": "stop"
+                  }],
+                  "usage": { "prompt_tokens": 19, "completion_tokens": 6 }
+                }
+                """));
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var readSchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Lies die Dokumentation.")],
+            [new LmToolDefinition("fs.readText", "Datei lesen", readSchema.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "fs.readText");
+
+        Assert.Equal(2, handler.RequestBodies.Count);
+        using var nativeRequest = JsonDocument.Parse(handler.RequestBodies[0]);
+        using var repairRequest = JsonDocument.Parse(handler.RequestBodies[1]);
+        Assert.True(nativeRequest.RootElement.TryGetProperty("tools", out _));
+        Assert.False(repairRequest.RootElement.TryGetProperty("tools", out _));
+        Assert.Equal("fs.readText", Assert.Single(result.ToolCalls).Name);
+    }
+
+    [Fact]
+    public async Task InvalidSchemaFreeRepairGetsOneBoundedCorrection()
+    {
+        using var context = new TestServerContext();
+        var handler = new ResponseSequenceHandler(
+            (HttpStatusCode.InternalServerError, "{\"error\":{\"message\":\"Channel Error\"}}"),
+            (HttpStatusCode.OK, """
+                {"choices":[{"message":{"role":"assistant","content":"{\"kind\":\"tool\",\"name\":\"fs.readText\",\"arguments\":{\"unknown\":true}}"}}]}
+                """),
+            (HttpStatusCode.OK, """
+                {"choices":[{"message":{"role":"assistant","content":"{\"kind\":\"tool\",\"name\":\"fs.readText\",\"arguments\":{\"path\":\"README.md\"}}"}}]}
+                """));
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var readSchema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Lies die Dokumentation.")],
+            [new LmToolDefinition("fs.readText", "Datei lesen", readSchema.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "fs.readText");
+
+        Assert.Equal(3, handler.RequestBodies.Count);
+        Assert.Contains("vorherige Aktion war", handler.RequestBodies[2], StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("README.md", Assert.Single(result.ToolCalls).Arguments.GetProperty("path").GetString());
+    }
+
+    [Fact]
+    public async Task MissingProviderToolCallIdGetsAHostIdentity()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"type":"function","function":{"name":"workspace.map","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Erfasse den Workspace.")],
+            [new LmToolDefinition("workspace.map", "Karte", schema.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "workspace.map");
+
+        Assert.StartsWith("call_", Assert.Single(result.ToolCalls).Id, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OptionalCodingRoundCanFinishInTheSameAtomicRequest()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {"choices":[{"message":{"role":"assistant","content":"Die Aufgabe ist vollständig abgeschlossen."},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":5}}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schema = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Schließe den Auftrag ab.")],
+            [new LmToolDefinition("workspace.map", "Karte", schema.RootElement.Clone())],
+            modelRole: "code");
+
+        Assert.Equal("Die Aufgabe ist vollständig abgeschlossen.", result.Content);
+        Assert.Empty(result.ToolCalls);
+        Assert.Equal(1, handler.RequestCount);
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        Assert.Equal("auto", request.RootElement.GetProperty("tool_choice").GetString());
+    }
+
+    [Fact]
+    public async Task AtomicCodingToolCallPinsTheSingleRequiredFunction()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {"choices":[{"message":{"role":"assistant","content":"{\"query\":\"Mechanik\"}"},"finish_reason":"stop"}]}
+            """);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}");
+
+        _ = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Suche im Web.")],
+            [new LmToolDefinition("web.search", "Suche", schemaDocument.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "web.search");
+
+        using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
+        Assert.Equal("/v1/chat/completions", handler.RequestPath);
+        var tool = Assert.Single(request.RootElement.GetProperty("tools").EnumerateArray());
+        Assert.Equal("web.search", tool.GetProperty("function").GetProperty("name").GetString());
+        Assert.Equal("required", request.RootElement.GetProperty("tool_choice").GetString());
+        Assert.False(request.RootElement.TryGetProperty("response_format", out _));
+    }
+
+    [Fact]
+    public async Task NamedToolChoiceRejectsAToolOutsideTheSuppliedCatalog()
+    {
+        using var context = new TestServerContext();
+        using var http = new HttpClient(new RecordingHandler("{}"));
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{},\"required\":[]}");
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() => client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Suche im Web.")],
+            [new LmToolDefinition("workspace.map", "Karte", schemaDocument.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "web.search"));
+
+        Assert.Contains("web.search", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AtomicCodingToolCallRetriesTransientLmStudioChannelFailure()
+    {
+        using var context = new TestServerContext();
+        var handler = new RecordingHandler("""
+            {"choices":[{"message":{"role":"assistant","content":"{\"query\":\"Mechanik\"}"},"finish_reason":"stop"}]}
+            """, failuresBeforeSuccess: 1);
+        using var http = new HttpClient(handler);
+        using var client = new LmStudioClient(
+            http,
+            context.WrappedOptions,
+            new DpapiSecretStore(context.WrappedOptions),
+            NullLogger<LmStudioClient>.Instance);
+        using var schemaDocument = JsonDocument.Parse(
+            "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}");
+
+        var result = await client.CompleteChatAsync(
+            "qwen3-coder-next",
+            [new LmChatMessage("user", "Suche im Web.")],
+            [new LmToolDefinition("web.search", "Suche", schemaDocument.RootElement.Clone())],
+            modelRole: "code",
+            requireToolCall: true,
+            requiredToolName: "web.search");
+
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("web.search", call.Name);
+        Assert.Equal(2, handler.RequestCount);
+        Assert.Equal("/v1/chat/completions", handler.RequestPath);
     }
 
     [Fact]
@@ -355,15 +1524,11 @@ public sealed class LmStudioClientTests
         using var context = new TestServerContext();
         var handler = new ResidentCodingModelHandler(modelId, expectedInstanceId);
         using var http = new HttpClient(handler);
-        var cliLoader = new LmStudioCliModelLoader(
-            context.WrappedOptions,
-            NullLogger<LmStudioCliModelLoader>.Instance);
         using var client = new LmStudioClient(
             http,
             context.WrappedOptions,
             new DpapiSecretStore(context.WrappedOptions),
-            NullLogger<LmStudioClient>.Instance,
-            cliLoader);
+            NullLogger<LmStudioClient>.Instance);
         var loadingNotifications = 0;
 
         var first = await client.EnsureModelPreparedAsync(
@@ -397,12 +1562,11 @@ public sealed class LmStudioClientTests
         using var context = new TestServerContext();
         var handler = new RecordingHandler("""
             {
-              "status": "completed",
-              "output": [{
-                "type": "message",
-                "content": [{ "type": "output_text", "text": "GO_SESSION_TITLE: Fertig\n\nErledigt" }]
+              "choices": [{
+                "message": { "role": "assistant", "content": "Erledigt" },
+                "finish_reason": "stop"
               }],
-              "usage": { "input_tokens": 20, "output_tokens": 4 }
+              "usage": { "prompt_tokens": 20, "completion_tokens": 4 }
             }
             """);
         using var http = new HttpClient(handler);
@@ -432,12 +1596,11 @@ public sealed class LmStudioClientTests
         using var context = new TestServerContext();
         var handler = new RecordingHandler("""
             {
-              "status": "completed",
-              "output": [{
-                "type": "message",
-                "content": [{ "type": "output_text", "text": "Erledigt" }]
+              "choices": [{
+                "message": { "role": "assistant", "content": "Erledigt" },
+                "finish_reason": "stop"
               }],
-              "usage": { "input_tokens": 20, "output_tokens": 4 }
+              "usage": { "prompt_tokens": 20, "completion_tokens": 4 }
             }
             """);
         using var http = new HttpClient(handler);
@@ -471,12 +1634,11 @@ public sealed class LmStudioClientTests
         using var context = new TestServerContext();
         var handler = new RecordingHandler("""
             {
-              "status": "completed",
-              "output": [{
-                "type": "message",
-                "content": [{ "type": "output_text", "text": "Erledigt" }]
+              "choices": [{
+                "message": { "role": "assistant", "content": "Erledigt" },
+                "finish_reason": "stop"
               }],
-              "usage": { "input_tokens": 20, "output_tokens": 4 }
+              "usage": { "prompt_tokens": 20, "completion_tokens": 4 }
             }
             """);
         using var http = new HttpClient(handler);
@@ -495,7 +1657,7 @@ public sealed class LmStudioClientTests
 
         using var request = JsonDocument.Parse(Assert.IsType<string>(handler.RequestBody));
         var root = request.RootElement;
-        Assert.Equal("none", root.GetProperty("reasoning").GetProperty("effort").GetString());
+        Assert.Equal("off", root.GetProperty("reasoning_effort").GetString());
         Assert.False(root.TryGetProperty("thinking_budget_tokens", out _));
     }
 
@@ -505,12 +1667,11 @@ public sealed class LmStudioClientTests
         using var context = new TestServerContext();
         var handler = new RecordingHandler("""
             {
-              "status": "completed",
-              "output": [{
-                "type": "message",
-                "content": [{ "type": "output_text", "text": "Erledigt" }]
+              "choices": [{
+                "message": { "role": "assistant", "content": "Erledigt" },
+                "finish_reason": "stop"
               }],
-              "usage": { "input_tokens": 20, "output_tokens": 4 }
+              "usage": { "prompt_tokens": 20, "completion_tokens": 4 }
             }
             """);
         using var http = new HttpClient(handler);
@@ -530,7 +1691,7 @@ public sealed class LmStudioClientTests
         var root = request.RootElement;
         Assert.Equal(1.0, root.GetProperty("temperature").GetDouble(), 3);
         Assert.Equal(1.0, root.GetProperty("top_p").GetDouble(), 3);
-        Assert.Equal("high", root.GetProperty("reasoning").GetProperty("effort").GetString());
+        Assert.Equal("high", root.GetProperty("reasoning_effort").GetString());
         Assert.False(root.TryGetProperty("top_k", out _));
     }
 
@@ -752,8 +1913,8 @@ public sealed class LmStudioClientTests
             item.GetProperty("role").GetString() == "tool" && item.GetProperty("tool_call_id").GetString() == "call_previous");
     }
 
-    [Fact]
-    public async Task Qwen38CompatibilityFallbackKeepsBoundedOnReasoning()
+    [Fact(Skip = "Coding now uses Chat Completions directly; no Responses compatibility probe is performed.")]
+    public async Task CodingResponsesCompatibilityFailureFallsBackToToolFreeChatCompletion()
     {
         using var context = new TestServerContext();
         var handler = new ResponsesCompatibilityHandler();
@@ -764,18 +1925,105 @@ public sealed class LmStudioClientTests
             new DpapiSecretStore(context.WrappedOptions),
             NullLogger<LmStudioClient>.Instance);
 
-        _ = await client.CompleteChatAsync(
+        var result = await client.CompleteChatAsync(
             "qwen3.8-27b",
             [new LmChatMessage("user", "Arbeite am Repository weiter.")],
             [],
             modelRole: "code");
 
-        using var request = JsonDocument.Parse(handler.RequestBodies[1]);
+        Assert.Equal("Kompatible Antwort", result.Content);
+        Assert.Empty(result.ToolCalls);
+        Assert.Equal(["/v1/responses", "/v1/chat/completions"], handler.RequestPaths);
+        using var request = JsonDocument.Parse(handler.RequestBodies[0]);
         var root = request.RootElement;
         Assert.Equal("qwen3.8-27b", root.GetProperty("model").GetString());
-        Assert.False(root.TryGetProperty("reasoning_effort", out _));
-        Assert.Equal(4_096, root.GetProperty("thinking_budget_tokens").GetInt32());
         Assert.Equal(20, root.GetProperty("top_k").GetInt32());
+        using var fallbackRequest = JsonDocument.Parse(handler.RequestBodies[1]);
+        Assert.False(fallbackRequest.RootElement.TryGetProperty("tools", out _));
+    }
+
+    private sealed class StreamingResponsesHandler(string responseEvents) : HttpMessageHandler
+    {
+        public string? RequestBody { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestBody = request.Content is null
+                ? null
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(responseEvents, Encoding.UTF8, "text/event-stream"),
+            };
+        }
+    }
+
+    private sealed class QueuedStreamingResponsesHandler(params string[] responseEvents) : HttpMessageHandler
+    {
+        private readonly Queue<string> _responses = new(responseEvents);
+
+        public int RequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            if (_responses.Count == 0)
+            {
+                throw new InvalidOperationException("No queued streaming response remains.");
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(_responses.Dequeue(), Encoding.UTF8, "text/event-stream"),
+            });
+        }
+    }
+
+    private sealed class TerminatedResponsesThenChatCompletionsHandler : HttpMessageHandler
+    {
+        public int ResponsesRequestCount { get; private set; }
+
+        public int ChatCompletionsRequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            if (request.RequestUri?.AbsolutePath == "/v1/responses")
+            {
+                ResponsesRequestCount++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"terminated before complete tool call\"}}}\n\n",
+                        Encoding.UTF8,
+                        "text/event-stream"),
+                });
+            }
+
+            if (request.RequestUri?.AbsolutePath == "/v1/chat/completions")
+            {
+                ChatCompletionsRequestCount++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""
+                        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_search","function":{"name":"web.search","arguments":""}}]}}]}
+
+                        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":\"Mechanik\"}"}}]}}]}
+
+                        data: {"choices":[{"finish_reason":"tool_calls","delta":{}}],"usage":{"prompt_tokens":40,"completion_tokens":12}}
+
+                        data: [DONE]
+
+                        """, Encoding.UTF8, "text/event-stream"),
+                });
+            }
+
+            throw new InvalidOperationException($"Unexpected LM Studio path: {request.RequestUri?.AbsolutePath}");
+        }
     }
 
     private sealed class RecordingHandler(string responseJson, int failuresBeforeSuccess = 0) : HttpMessageHandler
@@ -802,6 +2050,56 @@ public sealed class LmStudioClientTests
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(responseJson, Encoding.UTF8, "application/json"),
+            };
+        }
+    }
+
+    private sealed class SequenceRecordingHandler(params string[] responseJson) : HttpMessageHandler
+    {
+        private readonly Queue<string> _responses = new(responseJson);
+
+        public List<string> RequestBodies { get; } = [];
+
+        public List<string> RequestPaths { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestPaths.Add(request.RequestUri?.AbsolutePath ?? string.Empty);
+            RequestBodies.Add(await request.Content!.ReadAsStringAsync(cancellationToken));
+            if (!_responses.TryDequeue(out var response))
+            {
+                throw new InvalidOperationException("The test received more requests than configured responses.");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(response, Encoding.UTF8, "application/json"),
+            };
+        }
+    }
+
+    private sealed class ResponseSequenceHandler(
+        params (HttpStatusCode StatusCode, string Body)[] configuredResponses) : HttpMessageHandler
+    {
+        private readonly Queue<(HttpStatusCode StatusCode, string Body)> _responses = new(configuredResponses);
+
+        public List<string> RequestBodies { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestBodies.Add(await request.Content!.ReadAsStringAsync(cancellationToken));
+            if (!_responses.TryDequeue(out var configuredResponse))
+            {
+                throw new InvalidOperationException("The test received more requests than configured responses.");
+            }
+
+            return new HttpResponseMessage(configuredResponse.StatusCode)
+            {
+                Content = new StringContent(configuredResponse.Body, Encoding.UTF8, "application/json"),
             };
         }
     }
@@ -833,6 +2131,24 @@ public sealed class LmStudioClientTests
 
             if (request.RequestUri?.AbsolutePath == "/v1/chat/completions")
             {
+                using var requestDocument = JsonDocument.Parse(RequestBodies[^1]);
+                if (!requestDocument.RootElement.TryGetProperty("tools", out _))
+                {
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("""
+                            {
+                              "choices": [{
+                                "message": {
+                                  "role": "assistant",
+                                  "content": "Kompatible Antwort"
+                                }
+                              }],
+                              "usage": { "prompt_tokens": 9, "completion_tokens": 3 }
+                            }
+                            """, Encoding.UTF8, "application/json"),
+                    };
+                }
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent("""
@@ -1101,5 +2417,102 @@ public sealed class LmStudioClientTests
         {
             Content = new StringContent(value, Encoding.UTF8, "application/json"),
         };
+    }
+
+    private sealed class RecordingNativeAgentClient : ILmStudioNativeAgentClient
+    {
+        private readonly Queue<Func<LmStudioNativeAgentRequest, LmChatResult>> _responses;
+
+        public RecordingNativeAgentClient(
+            params Func<LmStudioNativeAgentRequest, LmChatResult>[] responses)
+        {
+            _responses = new Queue<Func<LmStudioNativeAgentRequest, LmChatResult>>(responses);
+        }
+
+        public List<LmStudioNativeAgentRequest> Requests { get; } = [];
+
+        public LmStudioModelList Models { get; set; } = new([]);
+
+        public LmStudioModelPreparation LoadResult { get; set; } =
+            new("native-test", WasAlreadyLoaded: false);
+
+        public IReadOnlyList<IReadOnlyList<double>> EmbeddingResult { get; set; } = [];
+
+        public string VisionResult { get; set; } = "Vision";
+
+        public int ModelCatalogRequests { get; private set; }
+
+        public int LoadRequests { get; private set; }
+
+        public int UnloadRequests { get; private set; }
+
+        public int EmbeddingRequests { get; private set; }
+
+        public int VisionRequests { get; private set; }
+
+        public Task<LmStudioModelList> GetModelsAsync(CancellationToken cancellationToken = default)
+        {
+            ModelCatalogRequests++;
+            return Task.FromResult(Models);
+        }
+
+        public Task<LmStudioModelPreparation> LoadModelAsync(
+            string modelId,
+            int contextLength,
+            bool isEmbedding,
+            CancellationToken cancellationToken = default)
+        {
+            LoadRequests++;
+            return Task.FromResult(LoadResult);
+        }
+
+        public Task<int> UnloadModelsAsync(
+            IReadOnlyCollection<string> identifiers,
+            bool unloadAll,
+            IReadOnlyCollection<string>? preserveModelIds = null,
+            CancellationToken cancellationToken = default)
+        {
+            UnloadRequests++;
+            return Task.FromResult(identifiers.Count);
+        }
+
+        public Task<IReadOnlyList<IReadOnlyList<double>>> CreateEmbeddingsAsync(
+            string modelId,
+            IReadOnlyList<string> inputs,
+            CancellationToken cancellationToken = default)
+        {
+            EmbeddingRequests++;
+            return Task.FromResult(EmbeddingResult);
+        }
+
+        public Task<string> AnalyzeImagesAsync(
+            string modelId,
+            string prompt,
+            IReadOnlyList<string> imagePaths,
+            CancellationToken cancellationToken = default)
+        {
+            VisionRequests++;
+            return Task.FromResult(VisionResult);
+        }
+
+        public async Task<LmChatResult> CompleteAsync(
+            LmStudioNativeAgentRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Requests.Add(request);
+            if (request.Progress is not null)
+            {
+                await request.Progress(
+                    new LmStudioNativeAgentProgress(
+                        "toolCallGenerationNameReceived",
+                        request.RequiredToolName),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            if (_responses.Count == 0)
+            {
+                throw new InvalidOperationException("No native SDK response remains.");
+            }
+            return _responses.Dequeue()(request);
+        }
     }
 }

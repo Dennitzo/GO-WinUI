@@ -405,7 +405,6 @@ public sealed class CodingRunTraceServiceTests
     [InlineData("git.diff", "git diff --no-ext-diff", "inspect")]
     [InlineData("dotnet.build", "dotnet build Demo.sln --nologo", "build")]
     [InlineData("dotnet.test", "dotnet test Demo.sln --nologo", "test")]
-    [InlineData("document.renderPdf", "GO-Preset document.renderPdf Demo.sln", "build")]
     [InlineData("repository.verify", "GO-Preset repository.verify Demo.sln", "verify")]
     public void EveryProcessPresetCreatesAPowerShellConsole(string preset, string expectedCommand, string expectedPurpose)
     {

@@ -18,7 +18,6 @@ public sealed class SettingsLoggingAndBackupTests
         var settings = environment.Get<ISettingsStore>();
         await settings.SaveAsync(new AppSettings
         {
-            LmStudioBaseUrl = "http://localhost:1234/v1/",
             SelectedModel = null,
             AccentColor = "#f4b860",
             BackgroundColor = "#34313b",
@@ -28,7 +27,6 @@ public sealed class SettingsLoggingAndBackupTests
         });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal("http://localhost:1234/v1", restored.LmStudioBaseUrl);
         Assert.Equal(AppSettings.DefaultSelectedModel, restored.SelectedModel);
         Assert.Equal(AppSettings.DefaultSelectedCodingModel, restored.SelectedCodingModel);
         Assert.Equal("#F4B860", restored.AccentColor);

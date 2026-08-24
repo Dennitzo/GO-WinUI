@@ -56,14 +56,13 @@ public static class GoAiServerHostExtensions
         services.AddSingleton<UtteranceIntentService>();
         services.AddSingleton<WorkerOrchestrator>();
         services.AddSingleton<LiveCaptionService>();
-        services.AddSingleton<LmStudioCliModelLoader>();
+        services.AddSingleton<ILmStudioNativeAgentClient, LmStudioNativeAgentClient>();
         services.AddHttpClient();
         services.AddSingleton(static provider => new LmStudioClient(
-            provider.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(LmStudioClient)),
             provider.GetRequiredService<IOptions<GoAiServerOptions>>(),
             provider.GetRequiredService<DpapiSecretStore>(),
             provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<LmStudioClient>>(),
-            provider.GetRequiredService<LmStudioCliModelLoader>()));
+            provider.GetRequiredService<ILmStudioNativeAgentClient>()));
         services.AddHttpClient<WorkerApiClient>();
         services.AddSingleton<RunProcessor>();
         if (includeHostedServices)

@@ -278,27 +278,7 @@ public sealed record DocumentIngestResult(
 
 public sealed record LmModel(string Id, string? DisplayName = null, int? ContextLength = null);
 
-public sealed record LmDelta(string Text, string? Reasoning = null, bool IsCompleted = false);
-
-public sealed record ChatStreamUpdate(
-    Guid SessionId,
-    Guid MessageId,
-    string Delta,
-    string Content,
-    MessageStatus Status,
-    int? EstimatedContextTokens = null,
-    int? ContextLimit = null,
-    bool ContextWasTruncated = false,
-    string? ContextNotice = null);
-
 public sealed record LmChatMessage(ChatRole Role, string Content);
-
-public sealed record LmChatRequest(
-    string Model,
-    IReadOnlyList<LmChatMessage> Messages,
-    string? ReasoningEffort = null,
-    int? MaxOutputTokens = null,
-    bool RequireJsonObject = false);
 
 public sealed record ContextBuildRequest(
     string SystemPrompt,
@@ -343,7 +323,6 @@ public sealed record AppSettings
     public string? GoAiConnectionName { get; init; } = "GO AI Server";
     public string? LocalToolWorkspacePath { get; init; }
     public string LiveCaptionLanguage { get; init; } = "auto";
-    public string LmStudioBaseUrl { get; init; } = "http://127.0.0.1:1234/v1";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
     public string SelectedCodingModel { get; init; } = DefaultSelectedCodingModel;
     public string ReasoningEffort { get; init; } = "auto";

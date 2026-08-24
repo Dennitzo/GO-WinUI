@@ -13,6 +13,7 @@ public enum ConversationProfile
 {
     General,
     Audiobook,
+    ContextPreparation,
 }
 
 public enum RunState
@@ -145,6 +146,7 @@ public static class RunEventTypes
     public const string QueueChanged = "queue.changed";
     public const string ModelSelected = "model.selected";
     public const string ModelLoading = "model.loading";
+    public const string ModelGeneration = "model.generation";
     public const string ModelFallback = "model.fallback";
     public const string ProviderFallback = "provider.fallback";
     public const string ContextChanged = "context.changed";
@@ -168,6 +170,12 @@ public sealed record ModelLoadingEvent(
     string State,
     int RequestedContextLength,
     int EffectiveContextLength);
+
+public sealed record ModelGenerationEvent(
+    string State,
+    string? ToolName = null,
+    int? ArgumentCharacters = null,
+    double? PromptProgress = null);
 
 public sealed record ContextChangedEvent(
     int EstimatedInputTokens,

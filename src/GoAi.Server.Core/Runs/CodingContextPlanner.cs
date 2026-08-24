@@ -24,8 +24,9 @@ public static class CodingContextPlanner
         ArgumentNullException.ThrowIfNull(source);
         var safetyTokens = Math.Min(8_192, Math.Max(2_048, contextLength / 16));
         var budget = Math.Max(1_024, contextLength - maximumOutputTokens - safetyTokens);
-        var messages = source.Select(CompactHistoricalToolArguments).ToArray();
-        var compacted = !messages.SequenceEqual(source);
+        var conversation = CompactRepeatedConversationMessages(source, out var conversationCompacted);
+        var messages = conversation.Select(CompactHistoricalToolArguments).ToArray();
+        var compacted = conversationCompacted || !messages.SequenceEqual(conversation);
         var latestUserIndex = Array.FindLastIndex(messages, static message =>
             string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase));
 
@@ -138,6 +139,60 @@ public static class CodingContextPlanner
             }).ToArray();
         return message with { ToolCalls = calls };
     }
+
+    private static List<LmChatMessage> CompactRepeatedConversationMessages(
+        IReadOnlyList<LmChatMessage> source,
+        out bool compacted)
+    {
+        var lastPlainUserMessage = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var index = 0; index < source.Count; index++)
+        {
+            var message = source[index];
+            if (IsPlainMessage(message, "user")
+                && NormalizeConversationContent(message.Content) is { Length: > 0 } content)
+            {
+                lastPlainUserMessage[content] = index;
+            }
+        }
+
+        var result = new List<LmChatMessage>(source.Count);
+        compacted = false;
+        for (var index = 0; index < source.Count; index++)
+        {
+            var message = source[index];
+            if (IsTransientWorkflowStatus(message))
+            {
+                compacted = true;
+                continue;
+            }
+            if (IsPlainMessage(message, "user")
+                && NormalizeConversationContent(message.Content) is { Length: > 0 } content
+                && lastPlainUserMessage.TryGetValue(content, out var lastIndex)
+                && lastIndex != index)
+            {
+                compacted = true;
+                continue;
+            }
+            result.Add(message);
+        }
+        return result;
+    }
+
+    private static bool IsPlainMessage(LmChatMessage message, string role) =>
+        string.Equals(message.Role, role, StringComparison.OrdinalIgnoreCase)
+        && string.IsNullOrWhiteSpace(message.ToolCallId)
+        && message.ToolCalls is not { Count: > 0 };
+
+    private static bool IsTransientWorkflowStatus(LmChatMessage message) =>
+        IsPlainMessage(message, "assistant")
+        && NormalizeConversationContent(message.Content).StartsWith(
+            "**Workflow-Schritt verifiziert**",
+            StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeConversationContent(string? content) =>
+        string.IsNullOrWhiteSpace(content)
+            ? string.Empty
+            : string.Join(' ', content.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     private static LmChatMessage TruncateContent(LmChatMessage message, int maximumCharacters)
     {

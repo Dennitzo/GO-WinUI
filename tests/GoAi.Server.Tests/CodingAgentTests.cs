@@ -261,6 +261,13 @@ public sealed class CodingAgentTests
             successfulToolCount: 3,
             evidencePathCount: 1,
             mutatedPathCount: 1));
+        // PDF generation is a deterministic GO post-processing step and no
+        // longer a completion gate for the model-facing coding loop.
+        Assert.Null(RunProcessor.CodingCompletionBlocker(
+            CodingRequestIntent.Mutation,
+            successfulToolCount: 3,
+            evidencePathCount: 1,
+            mutatedPathCount: 1));
     }
 
     [Fact]
@@ -319,6 +326,106 @@ public sealed class CodingAgentTests
     }
 
     [Fact]
+    public void ContextPlannerRemovesRepeatedCampaignPromptsAndTransientWorkflowNoise()
+    {
+        var messages = new List<LmChatMessage>
+        {
+            new("system", "Coding-Regeln"),
+            new("user", "Erweitere das Lehrbuch autonom."),
+            new("assistant", "### Prozessbericht\n\nErster Fortschritt"),
+            new("assistant", "**Workflow-Schritt verifiziert**\n\nVersuch 1"),
+            new("user", "  Erweitere   das Lehrbuch autonom.  "),
+            new("assistant", "### Prozessbericht\n\nZweiter Fortschritt"),
+        };
+
+        var plan = CodingContextPlanner.Prepare(messages, 262_144, 8_192);
+
+        Assert.True(plan.WasCompacted);
+        Assert.Single(plan.Messages, message => message.Role == "user");
+        Assert.DoesNotContain(
+            plan.Messages,
+            message => message.Content?.Contains("Workflow-Schritt verifiziert", StringComparison.Ordinal) == true);
+        Assert.Contains(plan.Messages, message => message.Content?.Contains("Erster Fortschritt", StringComparison.Ordinal) == true);
+        Assert.Contains(plan.Messages, message => message.Content?.Contains("Zweiter Fortschritt", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void CodingRunCompactionKeepsRequestAnchorAndReplacesToolTurnsWithMemory()
+    {
+        var call = new LmToolCall(
+            "tool-1",
+            ClientToolNames.FileSystemReadText,
+            JsonSerializer.SerializeToElement(new { path = "src/App.xaml.cs" }));
+        var messages = new List<LmChatMessage>
+        {
+            new("system", "Coding-Regeln"),
+            new("system", "Repositorykarte folgt"),
+            new("user", "src/App.xaml.cs\nsrc/MainWindow.xaml"),
+            new("user", "Behebe den UI-Fehler."),
+            new("assistant", ToolCalls: [call]),
+            new("tool", "Dateiinhalt", ToolCallId: "tool-1"),
+            new("assistant", "Zwischenergebnis"),
+        };
+
+        var compacted = RunProcessor.CreateCompactedCodingMessages(messages, "src/App.xaml.cs wurde gelesen.");
+
+        Assert.Equal(5, compacted.Count);
+        Assert.Equal(messages.Take(4), compacted.Take(4));
+        Assert.Equal("system", compacted[^1].Role);
+        Assert.Contains("GO_CODING_RUN_MEMORY", compacted[^1].Content, StringComparison.Ordinal);
+        Assert.Contains("src/App.xaml.cs wurde gelesen.", compacted[^1].Content, StringComparison.Ordinal);
+        Assert.DoesNotContain(compacted, message => string.Equals(message.Role, "tool", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            compacted.SelectMany(message => message.ToolCalls ?? []),
+            toolCall => toolCall.Id == "tool-1");
+    }
+
+    [Theory]
+    [InlineData(true, false, false, false, "Workspace-Evidenz fehlt", true)]
+    [InlineData(true, false, true, false, null, true)]
+    [InlineData(true, false, true, true, null, false)]
+    [InlineData(true, true, true, false, "Verifikation fehlt", false)]
+    [InlineData(false, false, true, false, "Verifikation fehlt", false)]
+    public void CodingToolRequirementEndsOnlyForSynthesisOrCompletedWork(
+        bool codingRun,
+        bool finalSynthesisRequested,
+        bool verificationRequired,
+        bool verificationComplete,
+        string? completionBlocker,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            RunProcessor.ShouldRequireCodingToolCall(
+                codingRun,
+                finalSynthesisRequested,
+                verificationRequired,
+                verificationComplete,
+                completionBlocker));
+    }
+
+    [Fact]
+    public void ContextPreparationUsesTheCodingModelWithoutActivatingTheCodingAgentLoop()
+    {
+        Assert.True(RunProcessor.IsCodingAgentRun("code", ConversationProfile.General));
+        Assert.False(RunProcessor.IsCodingAgentRun("code", ConversationProfile.ContextPreparation));
+
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Verdichte diese Historie.")])],
+            ClientCapabilities: [],
+            AllowedServerTools: [],
+            PreferredCodeModelId: GoAi.Server.Core.Configuration.CodingModelCatalog.Qwen38BId,
+            ConversationProfile: ConversationProfile.ContextPreparation);
+        var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
+
+        Assert.Contains("verdichtest ausschließlich", policy, StringComparison.Ordinal);
+        Assert.Contains("verwende keine Werkzeuge", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("### Prozessbericht", policy, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CodingCatalogAdvertisesLanguageNeutralWorkspaceAndProcessTools()
     {
         var request = new RunRequest(
@@ -332,7 +439,8 @@ public sealed class CodingAgentTests
 
         Assert.Contains(tools, tool => tool.Name == ClientToolNames.WorkspaceMap);
         Assert.Contains(tools, tool => tool.Name == ClientToolNames.FileSystemFindFiles);
-        Assert.Contains(tools, tool => tool.Name == ClientToolNames.FileSystemReadMany);
+        Assert.Contains(tools, tool => tool.Name == ClientToolNames.FileSystemReadText);
+        Assert.DoesNotContain(tools, tool => tool.Name == ClientToolNames.FileSystemReadMany);
         Assert.Contains(tools, tool => tool.Name == ClientToolNames.FileSystemWriteText);
         Assert.Contains(tools, tool => tool.Name == ClientToolNames.FileSystemReplaceText);
         Assert.Contains(tools, tool => tool.Name == ClientToolNames.ProcessRun);
@@ -470,8 +578,8 @@ public sealed class CodingAgentTests
     {
         Assert.Contains("persistente Coding-Agent", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("native strukturierte Tool-Calls", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("web.search und web.fetch", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Suchtreffer sind nur Wegweiser", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.DoesNotContain("web.search", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.DoesNotContain("web.fetch", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("nicht-denkenden Modus", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Unterstelle weder .NET", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Technologie- und Architekturadaption", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
@@ -491,7 +599,8 @@ public sealed class CodingAgentTests
         Assert.Contains("Zielgröße nicht selbst als erwarteten Null-", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Numerische Verifikation muss geschlossen fehlschlagen", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("niemals in ein Nullresiduum", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("niemals mehr als vier", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("ausnahmslos höchstens einen nativen Tool-Call", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("beende die Antwort unmittelbar", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("Button.Flyout", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("GO-WinUI", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("Build-Portable.ps1", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);

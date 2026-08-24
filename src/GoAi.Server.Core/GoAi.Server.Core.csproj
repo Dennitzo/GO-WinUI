@@ -11,7 +11,9 @@
     <ProjectReference Include="..\GoAi.Contracts\GoAi.Contracts.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="DocumentFormat.OpenXml" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="PdfPig" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
   </ItemGroup>

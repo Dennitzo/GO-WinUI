@@ -41,8 +41,8 @@ public sealed partial class CodingSolutionPdfExporter(ILogger<CodingSolutionPdfE
                 return output;
             }
 
-            var script = Path.Combine(AppContext.BaseDirectory, "Assets", "Scripts", "export-coding-solution.ps1");
-            var webAssets = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+            var script = ApplicationAssets.ResolvePath("Assets", "Scripts", "export-coding-solution.ps1");
+            var webAssets = ApplicationAssets.ResolvePath("Assets", "Web");
             if (!File.Exists(script) || !Directory.Exists(webAssets))
             {
                 throw new FileNotFoundException("Die lokalen GO-Ressourcen für den Lösungs-PDF-Export fehlen.", script);

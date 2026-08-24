@@ -71,9 +71,6 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
 
     private static AppSettings Normalize(AppSettings settings)
     {
-        var baseUrl = settings.LmStudioBaseUrl.Trim();
-        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
-            baseUrl = "http://127.0.0.1:1234/v1";
         var goAiServerUrl = settings.GoAiServerUrl.Trim();
         if (!Uri.TryCreate(goAiServerUrl, UriKind.Absolute, out var goAiUri)
             || goAiUri.Scheme is not ("http" or "https")
@@ -111,7 +108,6 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
                     : string.IsNullOrWhiteSpace(settings.LiveCaptionLanguage)
                         ? "auto"
                         : settings.LiveCaptionLanguage.Trim(),
-            LmStudioBaseUrl = baseUrl.TrimEnd('/'),
             SelectedModel = string.IsNullOrWhiteSpace(settings.SelectedModel)
                 ? AppSettings.DefaultSelectedModel
                 : settings.SelectedModel.Trim(),

@@ -35,6 +35,34 @@ function Convert-ToFileUri([string]$Path) {
     return ([Uri](Resolve-Path -LiteralPath $Path).Path).AbsoluteUri
 }
 
+function Invoke-EdgeProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$CommandArguments
+    )
+
+    # Chromium can emit harmless diagnostics on stderr while returning exit
+    # code zero. Windows PowerShell otherwise promotes those lines to a
+    # terminating NativeCommandError because this script runs in Stop mode.
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $capturedOutput = (& $Executable @CommandArguments 2>&1 | Out-String)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+
+    return [pscustomobject]@{
+        ExitCode = [int]$exitCode
+        Output = [string]$capturedOutput
+    }
+}
+
 $source = (Resolve-Path -LiteralPath $SourcePath).Path
 $webAssets = (Resolve-Path -LiteralPath $WebAssetsPath).Path
 $output = [IO.Path]::GetFullPath($OutputPath)
@@ -55,8 +83,10 @@ $titleBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($title))
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('GO-SolutionPdf-' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
 $htmlPath = Join-Path $temporaryRoot 'solution.html'
-$profilePath = Join-Path $temporaryRoot 'edge-profile'
-[IO.Directory]::CreateDirectory($profilePath) | Out-Null
+$validationProfilePath = Join-Path $temporaryRoot 'edge-profile-validation'
+$printProfilePath = Join-Path $temporaryRoot 'edge-profile-print'
+[IO.Directory]::CreateDirectory($validationProfilePath) | Out-Null
+[IO.Directory]::CreateDirectory($printProfilePath) | Out-Null
 $temporaryPdf = Join-Path $outputDirectory ('.' + [IO.Path]::GetFileNameWithoutExtension($output) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp.pdf')
 $backupPdf = Join-Path $outputDirectory ('.' + [IO.Path]::GetFileNameWithoutExtension($output) + '.' + [Guid]::NewGuid().ToString('N') + '.bak.pdf')
 
@@ -116,17 +146,18 @@ try {
         '--no-first-run',
         '--allow-file-access-from-files',
         '--run-all-compositor-stages-before-draw',
-        '--virtual-time-budget=5000',
-        ('--user-data-dir=' + $profilePath)
+        '--virtual-time-budget=5000'
     )
     $dumpArguments = $commonArguments + @(
+        ('--user-data-dir=' + $validationProfilePath),
         '--dump-dom',
         ([Uri]$htmlPath).AbsoluteUri
     )
 
-    $renderedDom = (& $edge @dumpArguments 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Microsoft Edge hat die KaTeX-Prüfung mit Exit-Code $LASTEXITCODE beendet."
+    $validationResult = Invoke-EdgeProcess -Executable $edge -CommandArguments $dumpArguments
+    $renderedDom = $validationResult.Output
+    if ($validationResult.ExitCode -ne 0) {
+        throw "Microsoft Edge hat die KaTeX-Prüfung mit Exit-Code $($validationResult.ExitCode) beendet."
     }
     if ($renderedDom -notmatch 'data-go-pdf-ready="true"') {
         throw 'Der GO-Markdown-/KaTeX-Renderer wurde vor der PDF-Erzeugung nicht vollständig initialisiert.'
@@ -136,14 +167,15 @@ try {
     }
 
     $arguments = $commonArguments + @(
+        ('--user-data-dir=' + $printProfilePath),
         '--no-pdf-header-footer',
         ('--print-to-pdf=' + $temporaryPdf),
         ([Uri]$htmlPath).AbsoluteUri
     )
 
-    & $edge @arguments | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Microsoft Edge hat die PDF-Erzeugung mit Exit-Code $LASTEXITCODE beendet."
+    $printResult = Invoke-EdgeProcess -Executable $edge -CommandArguments $arguments
+    if ($printResult.ExitCode -ne 0) {
+        throw "Microsoft Edge hat die PDF-Erzeugung mit Exit-Code $($printResult.ExitCode) beendet."
     }
     if (-not (Test-Path -LiteralPath $temporaryPdf -PathType Leaf)) {
         throw 'Microsoft Edge hat keine PDF-Datei erzeugt.'

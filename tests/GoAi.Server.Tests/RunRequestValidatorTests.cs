@@ -48,7 +48,7 @@ public sealed class RunRequestValidatorTests
             GoAiProtocol.Version,
             RunMode.Code,
             [new RunMessage("user", [new ContentPart("text", "Analysiere und behebe das Repository")])],
-            ClientCapabilities: ["filesystem", "code", "process"],
+            ClientCapabilities: ["filesystem", "code", "process", "pdf"],
             Limits: new RunLimits(8_192, 262_144, 14_400),
             Workspace: new WorkspaceDescriptor(
                 "GO-WinUI",
@@ -204,5 +204,25 @@ public sealed class RunRequestValidatorTests
             request with { Mode = RunMode.Code }));
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
             request with { AllowedServerTools = null }));
+    }
+
+    [Fact]
+    public void ContextPreparationCanUseTheSelectedCodingModelWithoutCodingTools()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Verdichte den Verlauf.")])],
+            ClientCapabilities: [],
+            AllowedServerTools: [],
+            PreferredCodeModelId: CodingModelCatalog.Qwen38BId,
+            ConversationProfile: ConversationProfile.ContextPreparation);
+
+        RunRequestValidator.Validate(request);
+
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
+            request with { ClientCapabilities = ["code"] }));
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
+            request with { AllowedServerTools = ["web.search"] }));
     }
 }

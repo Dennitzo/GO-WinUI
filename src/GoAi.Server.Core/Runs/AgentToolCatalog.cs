@@ -1,6 +1,7 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Models;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace GoAi.Server.Core.Runs;
 
@@ -11,7 +12,12 @@ public sealed class AgentToolCatalog
         "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
         "image.generate", "math.evaluate", "context.embed", "context.retrieve",
     ];
-    private static readonly string[] CodingResearchTools = ["web.search", "web.fetch"];
+    // Web research remains available to the dedicated general-chat workflow.
+    // It is deliberately excluded from native coding predictions because an
+    // isolated SDK qualification reproduces an LM Studio channel termination
+    // for these tools while multi-round workspace tools remain stable.
+    private static readonly HashSet<string> CodingExcludedServerTools =
+        new(["web.search", "web.fetch"], StringComparer.Ordinal);
 
     private readonly Dictionary<string, AgentToolSpec> _tools = CreateTools();
 
@@ -25,14 +31,11 @@ public sealed class AgentToolCatalog
             {
                 throw new ArgumentException($"Unknown or unavailable server tool: {name}");
             }
+            if (request.Mode == RunMode.Code && CodingExcludedServerTools.Contains(name))
+            {
+                continue;
+            }
             names.Add(name);
-        }
-        // Web research is a built-in read-only capability of every coding run.
-        // Keep this server-side guarantee for older GO clients that still send an
-        // explicit empty or incomplete server-tool allow-list.
-        if (request.Mode == RunMode.Code)
-        {
-            names.UnionWith(CodingResearchTools);
         }
         var capabilities = request.ClientCapabilities ?? [];
         if (HasCapability(capabilities, "documents"))
@@ -48,7 +51,6 @@ public sealed class AgentToolCatalog
                 ClientToolNames.FileSystemStat,
                 ClientToolNames.FileSystemFindFiles,
                 ClientToolNames.FileSystemReadText,
-                ClientToolNames.FileSystemReadMany,
                 ClientToolNames.FileSystemSearch,
                 ClientToolNames.FileSystemWriteText,
                 ClientToolNames.FileSystemReplaceText,
@@ -64,6 +66,8 @@ public sealed class AgentToolCatalog
             names.Add(ClientToolNames.ProcessRun);
             names.Add(ClientToolNames.LeanProof);
         }
+        // PDF is intentionally not exposed as a model tool. GO renders a
+        // requested manuscript deterministically after workspace changes.
         if (HasCapability(capabilities, "bricscad"))
         {
             names.UnionWith(
@@ -299,7 +303,7 @@ public sealed class AgentToolCatalog
         {
             Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz.", ToolRiskClass.ReadOnly, SearchSchema()),
             Server("youtube.search", "Suche YouTube; ohne API-Key wird ein sichtbar gekennzeichneter SearXNG-Fallback verwendet.", ToolRiskClass.ReadOnly, SearchSchema()),
-            Server("web.fetch", "Rufe eine öffentliche HTTP(S)-Quelle SSRF-geschützt ab. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, Schema("url", ("url", "string"))),
+            Server("web.fetch", "Rufe eine öffentliche HTTP(S)-Quelle SSRF-geschützt ab und extrahiere Text aus Webseiten, PDF-, DOCX- und RTF-Dokumenten. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, Schema("url", ("url", "string"))),
             Server("media.inspect", "Extrahiere sichere Metadaten, Audio und zeitcodierte Frames eines Uploads.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem Vision-Modell.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("image.generate", "Erzeuge Bilder mit Z-Image-Turbo.", ToolRiskClass.ReadOnly, ImageSchema()),
@@ -322,7 +326,7 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.FileSystemProposePatch, "Schlage einen Patch für eine vorhandene Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "patch"], ("path", "string"), ("patch", "string"))),
             Client(ClientToolNames.FileSystemProposeCreate, "Schlage das Erstellen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "content"], ("path", "string"), ("content", "string"))),
             Client(ClientToolNames.FileSystemProposeDelete, "Schlage das Löschen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema("path", ("path", "string"))),
-            Client(ClientToolNames.ProcessRunPreset, "Führe ein versioniertes Build-, Test-, Start-, Git- oder Dokument-Preset im freigegebenen Workspace aus. Nutze document.renderPdf für KaTeX-kompatible PDF-Erzeugung aus Markdown/Text/TeX/JSON statt eigener HTML/CDN-PDF-Skripte.", ToolRiskClass.Process, ProcessSchema()),
+            Client(ClientToolNames.ProcessRunPreset, "Führe ein versioniertes Build-, Test-, Start- oder Git-Preset im freigegebenen Workspace aus. PDF-Artefakte werden von GO deterministisch nach einer Quellenänderung erzeugt.", ToolRiskClass.Process, ProcessSchema()),
             Client(ClientToolNames.ProcessRun, "Führe ein direktes Programm mit getrennter Argumentliste und Workspace-Arbeitsverzeichnis für Analyse, Setup, Test, Build oder Smoke-Start aus.", ToolRiskClass.Process, ProcessRunSchema()),
             Client(ClientToolNames.LeanProof, "Prüfe freiwillig einen mathematischen oder algorithmischen Beweis mit der gepinnten lokalen Lean-/Lake-Toolchain. Verwende niemals process.run für lean oder lake. check kompiliert eine Datei; verify kompiliert und prüft die Axiomabhängigkeiten des exakt deklarierten Theorems. Ein Dateiname erzeugt keinen Lean-Namespace.", ToolRiskClass.Process, LeanProofSchema()),
             Client(ClientToolNames.BricsCadGeometryQuery, "Lese freigegebene BricsCAD-Geometrie.", ToolRiskClass.ReadOnly, CadSchema()),
@@ -404,7 +408,7 @@ public sealed class AgentToolCatalog
         + name + "\"],\"additionalProperties\":false}");
 
     private static JsonElement ProcessSchema() => Parse("""
-        {"type":"object","properties":{"preset":{"type":"string","enum":["git.status","git.diff","dotnet.build","dotnet.test","repository.build","repository.verify","repository.start","code.run","code.test","document.renderPdf"]},"target":{"type":"string","description":"Optionaler relativer Datei-, Projekt- oder Solutionpfad. Bei document.renderPdf ist target die Markdown-/Text-/TeX-/JSON-Quelldatei, aus der GO eine gleichnamige A4-PDF mit lokal gerendertem KaTeX erzeugt."}},"required":["preset"],"additionalProperties":false}
+        {"type":"object","properties":{"preset":{"type":"string","enum":["git.status","git.diff","dotnet.build","dotnet.test","repository.build","repository.verify","repository.start","code.run","code.test"]},"target":{"type":"string","description":"Optionaler relativer Datei-, Projekt- oder Solutionpfad."}},"required":["preset"],"additionalProperties":false}
         """);
 
     private static JsonElement ProcessRunSchema() => Parse("""

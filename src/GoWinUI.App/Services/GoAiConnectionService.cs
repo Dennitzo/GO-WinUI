@@ -30,10 +30,22 @@ public sealed class GoAiConnectionService(
         new EventId(5200, nameof(ConnectionFailed)),
         "GO AI Server connection check failed ({FailureKind}).");
     private readonly object _connectionModeSync = new();
+    private Func<HttpMessageHandler>? _httpHandlerFactory;
     private readonly List<CancellationTokenSource> _retiredModeCancellations = [];
     private CancellationTokenSource? _connectionModeCancellation =
         settings.Current.IsAiConnectionEnabled ? new CancellationTokenSource() : null;
     private bool _disposed;
+
+    internal GoAiConnectionService(
+        SettingsCoordinator settings,
+        IAiSecretStore secrets,
+        ILogger<GoAiConnectionService> logger,
+        Func<HttpMessageHandler> httpHandlerFactory)
+        : this(settings, secrets, logger)
+    {
+        _httpHandlerFactory = httpHandlerFactory
+            ?? throw new ArgumentNullException(nameof(httpHandlerFactory));
+    }
 
     public async Task<GoAiClient> CreateClientAsync(CancellationToken cancellationToken = default)
     {
@@ -52,12 +64,13 @@ public sealed class GoAiConnectionService(
             throw new InvalidOperationException("Der GO-AI-Server-Schlüssel ist noch nicht gespeichert.");
         }
 
-        var handler = new HttpClientHandler
-        {
-            UseProxy = false,
-            ServerCertificateCustomValidationCallback = (_, certificate, chain, errors) =>
-                ValidateCertificate(certificate, chain, errors),
-        };
+        HttpMessageHandler handler = _httpHandlerFactory?.Invoke()
+            ?? new HttpClientHandler
+            {
+                UseProxy = false,
+                ServerCertificateCustomValidationCallback = (_, certificate, chain, errors) =>
+                    ValidateCertificate(certificate, chain, errors),
+            };
         var modeHandler = new ConnectionModeHandler(handler, connectionModeToken);
         var httpClient = new HttpClient(modeHandler, disposeHandler: true)
         {
