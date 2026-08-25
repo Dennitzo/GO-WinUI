@@ -13,6 +13,7 @@ public static class RunRequestValidator
         "bricscad",
         "screenCapture",
         "documents",
+        "documentIo",
         "pdf",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)

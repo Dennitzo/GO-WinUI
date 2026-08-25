@@ -308,19 +308,18 @@ public sealed record WindowPlacement(
 
 public sealed record AppSettings
 {
-    public const string DefaultSelectedModel = "openai/gpt-oss-20b";
-    public const string DefaultSelectedCodingModel = "qwen3.8-27b";
+    public const int CurrentVersion = 14;
+    public const string DefaultSelectedModel = "gpt-oss-120b";
+    public const string DefaultSelectedCodingModel = "qwen3-coder-next-q8_0";
     public const string DefaultAccentColor = "#A970FF";
     public const string DefaultBackgroundColor = "#6B6872";
     public const int MaximumRecentActivityTextLength = 180;
 
-    public int Version { get; init; } = 11;
-    public bool IsAiConnectionEnabled { get; init; }
+    public int Version { get; init; } = CurrentVersion;
+    public bool IsAiConnectionEnabled { get; init; } = true;
     public AiProviderKind AiProvider { get; init; } = AiProviderKind.GoAiServer;
-    public string GoAiServerUrl { get; init; } = "https://192.168.0.67:8443";
+    public string GoAiServerUrl { get; init; } = "http://192.168.0.67:8080";
     public string GoAiProtocolVersion { get; init; } = "1.0";
-    public string? GoAiCaFingerprint { get; init; }
-    public string? GoAiConnectionName { get; init; } = "GO AI Server";
     public string? LocalToolWorkspacePath { get; init; }
     public string LiveCaptionLanguage { get; init; } = "auto";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;

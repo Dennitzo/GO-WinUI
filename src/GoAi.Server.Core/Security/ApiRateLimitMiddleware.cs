@@ -10,6 +10,8 @@ namespace GoAi.Server.Core.Security;
 public sealed class ApiRateLimitMiddleware
 {
     private const int GeneralRequestsPerMinute = 240;
+    private const int StatusRequestsPerMinute = 1_200;
+    private const int RunControlRequestsPerMinute = 1_200;
     private const int SpeechRequestsPerMinute = 1_200;
     private const int ArtifactRequestsPerMinute = 1_200;
     private static readonly PathString[] AnonymousPaths =
@@ -34,11 +36,12 @@ public sealed class ApiRateLimitMiddleware
             return;
         }
 
-        var presented = context.Request.Headers[GoAiHeaders.ApiKey].FirstOrDefault()
-            ?? context.Request.Headers.Authorization.FirstOrDefault()
-            ?? context.Connection.RemoteIpAddress?.ToString()
-            ?? "unknown";
-        var policy = ResolvePolicy(context.Request.Path);
+        var clientId = context.Request.Headers[GoAiHeaders.ClientId].FirstOrDefault();
+        var sourceIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var presented = string.IsNullOrWhiteSpace(clientId)
+            ? sourceIp
+            : $"{sourceIp}:{clientId[..Math.Min(clientId.Length, 128)]}";
+        var policy = ResolvePolicy(context.Request);
         var credentialHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(presented)));
         var partition = $"{credentialHash}:{policy.Name}";
         var now = DateTimeOffset.UtcNow;
@@ -82,8 +85,9 @@ public sealed class ApiRateLimitMiddleware
             context.RequestAborted).ConfigureAwait(false);
     }
 
-    private static RateLimitPolicy ResolvePolicy(PathString path)
+    private static RateLimitPolicy ResolvePolicy(HttpRequest request)
     {
+        var path = request.Path;
         if (path.StartsWithSegments("/v1/audio/speech")
             || path.StartsWithSegments("/v1/audio/live-captions"))
         {
@@ -93,6 +97,23 @@ public sealed class ApiRateLimitMiddleware
         if (path.StartsWithSegments("/v1/artifacts"))
         {
             return new("artifact", ArtifactRequestsPerMinute);
+        }
+
+        if (path.Equals("/v1/capabilities")
+            || path.Equals("/v1/models/status")
+            || path.Equals("/v1/gpu/status")
+            || path.Equals("/v1/services/status"))
+        {
+            return new("status", StatusRequestsPerMinute);
+        }
+
+        // Creating a run remains part of the normal request budget. Polling,
+        // SSE reconnects, cancellation and idempotent client-tool results use a
+        // separate control window so health/status traffic cannot interrupt an
+        // already accepted agent run.
+        if ((path.Value ?? string.Empty).StartsWith("/v1/runs/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new("run-control", RunControlRequestsPerMinute);
         }
 
         return new("general", GeneralRequestsPerMinute);

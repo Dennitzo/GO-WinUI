@@ -1,5 +1,7 @@
 using GoAi.Contracts;
 using GoWinUI.App.Services;
+using GoWinUI.BricsCad.Protocol;
+using GoWinUI.Infrastructure;
 using System.Text.Json;
 
 namespace GoWinUI.Tests;
@@ -10,6 +12,74 @@ public sealed class LocalToolBrokerValidationTests
     private static readonly string[] LeanMainArguments = ["Main.lean"];
     private static readonly string[] VoiceSearchTerms = ["voice", "speech", "SpeechRecognition"];
     private static readonly string[] AllFilesGlob = ["**/*"];
+
+    [Fact]
+    public void SharedDocumentContractsAreAcceptedLocally()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var read = Create(
+            ClientToolNames.DocumentRead,
+            ToolRiskClass.ReadOnly,
+            new
+            {
+                scope = "session",
+                mode = "read",
+                reference = Guid.NewGuid().ToString("D"),
+                startUnit = 2,
+                maximumUnits = 4,
+                maximumCharacters = 12_000,
+            },
+            now);
+        var create = Create(
+            ClientToolNames.DocumentCreate,
+            ToolRiskClass.LocalMutation,
+            new
+            {
+                operation = "appendSection",
+                reference = Guid.NewGuid().ToString("D"),
+                format = "docx",
+                sectionId = "kapitel.zwei",
+                heading = "Kapitel zwei",
+                content = "Begrenzter neuer Abschnitt",
+                expectedSha256 = new string('a', 64),
+            },
+            now);
+
+        LocalToolBroker.ValidateProposal(read, now);
+        LocalToolBroker.ValidateProposal(create, now);
+    }
+
+    [Fact]
+    public void SharedDocumentContractsRejectUnboundedReadsAndUnversionedEdits()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var unboundedRead = Create(
+            ClientToolNames.DocumentRead,
+            ToolRiskClass.ReadOnly,
+            new
+            {
+                scope = "workspace",
+                mode = "read",
+                reference = "bericht.pdf",
+                maximumCharacters = 40_001,
+            },
+            now);
+        var unversionedEdit = Create(
+            ClientToolNames.DocumentCreate,
+            ToolRiskClass.LocalMutation,
+            new
+            {
+                operation = "replaceSection",
+                reference = "bericht.pdf",
+                format = "pdf",
+                sectionId = "ergebnis",
+                content = "Geänderter Abschnitt",
+            },
+            now);
+
+        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(unboundedRead, now));
+        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(unversionedEdit, now));
+    }
 
     [Fact]
     public void CodeRunPresetIsAcceptedWithAWorkspaceRelativeTarget()
@@ -430,6 +500,106 @@ public sealed class LocalToolBrokerValidationTests
     public void ModelWorkspaceAliasesBecomeClientRelativePaths(string input, string expected)
     {
         Assert.Equal(expected, LocalToolBroker.NormalizeWorkspaceAlias(input));
+    }
+
+    [Fact]
+    public void MissingReadPathSuggestionsComeOnlyFromActuallyIndexedTextFiles()
+    {
+        var now = DateTimeOffset.UtcNow;
+        WorkspaceIndexEntry Entry(string path, bool binary = false) => new(
+            path,
+            100,
+            now,
+            new string('a', 64),
+            binary,
+            true,
+            binary ? "binary" : "markdown");
+        WorkspaceIndexEntry[] entries =
+        [
+            Entry("docs/harmonic_oscillator.md"),
+            Entry("chapters/harmonic-oscillator-de.md"),
+            Entry("chapters/thermodynamik.md"),
+            Entry("chapters/harmonic_oscillator.pdf", binary: true),
+            Entry("src/Oscillator.cs"),
+        ];
+
+        var suggestions = LocalToolBroker.FindWorkspacePathSuggestions(
+            "chapters/harmonic_oscillator.md",
+            entries);
+
+        Assert.Equal("docs/harmonic_oscillator.md", suggestions[0]);
+        Assert.Contains("chapters/harmonic-oscillator-de.md", suggestions);
+        Assert.Contains("chapters/thermodynamik.md", suggestions);
+        Assert.DoesNotContain("chapters/harmonic_oscillator.pdf", suggestions);
+        Assert.All(suggestions, path => Assert.Contains(entries, entry => entry.Path == path));
+    }
+
+    [Fact]
+    public void MissingReadPathWithoutEvidenceDoesNotInventASuggestion()
+    {
+        WorkspaceIndexEntry[] entries =
+        [
+            new(
+                "src/App.cs",
+                100,
+                DateTimeOffset.UtcNow,
+                new string('a', 64),
+                false,
+                true,
+                "csharp"),
+        ];
+
+        var suggestions = LocalToolBroker.FindWorkspacePathSuggestions(
+            "chapters/harmonic_oscillator.md",
+            entries);
+
+        Assert.Empty(suggestions);
+    }
+
+    [Fact]
+    public async Task MissingReadTextReturnsStructuredExistingCandidatesToTheAgent()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "missing-path-test", Guid.NewGuid().ToString("N"));
+        var chapterDirectory = Path.Combine(root, "chapters");
+        Directory.CreateDirectory(chapterDirectory);
+        await File.WriteAllTextAsync(Path.Combine(chapterDirectory, "harmonic-oscillator-de.md"), "# Harmonischer Oszillator");
+        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions
+        {
+            DataDirectory = Path.Combine(root, ".go-test-cache"),
+        });
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            var broker = new LocalToolBroker(
+                connection: null!,
+                settings: null!,
+                confirmation,
+                bricsCad,
+                index,
+                documents: null!);
+            var proposal = Create(
+                ClientToolNames.FileSystemReadText,
+                ToolRiskClass.ReadOnly,
+                new { path = "chapters/harmonic_oscillator.md" },
+                DateTimeOffset.UtcNow);
+
+            var result = await broker.ExecuteAsync(proposal, root);
+
+            Assert.Equal("failed", result.Status);
+            Assert.Equal("client.workspace_path_not_found", result.ErrorCode);
+            Assert.Equal("path_not_found", result.Result.GetProperty("reason").GetString());
+            Assert.Contains(
+                "chapters/harmonic-oscillator-de.md",
+                result.Result.GetProperty("suggestedPaths").EnumerateArray().Select(static item => item.GetString()));
+        }
+        finally
+        {
+            index.Dispose();
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]

@@ -36,6 +36,8 @@ public sealed record ToolDescriptor(
 
 public static class ClientToolNames
 {
+    public const string DocumentRead = "document.read";
+    public const string DocumentCreate = "document.create";
     public const string DocumentsList = "documents.list";
     public const string DocumentsSearch = "documents.search";
     public const string DocumentsReadPages = "documents.readPages";

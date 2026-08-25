@@ -1,6 +1,5 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
-using GoAi.Server.Core.Security;
 using GoAi.Server.Core.Workers;
 using Microsoft.Extensions.Options;
 using System.Net;
@@ -19,20 +18,18 @@ public sealed class WorkerApiClientTests
             var options = Options.Create(new GoAiServerOptions
             {
                 DataDirectory = root,
-                WorkerKeyDirectory = Path.Combine(root, "Secrets"),
                 SpeechWorkerUri = new Uri("http://speech.worker.test", UriKind.Absolute),
             });
-            using var keys = new WorkerKeyStore(options);
             var handler = new RecordingHandler();
             using var httpClient = new HttpClient(handler);
-            var client = new WorkerApiClient(httpClient, keys, options);
+            var client = new WorkerApiClient(httpClient, options);
 
             var response = await client.LoadSpeechComponentAsync("speaker");
 
             Assert.Equal(System.Text.Json.JsonValueKind.Object, response.ValueKind);
             Assert.Equal("/load", handler.Path);
             Assert.Contains("\"component\":\"speaker\"", handler.Body, StringComparison.Ordinal);
-            Assert.True(handler.HasWorkerKey);
+            Assert.False(handler.HasAuthorization);
         }
         finally
         {
@@ -47,10 +44,9 @@ public sealed class WorkerApiClientTests
     public async Task SpeechWarmupRejectsUnknownComponentsBeforeCallingTheWorker()
     {
         var options = Options.Create(new GoAiServerOptions());
-        using var keys = new WorkerKeyStore(options);
         var handler = new RecordingHandler();
         using var httpClient = new HttpClient(handler);
-        var client = new WorkerApiClient(httpClient, keys, options);
+        var client = new WorkerApiClient(httpClient, options);
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
             client.LoadSpeechComponentAsync("vision"));
@@ -59,7 +55,7 @@ public sealed class WorkerApiClientTests
     }
 
     [Fact]
-    public async Task ExclusiveLmStudioTransitionCanReleaseOptionalWorkersWithoutReleasingSpeech()
+    public async Task OptionalWorkersCanBeReleasedWithoutReleasingSpeech()
     {
         var root = Path.Combine(Path.GetTempPath(), $"go-ai-worker-client-{Guid.NewGuid():N}");
         try
@@ -67,15 +63,13 @@ public sealed class WorkerApiClientTests
             var options = Options.Create(new GoAiServerOptions
             {
                 DataDirectory = root,
-                WorkerKeyDirectory = Path.Combine(root, "Secrets"),
                 SpeechWorkerUri = new Uri("http://speech.worker.test", UriKind.Absolute),
                 MediaWorkerUri = new Uri("http://media.worker.test", UriKind.Absolute),
                 ImageWorkerUri = new Uri("http://image.worker.test", UriKind.Absolute),
             });
-            using var keys = new WorkerKeyStore(options);
             var handler = new RecordingHandler();
             using var httpClient = new HttpClient(handler);
-            var client = new WorkerApiClient(httpClient, keys, options);
+            var client = new WorkerApiClient(httpClient, options);
 
             await client.ReleaseAllAsync(exceptWorker: "speech");
 
@@ -111,13 +105,11 @@ public sealed class WorkerApiClientTests
             var options = Options.Create(new GoAiServerOptions
             {
                 DataDirectory = root,
-                WorkerKeyDirectory = Path.Combine(root, "Secrets"),
                 SpeechWorkerUri = new Uri("http://speech.worker.test", UriKind.Absolute),
             });
-            using var keys = new WorkerKeyStore(options);
             var handler = new RecordingHandler();
             using var httpClient = new HttpClient(handler);
-            var client = new WorkerApiClient(httpClient, keys, options);
+            var client = new WorkerApiClient(httpClient, options);
             const string sessionId = "speech-0123456789abcdef0123456789abcdef";
 
             _ = await client.SynthesizeParagraphAsync(
@@ -161,7 +153,7 @@ public sealed class WorkerApiClientTests
 
         public string Body { get; private set; } = string.Empty;
 
-        public bool HasWorkerKey { get; private set; }
+        public bool HasAuthorization { get; private set; }
 
         public List<(string Host, string Path)> Requests { get; } = [];
 
@@ -174,7 +166,7 @@ public sealed class WorkerApiClientTests
             Body = request.Content is null
                 ? string.Empty
                 : await request.Content.ReadAsStringAsync(cancellationToken);
-            HasWorkerKey = request.Headers.Contains(GoAiHeaders.WorkerKey);
+            HasAuthorization = request.Headers.Authorization is not null;
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent("{}", Encoding.UTF8, "application/json"),

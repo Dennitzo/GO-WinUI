@@ -17,17 +17,14 @@ public sealed class GoAiClient : IDisposable
     private readonly bool _ownsHttpClient;
     private bool _disposed;
 
-    public GoAiClient(HttpClient httpClient, string apiKey, bool ownsHttpClient = false)
+    public GoAiClient(HttpClient httpClient, string? clientId = null, bool ownsHttpClient = false)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new ArgumentException("An API key is required.", nameof(apiKey));
-        }
-
         _ownsHttpClient = ownsHttpClient;
-        _httpClient.DefaultRequestHeaders.Remove(GoAiHeaders.ApiKey);
-        _httpClient.DefaultRequestHeaders.TryAddWithoutValidation(GoAiHeaders.ApiKey, apiKey);
+        _httpClient.DefaultRequestHeaders.Remove(GoAiHeaders.ClientId);
+        _httpClient.DefaultRequestHeaders.TryAddWithoutValidation(
+            GoAiHeaders.ClientId,
+            string.IsNullOrWhiteSpace(clientId) ? $"client-{Guid.NewGuid():N}" : clientId.Trim());
     }
 
     public Task<HealthSnapshot> GetLiveHealthAsync(CancellationToken cancellationToken = default) =>
@@ -57,22 +54,6 @@ public sealed class GoAiClient : IDisposable
 
     public Task<ModelStatusSnapshot> GetModelStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<ModelStatusSnapshot>("v1/models/status", cancellationToken);
-
-    public Task<GeneralModelSelection> SelectGeneralModelAsync(
-        string modelId,
-        CancellationToken cancellationToken = default) =>
-        PostAsync<GeneralModelSelection, GeneralModelSelection>(
-            "v1/models/general",
-            new GeneralModelSelection(modelId, 0, false),
-            cancellationToken);
-
-    public Task<CodingModelSelection> SelectCodingModelAsync(
-        string modelId,
-        CancellationToken cancellationToken = default) =>
-        PostAsync<CodingModelSelection, CodingModelSelection>(
-            "v1/models/code",
-            new CodingModelSelection(modelId, string.Empty, 0, false),
-            cancellationToken);
 
     public Task<GpuStatusSnapshot> GetGpuStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<GpuStatusSnapshot>("v1/gpu/status", cancellationToken);
@@ -281,12 +262,21 @@ public sealed class GoAiClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        using var response = await _httpClient.PostAsJsonAsync(
-            $"v1/runs/{Uri.EscapeDataString(runId)}/client-tool-results",
-            result,
-            _jsonOptions,
-            cancellationToken).ConfigureAwait(false);
-        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        for (var attempt = 0; ; attempt++)
+        {
+            using var response = await _httpClient.PostAsJsonAsync(
+                $"v1/runs/{Uri.EscapeDataString(runId)}/client-tool-results",
+                result,
+                _jsonOptions,
+                cancellationToken).ConfigureAwait(false);
+            if (await WaitForRateLimitRetryAsync(response, attempt, cancellationToken).ConfigureAwait(false))
+            {
+                continue;
+            }
+
+            await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+            return;
+        }
     }
 
     public async IAsyncEnumerable<RunEvent> StreamRunEventsAsync(

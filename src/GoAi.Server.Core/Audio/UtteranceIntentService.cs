@@ -28,18 +28,18 @@ public sealed class UtteranceIntentService
     private readonly GoAiServerOptions _options;
     private readonly GpuLeaseScheduler _scheduler;
     private readonly WorkerOrchestrator _workers;
-    private readonly LmStudioClient _lmStudio;
+    private readonly ModelRuntimeClient _modelRuntime;
 
     public UtteranceIntentService(
         IOptions<GoAiServerOptions> options,
         GpuLeaseScheduler scheduler,
         WorkerOrchestrator workers,
-        LmStudioClient lmStudio)
+        ModelRuntimeClient modelRuntime)
     {
         _options = options.Value;
         _scheduler = scheduler;
         _workers = workers;
-        _lmStudio = lmStudio;
+        _modelRuntime = modelRuntime;
     }
 
     public async Task<UtteranceIntentResponse> ClassifyAsync(
@@ -63,7 +63,7 @@ public sealed class UtteranceIntentService
                 activity.Mode == GpuLeaseMode.Exclusive
                 && string.Equals(activity.Workload, "llm-code", StringComparison.Ordinal)))
         {
-            // Qwen owns LM Studio while a coding run is active. Voice input must
+            // Qwen owns llama.cpp while a coding run is active. Voice input must
             // remain responsive instead of queuing an otherwise hidden General-AI
             // intent request behind that potentially long run.
             return ClassifyLocallyDuringCoding(text);
@@ -73,7 +73,7 @@ public sealed class UtteranceIntentService
             "voice-intent", null, GpuLeaseMode.Shared, cancellationToken).ConfigureAwait(false);
         _ = await _workers.PrepareLmModelAsync(
             _options.GeneralModelId, _options.GeneralContextLength, cancellationToken).ConfigureAwait(false);
-        var result = await _lmStudio.CompleteChatAsync(
+        var result = await _modelRuntime.CompleteChatAsync(
             _options.GeneralModelId,
             [
                 new("system", """
@@ -87,7 +87,7 @@ public sealed class UtteranceIntentService
             ],
             [],
             maximumOutputTokens: 128,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return Parse(result.Content, text);
     }

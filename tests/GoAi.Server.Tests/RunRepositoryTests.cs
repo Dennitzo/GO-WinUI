@@ -111,7 +111,8 @@ public sealed class RunRepositoryTests
             0,
             0,
             PendingProposalId: proposal.ProposalId,
-            PendingToolCallId: "call-1");
+            PendingToolCallId: "call-1",
+            HasSuccessfulClientToolEvidence: true);
         var result = new ClientToolResult(proposal.ProposalId, "completed", resultJson.RootElement.Clone());
 
         await repository.SaveToolProposalAsync(proposal);
@@ -121,6 +122,7 @@ public sealed class RunRepositoryTests
 
         Assert.True(await repository.TryQueueClientToolContinuationAsync(run.Snapshot.RunId, proposal.ProposalId));
         Assert.Equal(RunState.Queued, (await repository.GetAsync(run.Snapshot.RunId))?.State);
+        Assert.True((await repository.GetCheckpointAsync(run.Snapshot.RunId))?.HasSuccessfulClientToolEvidence);
         Assert.False(await repository.TryQueueClientToolContinuationAsync(run.Snapshot.RunId, proposal.ProposalId));
     }
 

@@ -1,6 +1,5 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
-using GoAi.Server.Core.Security;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using Microsoft.Extensions.Options;
@@ -30,16 +29,13 @@ public sealed partial class WebResearchService
         "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 GO-AI-Server/1.0";
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly GoAiServerOptions _options;
-    private readonly DpapiSecretStore? _secretStore;
 
     public WebResearchService(
         IHttpClientFactory httpClientFactory,
-        IOptions<GoAiServerOptions> options,
-        DpapiSecretStore? secretStore = null)
+        IOptions<GoAiServerOptions> options)
     {
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
-        _secretStore = secretStore;
     }
 
     public async Task<WebSearchResponse> SearchAsync(
@@ -58,10 +54,7 @@ public sealed partial class WebResearchService
         }
 
         var maximum = Math.Clamp(request.MaximumResults, 1, 20);
-        var youtubeApiKey = youtubeFallback && _secretStore is not null
-            ? await _secretStore.ReadYouTubeApiKeyAsync(cancellationToken).ConfigureAwait(false)
-            : null;
-        youtubeApiKey ??= _options.YouTubeApiKey;
+        var youtubeApiKey = _options.YouTubeApiKey;
         if (youtubeFallback && !string.IsNullOrWhiteSpace(youtubeApiKey))
         {
             return await SearchYouTubeAsync(request, maximum, youtubeApiKey, cancellationToken).ConfigureAwait(false);

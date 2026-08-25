@@ -1,17 +1,30 @@
 {
   admin off
-  auto_https disable_redirects
-  default_sni 192.168.0.67
-  skip_install_trust
+  auto_https off
   servers {
-    protocols h1 h2
+    protocols h1 h2c
   }
 }
 
-https://192.168.0.67:8443 {
-  tls internal
+:8080 {
   encode zstd gzip
-  reverse_proxy 127.0.0.1:7080 {
+
+  @allowedOrigin header_regexp Origin ^(?:http://localhost(?::\d+)?|http://127\.0\.0\.1(?::\d+)?|https://go\.local)$
+  header @allowedOrigin {
+    Access-Control-Allow-Origin "{http.request.header.Origin}"
+    Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    Access-Control-Allow-Headers "Content-Type, Idempotency-Key, Last-Event-ID, X-GO-Client-ID"
+    Access-Control-Max-Age "600"
+    Vary "Origin"
+  }
+
+  @preflight {
+    method OPTIONS
+    header_regexp Origin ^(?:http://localhost(?::\d+)?|http://127\.0\.0\.1(?::\d+)?|https://go\.local)$
+  }
+  respond @preflight 204
+
+  reverse_proxy gateway:8080 {
     transport http {
       versions 1.1
       dial_timeout 5s

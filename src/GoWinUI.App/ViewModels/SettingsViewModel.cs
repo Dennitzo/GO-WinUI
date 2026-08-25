@@ -11,7 +11,6 @@ namespace GoWinUI.App.ViewModels;
 public sealed partial class SettingsViewModel(
     SettingsCoordinator settings,
     GoAiConnectionService goAi,
-    IAiSecretStore secrets,
     IPromptTriggerRepository triggerRepository,
     IBackupService backups,
     ShellViewModel shell) : ObservableObject
@@ -55,9 +54,6 @@ public sealed partial class SettingsViewModel(
     public partial bool IsAiConnectionEnabled { get; set; }
 
     [ObservableProperty]
-    public partial string GoAiApiKey { get; set; } = string.Empty;
-
-    [ObservableProperty]
     public partial string LocalToolWorkspacePath { get; set; } = string.Empty;
 
     [ObservableProperty]
@@ -71,9 +67,6 @@ public sealed partial class SettingsViewModel(
 
     [ObservableProperty]
     public partial string ReasoningEffort { get; set; } = "auto";
-
-    [ObservableProperty]
-    public partial bool HasStoredApiKey { get; set; }
 
     [ObservableProperty]
     public partial string TriggerSearchText { get; set; } = string.Empty;
@@ -114,7 +107,7 @@ public sealed partial class SettingsViewModel(
         GoAiServerUrl = current.GoAiServerUrl;
         LocalToolWorkspacePath = current.LocalToolWorkspacePath ?? string.Empty;
         LiveCaptionLanguage = current.LiveCaptionLanguage;
-        SelectedModel = current.SelectedModel;
+        SelectedModel = current.SelectedModel ?? AppSettings.DefaultSelectedModel;
         SelectedCodingModel = current.SelectedCodingModel;
         ReasoningEffort = current.ReasoningEffort;
         Theme = current.Theme;
@@ -130,7 +123,6 @@ public sealed partial class SettingsViewModel(
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         Initialize();
-        HasStoredApiKey = !string.IsNullOrWhiteSpace(await secrets.GetApiKeyAsync(cancellationToken));
         PromptTriggers.Clear();
         foreach (var trigger in await triggerRepository.ListAsync(cancellationToken))
         {
@@ -170,16 +162,9 @@ public sealed partial class SettingsViewModel(
     public async Task<GoAiConnectionStatus?> SaveAsync(CancellationToken cancellationToken = default)
     {
         if (!Uri.TryCreate(GoAiServerUrl.Trim(), UriKind.Absolute, out var goAiUri)
-            || goAiUri.Scheme is not ("http" or "https")
-            || (goAiUri.Scheme == "http" && !goAiUri.IsLoopback))
+            || goAiUri.Scheme is not ("http" or "https"))
         {
-            throw new InvalidOperationException("GO AI Server benötigt eine gültige HTTPS-Adresse; HTTP ist nur auf Loopback erlaubt.");
-        }
-        if (!string.IsNullOrWhiteSpace(GoAiApiKey))
-        {
-            await secrets.SetApiKeyAsync(GoAiApiKey, cancellationToken);
-            GoAiApiKey = string.Empty;
-            HasStoredApiKey = true;
+            throw new InvalidOperationException("GO benötigt eine gültige HTTP- oder HTTPS-Adresse zum Docker-Gateway.");
         }
 
         var workspace = string.IsNullOrWhiteSpace(LocalToolWorkspacePath)
@@ -204,12 +189,6 @@ public sealed partial class SettingsViewModel(
             Language = Language,
         }, cancellationToken);
         await App.Current.ApplyAiConnectionModeAsync(IsAiConnectionEnabled);
-        if (IsAiConnectionEnabled && !string.IsNullOrWhiteSpace(SelectedModel))
-        {
-            using var client = await goAi.CreateClientAsync(cancellationToken);
-            _ = await client.SelectGeneralModelAsync(SelectedModel, cancellationToken);
-            _ = await client.SelectCodingModelAsync(SelectedCodingModel, cancellationToken);
-        }
         await SaveTriggersAsync(cancellationToken);
         App.Current.ApplyTheme(Theme);
         App.Current.ApplyAccentColor(AccentColor);
@@ -278,6 +257,14 @@ public sealed partial class SettingsViewModel(
             {
                 CodingModels.Add(item);
             }
+            SelectedModel = SelectAvailableModel(
+                items,
+                SelectedModel,
+                AppSettings.DefaultSelectedModel);
+            SelectedCodingModel = SelectAvailableModel(
+                codingItems,
+                SelectedCodingModel,
+                AppSettings.DefaultSelectedCodingModel);
             IsServerReady = status.IsReady;
             shell.ApplyAiConnectionState(true, status.IsReady);
             return status;
@@ -303,6 +290,28 @@ public sealed partial class SettingsViewModel(
         {
             IsBusy = false;
         }
+    }
+
+    private static string SelectAvailableModel(
+        IReadOnlyList<LmModel> models,
+        string? requested,
+        string fallback)
+    {
+        var selected = models.FirstOrDefault(model =>
+            string.Equals(model.Id, requested?.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (selected is not null)
+        {
+            return selected.Id;
+        }
+
+        var fallbackModel = models.FirstOrDefault(model =>
+            string.Equals(model.Id, fallback, StringComparison.OrdinalIgnoreCase));
+        if (fallbackModel is not null)
+        {
+            return fallbackModel.Id;
+        }
+
+        return models.Count > 0 ? models[0].Id : fallback;
     }
 
     public PromptTriggerEditorItem AddTrigger(
@@ -361,19 +370,6 @@ public sealed partial class SettingsViewModel(
 
     public void RefreshPromptTriggerView() =>
         OnPropertyChanged(nameof(VisiblePromptTriggers));
-
-    public async Task ImportConnectionBundleAsync(string path, CancellationToken cancellationToken = default)
-    {
-        var imported = await goAi.ImportConnectionBundleAsync(path, cancellationToken);
-        GoAiServerUrl = imported.ServerUrl;
-    }
-
-    public async Task DeleteApiKeyAsync(CancellationToken cancellationToken = default)
-    {
-        await secrets.DeleteApiKeyAsync(cancellationToken);
-        GoAiApiKey = string.Empty;
-        HasStoredApiKey = false;
-    }
 
     private async Task SaveTriggersAsync(CancellationToken cancellationToken)
     {

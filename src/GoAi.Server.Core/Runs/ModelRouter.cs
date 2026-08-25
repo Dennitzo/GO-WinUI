@@ -13,12 +13,12 @@ public sealed class ModelRouter
         ".cpp", ".h", ".hpp", ".java", ".go", ".rs", ".sql", ".json", ".yaml", ".yml", ".toml",
     };
     private readonly GoAiServerOptions _options;
-    private readonly LmStudioClient? _lmStudio;
+    private readonly ModelRuntimeClient? _modelRuntime;
 
-    public ModelRouter(IOptions<GoAiServerOptions> options, LmStudioClient? lmStudio = null)
+    public ModelRouter(IOptions<GoAiServerOptions> options, ModelRuntimeClient? modelRuntime = null)
     {
         _options = options.Value;
-        _lmStudio = lmStudio;
+        _modelRuntime = modelRuntime;
     }
 
     public async Task<ModelSelection> SelectAsync(
@@ -26,15 +26,15 @@ public sealed class ModelRouter
         CancellationToken cancellationToken = default)
     {
         var selected = Select(request);
-        if (_lmStudio is null)
+        if (_modelRuntime is null)
         {
             return selected;
         }
 
-        var status = await _lmStudio.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var status = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
         if (!status.ProviderReachable)
         {
-            throw new HttpRequestException("LM Studio model status is unavailable.");
+            throw new HttpRequestException("llama.cpp model status is unavailable.");
         }
         var model = status.Models.FirstOrDefault(candidate =>
             candidate.Downloaded

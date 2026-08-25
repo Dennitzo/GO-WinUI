@@ -19,7 +19,8 @@ public sealed class LocalToolBroker(
     IBricsCadBridgeHost bricsCad,
     WorkspaceRepositoryIndex repositoryIndex,
     IDocumentIngestor documents,
-    LeanProofService? leanProof = null)
+    LeanProofService? leanProof = null,
+    LocalDocumentToolService? documentTools = null)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private const int MaximumProcessStreamCharacters = 1_900_000;
@@ -42,6 +43,7 @@ public sealed class LocalToolBroker(
     private readonly AsyncLocal<string?> _executionWorkspace = new();
     private readonly AsyncLocal<Guid?> _executionSession = new();
     private readonly LeanProofService _leanProof = leanProof ?? new LeanProofService();
+    private readonly LocalDocumentToolService? _documentTools = documentTools;
 
     public bool IsBricsCadAvailable => bricsCad.IsConnected;
 
@@ -49,7 +51,7 @@ public sealed class LocalToolBroker(
 
     public IReadOnlyList<string> GetAvailableCapabilities(string? workspacePath = null)
     {
-        var result = new List<string>();
+        var result = new List<string> { "documentIo" };
         if (TryGetWorkspace(workspacePath, out _))
         {
             result.Add("filesystem");
@@ -66,17 +68,26 @@ public sealed class LocalToolBroker(
     public Task<ClientToolResult> ExecuteAsync(ToolProposal proposal, CancellationToken cancellationToken = default) =>
         ExecuteAsync(proposal, null, null, cancellationToken);
 
-    public async Task<ClientToolResult> ExecuteAsync(
+    public Task<ClientToolResult> ExecuteAsync(
         ToolProposal proposal,
         string? workspacePath,
         Guid? sessionId = null,
+        CancellationToken cancellationToken = default) =>
+        ExecuteAsync(proposal, workspacePath, sessionId, null, false, cancellationToken);
+
+    public async Task<ClientToolResult> ExecuteAsync(
+        ToolProposal proposal,
+        string? workspacePath,
+        Guid? sessionId,
+        Guid? assistantMessageId,
+        bool codingMode,
         CancellationToken cancellationToken = default)
     {
         var previousWorkspace = _executionWorkspace.Value;
         try
         {
-            var documentTool = proposal.Name.StartsWith("documents.", StringComparison.Ordinal);
-            _executionWorkspace.Value = documentTool ? null : ResolveWorkspace(workspacePath);
+            var attachedDocumentTool = proposal.Name.StartsWith("documents.", StringComparison.Ordinal);
+            _executionWorkspace.Value = attachedDocumentTool ? null : ResolveWorkspace(workspacePath);
             _executionSession.Value = sessionId;
             ValidateProposal(proposal);
             if (!await confirmation.ConfirmAsync(proposal, cancellationToken).ConfigureAwait(false))
@@ -86,6 +97,18 @@ public sealed class LocalToolBroker(
 
             var payload = proposal.Name switch
             {
+                ClientToolNames.DocumentRead => await RequireDocumentTools().ReadAsync(
+                    proposal.Arguments,
+                    _executionWorkspace.Value,
+                    sessionId ?? throw new InvalidOperationException("Die Dokument-Sitzung fehlt."),
+                    cancellationToken).ConfigureAwait(false),
+                ClientToolNames.DocumentCreate => await RequireDocumentTools().CreateAsync(
+                    proposal.Arguments,
+                    _executionWorkspace.Value,
+                    sessionId ?? throw new InvalidOperationException("Die Dokument-Sitzung fehlt."),
+                    assistantMessageId ?? throw new InvalidOperationException("Die AI-Nachricht für das Dokumentartefakt fehlt."),
+                    codingMode,
+                    cancellationToken).ConfigureAwait(false),
                 ClientToolNames.DocumentsList => await ListDocumentsAsync(cancellationToken).ConfigureAwait(false),
                 ClientToolNames.DocumentsSearch => await SearchDocumentsAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.DocumentsReadPages => await ReadDocumentPagesAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
@@ -115,6 +138,15 @@ public sealed class LocalToolBroker(
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (WorkspacePathNotFoundException exception)
+        {
+            return Result(
+                proposal,
+                "failed",
+                exception.Recovery,
+                "client.workspace_path_not_found",
+                exception.Message);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
@@ -155,12 +187,14 @@ public sealed class LocalToolBroker(
 
         var expectedRisk = proposal.Name switch
         {
-            ClientToolNames.DocumentsList or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages
+            ClientToolNames.DocumentRead
+                or ClientToolNames.DocumentsList or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages
                 or ClientToolNames.WorkspaceMap or ClientToolNames.FileSystemList or ClientToolNames.FileSystemStat
                 or ClientToolNames.FileSystemFindFiles or ClientToolNames.FileSystemReadText
                 or ClientToolNames.FileSystemReadMany or ClientToolNames.FileSystemSearch
                 or ClientToolNames.BricsCadGeometryQuery or ClientToolNames.BricsCadMeasure => ToolRiskClass.ReadOnly,
-            ClientToolNames.FileSystemWriteText or ClientToolNames.FileSystemReplaceText or ClientToolNames.FileSystemMove
+            ClientToolNames.DocumentCreate
+                or ClientToolNames.FileSystemWriteText or ClientToolNames.FileSystemReplaceText or ClientToolNames.FileSystemMove
                 or ClientToolNames.FileSystemProposePatch or ClientToolNames.FileSystemProposeCreate
                 or ClientToolNames.FileSystemProposeDelete => ToolRiskClass.LocalMutation,
             ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun
@@ -176,6 +210,58 @@ public sealed class LocalToolBroker(
         var arguments = proposal.Arguments;
         switch (proposal.Name)
         {
+            case ClientToolNames.DocumentRead:
+                ValidateProperties(
+                    arguments,
+                    ["scope", "mode"],
+                    ["scope", "mode", "reference", "query", "startUnit", "characterOffset", "maximumUnits", "maximumCharacters"]);
+                var documentScope = ValidateString(arguments, "scope", 1, 16);
+                var documentReadMode = ValidateString(arguments, "mode", 1, 16);
+                if (documentScope is not ("session" or "workspace")
+                    || documentReadMode is not ("list" or "outline" or "read" or "search"))
+                {
+                    throw new InvalidDataException("Die document.read-Auswahl ist ungültig.");
+                }
+                ValidateOptionalString(arguments, "reference", 1, 1_024);
+                ValidateOptionalString(arguments, "query", 1, 2_000);
+                ValidateOptionalInteger(arguments, "startUnit", 1, 1_000_000);
+                ValidateOptionalInteger(arguments, "characterOffset", 0, MaximumResultCharacters);
+                ValidateOptionalInteger(arguments, "maximumUnits", 1, 30);
+                ValidateOptionalInteger(arguments, "maximumCharacters", 1_000, 40_000);
+                if (documentReadMode != "list" && !arguments.TryGetProperty("reference", out _))
+                {
+                    throw new InvalidDataException("document.read benötigt außerhalb des list-Modus eine reference.");
+                }
+                if (documentReadMode == "search" && !arguments.TryGetProperty("query", out _))
+                {
+                    throw new InvalidDataException("document.read search benötigt query.");
+                }
+                break;
+            case ClientToolNames.DocumentCreate:
+                ValidateProperties(
+                    arguments,
+                    ["operation", "reference", "format", "sectionId", "content"],
+                    ["operation", "reference", "format", "sectionId", "heading", "content", "expectedSha256"]);
+                var documentOperation = ValidateString(arguments, "operation", 1, 32);
+                if (documentOperation is not ("create" or "appendSection" or "replaceSection"))
+                {
+                    throw new InvalidDataException("Die document.create-Operation ist ungültig.");
+                }
+                ValidateString(arguments, "reference", 1, 1_024);
+                var documentFormat = ValidateString(arguments, "format", 1, 16);
+                if (documentFormat is not ("markdown" or "text" or "docx" or "pdf"))
+                {
+                    throw new InvalidDataException("Das document.create-Format ist ungültig.");
+                }
+                ValidateString(arguments, "sectionId", 1, 128);
+                ValidateOptionalString(arguments, "heading", 1, 500);
+                ValidateString(arguments, "content", 0, 120_000);
+                ValidateOptionalString(arguments, "expectedSha256", 64, 64);
+                if (documentOperation != "create" && !arguments.TryGetProperty("expectedSha256", out _))
+                {
+                    throw new InvalidDataException("document.create-Bearbeitungen benötigen expectedSha256.");
+                }
+                break;
             case ClientToolNames.DocumentsList:
                 ValidateProperties(arguments, [], []);
                 break;
@@ -580,10 +666,30 @@ public sealed class LocalToolBroker(
 
     private async Task<object> ReadTextAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
-        var path = ResolvePath(RequiredString(arguments, "path"), requireExisting: true);
+        var requestedPath = RequiredString(arguments, "path");
+        var path = ResolvePath(requestedPath, requireExisting: false);
         if (!File.Exists(path))
         {
-            throw new FileNotFoundException("Die angeforderte Textdatei wurde nicht gefunden.", path);
+            var pathIsDirectory = Directory.Exists(path);
+            var snapshot = await repositoryIndex.GetSnapshotAsync(Workspace(), cancellationToken).ConfigureAwait(false);
+            var suggestedPaths = FindWorkspacePathSuggestions(requestedPath, snapshot.Entries)
+                .Where(candidate => File.Exists(ResolvePath(candidate, requireExisting: false)))
+                .ToArray();
+            throw new WorkspacePathNotFoundException(
+                pathIsDirectory
+                    ? "Der angeforderte fs.readText-Pfad ist ein Ordner. Verwende fs.list für diesen Ordner und lies danach eine tatsächlich vorhandene Textdatei."
+                    : "Der angeforderte Workspace-Pfad wurde nicht gefunden. Verwende ausschließlich einen tatsächlich vorhandenen relativen Pfad aus suggestedPaths oder ermittle ihn mit fs.findFiles beziehungsweise fs.list.",
+                new
+                {
+                    failed = true,
+                    reason = pathIsDirectory ? "path_is_directory" : "path_not_found",
+                    requestedPath = NormalizeWorkspaceAlias(requestedPath)?.Replace('\\', '/') ?? requestedPath.Replace('\\', '/'),
+                    suggestedPaths,
+                    recoveryTool = pathIsDirectory
+                        ? ClientToolNames.FileSystemList
+                        : suggestedPaths.Length == 0 ? ClientToolNames.FileSystemFindFiles : null,
+                    repositoryRevision = snapshot.RevisionFingerprint,
+                });
         }
         return Bounded(await ReadTextRangeAsync(
             path,
@@ -591,6 +697,131 @@ public sealed class LocalToolBroker(
             OptionalInteger(arguments, "endLine"),
             MaximumResultCharacters,
             cancellationToken).ConfigureAwait(false));
+    }
+
+    internal static IReadOnlyList<string> FindWorkspacePathSuggestions(
+        string requestedPath,
+        IReadOnlyList<WorkspaceIndexEntry> entries,
+        int maximumResults = 8)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestedPath);
+        ArgumentNullException.ThrowIfNull(entries);
+        maximumResults = Math.Clamp(maximumResults, 1, 32);
+        var normalizedRequested = (NormalizeWorkspaceAlias(requestedPath) ?? requestedPath)
+            .Replace('\\', '/')
+            .TrimStart('/');
+        var requestedName = Path.GetFileName(normalizedRequested);
+        var requestedStem = Path.GetFileNameWithoutExtension(requestedName);
+        var requestedExtension = Path.GetExtension(requestedName);
+        var requestedDirectory = NormalizeRelativeDirectory(Path.GetDirectoryName(
+            normalizedRequested.Replace('/', Path.DirectorySeparatorChar)));
+        var requestedTokens = SplitPathTokens(requestedStem);
+
+        return entries
+            .Where(static entry => !entry.IsBinary)
+            .Select(entry => new
+            {
+                entry.Path,
+                Score = ScoreWorkspacePathCandidate(
+                    entry.Path,
+                    requestedName,
+                    requestedStem,
+                    requestedExtension,
+                    requestedDirectory,
+                    requestedTokens),
+            })
+            .Where(static candidate => candidate.Score >= 25)
+            .OrderByDescending(static candidate => candidate.Score)
+            .ThenBy(static candidate => candidate.Path, StringComparer.OrdinalIgnoreCase)
+            .Take(maximumResults)
+            .Select(static candidate => candidate.Path)
+            .ToArray();
+    }
+
+    private static int ScoreWorkspacePathCandidate(
+        string candidatePath,
+        string requestedName,
+        string requestedStem,
+        string requestedExtension,
+        string requestedDirectory,
+        IReadOnlySet<string> requestedTokens)
+    {
+        var normalizedCandidate = candidatePath.Replace('\\', '/');
+        var candidateName = Path.GetFileName(normalizedCandidate);
+        var candidateStem = Path.GetFileNameWithoutExtension(candidateName);
+        var candidateExtension = Path.GetExtension(candidateName);
+        var candidateDirectory = NormalizeRelativeDirectory(Path.GetDirectoryName(
+            normalizedCandidate.Replace('/', Path.DirectorySeparatorChar)));
+        var score = 0;
+        if (candidateName.Equals(requestedName, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 160;
+        }
+        if (candidateStem.Equals(requestedStem, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 100;
+        }
+        if (!string.IsNullOrWhiteSpace(requestedExtension)
+            && candidateExtension.Equals(requestedExtension, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 15;
+        }
+        if (candidateDirectory.Equals(requestedDirectory, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 50;
+        }
+        if (!string.IsNullOrWhiteSpace(requestedStem)
+            && (candidateStem.Contains(requestedStem, StringComparison.OrdinalIgnoreCase)
+                || requestedStem.Contains(candidateStem, StringComparison.OrdinalIgnoreCase)))
+        {
+            score += 35;
+        }
+
+        var candidateTokens = SplitPathTokens(candidateStem);
+        score += Math.Min(45, requestedTokens.Count(candidateTokens.Contains) * 15);
+        if (requestedStem.Length > 0 && candidateStem.Length > 0)
+        {
+            var maximumLength = Math.Max(requestedStem.Length, candidateStem.Length);
+            var similarity = 1d - (double)LevenshteinDistance(
+                requestedStem.ToLowerInvariant(),
+                candidateStem.ToLowerInvariant()) / maximumLength;
+            if (similarity >= 0.45d)
+            {
+                score += (int)Math.Round(similarity * 35d, MidpointRounding.AwayFromZero);
+            }
+        }
+        return score;
+    }
+
+    private static HashSet<string> SplitPathTokens(string value) => Regex
+        .Split(value.ToLowerInvariant(), @"[^\p{L}\p{N}]+")
+        .Where(static token => token.Length > 1)
+        .ToHashSet(StringComparer.Ordinal);
+
+    private static string NormalizeRelativeDirectory(string? value) => string.IsNullOrWhiteSpace(value)
+        ? string.Empty
+        : value.Replace('\\', '/').Trim('/');
+
+    private static int LevenshteinDistance(string left, string right)
+    {
+        if (left.Length == 0) return right.Length;
+        if (right.Length == 0) return left.Length;
+        var previous = Enumerable.Range(0, right.Length + 1).ToArray();
+        var current = new int[right.Length + 1];
+        for (var leftIndex = 1; leftIndex <= left.Length; leftIndex++)
+        {
+            current[0] = leftIndex;
+            for (var rightIndex = 1; rightIndex <= right.Length; rightIndex++)
+            {
+                var substitution = previous[rightIndex - 1]
+                    + (left[leftIndex - 1] == right[rightIndex - 1] ? 0 : 1);
+                current[rightIndex] = Math.Min(
+                    Math.Min(previous[rightIndex] + 1, current[rightIndex - 1] + 1),
+                    substitution);
+            }
+            (previous, current) = (current, previous);
+        }
+        return previous[right.Length];
     }
 
     private async Task<object> ReadManyAsync(JsonElement arguments, CancellationToken cancellationToken)
@@ -2238,6 +2469,9 @@ public sealed class LocalToolBroker(
         };
     }
 
+    private LocalDocumentToolService RequireDocumentTools() => _documentTools
+        ?? throw new InvalidOperationException("Die lokalen Dokumentwerkzeuge sind nicht initialisiert.");
+
     private async Task<object> SearchDocumentsAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         var sessionId = _executionSession.Value ?? throw new InvalidOperationException("Die Dokument-Sitzung fehlt.");
@@ -2363,7 +2597,10 @@ public sealed class LocalToolBroker(
     private string ResolvePath(string requested, bool requireExisting)
     {
         var root = Workspace();
-        var combined = Path.IsPathFullyQualified(requested) ? requested : Path.Combine(root, requested);
+        var normalizedRequested = NormalizeWorkspaceAlias(requested) ?? requested;
+        var combined = Path.IsPathFullyQualified(normalizedRequested)
+            ? normalizedRequested
+            : Path.Combine(root, normalizedRequested);
         var full = Path.GetFullPath(combined);
         if (!IsWithin(root, full))
         {
@@ -3092,4 +3329,9 @@ public sealed class LocalToolBroker(
         int EndLine,
         bool Truncated,
         string Sha256);
+
+    private sealed class WorkspacePathNotFoundException(string message, object recovery) : FileNotFoundException(message)
+    {
+        public object Recovery { get; } = recovery;
+    }
 }

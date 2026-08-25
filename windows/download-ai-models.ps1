@@ -1,22 +1,16 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'GO-AI-Server'),
+    [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'GO-AI-Stack'),
 
-    [switch] $SkipLmStudioModels,
+    [switch] $SkipLlmModels,
 
-    [switch] $SkipWorkerModels,
-
-    [switch] $OnlyCodingModel
+    [switch] $SkipWorkerModels
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
-
-if ($OnlyCodingModel -and $SkipLmStudioModels) {
-    throw '-OnlyCodingModel cannot be combined with -SkipLmStudioModels.'
-}
 
 function Invoke-CheckedCommand {
     param(
@@ -71,8 +65,7 @@ function Invoke-PinnedModelFileDownload {
 
     $StagingDirectory = [IO.Path]::GetFullPath($StagingDirectory)
     New-Item -ItemType Directory -Path $StagingDirectory -Force | Out-Null
-    # Never resume inside LM Studio's model tree. LM Studio owns its own
-    # downloading_*.part files and may update or remove them concurrently.
+    # Partial files are isolated from the immutable runtime model tree.
     $partialPath = Join-Path $StagingDirectory ($Sha256.ToLowerInvariant() + '.part')
     if (-not (Test-Path -LiteralPath $partialPath -PathType Leaf)) {
         New-Item -ItemType File -Path $partialPath -Force | Out-Null
@@ -176,32 +169,31 @@ $downloadRoot = Join-Path $DataRoot 'Downloads'
 $toolRoot = Join-Path $DataRoot 'Tools\huggingface'
 New-Item -ItemType Directory -Path $modelRoot -Force | Out-Null
 
-if (-not $SkipLmStudioModels) {
-    $lmModelRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.lmstudio\models'
-    $lmFiles = @(
+if (-not $SkipLlmModels) {
+    $runtimeFiles = @(
         [pscustomobject]@{
-            Repository = 'lmstudio-community/Qwen3-Coder-Next-GGUF'
-            Revision = '5da348a0eba5fb3744e6c6a336ebe2868737d9b3'
-            FileName = 'Qwen3-Coder-Next-Q6_K-00001-of-00002.gguf'
-            RelativePath = 'lmstudio-community\Qwen3-Coder-Next-GGUF\Qwen3-Coder-Next-Q6_K-00001-of-00002.gguf'
+            Repository = 'lmstudio-community/gpt-oss-120b-GGUF'
+            Revision = 'ffa0c82eff830f6644fa19b14ef2c0e11f7cd1e8'
+            FileName = 'gpt-oss-120b-MXFP4-00001-of-00002.gguf'
+            RelativePath = 'llm\gpt-oss-120b-MXFP4-00001-of-00002.gguf'
             ExistingPartialPath = $null
-            Length = 39816544640
-            Sha256 = '05f7aaea22886c03748a6a6f3b807b47aa184fb3173117ed4c525d9e41d6dbf6'
+            Length = 39815566336
+            Sha256 = '01d8a3bc7efdaa331112e8a0a42ec9046fcee2a1dce910452aafaccb996759f3'
         },
         [pscustomobject]@{
-            Repository = 'lmstudio-community/Qwen3-Coder-Next-GGUF'
-            Revision = '5da348a0eba5fb3744e6c6a336ebe2868737d9b3'
-            FileName = 'Qwen3-Coder-Next-Q6_K-00002-of-00002.gguf'
-            RelativePath = 'lmstudio-community\Qwen3-Coder-Next-GGUF\Qwen3-Coder-Next-Q6_K-00002-of-00002.gguf'
+            Repository = 'lmstudio-community/gpt-oss-120b-GGUF'
+            Revision = 'ffa0c82eff830f6644fa19b14ef2c0e11f7cd1e8'
+            FileName = 'gpt-oss-120b-MXFP4-00002-of-00002.gguf'
+            RelativePath = 'llm\gpt-oss-120b-MXFP4-00002-of-00002.gguf'
             ExistingPartialPath = $null
-            Length = 25711922144
-            Sha256 = 'fba6a8605731a6971d99e2b7dbcbad270e48dfb67efb54d084214c42a9896050'
+            Length = 23571779104
+            Sha256 = 'b7bf9fba295115d0e32951ce54911b3020dd92459b88a3908ad58479be6f7676'
         },
         [pscustomobject]@{
             Repository = 'Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF'
             Revision = 'f54435e6cc31258f04b0969105c3f6badb197931'
             FileName = 'Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf'
-            RelativePath = 'Qwen\Qwen3-VL-30B-A3B-Instruct-GGUF\Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf'
+            RelativePath = 'vision\Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf'
             Length = 18556687168
             Sha256 = '87bb374d849f80ebdfabb304189fac9e0bd35a0f74506e6a59c51b206cbe863b'
         },
@@ -209,7 +201,7 @@ if (-not $SkipLmStudioModels) {
             Repository = 'Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF'
             Revision = 'f54435e6cc31258f04b0969105c3f6badb197931'
             FileName = 'mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf'
-            RelativePath = 'Qwen\Qwen3-VL-30B-A3B-Instruct-GGUF\mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf'
+            RelativePath = 'vision\mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf'
             ExistingPartialPath = $null
             Length = 1083499584
             Sha256 = 'cae72cf123cc9e08d553cd5a5055d6d3cf0f82652aa41c3e4aa424cda9a26f7f'
@@ -218,23 +210,18 @@ if (-not $SkipLmStudioModels) {
             Repository = 'ggml-org/bge-m3-Q8_0-GGUF'
             Revision = '9eba04c5d75ba5a1595e45de734d36bef4e5cb98'
             FileName = 'bge-m3-q8_0.gguf'
-            RelativePath = 'ggml-org\bge-m3-Q8_0-GGUF\bge-m3-q8_0.gguf'
+            RelativePath = 'embedding\bge-m3-q8_0.gguf'
             ExistingPartialPath = $null
             Length = 634553760
             Sha256 = 'aa473d51f451a22f0fcf39ba3330c14bed38a385712b1113440f69df4047a173'
         }
     )
-    if ($OnlyCodingModel) {
-        $lmFiles = @($lmFiles | Where-Object {
-            $_.Repository -eq 'lmstudio-community/Qwen3-Coder-Next-GGUF'
-        })
-    }
-    foreach ($file in $lmFiles) {
+    foreach ($file in $runtimeFiles) {
         $arguments = @{
             Repository = $file.Repository
             Revision = $file.Revision
             FileName = $file.FileName
-            Destination = (Join-Path $lmModelRoot $file.RelativePath)
+            Destination = (Join-Path $modelRoot $file.RelativePath)
             ExpectedLength = $file.Length
             Sha256 = $file.Sha256
             StagingDirectory = $downloadRoot
@@ -242,56 +229,6 @@ if (-not $SkipLmStudioModels) {
         Invoke-PinnedModelFileDownload @arguments
     }
 
-    $requiredCatalogModels = if ($OnlyCodingModel) {
-        @('qwen3-coder-next')
-    }
-    else {
-        @('qwen3-coder-next', 'qwen3-vl-30b-a3b-instruct', 'bge-m3')
-    }
-    & (Join-Path $PSScriptRoot 'refresh-lmstudio-model-catalog.ps1') `
-        -RequiredNameFragments $requiredCatalogModels
-
-    # Remove the retired coding model only after both pinned Qwen shards have
-    # passed their length and SHA-256 checks and LM Studio has discovered Qwen.
-    $safeLmModelRoot = [IO.Path]::GetFullPath($lmModelRoot).TrimEnd('\') + '\'
-    $legacyCodingModelRoot = [IO.Path]::GetFullPath((
-        Join-Path $lmModelRoot 'lmstudio-community\Laguna-S-2.1-GGUF'))
-    if ($legacyCodingModelRoot.StartsWith($safeLmModelRoot, [StringComparison]::OrdinalIgnoreCase) -and
-        [IO.Path]::GetFileName($legacyCodingModelRoot) -eq 'Laguna-S-2.1-GGUF' -and
-        (Test-Path -LiteralPath $legacyCodingModelRoot -PathType Container)) {
-        $lms = Get-Command 'lms' -ErrorAction SilentlyContinue
-        if ($null -ne $lms) {
-            $previousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE
-            $previousErrorActionPreference = $ErrorActionPreference
-            Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
-            try {
-                # `lms unload` writes "Model Not Found" to stderr when the retired
-                # model is already unloaded. Windows PowerShell promotes that benign
-                # native stderr record to a terminating error while this script uses
-                # ErrorActionPreference=Stop, preventing the subsequent cleanup.
-                $ErrorActionPreference = 'Continue'
-                $unloadOutput = @(& $lms.Source unload 'poolside/laguna-s-2.1' 2>&1)
-                $unloadExitCode = $LASTEXITCODE
-                if ($unloadExitCode -ne 0 -and
-                    (($unloadOutput | ForEach-Object { $_.ToString() }) -join "`n") -notmatch 'Model Not Found') {
-                    throw "Unable to unload retired Laguna model (exit $unloadExitCode): $($unloadOutput -join ' ')"
-                }
-            }
-            finally {
-                $ErrorActionPreference = $previousErrorActionPreference
-                if ($null -ne $previousElectronRunAsNode) {
-                    $env:ELECTRON_RUN_AS_NODE = $previousElectronRunAsNode
-                }
-                else {
-                    Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
-                }
-            }
-        }
-        Remove-Item -LiteralPath $legacyCodingModelRoot -Recurse -Force
-        Write-Host "Removed retired Laguna model directory: $legacyCodingModelRoot" -ForegroundColor DarkGray
-        & (Join-Path $PSScriptRoot 'refresh-lmstudio-model-catalog.ps1') `
-            -RequiredNameFragments @('qwen3-coder-next')
-    }
 }
 
 if (-not $SkipWorkerModels) {
@@ -308,10 +245,11 @@ if (-not $SkipWorkerModels) {
         throw "Hugging Face client is missing: $hf"
     }
 
-    $whisperRoot = Join-Path $modelRoot 'faster-whisper-large-v3'
-    $speakerRoot = Join-Path $modelRoot 'spkrec-ecapa-voxceleb'
-    $supertonicRoot = Join-Path $modelRoot 'supertonic-3'
-    $zImageRoot = Join-Path $modelRoot 'z-image'
+    $speechRoot = Join-Path $modelRoot 'speech'
+    $whisperRoot = Join-Path $speechRoot 'faster-whisper-large-v3'
+    $speakerRoot = Join-Path $speechRoot 'spkrec-ecapa-voxceleb'
+    $supertonicRoot = Join-Path $speechRoot 'supertonic-3'
+    $zImageRoot = Join-Path $modelRoot 'image\z-image'
     New-Item -ItemType Directory -Path $zImageRoot -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $supertonicRoot 'onnx') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $supertonicRoot 'voice_styles') -Force | Out-Null
@@ -380,7 +318,7 @@ if (-not $SkipWorkerModels) {
     Assert-FileHash $flatVae 'afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38'
     Assert-FileHash (Join-Path $zImageRoot 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf') '3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597'
 
-    $safeModelRoot = [IO.Path]::GetFullPath($modelRoot).TrimEnd('\') + '\'
+    $safeModelRoot = [IO.Path]::GetFullPath($speechRoot).TrimEnd('\') + '\'
     foreach ($legacyModelName in @(
         'piper',
         'qwen3-tts-12hz-1.7b-voicedesign',
@@ -390,7 +328,7 @@ if (-not $SkipWorkerModels) {
         'faster-whisper-large-v3-turbo',
         'whisper-large-v3-turbo'
     )) {
-        $legacyModelRoot = [IO.Path]::GetFullPath((Join-Path $modelRoot $legacyModelName))
+        $legacyModelRoot = [IO.Path]::GetFullPath((Join-Path $speechRoot $legacyModelName))
         if ($legacyModelRoot.StartsWith($safeModelRoot, [StringComparison]::OrdinalIgnoreCase) -and
             [IO.Path]::GetFileName($legacyModelRoot) -eq $legacyModelName -and
             (Test-Path -LiteralPath $legacyModelRoot -PathType Container)) {

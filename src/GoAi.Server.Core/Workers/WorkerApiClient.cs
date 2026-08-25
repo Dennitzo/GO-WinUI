@@ -1,6 +1,5 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
-using GoAi.Server.Core.Security;
 using Microsoft.Extensions.Options;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -12,17 +11,14 @@ namespace GoAi.Server.Core.Workers;
 public sealed class WorkerApiClient
 {
     private readonly HttpClient _httpClient;
-    private readonly WorkerKeyStore _keys;
     private readonly GoAiServerOptions _options;
     private readonly JsonSerializerOptions _jsonOptions = GoAiProtocol.CreateJsonOptions();
 
     public WorkerApiClient(
         HttpClient httpClient,
-        WorkerKeyStore keys,
         IOptions<GoAiServerOptions> options)
     {
         _httpClient = httpClient;
-        _keys = keys;
         _options = options.Value;
         _httpClient.Timeout = TimeSpan.FromHours(2);
     }
@@ -50,9 +46,6 @@ public sealed class WorkerApiClient
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
             new Uri(_options.SpeechWorkerUri, "/live-captions"));
-        request.Headers.TryAddWithoutValidation(
-            GoAiHeaders.WorkerKey,
-            await _keys.ReadAsync("speech", cancellationToken).ConfigureAwait(false));
         if (!string.IsNullOrWhiteSpace(language))
         {
             request.Headers.TryAddWithoutValidation("X-GO-AI-Caption-Language", language);
@@ -259,9 +252,6 @@ public sealed class WorkerApiClient
         CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(baseUri, path));
-        request.Headers.TryAddWithoutValidation(
-            GoAiHeaders.WorkerKey,
-            await _keys.ReadAsync(workerName, cancellationToken).ConfigureAwait(false));
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
@@ -283,7 +273,6 @@ public sealed class WorkerApiClient
         CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(baseUri, path));
-        request.Headers.TryAddWithoutValidation(GoAiHeaders.WorkerKey, await _keys.ReadAsync(workerName, cancellationToken).ConfigureAwait(false));
         if (body is not null)
         {
             request.Content = JsonContent.Create(body, options: _jsonOptions);

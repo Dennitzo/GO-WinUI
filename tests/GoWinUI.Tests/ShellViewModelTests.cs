@@ -70,7 +70,7 @@ public sealed class ShellViewModelTests
         Assert.All(viewModel.AiServices, static item => Assert.False(string.IsNullOrWhiteSpace(item.Glyph)));
         Assert.Equal(viewModel.AiServices.Count, viewModel.AiServices.Select(static item => item.Glyph).Distinct().Count());
         Assert.Equal(
-            "General AI - gpt-oss-20b",
+            "General AI - gpt-oss-120b",
             viewModel.AiServices.Single(static item => item.Key == "general").ToolTipText);
         Assert.All(viewModel.AiServices, static item => Assert.False(item.IsActive));
         Assert.All(viewModel.AiServices, static item => Assert.True(item.IsIdle));
@@ -82,7 +82,7 @@ public sealed class ShellViewModelTests
         Assert.Contains(viewModel.AiServices, static item =>
             item.DisplayName == "Coding"
             && item.Runtime.Contains("Qwen3-Coder-Next", StringComparison.Ordinal)
-            && item.Runtime.Contains("gpt-oss-120b", StringComparison.Ordinal));
+            && item.Runtime.Contains("llama.cpp", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public sealed class ShellViewModelTests
             now,
             ActiveWorkloads:
             [
-                new("lease-general", "llm-general", "gpt-oss-20b", "LM Studio", "run-1", now),
+                new("lease-general", "llm-general", "gpt-oss-120b", "Docker · llama.cpp", "run-1", now),
                 new("lease-speech", "live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT", "caption-1", now),
             ]));
 
@@ -146,7 +146,7 @@ public sealed class ShellViewModelTests
     }
 
     [Fact]
-    public void CodingWorkloadActivatesQwenCoderChipOnly()
+    public void CodingWorkloadActivatesOnlyTheSharedCodingModelChip()
     {
         var now = DateTimeOffset.UtcNow;
         var viewModel = new ShellViewModel();
@@ -158,7 +158,7 @@ public sealed class ShellViewModelTests
             "lease-code",
             [],
             now,
-            ActiveWorkloads: [new("lease-code", "llm-code", "Qwen3-Coder-Next Q6_K", "LM Studio", "run-code", now)]));
+            ActiveWorkloads: [new("lease-code", "llm-code", "Coding-Agent · gpt-oss-120b", "Docker · llama.cpp", "run-code", now)]));
 
         Assert.True(viewModel.AiServices.Single(static item => item.Key == "coding").IsActive);
         Assert.False(viewModel.AiServices.Single(static item => item.Key == "general").IsActive);
@@ -166,11 +166,12 @@ public sealed class ShellViewModelTests
 
     private static ModelStatusSnapshot ReadyModels() => new(
         true,
-        "http://127.0.0.1:1234",
+        "http://llm:8080",
         [
-            new("gpt-oss-20b", "general", true, true, "loaded", 131_072),
-            new("Qwen3-Coder-Next Q6_K", "code", true, false, "available", 262_144),
-            new("Qwen3-VL", "vision", true, false, "available", 65_536),
+            new("gpt-oss-120b", "general", true, true, "loaded", 131_072),
+            new("gpt-oss-120b", "code", true, false, "unloaded", 131_072),
+            new("qwen3-coder-next-q8_0", "code", true, true, "loaded", 262_144),
+            new("Qwen3-VL", "vision", true, false, "available", 262_144),
         ],
         DateTimeOffset.UtcNow);
 

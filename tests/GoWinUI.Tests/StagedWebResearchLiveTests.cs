@@ -17,7 +17,7 @@ public sealed class StagedWebResearchLiveTests
         var modelId = Environment.GetEnvironmentVariable("GO_AI_LIVE_CODING_MODEL")?.Trim();
         if (string.IsNullOrWhiteSpace(modelId))
         {
-            modelId = "qwen3-coder-next";
+            modelId = "gpt-oss-120b";
         }
         var workspace = Path.Combine(
             Path.GetTempPath(),
@@ -40,7 +40,7 @@ public sealed class StagedWebResearchLiveTests
                 timeout.Token);
             var observation = await harness.ExecuteAsync(
                 sessionId,
-                "Führe eine Websuche in der offiziellen LM-Studio-Dokumentation zum TypeScript-SDK-Tool-Calling durch. "
+                "Führe eine Websuche in der offiziellen llama.cpp-Dokumentation zum nativen Tool-Calling durch. "
                     + "Lies die relevanten Seiten und fasse zwei belegte Hinweise mit Titel und URL zusammen. "
                     + "Analysiere danach kurz, wie sie für diesen leeren Workspace gelten. Verändere keine Dateien.",
                 "live-web-research",

@@ -20,14 +20,19 @@ public sealed class CapabilityService
             CreateModelCapability(_options.GeneralModelId, "general", _options.GeneralContextLength, true, false),
             .. CodingModelCatalog.Models.Select(static profile =>
                 CreateModelCapability(profile.Id, "code", profile.ContextLength, true, false)),
-            CreateModelCapability(_options.VisionModelId, "vision", 65536, true, true),
-            CreateModelCapability(_options.EmbeddingModelId, "embedding", 8192, false, false),
+            CreateModelCapability(_options.VisionModelId, "vision", _options.VisionContextLength, true, true),
+            CreateModelCapability(_options.EmbeddingModelId, "embedding", _options.EmbeddingContextLength, false, false),
         ],
         [
             "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
             "image.generate", "math.evaluate", "context.embed", "context.retrieve",
         ],
         [
+            ClientToolNames.DocumentRead,
+            ClientToolNames.DocumentCreate,
+            ClientToolNames.DocumentsList,
+            ClientToolNames.DocumentsSearch,
+            ClientToolNames.DocumentsReadPages,
             ClientToolNames.WorkspaceMap,
             ClientToolNames.FileSystemList,
             ClientToolNames.FileSystemStat,

@@ -140,7 +140,7 @@ public sealed class ChatAndContextTests
     [Fact]
     public void EscapedMarkdownSessionTitleMarkerIsNeverRendered()
     {
-        const string raw = "**GO\\_SESSION\\_TITLE:** Technischer Titel\n\n### Prozessbericht\nDie CodeÃ¤nderung wurde geprÃ¼ft.";
+        const string raw = "**GO\\_SESSION\\_TITLE:** Technischer Titel\n\n### Prozessbericht\nDie Codeänderung wurde geprüft.";
 
         var response = GeneralAgentResponseParser.Parse(raw, "Workflow fortsetzen");
 

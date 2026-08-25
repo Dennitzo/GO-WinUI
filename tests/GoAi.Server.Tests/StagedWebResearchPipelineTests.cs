@@ -22,7 +22,7 @@ public sealed class StagedWebResearchPipelineTests
 
         var result = await StagedWebResearchPipeline.ExecuteAsync(
             "Vergleiche die offiziellen Spezifikationen.",
-            "qwen3-coder-next",
+            "gpt-oss-120b",
             "code",
             search,
             fetch,
@@ -31,7 +31,7 @@ public sealed class StagedWebResearchPipelineTests
             catalog.Validate);
 
         Assert.Equal(4, modelRequests.Count);
-        Assert.All(modelRequests, static request => Assert.Equal("qwen3-coder-next", request.ModelId));
+        Assert.All(modelRequests, static request => Assert.Equal("gpt-oss-120b", request.ModelId));
         Assert.All(modelRequests, static request => Assert.Equal("code", request.ModelRole));
         Assert.Collection(
             modelRequests,
@@ -44,7 +44,10 @@ public sealed class StagedWebResearchPipelineTests
                 Assert.False(request.RequireToolCall);
                 Assert.Null(request.RequiredToolName);
                 Assert.False(request.DisableReasoning);
+                Assert.Contains("Deutsch", request.Messages[0].Content, StringComparison.Ordinal);
             });
+        Assert.Contains("language exakt auf 'de-DE'", modelRequests[0].Messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains("nicht ins Englische", modelRequests[0].Messages[0].Content, StringComparison.Ordinal);
         Assert.Equal(["web.search", "web.fetch", "web.fetch"], executedTools);
         Assert.Equal(2, result.FetchedSourceCount);
         Assert.False(result.UsedLocalSynthesisFallback);
@@ -83,8 +86,12 @@ public sealed class StagedWebResearchPipelineTests
             executedTools.Add(call.Name);
             if (call.Name == "web.search")
             {
+                Assert.Equal("de-DE", call.Arguments.GetProperty("language").GetString());
+                Assert.Equal(
+                    "Vergleiche die offiziellen Spezifikationen.",
+                    call.Arguments.GetProperty("query").GetString());
                 return Task.FromResult(Result(new WebSearchResponse(
-                    "official specifications",
+                    call.Arguments.GetProperty("query").GetString()!,
                     [
                         new WebSearchResult("Official", "https://example.com/official", "Primary source"),
                         new WebSearchResult("Specification", "https://example.org/specification", "Normative text"),
@@ -113,8 +120,9 @@ public sealed class StagedWebResearchPipelineTests
         var fetch = catalog.Resolve("web.fetch", tools);
         var executed = new List<LmToolCall>();
 
+        var longTask = "Suche im Web nach der API. " + new string('x', 700);
         var result = await StagedWebResearchPipeline.ExecuteAsync(
-            "Suche im Web nach der API.",
+            longTask,
             "gpt-oss-120b",
             "general",
             search,
@@ -128,6 +136,7 @@ public sealed class StagedWebResearchPipelineTests
         Assert.True(result.UsedLocalSynthesisFallback);
         Assert.Equal("web.search", executed[0].Name);
         Assert.Equal("web.fetch", executed[1].Name);
+        Assert.InRange(executed[0].Arguments.GetProperty("query").GetString()!.Length, 1, 500);
         Assert.Contains("Deterministischer Evidenzfallback", result.Dossier, StringComparison.Ordinal);
         Assert.Contains("https://example.com/reference", result.Dossier, StringComparison.Ordinal);
 
@@ -195,6 +204,37 @@ public sealed class StagedWebResearchPipelineTests
         Assert.True(StagedWebResearchPipeline.IsRequested(
             explicitRequest,
             catalog.GetAvailableTools(explicitRequest)));
+    }
+
+    [Theory]
+    [InlineData("Suche nach aktuellen Informationen zur klassischen Mechanik.", "de-DE")]
+    [InlineData("Search the web for current information about classical mechanics.", "en-US")]
+    [InlineData("Qwen3 tool calling", "de-DE")]
+    [InlineData("Suche diese API ausdrücklich auf Englisch.", "en-US")]
+    public void SearchLanguageFollowsTheCurrentPromptAndDefaultsToGerman(string task, string expected)
+    {
+        Assert.Equal(expected, StagedWebResearchPipeline.ResolvePreferredSearchLanguage(task));
+    }
+
+    [Fact]
+    public void ClearlyEnglishModelQueryIsReplacedForAGermanTask()
+    {
+        var diagnostics = new List<string>();
+        var generated = ToolResult(
+            "web.search",
+            new { query = "classical mechanics equations and topics", maximumResults = 20, language = "en-US" })
+            .ToolCalls[0];
+
+        var normalized = StagedWebResearchPipeline.NormalizeSearchCall(
+            generated,
+            "Suche Themen und Gleichungen der klassischen Mechanik.",
+            "de-DE",
+            diagnostics);
+
+        Assert.Equal("Suche Themen und Gleichungen der klassischen Mechanik.", normalized.Arguments.GetProperty("query").GetString());
+        Assert.Equal("de-DE", normalized.Arguments.GetProperty("language").GetString());
+        Assert.Equal(8, normalized.Arguments.GetProperty("maximumResults").GetInt32());
+        Assert.Single(diagnostics);
     }
 
     private static RunRequest CreateRequest() => new(

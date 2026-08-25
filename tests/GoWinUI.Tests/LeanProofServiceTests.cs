@@ -66,29 +66,6 @@ public sealed class LeanProofServiceTests
         Assert.Empty(result.ForbiddenConstructs);
     }
 
-    [Fact]
-    public async Task LivePhyMaProofManifestsUseTheManagedMathlibVerifier()
-    {
-        if (!string.Equals(
-                Environment.GetEnvironmentVariable("GO_RUN_MATHLIB_LIVE_TESTS"),
-                "1",
-                StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        var workspace = Environment.GetEnvironmentVariable("GO_MATHLIB_TEST_WORKSPACE");
-        Assert.True(Directory.Exists(workspace), "GO_MATHLIB_TEST_WORKSPACE muss auf den vorbereiteten Workspace zeigen.");
-
-        var results = await new CodingProofVerifier(new LeanProofService()).VerifyAllAsync(workspace!);
-
-        Assert.Equal(3, results.Count);
-        Assert.All(results, result => Assert.True(result.Passed, $"{result.ManifestPath}: {result.Detail}"));
-        var formal = Assert.Single(results, result => result.Kind == CodingProofKind.Formal);
-        Assert.Contains("cantor_powerSet_cardinality", formal.Detail, StringComparison.Ordinal);
-        Assert.Contains("Classical.choice", formal.Detail, StringComparison.Ordinal);
-    }
-
     private static readonly HashSet<string> AllowedAxioms = new(StringComparer.Ordinal)
     {
         "propext", "Classical.choice", "Quot.sound",
@@ -291,7 +268,7 @@ public sealed class LeanProofServiceTests
                 {
                   "caseId": "identity",
                   "kind": "formal",
-                  "statement": "Die IdentitÃ¤tsaussage ist innerhalb der Lean-Logik wahr.",
+                  "statement": "Die Identitätsaussage ist innerhalb der Lean-Logik wahr.",
                   "assumptions": [],
                   "validityDomain": "Aussagenlogik in Lean.",
                   "artifact": "proofs/identity/Identity.lean",

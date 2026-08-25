@@ -19,18 +19,18 @@ public static class CodingContextPlanner
     public static CodingContextPlan Prepare(
         IReadOnlyList<LmChatMessage> source,
         int contextLength,
-        int maximumOutputTokens)
+        int maximumOutputTokens,
+        bool allowLossyCompaction = true)
     {
         ArgumentNullException.ThrowIfNull(source);
-        var safetyTokens = Math.Min(8_192, Math.Max(2_048, contextLength / 16));
-        var budget = Math.Max(1_024, contextLength - maximumOutputTokens - safetyTokens);
+        var budget = ComputeInputTokenBudget(contextLength, maximumOutputTokens);
         var conversation = CompactRepeatedConversationMessages(source, out var conversationCompacted);
         var messages = conversation.Select(CompactHistoricalToolArguments).ToArray();
         var compacted = conversationCompacted || !messages.SequenceEqual(conversation);
         var latestUserIndex = Array.FindLastIndex(messages, static message =>
             string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase));
 
-        if (EstimateTokens(messages) > budget)
+        if (allowLossyCompaction && EstimateTokens(messages) > budget)
         {
             for (var index = 0; index < messages.Length && EstimateTokens(messages) > budget; index++)
             {
@@ -45,7 +45,7 @@ public static class CodingContextPlanner
             }
         }
 
-        if (EstimateTokens(messages) > budget)
+        if (allowLossyCompaction && EstimateTokens(messages) > budget)
         {
             var toolIndices = messages
                 .Select((message, index) => (message, index))
@@ -63,7 +63,7 @@ public static class CodingContextPlanner
             }
         }
 
-        while (EstimateTokens(messages) > budget)
+        while (allowLossyCompaction && EstimateTokens(messages) > budget)
         {
             var candidate = messages
                 .Select((message, index) => new
@@ -101,6 +101,14 @@ public static class CodingContextPlanner
             compacted
                 ? "Ältere Chat- und Werkzeugdaten wurden verdichtet; aktuelle Quellen und Tool-IDs bleiben erhalten."
                 : null);
+    }
+
+    public static int ComputeInputTokenBudget(int contextLength, int maximumOutputTokens)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(contextLength, 2_048);
+        ArgumentOutOfRangeException.ThrowIfNegative(maximumOutputTokens);
+        var safetyTokens = Math.Min(8_192, Math.Max(2_048, contextLength / 16));
+        return Math.Max(1_024, contextLength - maximumOutputTokens - safetyTokens);
     }
 
     public static int EstimateTokens(IReadOnlyList<LmChatMessage> messages)

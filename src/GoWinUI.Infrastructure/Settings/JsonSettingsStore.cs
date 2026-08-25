@@ -71,12 +71,22 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
 
     private static AppSettings Normalize(AppSettings settings)
     {
-        var goAiServerUrl = settings.GoAiServerUrl.Trim();
+        var goAiServerUrl = (settings.GoAiServerUrl ?? string.Empty).Trim();
         if (!Uri.TryCreate(goAiServerUrl, UriKind.Absolute, out var goAiUri)
-            || goAiUri.Scheme is not ("http" or "https")
-            || (goAiUri.Scheme == "http" && !goAiUri.IsLoopback))
+            || goAiUri.Scheme is not ("http" or "https"))
         {
-            goAiServerUrl = "https://192.168.0.67:8443";
+            goAiServerUrl = "http://192.168.0.67:8080";
+        }
+        else if (settings.Version < 13
+                 && string.Equals(goAiUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                 && goAiUri.Port == 8443)
+        {
+            var dockerGateway = new UriBuilder(goAiUri)
+            {
+                Scheme = Uri.UriSchemeHttp,
+                Port = 8080,
+            };
+            goAiServerUrl = dockerGateway.Uri.ToString();
         }
         var window = settings.Window with
         {
@@ -92,15 +102,13 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         var lastActivityAt = lastActivityText is null ? null : settings.LastActivityAt;
         return settings with
         {
-            Version = 11,
+            Version = AppSettings.CurrentVersion,
+            IsAiConnectionEnabled = settings.Version < 13
+                || settings.IsAiConnectionEnabled,
             GoAiServerUrl = goAiServerUrl.TrimEnd('/'),
             GoAiProtocolVersion = string.IsNullOrWhiteSpace(settings.GoAiProtocolVersion)
                 ? "1.0"
                 : settings.GoAiProtocolVersion.Trim(),
-            GoAiCaFingerprint = NormalizeFingerprint(settings.GoAiCaFingerprint),
-            GoAiConnectionName = string.IsNullOrWhiteSpace(settings.GoAiConnectionName)
-                ? "GO AI Server"
-                : settings.GoAiConnectionName.Trim(),
             LocalToolWorkspacePath = NormalizeWorkspace(settings.LocalToolWorkspacePath),
             LiveCaptionLanguage = settings.Version < 5
                 && string.Equals(settings.LiveCaptionLanguage, "de", StringComparison.OrdinalIgnoreCase)
@@ -108,9 +116,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
                     : string.IsNullOrWhiteSpace(settings.LiveCaptionLanguage)
                         ? "auto"
                         : settings.LiveCaptionLanguage.Trim(),
-            SelectedModel = string.IsNullOrWhiteSpace(settings.SelectedModel)
-                ? AppSettings.DefaultSelectedModel
-                : settings.SelectedModel.Trim(),
+            SelectedModel = NormalizeGeneralModel(settings.SelectedModel),
             SelectedCodingModel = NormalizeCodingModel(settings.Version, settings.SelectedCodingModel),
             ReasoningEffort = NormalizeReasoningEffort(settings.Version, settings.ReasoningEffort),
             AccentColor = accentColor,
@@ -126,10 +132,24 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
 
     private static string NormalizeCodingModel(int settingsVersion, string? value)
     {
-        var normalized = value?.Trim();
-        if (settingsVersion < 10 || string.IsNullOrWhiteSpace(normalized))
+        if (settingsVersion < 14)
         {
             return AppSettings.DefaultSelectedCodingModel;
+        }
+
+        var normalized = value?.Trim();
+        return normalized is "gpt-oss-120b" or "qwen3-coder-next-q8_0"
+            ? normalized
+            : AppSettings.DefaultSelectedCodingModel;
+    }
+
+    private static string NormalizeGeneralModel(string? value)
+    {
+        var normalized = value?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized)
+            || normalized.Contains("gpt-oss-120b", StringComparison.OrdinalIgnoreCase))
+        {
+            return AppSettings.DefaultSelectedModel;
         }
 
         return normalized;
@@ -146,12 +166,6 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         return normalized is "off" or "on" or "low" or "medium" or "high"
             ? normalized
             : "auto";
-    }
-
-    private static string? NormalizeFingerprint(string? value)
-    {
-        var normalized = new string((value ?? string.Empty).Where(Uri.IsHexDigit).ToArray()).ToLowerInvariant();
-        return normalized.Length == 64 ? normalized : null;
     }
 
     private static string? NormalizeWorkspace(string? value)

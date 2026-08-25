@@ -48,24 +48,24 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
         string workspace,
         string modelId,
         string sessionId,
-        string apiKey)
+        string clientId)
     {
         this.scenario = scenario;
         this.workspace = workspace;
         this.modelId = modelId;
         modelDisplayName = modelId.ToLowerInvariant() switch
         {
-            "qwen3.8-27b" => "Qwen3.8-27B",
-            "openai/gpt-oss-120b" => "gpt-oss-120b",
-            _ => "Qwen3-Coder-Next",
+            _ => "gpt-oss-120b",
         };
 
+        var gatewayUrl = Environment.GetEnvironmentVariable("GO_AI_SERVER_URL")
+            ?? "http://127.0.0.1:8080/";
         http = new HttpClient
         {
-            BaseAddress = new Uri("http://127.0.0.1:7080/", UriKind.Absolute),
+            BaseAddress = new Uri(gatewayUrl.TrimEnd('/') + "/", UriKind.Absolute),
             Timeout = Timeout.InfiniteTimeSpan,
         };
-        client = new GoAiClient(http, apiKey);
+        client = new GoAiClient(http, clientId);
         var cacheRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "GO",
@@ -102,24 +102,20 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
             throw new DirectoryNotFoundException($"Live-Coding-Workspace fehlt: {canonicalWorkspace}");
         }
 
-        var apiKey = await new WindowsCredentialSecretStore()
-            .GetApiKeyAsync(cancellationToken)
-            .ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            throw new InvalidOperationException("Für den Live-Test ist kein GO-AI-Clientschlüssel gespeichert.");
-        }
+        var clientId = $"go-live-test-{sessionId}";
 
         var harness = new CodingAgentLiveTestHarness(
             scenario,
             canonicalWorkspace,
             modelId,
             sessionId,
-            apiKey);
+            clientId);
         try
         {
             var ready = await harness.client.GetReadyHealthAsync(cancellationToken).ConfigureAwait(false);
-            if (!string.Equals(ready.Status, "ready", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(ready.Status, "ready", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(ready.Status, "modelNotLoaded", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(ready.Status, "modelLoading", StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException($"GO AI Server ist nicht bereit: {ready.Status}");
             }

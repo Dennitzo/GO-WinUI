@@ -13,16 +13,14 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from common.worker_security import read_worker_key, require_worker_key
 
 
 DATA_ROOT = Path("/data")
-OUTPUT_ROOT = DATA_ROOT / "Artifacts" / "worker"
+OUTPUT_ROOT = DATA_ROOT / "artifacts" / "worker"
 SD_SERVER = Path("/opt/stable-diffusion/sd-server")
 MODEL = Path(os.environ.get("GO_AI_Z_IMAGE_MODEL", "/models/z-image/z_image_turbo-Q4_K.gguf"))
 VAE = Path(os.environ.get("GO_AI_Z_IMAGE_VAE", "/models/z-image/ae.safetensors"))
@@ -31,7 +29,6 @@ MODEL_TTL_SECONDS = max(60, int(os.environ.get("GO_AI_MODEL_TTL_SECONDS", "600")
 SERVER_LOAD_TIMEOUT_SECONDS = max(60, int(os.environ.get("GO_AI_IMAGE_LOAD_TIMEOUT_SECONDS", "1200")))
 SD_SERVER_PORT = int(os.environ.get("GO_AI_SD_SERVER_PORT", "8090"))
 SD_SERVER_URL = f"http://127.0.0.1:{SD_SERVER_PORT}"
-WORKER_KEY = read_worker_key()
 PROCESS_GATE = threading.Lock()
 
 
@@ -177,13 +174,6 @@ def stop_runtime() -> None:
 @app.get("/health")
 def health() -> dict:
     return {"status": "live", "worker": "image"}
-
-
-@app.middleware("http")
-async def authenticate(request: Request, call_next):
-    if request.url.path != "/health" and not require_worker_key(request, WORKER_KEY):
-        return JSONResponse(status_code=401, content={"errorCode": "worker.authentication_failed"})
-    return await call_next(request)
 
 
 @app.get("/status")

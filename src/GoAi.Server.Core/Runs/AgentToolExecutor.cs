@@ -19,7 +19,7 @@ public sealed class AgentToolExecutor
     private readonly WorkerOrchestrator _workers;
     private readonly UploadService _uploads;
     private readonly ArtifactService _artifacts;
-    private readonly LmStudioClient _lmStudio;
+    private readonly ModelRuntimeClient _modelRuntime;
     private readonly GpuLeaseScheduler _scheduler;
     private readonly ServiceActivityTracker _serviceActivities;
     private readonly GoAiServerOptions _options;
@@ -30,7 +30,7 @@ public sealed class AgentToolExecutor
         WorkerOrchestrator workers,
         UploadService uploads,
         ArtifactService artifacts,
-        LmStudioClient lmStudio,
+        ModelRuntimeClient modelRuntime,
         GpuLeaseScheduler scheduler,
         ServiceActivityTracker serviceActivities,
         IOptions<GoAiServerOptions> options)
@@ -39,7 +39,7 @@ public sealed class AgentToolExecutor
         _workers = workers;
         _uploads = uploads;
         _artifacts = artifacts;
-        _lmStudio = lmStudio;
+        _modelRuntime = modelRuntime;
         _scheduler = scheduler;
         _serviceActivities = serviceActivities;
         _options = options.Value;
@@ -400,9 +400,9 @@ public sealed class AgentToolExecutor
             cancellationToken).ConfigureAwait(false);
         _ = await _workers.PrepareLmModelAsync(
             _options.VisionModelId,
-            65_536,
+            _options.VisionContextLength,
             cancellationToken).ConfigureAwait(false);
-        return await _lmStudio.AnalyzeImagesAsync(
+        return await _modelRuntime.AnalyzeImagesAsync(
             _options.VisionModelId,
             prompt,
             imagePaths,
@@ -427,7 +427,7 @@ public sealed class AgentToolExecutor
             _options.GeneralModelId,
             _options.GeneralContextLength,
             cancellationToken).ConfigureAwait(false);
-        var response = await _lmStudio.CompleteChatAsync(
+        var response = await _modelRuntime.CompleteChatAsync(
             _options.GeneralModelId,
             [
                 new LmChatMessage("system", TgaAgentPolicies.ForRole("general")),
@@ -457,7 +457,7 @@ public sealed class AgentToolExecutor
             _options.GeneralModelId,
             _options.GeneralContextLength,
             cancellationToken).ConfigureAwait(false);
-        var response = await _lmStudio.CompleteChatAsync(
+        var response = await _modelRuntime.CompleteChatAsync(
             _options.GeneralModelId,
             messages,
             [],
@@ -591,7 +591,7 @@ public sealed class AgentToolExecutor
             _options.EmbeddingModelId,
             8192,
             cancellationToken).ConfigureAwait(false);
-        return await _lmStudio.CreateEmbeddingsAsync(
+        return await _modelRuntime.CreateEmbeddingsAsync(
             _options.EmbeddingModelId,
             inputs,
             cancellationToken).ConfigureAwait(false);

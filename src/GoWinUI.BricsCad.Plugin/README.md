@@ -10,5 +10,5 @@ the running GO process through `%LOCALAPPDATA%\GO\Bridge\active.json` and connec
 to its dynamic loopback port. It rejects rendezvous files whose current-user ACL,
 token, protocol number or exact contract SHA-256 does not match.
 
-The plugin contains no LM Studio or chat integration. It only implements the
+The plugin contains no model-runtime or chat integration. It only implements the
 ported BricsCAD V26 tool contract and CAD operations.

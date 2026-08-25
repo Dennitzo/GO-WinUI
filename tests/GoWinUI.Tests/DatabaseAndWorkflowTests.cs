@@ -253,7 +253,7 @@ public sealed class DatabaseAndWorkflowTests
 
         await chats.SetCodeDiffAsync(message.Id, "diff --git a/demo.cs b/demo.cs\n+added\n");
 
-        Assert.Equal(25, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
+        Assert.Equal(26, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
         await using (var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
         {
             await connection.OpenAsync();

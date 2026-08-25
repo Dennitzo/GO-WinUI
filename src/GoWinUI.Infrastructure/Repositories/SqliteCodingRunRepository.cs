@@ -124,7 +124,7 @@ public sealed class SqliteCodingRunRepository(SqliteDatabase database) : ICoding
             return count;
         }, cancellationToken);
 
-    public async Task ImportAsync(
+    public async Task<bool> ImportAsync(
         Guid localRunId,
         string? serverRunId,
         Guid sessionId,
@@ -139,17 +139,36 @@ public sealed class SqliteCodingRunRepository(SqliteDatabase database) : ICoding
             && existing.MessageId == messageId
             && existing.Entries.SequenceEqual(orderedEntries))
         {
-            return;
+            return true;
         }
 
-        await database.WriteAsync(async (connection, transaction, token) =>
+        return await database.WriteAsync(async (connection, transaction, token) =>
         {
+            await using (var check = connection.CreateCommand())
+            {
+                check.Transaction = transaction;
+                check.CommandText = """
+                    SELECT EXISTS(
+                        SELECT 1 FROM chat_messages
+                        WHERE id=$message AND session_id=$session);
+                    """;
+                check.Parameters.AddWithValue("$message", messageId.ToString("D"));
+                check.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+                if (Convert.ToInt64(
+                        await check.ExecuteScalarAsync(token).ConfigureAwait(false),
+                        System.Globalization.CultureInfo.InvariantCulture) == 0)
+                {
+                    return false;
+                }
+            }
+
             foreach (var entry in orderedEntries)
             {
                 await UpsertRunAndEntryAsync(
                     connection, transaction, localRunId, serverRunId, sessionId, messageId, entry, token)
                     .ConfigureAwait(false);
             }
+            return true;
         }, cancellationToken).ConfigureAwait(false);
     }
 

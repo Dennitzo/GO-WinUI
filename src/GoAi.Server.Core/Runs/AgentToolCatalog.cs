@@ -7,6 +7,8 @@ namespace GoAi.Server.Core.Runs;
 
 public sealed class AgentToolCatalog
 {
+    public const string SelectorToolName = "go.selectTool";
+    private static readonly string[] SelectorRequiredProperties = ["name"];
     private static readonly string[] DefaultServerTools =
     [
         "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
@@ -27,6 +29,10 @@ public sealed class AgentToolCatalog
             names.Add(name);
         }
         var capabilities = request.ClientCapabilities ?? [];
+        if (HasCapability(capabilities, "documentIo"))
+        {
+            names.UnionWith([ClientToolNames.DocumentRead, ClientToolNames.DocumentCreate]);
+        }
         if (HasCapability(capabilities, "documents"))
         {
             names.UnionWith([ClientToolNames.DocumentsList, ClientToolNames.DocumentsSearch, ClientToolNames.DocumentsReadPages]);
@@ -55,8 +61,8 @@ public sealed class AgentToolCatalog
             names.Add(ClientToolNames.ProcessRun);
             names.Add(ClientToolNames.LeanProof);
         }
-        // PDF is intentionally not exposed as a model tool. GO renders a
-        // requested manuscript deterministically after workspace changes.
+        // PDF bytes are never model-generated. document.create edits a bounded
+        // canonical source and delegates rendering to GO's deterministic path.
         if (HasCapability(capabilities, "bricscad"))
         {
             names.UnionWith(
@@ -80,6 +86,57 @@ public sealed class AgentToolCatalog
         }
         var tool = registered;
         return tool;
+    }
+
+    public static LmToolDefinition CreateSelectorDefinition(IReadOnlyList<AgentToolSpec> available)
+    {
+        ArgumentNullException.ThrowIfNull(available);
+        if (available.Count == 0)
+        {
+            throw new ArgumentException("A tool selector requires at least one available tool.", nameof(available));
+        }
+        var ordered = available.OrderBy(static tool => tool.Name, StringComparer.Ordinal).ToArray();
+        var catalog = string.Join(
+            "\n",
+            ordered.Select(static tool => $"- {tool.Name}: {BoundDescription(tool.Description)}"));
+        var schema = JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            additionalProperties = false,
+            properties = new
+            {
+                name = new
+                {
+                    type = "string",
+                    @enum = ordered.Select(static tool => tool.Name).ToArray(),
+                    description = "Name des Werkzeugs, dessen vollständiges Schema im nächsten Modellturn benötigt wird.",
+                },
+            },
+            required = SelectorRequiredProperties,
+        }, GoAiProtocol.CreateJsonOptions());
+        return new LmToolDefinition(
+            SelectorToolName,
+            "Wähle genau ein benötigtes Werkzeug aus dem kompakten Katalog. GO stellt danach ausschließlich dessen vollständiges Schema bereit.\n" + catalog,
+            schema);
+    }
+
+    public AgentToolSpec ResolveSelection(JsonElement arguments, IReadOnlyList<AgentToolSpec> available)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object
+            || arguments.EnumerateObject().Any(static property => property.Name != "name")
+            || !arguments.TryGetProperty("name", out var value)
+            || value.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            throw new ArgumentException("go.selectTool requires exactly one non-empty string property named 'name'.");
+        }
+        return Resolve(value.GetString()!, available);
+    }
+
+    private static string BoundDescription(string description)
+    {
+        var normalized = string.Join(' ', description.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return normalized.Length <= 180 ? normalized : normalized[..177] + "...";
     }
 
     public void Validate(AgentToolSpec tool, JsonElement arguments)
@@ -117,6 +174,53 @@ public sealed class AgentToolCatalog
     {
         switch (name)
         {
+            case ClientToolNames.DocumentRead:
+                var documentScope = RequireString(value, "scope", 1, 16);
+                var documentReadMode = RequireString(value, "mode", 1, 16);
+                if (documentScope is not ("session" or "workspace"))
+                {
+                    throw new ArgumentException("document.read scope is not supported.");
+                }
+                if (documentReadMode is not ("list" or "outline" or "read" or "search"))
+                {
+                    throw new ArgumentException("document.read mode is not supported.");
+                }
+                OptionalString(value, "reference", 1, 1024);
+                OptionalString(value, "query", 1, 2000);
+                OptionalInteger(value, "startUnit", 1, 1_000_000);
+                OptionalInteger(value, "characterOffset", 0, 4 * 1024 * 1024);
+                OptionalInteger(value, "maximumUnits", 1, 30);
+                OptionalInteger(value, "maximumCharacters", 1000, 40_000);
+                if (documentReadMode != "list" && !value.TryGetProperty("reference", out _))
+                {
+                    throw new ArgumentException("document.read requires reference outside list mode.");
+                }
+                if (documentReadMode == "search" && !value.TryGetProperty("query", out _))
+                {
+                    throw new ArgumentException("document.read search requires query.");
+                }
+                break;
+            case ClientToolNames.DocumentCreate:
+                var documentOperation = RequireString(value, "operation", 1, 32);
+                if (documentOperation is not ("create" or "appendSection" or "replaceSection"))
+                {
+                    throw new ArgumentException("document.create operation is not supported.");
+                }
+                RequireString(value, "reference", 1, 1024);
+                var documentFormat = RequireString(value, "format", 1, 16);
+                if (documentFormat is not ("markdown" or "text" or "docx" or "pdf"))
+                {
+                    throw new ArgumentException("document.create format is not supported.");
+                }
+                RequireString(value, "sectionId", 1, 128);
+                RequireString(value, "content", 0, 120_000);
+                OptionalString(value, "heading", 1, 500);
+                OptionalString(value, "expectedSha256", 64, 64);
+                if (documentOperation != "create" && !value.TryGetProperty("expectedSha256", out _))
+                {
+                    throw new ArgumentException("document.create edits require expectedSha256.");
+                }
+                break;
             case ClientToolNames.DocumentsList:
                 break;
             case ClientToolNames.DocumentsSearch:
@@ -290,7 +394,7 @@ public sealed class AgentToolCatalog
     {
         var tools = new[]
         {
-            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz.", ToolRiskClass.ReadOnly, SearchSchema()),
+            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Formuliere query in der Sprache des aktuellen Nutzerprompts und setze language passend; ohne eindeutige Sprache gilt de-DE.", ToolRiskClass.ReadOnly, SearchSchema()),
             Server("youtube.search", "Suche YouTube; ohne API-Key wird ein sichtbar gekennzeichneter SearXNG-Fallback verwendet.", ToolRiskClass.ReadOnly, SearchSchema()),
             Server("web.fetch", "Rufe eine öffentliche HTTP(S)-Quelle SSRF-geschützt ab und extrahiere Text aus Webseiten, PDF-, DOCX- und RTF-Dokumenten. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, Schema("url", ("url", "string"))),
             Server("media.inspect", "Extrahiere sichere Metadaten, Audio und zeitcodierte Frames eines Uploads.", ToolRiskClass.ReadOnly, MediaSchema()),
@@ -300,13 +404,15 @@ public sealed class AgentToolCatalog
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
             Server("context.retrieve", "Ordne Dokumenttexte über BGE-M3 semantisch zu einer Anfrage.", ToolRiskClass.ReadOnly, RetrieveSchema()),
             Client(ClientToolNames.WorkspaceMap, "Erzeuge eine kompakte Karte des freigegebenen Repositorys mit Projekten, Sprachen und relativen Dateipfaden.", ToolRiskClass.ReadOnly, WorkspaceMapSchema()),
+            Client(ClientToolNames.DocumentRead, "Lese Dokumente tokeneffizient: zuerst Sitzungsdokumente auflisten oder eine Gliederung abrufen, danach nur benötigte Abschnitte, Fortsetzungen oder Suchtreffer. Unterstützt Sitzungsartefakte sowie Workspace-Dokumente.", ToolRiskClass.ReadOnly, DocumentReadSchema()),
+            Client(ClientToolNames.DocumentCreate, "Erstelle oder bearbeite ein Dokument abschnittsweise über stabile sectionId-Werte. General AI erzeugt ein versioniertes Chat-Artefakt; Coding schreibt eine kanonische Workspace-Quelle. PDF wird deterministisch mit GO und KaTeX gerendert.", ToolRiskClass.LocalMutation, DocumentCreateSchema()),
             Client(ClientToolNames.DocumentsList, "Liste alle fertig aufbereiteten Dokumente der aktuellen GO-Sitzung mit Dateiname und Seitenzahl.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{},"required":[],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsSearch, "Durchsuche den persistenten lokalen Dokumentindex promptbezogen und liefere Originalbelege mit Dateiname und Seite.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"query":{"type":"string"},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":200000}},"required":["query"],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsReadPages, "Lese einen konkreten Seitenbereich eines Sitzungsdokuments als zitierfähigen Originalbeleg.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"documentId":{"type":"string"},"startPage":{"type":"integer","minimum":1},"endPage":{"type":"integer","minimum":1}},"required":["documentId","startPage","endPage"],"additionalProperties":false}""")),
-            Client(ClientToolNames.FileSystemList, "Liste Einträge innerhalb des freigegebenen Client-Workspace. Verwende . oder einen leeren Pfad für die Workspace-Wurzel.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
-            Client(ClientToolNames.FileSystemStat, "Lese Dateimetadaten innerhalb des freigegebenen Client-Workspace. Verwende . oder einen leeren Pfad für die Workspace-Wurzel.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
-            Client(ClientToolNames.FileSystemFindFiles, "Finde mehrere Dateien per Glob oder Dateiname im indexierten Workspace.", ToolRiskClass.ReadOnly, FindFilesSchema()),
-            Client(ClientToolNames.FileSystemReadText, "Lese eine ganze Textdatei oder einen bestimmten Zeilenbereich im Workspace.", ToolRiskClass.ReadOnly, ReadTextSchema()),
+            Client(ClientToolNames.FileSystemList, "Liste Einträge eines nachweislich vorhandenen Ordners im freigegebenen Client-Workspace. Verwende . oder einen leeren Pfad für die Workspace-Wurzel.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
+            Client(ClientToolNames.FileSystemStat, "Lese Metadaten eines nachweislich vorhandenen Workspace-Pfads. Verwende . oder einen leeren Pfad für die Workspace-Wurzel.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
+            Client(ClientToolNames.FileSystemFindFiles, "Finde tatsächlich vorhandene Dateien per Glob oder Dateiname im indexierten Workspace; nutze dies vor fs.readText, wenn ein Pfad nicht bereits aus Repositorykarte oder Toolergebnis belegt ist.", ToolRiskClass.ReadOnly, FindFilesSchema()),
+            Client(ClientToolNames.FileSystemReadText, "Lese eine vorhandene Textdatei oder einen bestimmten Zeilenbereich. path muss exakt aus Repositorykarte, fs.list, fs.findFiles, fs.search oder einer zuvor erfolgreichen Dateioperation stammen; erfinde keine Standardpfade.", ToolRiskClass.ReadOnly, ReadTextSchema()),
             Client(ClientToolNames.FileSystemReadMany, "Lese mehrere relevante Dateien oder Zeilenbereiche gebündelt und kontextbegrenzt.", ToolRiskClass.ReadOnly, ReadManySchema()),
             Client(ClientToolNames.FileSystemSearch, "Suche mehrere Literale oder reguläre Ausdrücke mit Globfiltern und Kontextzeilen im indexierten Workspace. Bei queries steht jedes Arrayelement für genau einen Suchbegriff; Pipe-Alternativen sind nur mit matchMode regex zulässig.", ToolRiskClass.ReadOnly, FileSearchSchema()),
             Client(ClientToolNames.FileSystemWriteText, "Schreibe oder überschreibe eine Textdatei atomar im freigegebenen Workspace.", ToolRiskClass.LocalMutation, WriteTextSchema()),
@@ -340,11 +446,19 @@ public sealed class AgentToolCatalog
     }
 
     private static JsonElement SearchSchema() => Parse("""
-        {"type":"object","properties":{"query":{"type":"string"},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string"}},"required":["query"],"additionalProperties":false}
+        {"type":"object","properties":{"query":{"type":"string","description":"Kurze Suchanfrage in der Sprache des aktuellen Nutzerprompts; technische Eigennamen unveraendert lassen."},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string","description":"BCP-47-Suchsprache passend zum aktuellen Prompt; Standard de-DE."}},"required":["query"],"additionalProperties":false}
         """);
 
     private static JsonElement WorkspaceMapSchema() => Parse("""
         {"type":"object","properties":{"maximumDepth":{"type":"integer","minimum":1,"maximum":32},"maximumEntries":{"type":"integer","minimum":1,"maximum":5000}},"required":[],"additionalProperties":false}
+        """);
+
+    private static JsonElement DocumentReadSchema() => Parse("""
+        {"type":"object","properties":{"scope":{"type":"string","enum":["session","workspace"]},"mode":{"type":"string","enum":["list","outline","read","search"]},"reference":{"type":"string","description":"GUID aus list oder relativer Workspace-Pfad."},"query":{"type":"string"},"startUnit":{"type":"integer","minimum":1},"characterOffset":{"type":"integer","minimum":0},"maximumUnits":{"type":"integer","minimum":1,"maximum":30},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":40000}},"required":["scope","mode"],"additionalProperties":false}
+        """);
+
+    private static JsonElement DocumentCreateSchema() => Parse("""
+        {"type":"object","properties":{"operation":{"type":"string","enum":["create","appendSection","replaceSection"]},"reference":{"type":"string","description":"Beim Erstellen Dateiname/Pfad, beim Bearbeiten documentId oder derselbe Workspace-Pfad."},"format":{"type":"string","enum":["markdown","text","docx","pdf"]},"sectionId":{"type":"string","description":"Stabile eindeutige Abschnitts-ID."},"heading":{"type":"string"},"content":{"type":"string","description":"Nur der neue oder geänderte Abschnitt als Markdown, nie das gesamte bestehende Dokument erneut."},"expectedSha256":{"type":"string","description":"Für Bearbeitungen verpflichtender SHA-256 aus document.read oder document.create."}},"required":["operation","reference","format","sectionId","content"],"additionalProperties":false}
         """);
 
     private static JsonElement FindFilesSchema() => Parse("""

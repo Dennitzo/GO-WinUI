@@ -22,8 +22,8 @@ public sealed partial class ShellViewModel : ObservableObject
 
     public ShellViewModel()
     {
-        AiServices.Add(new(GeneralService, "General AI", "gpt-oss-20b · LM Studio", "\uE950", "General AI - gpt-oss-20b", false, false, "Wird geprüft"));
-        AiServices.Add(new(CodingService, "Coding", "Qwen3.8-27B / Qwen3-Coder-Next / gpt-oss-120b · LM Studio", "\uE943", "Coding-Agent", false, false, "Wird geprüft"));
+        AiServices.Add(new(GeneralService, "General AI", "gpt-oss-120b · llama.cpp", "\uE950", "General AI - gpt-oss-120b", false, false, "Wird geprüft"));
+        AiServices.Add(new(CodingService, "Coding", "Qwen3-Coder-Next · Q8_0 · llama.cpp", "\uE943", "Coding-Agent - Qwen3-Coder-Next", false, false, "Wird geprüft"));
         AiServices.Add(new(SpeechToTextService, "Spracherkennung", "Whisper large-v3 · Docker", "\uE720", "Spracherkennung - Whisper large-v3", false, false, "Wird geprüft"));
         AiServices.Add(new(TextToSpeechService, "Sprachausgabe", "Ausgewählter Provider · GPU 1", "\uE767", "Sprachausgabe - ausgewählter Provider", false, false, "Wird geprüft"));
         AiServices.Add(new(VisionMediaService, "Vision / Medien", "Qwen3-VL + Media Worker", "\uE722", "Vision / Medien - Qwen3-VL", false, false, "Wird geprüft"));

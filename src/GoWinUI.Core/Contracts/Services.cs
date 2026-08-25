@@ -92,7 +92,7 @@ public interface ICodingRunRepository
         string? codeDiff,
         CancellationToken cancellationToken = default);
     Task<int> MarkRunningInterruptedAsync(CancellationToken cancellationToken = default);
-    Task ImportAsync(
+    Task<bool> ImportAsync(
         Guid localRunId,
         string? serverRunId,
         Guid sessionId,
@@ -152,9 +152,30 @@ public interface IChatArtifactRepository
         CancellationToken cancellationToken = default);
 }
 
+public interface IGeneratedDocumentRepository
+{
+    Task<IReadOnlyList<GeneratedDocument>> ListAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    Task<GeneratedDocument?> GetAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<GeneratedDocument> CreateAsync(GeneratedDocument document, CancellationToken cancellationToken = default);
+    Task<GeneratedDocument> UpdateAsync(
+        Guid id,
+        string sourceMarkdown,
+        string sha256,
+        long expectedRevision,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IDocumentFileCodec
+{
+    IReadOnlySet<string> ReadableExtensions { get; }
+    Task<IReadOnlyList<string>> ReadAsync(string path, CancellationToken cancellationToken = default);
+    Task WriteDocxAsync(string sourceMarkdown, string outputPath, CancellationToken cancellationToken = default);
+}
+
 public interface IGoAiRunRepository
 {
     Task<GoAiRunRecord> CreateAsync(GoAiRunRecord run, CancellationToken cancellationToken = default);
+    Task<GoAiRunRecord> BeginAttemptAsync(GoAiRunRecord run, CancellationToken cancellationToken = default);
     Task<GoAiRunRecord?> GetAsync(Guid id, CancellationToken cancellationToken = default);
     Task<GoAiRunRecord?> GetByServerRunIdAsync(string serverRunId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<GoAiRunRecord>> ListResumableAsync(CancellationToken cancellationToken = default);
@@ -171,17 +192,13 @@ public interface IGoAiRunRepository
 public interface IClientToolExecutionRepository
 {
     Task<ClientToolExecutionRecord?> GetAsync(string proposalId, CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<ClientToolExecutionRecord>> ListPendingSubmissionsAsync(Guid localRunId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ClientToolExecutionRecord>> ListPendingSubmissionsAsync(
+        Guid localRunId,
+        string? serverRunId = null,
+        CancellationToken cancellationToken = default);
     Task<ClientToolExecutionRecord> BeginAsync(ClientToolExecutionRecord execution, CancellationToken cancellationToken = default);
     Task<ClientToolExecutionRecord> CompleteAsync(string proposalId, string resultJson, CancellationToken cancellationToken = default);
     Task MarkSubmittedAsync(string proposalId, CancellationToken cancellationToken = default);
-}
-
-public interface IAiSecretStore
-{
-    Task<string?> GetApiKeyAsync(CancellationToken cancellationToken = default);
-    Task SetApiKeyAsync(string value, CancellationToken cancellationToken = default);
-    Task DeleteApiKeyAsync(CancellationToken cancellationToken = default);
 }
 
 public interface IProjectRepository

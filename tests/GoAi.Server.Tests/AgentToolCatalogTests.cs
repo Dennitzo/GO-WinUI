@@ -6,6 +6,35 @@ namespace GoAi.Server.Tests;
 
 public sealed class AgentToolCatalogTests
 {
+    [Fact]
+    public void CompactSelectorExposesNamesWithoutFullToolSchemas()
+    {
+        var catalog = new AgentToolCatalog();
+        var available = catalog.GetAvailableTools(CreateRequest([]));
+
+        var selector = AgentToolCatalog.CreateSelectorDefinition(available);
+
+        Assert.Equal(AgentToolCatalog.SelectorToolName, selector.Name);
+        var names = selector.Parameters.GetProperty("properties").GetProperty("name").GetProperty("enum");
+        Assert.Equal(available.Count, names.GetArrayLength());
+        Assert.DoesNotContain("maximumResults", selector.Parameters.GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SelectorResolvesExactlyOneAvailableTool()
+    {
+        var catalog = new AgentToolCatalog();
+        var available = catalog.GetAvailableTools(CreateRequest([]));
+        var selection = JsonSerializer.SerializeToElement(new { name = "web.search" });
+
+        var tool = catalog.ResolveSelection(selection, available);
+
+        Assert.Equal("web.search", tool.Name);
+        Assert.Throws<ArgumentException>(() => catalog.ResolveSelection(
+            JsonSerializer.SerializeToElement(new { name = "web.search", extra = true }),
+            available));
+    }
+
     private static readonly string[] LeanMainArguments = ["Main.lean"];
 
     [Fact]
@@ -28,6 +57,29 @@ public sealed class AgentToolCatalogTests
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsSearch);
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsReadPages);
         Assert.DoesNotContain(withDocuments, static tool => tool.Name == ClientToolNames.FileSystemWriteText);
+
+        var withDocumentIo = catalog.GetAvailableTools(CreateRequest(["documentIo"]));
+        Assert.Contains(withDocumentIo, static tool => tool.Name == ClientToolNames.DocumentRead);
+        Assert.Contains(withDocumentIo, static tool => tool.Name == ClientToolNames.DocumentCreate);
+        Assert.DoesNotContain(withDocumentIo, static tool => tool.Name == ClientToolNames.FileSystemWriteText);
+    }
+
+    [Fact]
+    public void DocumentToolsUseBoundedSectionContracts()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(["documentIo"]));
+        var read = catalog.Resolve(ClientToolNames.DocumentRead, tools);
+        var create = catalog.Resolve(ClientToolNames.DocumentCreate, tools);
+        using var readWindow = JsonDocument.Parse("""{"scope":"session","mode":"read","reference":"00000000-0000-0000-0000-000000000001","startUnit":2,"maximumUnits":3,"maximumCharacters":12000}""");
+        using var append = JsonDocument.Parse("""{"operation":"appendSection","reference":"00000000-0000-0000-0000-000000000001","format":"pdf","sectionId":"kapitel-2","heading":"Kapitel 2","content":"Text","expectedSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}""");
+        using var unbounded = JsonDocument.Parse("""{"scope":"session","mode":"read","reference":"00000000-0000-0000-0000-000000000001","maximumCharacters":40001}""");
+        using var staleEdit = JsonDocument.Parse("""{"operation":"replaceSection","reference":"00000000-0000-0000-0000-000000000001","format":"pdf","sectionId":"kapitel-2","content":"Text"}""");
+
+        catalog.Validate(read, readWindow.RootElement);
+        catalog.Validate(create, append.RootElement);
+        Assert.Throws<ArgumentException>(() => catalog.Validate(read, unbounded.RootElement));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(create, staleEdit.RootElement));
     }
 
     [Fact]
@@ -279,7 +331,7 @@ public sealed class AgentToolCatalogTests
         {
             Mode = RunMode.Code,
             AllowedServerTools = [],
-            PreferredCodeModelId = GoAi.Server.Core.Configuration.CodingModelCatalog.Qwen38BId,
+            PreferredCodeModelId = GoAi.Server.Core.Configuration.CodingModelCatalog.GptOss120BId,
             ConversationProfile = ConversationProfile.ContextPreparation,
         };
 

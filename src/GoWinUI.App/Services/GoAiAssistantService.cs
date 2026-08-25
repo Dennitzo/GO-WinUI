@@ -64,8 +64,16 @@ public sealed class GoAiStreamDetachedException : OperationCanceledException
 internal sealed class GoAiStreamDisconnectedException(string message, Exception innerException)
     : IOException(message, innerException);
 
-internal sealed class GoAiRunTerminalException(string message)
-    : InvalidOperationException(message);
+internal sealed class GoAiRunTerminalException(
+    string errorCode,
+    string message,
+    bool retryable)
+    : InvalidOperationException(message)
+{
+    public string ErrorCode { get; } = errorCode;
+
+    public bool Retryable { get; } = retryable;
+}
 
 public interface ICodingCampaignAgent
 {
@@ -119,7 +127,7 @@ public sealed class GoAiAssistantService(
     private string? _activeServerRunId;
     private string? _activeSessionId;
     private int _explicitCancellation;
-    private int _startupCampaignRunsStopped;
+    private int _startupRunsStopped;
     private int _speechActive;
     private int _disposed;
 
@@ -229,7 +237,9 @@ public sealed class GoAiAssistantService(
                         contentProfile,
                         cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
             }
-            var contextLimit = action == PromptTriggerAction.Code ? 262_144 : 131_072;
+            var contextLimit = action == PromptTriggerAction.Code
+                ? ModelContextProfiles.ResolveMaximum(settings.Current.SelectedCodingModel, "code")
+                : ModelContextProfiles.ResolveMaximum(settings.Current.SelectedModel, "general");
             await update(new(
                 GoAiAssistantUpdateKind.Started,
                 assistant,
@@ -250,7 +260,7 @@ public sealed class GoAiAssistantService(
                     PromptTriggerAction.VoiceInput => await CompleteVoiceInputAsync(assistant, update, _activeCancellation.Token).ConfigureAwait(false),
                     PromptTriggerAction.LiveCaptions or PromptTriggerAction.LiveTranslation =>
                         await CompleteLiveCaptionsAsync(assistant, trigger!, update, _activeCancellation.Token).ConfigureAwait(false),
-                    _ => await CompleteRunAsync(
+                    _ => await CompleteRunWithRetryAsync(
                         assistant,
                         prompt,
                         trigger,
@@ -342,92 +352,108 @@ public sealed class GoAiAssistantService(
         }
     }
 
-    public async Task StopPersistedCampaignRunsAtStartupAsync(CancellationToken cancellationToken = default)
+    public async Task StopPersistedRunsAtStartupAsync(CancellationToken cancellationToken = default)
     {
-        if (Interlocked.CompareExchange(ref _startupCampaignRunsStopped, 1, 0) != 0)
+        if (Interlocked.CompareExchange(ref _startupRunsStopped, 1, 0) != 0)
         {
             return;
         }
 
         try
         {
-            var campaignSessionIds = (await codingCampaigns.ListAsync(cancellationToken).ConfigureAwait(false))
-                .Select(static campaign => campaign.SessionId)
-                .ToHashSet();
-            if (campaignSessionIds.Count == 0)
-            {
-                return;
-            }
-
-            var staleRuns = (await runs.ListResumableAsync(cancellationToken).ConfigureAwait(false))
-                .Where(run => campaignSessionIds.Contains(run.SessionId))
-                .ToArray();
-            var serverRunIds = new List<string>(staleRuns.Length);
-            foreach (var run in staleRuns)
-            {
-                await runs.UpdateAsync(
-                    run.Id,
-                    run.ServerRunId,
-                    run.LastEventId,
-                    "cancelled",
-                    run.SelectedModel,
-                    "client.workflow_stopped_on_start",
-                    CancellationToken.None).ConfigureAwait(false);
-
-                var message = await chats.GetMessageAsync(
-                    run.AssistantMessageId,
-                    includeInternal: true,
-                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                if (message?.Status is MessageStatus.Pending or MessageStatus.Streaming or MessageStatus.Interrupted)
-                {
-                    var content = string.IsNullOrWhiteSpace(message.Content)
-                        ? "Der Coding-Workflow ist geladen und startet gestoppt. Senden startet ihn erneut."
-                        : message.Content;
-                    await chats.UpdateMessageAsync(
-                        message.Id,
-                        content,
-                        MessageStatus.Cancelled,
-                        "Der Workflow wurde beim Clientstart gestoppt.",
-                        CancellationToken.None).ConfigureAwait(false);
-                }
-
-                if (!string.IsNullOrWhiteSpace(run.ServerRunId))
-                {
-                    serverRunIds.Add(run.ServerRunId);
-                }
-            }
-
-            if (serverRunIds.Count > 0)
-            {
-                _ = CancelPersistedServerRunsAsync(serverRunIds);
-            }
+            var serverRunIds = await StopPersistedRunsLocallyAsync(
+                runs,
+                chats,
+                codingCampaigns,
+                cancellationToken).ConfigureAwait(false);
+            await CancelPersistedServerRunsAsync(serverRunIds, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
-            Interlocked.Exchange(ref _startupCampaignRunsStopped, 0);
+            Interlocked.Exchange(ref _startupRunsStopped, 0);
             throw;
         }
     }
 
-    private async Task CancelPersistedServerRunsAsync(IReadOnlyList<string> serverRunIds)
+    internal static async Task<IReadOnlyList<string>> StopPersistedRunsLocallyAsync(
+        IGoAiRunRepository runRepository,
+        IChatRepository chatRepository,
+        ICodingCampaignRepository campaignRepository,
+        CancellationToken cancellationToken = default)
     {
-        using var timeout = new CancellationTokenSource();
+        var campaignSessionIds = (await campaignRepository.ListAsync(cancellationToken).ConfigureAwait(false))
+            .Select(static campaign => campaign.SessionId)
+            .ToHashSet();
+        var staleRuns = await runRepository.ListResumableAsync(cancellationToken).ConfigureAwait(false);
+        var serverRunIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var run in staleRuns)
+        {
+            var isCampaignRun = campaignSessionIds.Contains(run.SessionId);
+            await runRepository.UpdateAsync(
+                run.Id,
+                run.ServerRunId,
+                run.LastEventId,
+                "cancelled",
+                run.SelectedModel,
+                isCampaignRun ? "client.workflow_stopped_on_start" : "client.run_stopped_on_start",
+                CancellationToken.None).ConfigureAwait(false);
+
+            var message = await chatRepository.GetMessageAsync(
+                run.AssistantMessageId,
+                includeInternal: true,
+                cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            if (message?.Status is MessageStatus.Pending or MessageStatus.Streaming or MessageStatus.Interrupted)
+            {
+                var content = string.IsNullOrWhiteSpace(message.Content)
+                    ? isCampaignRun
+                        ? "Der Coding-Workflow ist geladen und startet gestoppt. Senden startet ihn erneut."
+                        : "Der vorherige AI-Lauf wurde beim Clientstart gestoppt."
+                    : message.Content;
+                await chatRepository.UpdateMessageAsync(
+                    message.Id,
+                    content,
+                    MessageStatus.Cancelled,
+                    isCampaignRun
+                        ? "Der Workflow wurde beim Clientstart gestoppt."
+                        : "Der AI-Lauf wurde beim Clientstart gestoppt.",
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (!string.IsNullOrWhiteSpace(run.ServerRunId))
+            {
+                _ = serverRunIds.Add(run.ServerRunId);
+            }
+        }
+
+        return [.. serverRunIds];
+    }
+
+    private async Task CancelPersistedServerRunsAsync(
+        IReadOnlyList<string> serverRunIds,
+        CancellationToken cancellationToken)
+    {
+        if (serverRunIds.Count == 0)
+        {
+            return;
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(10));
         try
         {
             using var client = await connection.CreateClientAsync(timeout.Token).ConfigureAwait(false);
-            foreach (var serverRunId in serverRunIds)
+            await Task.WhenAll(serverRunIds.Select(async serverRunId =>
             {
                 try
                 {
                     await client.CancelRunAsync(serverRunId, timeout.Token).ConfigureAwait(false);
-                    RunDiagnostic(logger, serverRunId, "cancelled during stopped workflow startup", null);
+                    RunDiagnostic(logger, serverRunId, "cancelled during client startup", null);
                 }
                 catch (Exception exception) when (exception is not OutOfMemoryException)
                 {
                     RunDiagnostic(logger, serverRunId, $"startup cancel request failed ({exception.GetType().Name})", exception);
                 }
-            }
+            })).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
@@ -908,6 +934,102 @@ public sealed class GoAiAssistantService(
                 || attachment.FileName.StartsWith("GO-Systemaudio-", StringComparison.OrdinalIgnoreCase))
             && string.Equals(Path.GetExtension(attachment.FileName), ".wav", StringComparison.OrdinalIgnoreCase);
 
+    private async Task<ChatMessage> CompleteRunWithRetryAsync(
+        ChatMessage assistant,
+        string originalPrompt,
+        PromptTriggerMatch? trigger,
+        IReadOnlyList<AssistantAttachment> sessionAttachments,
+        IReadOnlyList<ChatMessage> historyBeforePrompt,
+        Func<GoAiAssistantUpdate, Task> update,
+        CancellationToken cancellationToken)
+    {
+        var retryCount = 0;
+        var codingDiffBaselineId = trigger?.Trigger.Action == PromptTriggerAction.Code
+            ? Guid.NewGuid()
+            : (Guid?)null;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return await CompleteRunAsync(
+                    assistant,
+                    originalPrompt,
+                    trigger,
+                    sessionAttachments,
+                    historyBeforePrompt,
+                    update,
+                    codingDiffBaselineId,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (ShouldRetryCurrentPrompt(
+                trigger?.Trigger.Action,
+                exception,
+                cancellationToken))
+            {
+                retryCount++;
+                var delay = PromptRetryDelay(retryCount);
+                RunDiagnostic(
+                    logger,
+                    assistant.Id.ToString("D"),
+                    $"prompt retry {retryCount} scheduled after {exception.GetType().Name}",
+                    exception);
+
+                if (trigger?.Trigger.Action == PromptTriggerAction.Code
+                    && await codingTrace.GetLatestForSessionAsync(
+                        assistant.SessionId,
+                        CancellationToken.None).ConfigureAwait(false) is { } latestTrace
+                    && latestTrace.MessageId == assistant.Id)
+                {
+                    var retryTrace = await codingTrace.AppendAsync(
+                        latestTrace.LocalRunId,
+                        latestTrace.ServerRunId,
+                        assistant.SessionId,
+                        assistant.Id,
+                        "retry",
+                        "running",
+                        "Prompt wird erneut ausgeführt",
+                        $"Technischer Abbruch · Versuch {retryCount} startet in {delay.TotalSeconds:0} Sekunden",
+                        cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                    await update(new(
+                        GoAiAssistantUpdateKind.CodingTraceChanged,
+                        assistant,
+                        CodingTrace: retryTrace)).ConfigureAwait(false);
+                }
+
+                await chats.UpdateMessageAsync(
+                    assistant.Id,
+                    string.Empty,
+                    MessageStatus.Streaming,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                assistant = await chats.GetMessageAsync(
+                    assistant.Id,
+                    includeInternal: true,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                    ?? assistant with
+                    {
+                        Content = string.Empty,
+                        Status = MessageStatus.Streaming,
+                        Error = null,
+                        UpdatedAt = DateTimeOffset.UtcNow,
+                    };
+
+                await update(new(
+                    GoAiAssistantUpdateKind.Delta,
+                    assistant)).ConfigureAwait(false);
+                await update(new(
+                    GoAiAssistantUpdateKind.Status,
+                    assistant,
+                    Status: "Wird erneut versucht",
+                    Detail: $"Derselbe Prompt wird nach einem technischen Abbruch erneut ausgeführt · Versuch {retryCount} in {delay.TotalSeconds:0} Sekunden",
+                    Model: trigger?.Trigger.Action == PromptTriggerAction.Code
+                        ? settings.Current.SelectedCodingModel
+                        : settings.Current.SelectedModel)).ConfigureAwait(false);
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
     private async Task<ChatMessage> CompleteRunAsync(
         ChatMessage assistant,
         string originalPrompt,
@@ -915,6 +1037,7 @@ public sealed class GoAiAssistantService(
         IReadOnlyList<AssistantAttachment> sessionAttachments,
         IReadOnlyList<ChatMessage> historyBeforePrompt,
         Func<GoAiAssistantUpdate, Task> update,
+        Guid? codingDiffBaselineId,
         CancellationToken cancellationToken)
     {
         using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
@@ -951,15 +1074,15 @@ public sealed class GoAiAssistantService(
         {
             RunAccepted accepted;
             var idempotencyKey = $"go-client-{Guid.NewGuid():N}";
-            localRun = new GoAiRunRecord(
+            var attempt = new GoAiRunRecord(
                 Guid.NewGuid(), assistant.SessionId, assistant.Id, action, idempotencyKey, null, 0, "queued",
                 null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
-            await runs.CreateAsync(localRun, cancellationToken).ConfigureAwait(false);
+            localRun = await runs.BeginAttemptAsync(attempt, cancellationToken).ConfigureAwait(false);
             if (action == PromptTriggerAction.Code)
             {
                 var codingSession = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
                 var codingDiffReady = await codingDiffs.BeginAsync(
-                        localRun.Id,
+                        codingDiffBaselineId ?? localRun.Id,
                         codingSession?.WorkspacePath,
                         cancellationToken).ConfigureAwait(false);
                 var trace = await codingTrace.StartAsync(
@@ -1046,7 +1169,13 @@ public sealed class GoAiAssistantService(
                     assistant,
                     CodingTrace: trace)).ConfigureAwait(false);
             }
-            var result = await StreamRunWithReconnectAsync(localRun, assistant, update, cancellationToken, client).ConfigureAwait(false);
+            var result = await StreamRunWithReconnectAsync(
+                localRun,
+                assistant,
+                update,
+                cancellationToken,
+                client,
+                codingDiffBaselineId).ConfigureAwait(false);
             return result;
         }
         catch (GoAiStreamDisconnectedException)
@@ -1118,9 +1247,9 @@ public sealed class GoAiAssistantService(
         ChatMessage assistant,
         Func<GoAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken,
-        GoAiClient? suppliedClient = null)
+        GoAiClient? suppliedClient = null,
+        Guid? codingDiffBaselineId = null)
     {
-        const int maximumReconnectAttempts = 5;
         var current = localRun;
         var consecutiveReconnectAttempts = 0;
         var lastObservedEventId = current.LastEventId;
@@ -1128,7 +1257,13 @@ public sealed class GoAiAssistantService(
         {
             try
             {
-                return await StreamRunAsync(current, assistant, update, cancellationToken, suppliedClient).ConfigureAwait(false);
+                return await StreamRunAsync(
+                    current,
+                    assistant,
+                    update,
+                    cancellationToken,
+                    suppliedClient,
+                    codingDiffBaselineId).ConfigureAwait(false);
             }
             catch (GoAiStreamDisconnectedException exception) when (!cancellationToken.IsCancellationRequested)
             {
@@ -1137,17 +1272,12 @@ public sealed class GoAiAssistantService(
                     consecutiveReconnectAttempts,
                     lastObservedEventId,
                     current.LastEventId);
-                if (consecutiveReconnectAttempts >= maximumReconnectAttempts)
-                {
-                    throw;
-                }
-
                 assistant = await chats.GetMessageAsync(
                     current.AssistantMessageId,
                     includeInternal: true,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false) ?? assistant;
-                var attemptNumber = consecutiveReconnectAttempts + 1;
-                var delay = TimeSpan.FromMilliseconds(500 * Math.Pow(2, consecutiveReconnectAttempts));
+                var attemptNumber = (long)consecutiveReconnectAttempts + 1;
+                var delay = StreamReconnectDelay(consecutiveReconnectAttempts);
                 if (current.Action == PromptTriggerAction.Code)
                 {
                     var trace = await codingTrace.AppendAsync(
@@ -1158,7 +1288,7 @@ public sealed class GoAiAssistantService(
                         "connection",
                         "running",
                         "Verbindung wird wiederhergestellt",
-                        $"Versuch {attemptNumber} von {maximumReconnectAttempts}",
+                        $"Versuch {attemptNumber} · Wiederholung bis der Serverlauf wieder erreichbar ist",
                         serverEventId: current.LastEventId,
                         cancellationToken: CancellationToken.None).ConfigureAwait(false);
                     await update(new(
@@ -1177,13 +1307,13 @@ public sealed class GoAiAssistantService(
                         GoAiAssistantUpdateKind.Status,
                         assistant,
                         Status: "Verbindung wird wiederhergestellt",
-                        Detail: $"SSE ab Ereignis {current.LastEventId} · Versuch {attemptNumber}/{maximumReconnectAttempts}"))
+                        Detail: $"SSE ab Ereignis {current.LastEventId} · Versuch {attemptNumber}"))
                         .ConfigureAwait(false);
                 }
                 RunDiagnostic(logger, current.ServerRunId ?? current.Id.ToString("D"), "stream reconnect", exception);
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                 lastObservedEventId = current.LastEventId;
-                consecutiveReconnectAttempts++;
+                consecutiveReconnectAttempts = Math.Min(consecutiveReconnectAttempts + 1, 1_000_000);
             }
         }
     }
@@ -1193,6 +1323,50 @@ public sealed class GoAiAssistantService(
         long previousEventId,
         long currentEventId) =>
         currentEventId > previousEventId ? 0 : consecutiveReconnectAttempts;
+
+    internal static bool ShouldRetryCurrentPrompt(
+        PromptTriggerAction? action,
+        Exception exception,
+        CancellationToken cancellationToken = default)
+    {
+        if (cancellationToken.IsCancellationRequested || exception is OperationCanceledException)
+        {
+            return false;
+        }
+
+        return exception switch
+        {
+            // Coding runs are workspace based. A fresh run sees every already committed
+            // tool change and can therefore continue the exact prompt after any terminal
+            // model/process failure, including a verification or turn-limit failure.
+            GoAiRunTerminalException when action == PromptTriggerAction.Code => true,
+            GoAiRunTerminalException terminal => terminal.Retryable,
+            GoAiStreamDisconnectedException => true,
+            TimeoutException => true,
+            HttpRequestException http => http.StatusCode is null
+                || http.StatusCode == System.Net.HttpStatusCode.RequestTimeout
+                || http.StatusCode == System.Net.HttpStatusCode.TooManyRequests
+                || (int)http.StatusCode >= 500,
+            _ => false,
+        };
+    }
+
+    internal static TimeSpan PromptRetryDelay(int retryCount) =>
+        TimeSpan.FromSeconds(Math.Min(30, Math.Max(2, retryCount * 2)));
+
+    internal static TimeSpan StreamReconnectDelay(int consecutiveReconnectAttempts) =>
+        TimeSpan.FromSeconds(Math.Min(30, 0.5 * Math.Pow(2, Math.Min(6, Math.Max(0, consecutiveReconnectAttempts)))));
+
+    internal static bool IsRetryableServerErrorCode(string? errorCode) => errorCode is
+        "document.context_preparation_failed"
+        or "session.context_preparation_failed"
+        or "general.context_budget"
+        or "coding.context_unavailable"
+        or "coding.empty_response"
+        or "provider.generation_terminated"
+        or "provider.http_failed"
+        or "run.timeout"
+        or "run.gateway_stopped";
 
     internal static string CodingContextTraceFingerprint(ContextChangedEvent context) =>
         string.Join(
@@ -1205,12 +1379,43 @@ public sealed class GoAiAssistantService(
             context.HistoryWasCompacted ? "1" : "0",
             context.Detail?.Trim() ?? string.Empty);
 
+    internal static string? FormatModelTokenProgress(
+        ModelGenerationEvent progress,
+        ref int activeRunTokens,
+        ref bool hasRunStarted)
+    {
+        if (string.Equals(progress.State, "generationStarted", StringComparison.Ordinal))
+        {
+            activeRunTokens = 0;
+            hasRunStarted = true;
+        }
+        else if (string.Equals(progress.State, "tokenProgress", StringComparison.Ordinal)
+                 && (progress.CurrentTokens is not null
+                     || progress.ProcessedPromptTokens is not null
+                     || progress.GeneratedTokens is not null))
+        {
+            hasRunStarted = true;
+            var currentTokens = progress.CurrentTokens
+                ?? (progress.ProcessedPromptTokens is { } processedPromptTokens
+                    ? Math.Max(0, processedPromptTokens) + Math.Max(0, progress.GeneratedTokens ?? 0)
+                    : progress.GeneratedTokens!.Value);
+            activeRunTokens = Math.Max(activeRunTokens, Math.Max(0, currentTokens));
+        }
+        else if (!hasRunStarted)
+        {
+            return null;
+        }
+
+        return $"{activeRunTokens:N0} Token";
+    }
+
     private async Task<ChatMessage> StreamRunAsync(
         GoAiRunRecord localRun,
         ChatMessage assistant,
         Func<GoAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken,
-        GoAiClient? suppliedClient = null)
+        GoAiClient? suppliedClient = null,
+        Guid? codingDiffBaselineId = null)
     {
         var ownsClient = suppliedClient is null;
         var client = suppliedClient ?? await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
@@ -1218,6 +1423,8 @@ public sealed class GoAiAssistantService(
         var model = localRun.SelectedModel;
         var collectedArtifacts = (await artifacts.ListForMessageAsync(assistant.Id, cancellationToken).ConfigureAwait(false)).ToList();
         string? lastCodingContextTraceFingerprint = null;
+        var activeModelRunTokens = 0;
+        var hasModelRunStarted = false;
 
         async Task TraceCodingAsync(
             string stage,
@@ -1264,7 +1471,10 @@ public sealed class GoAiAssistantService(
                 statusUpdate = statusUpdate with
                 {
                     Status = "Denkt nach",
-                    Detail = null,
+                    Detail = statusUpdate.Detail is { Length: > 0 }
+                        && statusUpdate.Detail.Contains("Token", StringComparison.Ordinal)
+                            ? statusUpdate.Detail
+                            : null,
                     Model = model,
                 };
             }
@@ -1277,7 +1487,7 @@ public sealed class GoAiAssistantService(
 
             var codingSession = await chats.GetSessionAsync(localRun.SessionId, CancellationToken.None).ConfigureAwait(false);
             var diff = await codingDiffs.RefreshAsync(
-                localRun.Id,
+                codingDiffBaselineId ?? localRun.Id,
                 codingSession?.WorkspacePath,
                 CancellationToken.None).ConfigureAwait(false);
             if (diff is null) return;
@@ -1288,19 +1498,19 @@ public sealed class GoAiAssistantService(
             await TraceCodingAsync(
                 "diff",
                 "completed",
-                "Finaler Lauf-Diff geprÃ¼ft",
+                "Finaler Lauf-Diff geprüft",
                 diff.FileCount == 0
-                    ? "Keine CodeÃ¤nderungen dieses Laufs."
-                    : $"{diff.FileCount:N0} Dateien Â· +{diff.AddedLines:N0} Â· âˆ’{diff.DeletedLines:N0}",
+                    ? "Keine Codeänderungen dieses Laufs."
+                    : $"{diff.FileCount:N0} Dateien · +{diff.AddedLines:N0} · −{diff.DeletedLines:N0}",
                 serverEventId: serverEventId,
                 traceCancellationToken: CancellationToken.None).ConfigureAwait(false);
             await update(new(
                 GoAiAssistantUpdateKind.CodeDiffChanged,
                 assistant,
-                Status: "CodeÃ¤nderungen",
+                Status: "Codeänderungen",
                 Detail: diff.FileCount == 0
-                    ? "Keine CodeÃ¤nderungen dieses Laufs."
-                    : $"{diff.FileCount:N0} Dateien Â· +{diff.AddedLines:N0} Â· âˆ’{diff.DeletedLines:N0}"))
+                    ? "Keine Codeänderungen dieses Laufs."
+                    : $"{diff.FileCount:N0} Dateien · +{diff.AddedLines:N0} · −{diff.DeletedLines:N0}"))
                 .ConfigureAwait(false);
         }
 
@@ -1309,14 +1519,10 @@ public sealed class GoAiAssistantService(
         try
         {
             var pendingSubmissions = await toolExecutions
-                .ListPendingSubmissionsAsync(localRun.Id, cancellationToken)
+                .ListPendingSubmissionsAsync(localRun.Id, localRun.ServerRunId, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var pending in pendingSubmissions)
             {
-                if (!string.Equals(pending.ServerRunId, localRun.ServerRunId, StringComparison.Ordinal))
-                {
-                    throw new InvalidDataException("Ein gespeichertes Client-Toolergebnis gehört nicht zum aktiven Serverlauf.");
-                }
                 var pendingResult = JsonSerializer.Deserialize<ClientToolResult>(pending.ResultJson!, JsonOptions)
                     ?? throw new InvalidDataException("Ein gespeichertes Client-Toolergebnis ist ungültig.");
                 await TraceCodingAsync(
@@ -1417,7 +1623,7 @@ public sealed class GoAiAssistantService(
                                     "modelTool",
                                     "running",
                                     "Toolaufruf wird erzeugt",
-                                    "LM Studio erzeugt Toolname und Argumente im nativen SDK-Kanal.",
+                                    "llama.cpp erzeugt Toolname und Argumente im nativen SDK-Kanal.",
                                     serverEventId: item.Id,
                                     traceCancellationToken: cancellationToken).ConfigureAwait(false);
                                 break;
@@ -1448,7 +1654,19 @@ public sealed class GoAiAssistantService(
                                     "modelTool",
                                     "failed",
                                     "Toolaufruf unvollständig",
-                                    "LM Studio hat den nativen Toolaufruf nicht validieren können; der SDK-Kanal korrigiert ihn einmal.",
+                                    "llama.cpp hat den nativen Toolaufruf nicht validieren können; der SDK-Kanal korrigiert ihn einmal.",
+                                    serverEventId: item.Id,
+                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
+                                break;
+                            case "toolCallRetry":
+                                await TraceCodingAsync(
+                                    "modelTool",
+                                    "running",
+                                    "Toolaufruf wird kompakt korrigiert",
+                                    string.IsNullOrWhiteSpace(generation.ToolName)
+                                        ? "GO verwirft den unvollständigen Modelltext und erlaubt genau einen begrenzten Korrekturversuch."
+                                        : $"{generation.ToolName} wird ohne erneute Langzeitanalyse genau einmal korrigiert.",
+                                    tool: generation.ToolName,
                                     serverEventId: item.Id,
                                     traceCancellationToken: cancellationToken).ConfigureAwait(false);
                                 break;
@@ -1456,7 +1674,7 @@ public sealed class GoAiAssistantService(
                                 await TraceCodingAsync(
                                     "modelTool",
                                     "running",
-                                    "LM-Studio-Kanal wird wiederhergestellt",
+                                    "Docker-Modell-Kanal wird wiederhergestellt",
                                     string.IsNullOrWhiteSpace(generation.ToolName)
                                         ? "Die abgebrochene native Vorhersage wird einmal mit derselben Aufgabe wiederholt."
                                         : $"{generation.ToolName} wird nach einem Transportabbruch einmal erneut erzeugt.",
@@ -1469,6 +1687,10 @@ public sealed class GoAiAssistantService(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: "Denkt nach",
+                            Detail: FormatModelTokenProgress(
+                                generation,
+                                ref activeModelRunTokens,
+                                ref hasModelRunStarted),
                             Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ContextChanged:
@@ -1594,7 +1816,7 @@ public sealed class GoAiAssistantService(
                             "tool",
                             toolCompleted ? "completed" : "failed",
                             runningProcessConsole is null
-                                ? CodingToolTitle(proposal.Name, completed: true)
+                                ? CodingToolTitle(proposal.Name, completed: true, succeeded: toolCompleted)
                                 : "PowerShell-Befehl abgeschlossen",
                             CodingRunTraceService.DescribeResult(result),
                             proposal.Name,
@@ -1603,10 +1825,26 @@ public sealed class GoAiAssistantService(
                             item.Id,
                             completedProcessConsole,
                             cancellationToken).ConfigureAwait(false);
-                        if (IsSuccessfulWorkspaceMutation(proposal, result))
+                        if (proposal.Name == ClientToolNames.DocumentCreate
+                            && string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase))
+                        {
+                            collectedArtifacts.Clear();
+                            collectedArtifacts.AddRange(await artifacts.ListForMessageAsync(
+                                assistant.Id,
+                                cancellationToken).ConfigureAwait(false));
+                            await update(new(
+                                GoAiAssistantUpdateKind.ArtifactsChanged,
+                                assistant,
+                                collectedArtifacts.ToArray())).ConfigureAwait(false);
+                        }
+                        if (localRun.Action == PromptTriggerAction.Code
+                            && IsSuccessfulWorkspaceMutation(proposal, result))
                         {
                             var codingSession = await chats.GetSessionAsync(localRun.SessionId, cancellationToken).ConfigureAwait(false);
-                            var diff = await codingDiffs.RefreshAsync(localRun.Id, codingSession?.WorkspacePath, cancellationToken).ConfigureAwait(false);
+                            var diff = await codingDiffs.RefreshAsync(
+                                codingDiffBaselineId ?? localRun.Id,
+                                codingSession?.WorkspacePath,
+                                cancellationToken).ConfigureAwait(false);
                             if (diff is not null)
                             {
                                 await TraceCodingAsync(
@@ -1703,7 +1941,10 @@ public sealed class GoAiAssistantService(
                             model,
                             failed?.ErrorCode ?? "server.run_failed",
                             CancellationToken.None).ConfigureAwait(false);
-                        throw new GoAiRunTerminalException(failed?.Message ?? "Der Serverlauf ist fehlgeschlagen.");
+                        throw new GoAiRunTerminalException(
+                            failed?.ErrorCode ?? "server.run_failed",
+                            failed?.Message ?? "Der Serverlauf ist fehlgeschlagen.",
+                            failed?.Retryable ?? false);
                     case RunEventTypes.RunCancelled:
                         await TraceCodingAsync(
                             "run",
@@ -1761,9 +2002,13 @@ public sealed class GoAiAssistantService(
                     snapshot.SelectedModel,
                     snapshot.ErrorCode ?? "server.run_failed",
                     CancellationToken.None).ConfigureAwait(false);
-                throw new GoAiRunTerminalException(snapshot.State == RunState.Interrupted
-                    ? "Der Serverlauf wurde durch einen Serverneustart unterbrochen. Starte den Auftrag erneut."
-                    : "Der Serverlauf ist fehlgeschlagen.");
+                var interrupted = snapshot.State == RunState.Interrupted;
+                throw new GoAiRunTerminalException(
+                    snapshot.ErrorCode ?? (interrupted ? "run.gateway_stopped" : "server.run_failed"),
+                    interrupted
+                        ? "Der Serverlauf wurde durch einen Serverneustart unterbrochen."
+                        : "Der Serverlauf ist fehlgeschlagen.",
+                    interrupted || IsRetryableServerErrorCode(snapshot.ErrorCode));
             }
             if (snapshot.State == RunState.Cancelled)
             {
@@ -1820,6 +2065,8 @@ public sealed class GoAiAssistantService(
                 proposal,
                 session.WorkspacePath,
                 localRun.SessionId,
+                localRun.AssistantMessageId,
+                localRun.Action == PromptTriggerAction.Code,
                 cancellationToken).ConfigureAwait(false);
             var json = JsonSerializer.Serialize(result, JsonOptions);
             _ = await toolExecutions.CompleteAsync(proposal.ProposalId, json, CancellationToken.None).ConfigureAwait(false);
@@ -1863,8 +2110,40 @@ public sealed class GoAiAssistantService(
         proposal.RiskClass == ToolRiskClass.LocalMutation
         && string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase);
 
-    internal static string CodingToolTitle(string toolName, bool completed) => toolName switch
+    internal static string CodingToolTitle(string toolName, bool completed, bool succeeded = true)
     {
+        if (completed && !succeeded)
+        {
+            return toolName switch
+            {
+                ClientToolNames.DocumentRead => "Dokument konnte nicht gelesen werden",
+                ClientToolNames.DocumentCreate => "Dokument konnte nicht aktualisiert werden",
+                ClientToolNames.WorkspaceMap => "Workspace konnte nicht analysiert werden",
+                ClientToolNames.FileSystemList => "Ordner konnte nicht gelesen werden",
+                ClientToolNames.FileSystemStat => "Dateistatus konnte nicht gelesen werden",
+                ClientToolNames.FileSystemFindFiles => "Dateisuche fehlgeschlagen",
+                ClientToolNames.FileSystemReadText => "Datei konnte nicht gelesen werden",
+                ClientToolNames.FileSystemReadMany => "Dateien konnten nicht gelesen werden",
+                ClientToolNames.FileSystemSearch => "Quelltextsuche fehlgeschlagen",
+                ClientToolNames.FileSystemWriteText => "Datei konnte nicht geschrieben werden",
+                ClientToolNames.FileSystemReplaceText => "Datei konnte nicht ge\u00E4ndert werden",
+                ClientToolNames.FileSystemMove => "Datei konnte nicht verschoben werden",
+                ClientToolNames.FileSystemProposePatch => "Patch konnte nicht angewendet werden",
+                ClientToolNames.FileSystemProposeCreate => "Datei konnte nicht erstellt werden",
+                ClientToolNames.FileSystemProposeDelete => "Datei konnte nicht gel\u00F6scht werden",
+                ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun => "Pr\u00FCfung fehlgeschlagen",
+                ClientToolNames.LeanProof => "Lean-Beweis fehlgeschlagen",
+                _ => "Lokale Aktion fehlgeschlagen",
+            };
+        }
+
+        return CodingToolSuccessTitle(toolName, completed);
+    }
+
+    private static string CodingToolSuccessTitle(string toolName, bool completed) => toolName switch
+    {
+        ClientToolNames.DocumentRead => completed ? "Dokument gelesen" : "Dokument wird gelesen",
+        ClientToolNames.DocumentCreate => completed ? "Dokument aktualisiert" : "Dokument wird aktualisiert",
         ClientToolNames.WorkspaceMap => completed ? "Workspace analysiert" : "Workspace wird analysiert",
         ClientToolNames.FileSystemList => completed ? "Ordner gelesen" : "Ordner wird gelesen",
         ClientToolNames.FileSystemStat => completed ? "Dateistatus gelesen" : "Dateistatus wird gelesen",
@@ -2155,6 +2434,7 @@ public sealed class GoAiAssistantService(
             coding ? "code" : "general",
             settings.Current.ReasoningEffort);
         var codingModelDisplayName = DescribeCodingModel(preferredCodeModel);
+        var codingContextLimit = ModelContextProfiles.ResolveMaximum(preferredCodeModel, "code");
 
         DocumentRunContext? documentContext = null;
         if (!coding)
@@ -2181,7 +2461,7 @@ public sealed class GoAiAssistantService(
         }
 
         var sessionContext = coding
-            ? SessionContextPreparationService.CreateCurrentPromptOnlyCodingContext(262_144)
+            ? SessionContextPreparationService.CreateCurrentPromptOnlyCodingContext(codingContextLimit)
             : await sessionContexts.PrepareAsync(
                 client,
                 sessionId,
@@ -2239,7 +2519,7 @@ public sealed class GoAiAssistantService(
                 assistant,
                 Status: "Repository wird indiziert",
                 Detail: Path.GetFileName(workspacePath),
-                ContextLimit: 262_144)).ConfigureAwait(false);
+                ContextLimit: codingContextLimit)).ConfigureAwait(false);
             var snapshot = await repositoryIndex.GetSnapshotAsync(workspacePath, cancellationToken).ConfigureAwait(false);
             var map = WorkspaceRepositoryIndex.BuildRepositoryMap(snapshot);
             workspaceDescriptor = new WorkspaceDescriptor(
@@ -2261,7 +2541,7 @@ public sealed class GoAiAssistantService(
                 Status: "Repository bereit",
                 Detail: $"{snapshot.Entries.Count:N0} Dateien indiziert · {codingModelDisplayName}",
                 ContextUsed: EstimateRequestTokens(messages, latestParts, map),
-                ContextLimit: 262_144,
+                ContextLimit: codingContextLimit,
                 LoadedFiles: 0)).ConfigureAwait(false);
         }
         messages.Add(new RunMessage("user", latestParts));
@@ -2278,7 +2558,10 @@ public sealed class GoAiAssistantService(
         {
             throw new InvalidOperationException("Das GO-BricsCAD-Plugin ist nicht verbunden. Öffne BricsCAD und stelle die GO-Bridge-Verbindung her.");
         }
-        var capabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var capabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "documentIo",
+        };
         if (coding)
         {
             capabilities.UnionWith(toolBroker.GetAvailableCapabilities(session.WorkspacePath));
@@ -2836,9 +3119,8 @@ public sealed class GoAiAssistantService(
 
     private static string DescribeCodingModel(string? modelId) => modelId switch
     {
-        "qwen3.8-27b" => "Qwen3.8-27B · Q8_0",
-        "qwen3-coder-next" => "Qwen3-Coder-Next · Q6_K",
-        "openai/gpt-oss-120b" => "gpt-oss-120b",
+        "gpt-oss-120b" => "gpt-oss-120b",
+        "qwen3-coder-next-q8_0" => "Qwen3-Coder-Next · Q8_0",
         _ => string.IsNullOrWhiteSpace(modelId) ? "Coding-Agent" : modelId,
     };
 

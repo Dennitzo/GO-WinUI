@@ -27,12 +27,10 @@ public static class ModelReasoningProfiles
 {
     public const string Automatic = "auto";
     public const string GptOssFamily = "gpt-oss";
-    public const string Qwen38Family = "qwen3.8";
-    public const string FixedFamily = "fixed";
+    public const string Qwen3CoderNextFamily = "qwen3-coder-next";
     public const string UnknownFamily = "automatic";
 
     private static readonly IReadOnlyList<string> GptOssEfforts = ["low", "medium", "high"];
-    private static readonly IReadOnlyList<string> Qwen38Efforts = ["off", "on"];
 
     public static ModelReasoningProfile Resolve(string? modelId, string? role)
     {
@@ -44,22 +42,14 @@ public static class ModelReasoningProfiles
             return new(
                 GptOssFamily,
                 GptOssEfforts,
-                string.Equals(normalizedRole, "code", StringComparison.OrdinalIgnoreCase) ? "high" : "low");
-        }
-
-        if (normalizedModelId.Contains("qwen3.8", StringComparison.OrdinalIgnoreCase)
-            || normalizedModelId.Contains("qwen3_8", StringComparison.OrdinalIgnoreCase)
-            || normalizedModelId.Contains("qwen38", StringComparison.OrdinalIgnoreCase))
-        {
-            // LM Studio exposes Qwen3.8 GGUF reasoning as the model-specific
-            // on/off switch. The low/medium/xhigh Jinja values from the upstream
-            // Transformers template are not public options of this runtime.
-            return new(Qwen38Family, Qwen38Efforts, "on");
+                string.Equals(normalizedRole, "code", StringComparison.OrdinalIgnoreCase) ? "high" : "medium");
         }
 
         if (normalizedModelId.Contains("qwen3-coder-next", StringComparison.OrdinalIgnoreCase))
         {
-            return new(FixedFamily, [], null);
+            // Qwen3-Coder-Next is a non-thinking model. Sending a reasoning
+            // parameter would make the runtime reject an otherwise valid turn.
+            return new(Qwen3CoderNextFamily, [], null);
         }
 
         return new(UnknownFamily, [], null);

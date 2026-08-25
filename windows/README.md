@@ -1,43 +1,32 @@
-# Einheitlicher Windows-Build
+# Build- und Betriebsskripte
 
-Öffentlicher Einstiegspunkt ist `windows\build.ps1`. Der Standardbuild stellt
-wieder her, baut in Release, führt Tests aus, veröffentlicht den win-x64-
-Single-file-Build und führt die Smoke-Checks aus. BricsCAD wird dafür nicht
-benötigt:
+## GO-WinUI-Client
+
+Der vollständige Clientbuild führt Restore, Release-Build, Tests, win-x64-Single-file-Publish und Portable-Smoke aus:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1
 ```
 
-Das primäre Artefakt liegt unter `artifacts\portable\win-x64\GO.exe`. Der
-Single-file-Flavor extrahiert WinUI-, Web- und native SQLite-Inhalte beim Start;
-`-SkipPublish` überspringt Veröffentlichung und Smoke-Test. Ein zusätzlicher
-self-contained Ordnerbuild kann direkt über `windows\publish.ps1 -Mode Folder`
-erzeugt werden.
+Das Ergebnis liegt unter `artifacts\portable\win-x64\GO.exe`. BricsCAD wird nur mit
+`-IncludeBricsCadPlugin` oder über `build-bricscad-plugin.ps1` zusätzlich gebaut.
 
-Das BricsCAD-V26-Plugin ist ein separates Artefakt und wird nur explizit gebaut:
+## Docker-basierter AI-Stack
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build-bricscad-plugin.ps1
-```
+| Skript | Zweck |
+|---|---|
+| `download-ai-models.ps1` | gepinnte Modelldateien herunterladen und prüfen |
+| `download-qwen3-coder-next-q8.ps1` | Qwen3-Coder-Next Q8_0 revisions- und hashgeprüft für den Docker-Coding-Preset herunterladen |
+| `remove-obsolete-ai-models.ps1` | alte LM-Studio-, GO-AI-Server- und gpt-oss-20b-Modellbestände nach Sicherheitsprüfung entfernen |
+| `remove-obsolete-artifacts.ps1` | regenerierbare Alt-Builds und frühere Modelltestausgaben entfernen; Diagnose-Traces behalten |
+| `remove-legacy-ai-server-autostart.ps1` | globale Verknüpfung und Registryanzeige der früheren Windows-Server-App entfernen |
+| `remove-legacy-ai-server-installation.ps1` | migrierte Windows-Server-Installation samt Altdaten sicher entfernen; Docker-Daten und Migrationsbackup behalten |
+| `build-ai-stack.ps1` | Servertests und Docker-Images bauen |
+| `deploy-ai-stack.ps1` | Verzeichnisse, Modellbestand, optionale DB-Migration und Firewall vorbereiten |
+| `start-ai-stack.ps1` | `docker compose up -d` |
+| `stop-ai-stack.ps1` | `docker compose down` und VRAM freigeben |
+| `update-ai-stack.ps1` | Images neu bauen und Stack kontrolliert aktualisieren |
+| `smoke-ai-stack.ps1` | Gateway, private Dienste, Portbelegung und optional Inferenz prüfen |
 
-Alternativ aktiviert `build.ps1 -IncludeBricsCadPlugin` diesen Zusatzschritt. Eine
-Installation kann mit `-BricsCadInstallDir` oder `BRICSCAD_V26_DIR` angegeben
-werden. `GOBricsCad.dll` und ihre GO-Protokoll-DLL liegen anschließend getrennt von
-der App unter `artifacts\windows\bricscad-v26` und zusätzlich als ZIP vor.
-
-## Separater GO-AI-Server-Build
-
-Der im selben Repository versionierte GO AI Server besitzt einen eigenen Build und
-verändert das portable GO-Clientartefakt nicht:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build-ai-server.ps1
-```
-
-Das Ergebnis liegt unter `artifacts\go-ai-server\portable\win-x64`. Modelle für
-LM Studio werden mit `download-ai-models.ps1` direkt in dessen verwaltete
-Publisher-/Repository-Struktur geladen und anschließend mit
-`refresh-lmstudio-model-catalog.ps1` für das **My Models**-Overlay neu eingelesen.
-Worker-Modelle bleiben getrennt unter `C:\ProgramData\GO-AI-Server\Models`.
-Weitere Betriebsdetails stehen in [GO-AI-SERVER.md](../GO-AI-SERVER.md).
+Das Deployment benötigt für die Firewallregel einmalig eine administrative PowerShell. Es gibt kein Windows-
+Serverartefakt und keinen LM-Studio-Katalog. Einzelheiten stehen in [GO-AI-SERVER.md](../GO-AI-SERVER.md).

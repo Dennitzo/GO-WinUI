@@ -71,15 +71,29 @@ public sealed class ProtocolTests
 
         var general = Assert.Single(snapshot.Models, static model => model.Role == "general");
         Assert.Equal(["low", "medium", "high"], general.ReasoningEfforts);
-        Assert.Equal("low", general.DefaultReasoningEffort);
+        Assert.Equal("medium", general.DefaultReasoningEffort);
 
-        var qwen38 = Assert.Single(snapshot.Models, static model => model.Id == CodingModelCatalog.Qwen38BId);
-        Assert.Equal(["off", "on"], qwen38.ReasoningEfforts);
-        Assert.Equal("on", qwen38.DefaultReasoningEffort);
+        var coding = snapshot.Models.Where(static model => model.Role == "code").ToArray();
+        Assert.Equal(2, coding.Length);
+        var gptCoding = Assert.Single(coding, static model => model.Id == CodingModelCatalog.GptOss120BId);
+        Assert.Equal(["low", "medium", "high"], gptCoding.ReasoningEfforts);
+        Assert.Equal("high", gptCoding.DefaultReasoningEffort);
+        var qwenCoding = Assert.Single(coding, static model => model.Id == CodingModelCatalog.Qwen3CoderNextQ8Id);
+        Assert.Equal(262_144, qwenCoding.ContextTokens);
+        Assert.Empty(qwenCoding.ReasoningEfforts ?? []);
+        Assert.Null(qwenCoding.DefaultReasoningEffort);
 
-        var qwenCoder = Assert.Single(snapshot.Models, static model => model.Id == CodingModelCatalog.Qwen3CoderNextId);
-        Assert.Empty(qwenCoder.ReasoningEfforts!);
-        Assert.Null(qwenCoder.DefaultReasoningEffort);
+        var vision = Assert.Single(snapshot.Models, static model => model.Role == "vision");
+        Assert.Equal(262_144, vision.ContextTokens);
+    }
+
+    [Fact]
+    public void CapabilitiesAdvertiseSharedDocumentTools()
+    {
+        var snapshot = new CapabilityService(Options.Create(new GoAiServerOptions())).GetSnapshot();
+
+        Assert.Contains(ClientToolNames.DocumentRead, snapshot.ClientTools);
+        Assert.Contains(ClientToolNames.DocumentCreate, snapshot.ClientTools);
     }
 
     [Fact]
@@ -152,35 +166,25 @@ public sealed class ProtocolTests
     }
 
     [Fact]
-    public void ProviderSecretOverridesKeepClientSecretsInTheRunDataDirectory()
+    public void ContainerPathsStayUnderMountedDataDirectories()
     {
         var options = new GoAiServerOptions
         {
             DataDirectory = @"C:\GO-AI-Test\RunData",
-            ProviderDataDirectory = @"C:\GO-AI-Test\ProviderData",
             WorkerDataDirectory = @"C:\GO-AI-Test\WorkerData",
         };
 
         Assert.Equal(
-            Path.GetFullPath(@"C:\GO-AI-Test\ProviderData\Secrets\lmstudio-token.dpapi"),
-            options.LmStudioTokenPath);
-        Assert.Equal(
-            Path.GetFullPath(@"C:\GO-AI-Test\ProviderData\Secrets\speech-worker.key"),
-            options.GetWorkerKeyPath("speech"));
-        Assert.Equal(
-            Path.GetFullPath(@"C:\GO-AI-Test\RunData\Secrets\bootstrap-client-key.once"),
-            options.BootstrapKeyExportPath);
-        Assert.Equal(
-            Path.GetFullPath(@"C:\GO-AI-Test\WorkerData\Uploads"),
+            Path.GetFullPath(@"C:\GO-AI-Test\WorkerData\uploads"),
             options.UploadDirectory);
         Assert.Equal(
             Path.GetFullPath(@"C:\GO-AI-Test\WorkerData"),
             options.ResolvedWorkerDataDirectory);
         Assert.Equal(
-            Path.GetFullPath(@"C:\GO-AI-Test\WorkerData\Artifacts\worker"),
+            Path.GetFullPath(@"C:\GO-AI-Test\WorkerData\artifacts\worker"),
             options.WorkerArtifactDirectory);
         Assert.Equal(
-            Path.GetFullPath(@"C:\GO-AI-Test\RunData\Artifacts"),
+            Path.GetFullPath(@"C:\GO-AI-Test\RunData\artifacts"),
             options.ArtifactDirectory);
     }
 }

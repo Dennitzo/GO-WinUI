@@ -29,10 +29,9 @@ public static class GoAiProtocol
 
 public static class GoAiHeaders
 {
-    public const string ApiKey = "X-GO-AI-Key";
+    public const string ClientId = "X-GO-Client-ID";
     public const string LastEventId = "Last-Event-ID";
     public const string IdempotencyKey = "Idempotency-Key";
-    public const string WorkerKey = "X-GO-AI-Worker-Key";
     public const string CaptionProfile = "X-GO-AI-Caption-Profile";
     public const string CaptionTurnId = "X-GO-AI-Caption-Turn-Id";
     public const string CaptionRevision = "X-GO-AI-Caption-Revision";

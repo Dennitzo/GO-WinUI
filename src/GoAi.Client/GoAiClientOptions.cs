@@ -2,6 +2,5 @@ namespace GoAi.Client;
 
 public sealed record GoAiClientOptions(
     Uri ServerUri,
-    string ApiKey,
-    string? ExpectedCaSha256 = null,
+    string? ClientId = null,
     TimeSpan? RequestTimeout = null);

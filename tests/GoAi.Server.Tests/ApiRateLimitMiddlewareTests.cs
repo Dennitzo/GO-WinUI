@@ -8,7 +8,7 @@ namespace GoAi.Server.Tests;
 public sealed class ApiRateLimitMiddlewareTests
 {
     [Fact]
-    public async Task RejectsRequestsAfterPerKeyWindowIsExhausted()
+    public async Task RejectsRequestsAfterPerClientAndIpWindowIsExhausted()
     {
         var forwarded = 0;
         var middleware = new ApiRateLimitMiddleware(context =>
@@ -97,12 +97,49 @@ public sealed class ApiRateLimitMiddlewareTests
         Assert.Equal(243, forwarded);
     }
 
-    private static DefaultHttpContext CreateContext(string apiKey)
+    [Fact]
+    public async Task StatusAndAcceptedRunControlDoNotShareTheGeneralWindow()
+    {
+        var forwarded = 0;
+        var middleware = new ApiRateLimitMiddleware(context =>
+        {
+            forwarded++;
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return Task.CompletedTask;
+        });
+
+        for (var index = 0; index < 240; index++)
+        {
+            await middleware.InvokeAsync(CreateContext("stable-test-key"));
+        }
+
+        var status = CreateContext("stable-test-key");
+        status.Request.Method = HttpMethods.Get;
+        status.Request.Path = "/v1/capabilities";
+        await middleware.InvokeAsync(status);
+
+        var toolResult = CreateContext("stable-test-key");
+        toolResult.Request.Path = "/v1/runs/run-123/client-tool-results";
+        await middleware.InvokeAsync(toolResult);
+
+        var rejectedGeneral = CreateContext("stable-test-key");
+        await middleware.InvokeAsync(rejectedGeneral);
+
+        Assert.Equal(StatusCodes.Status204NoContent, status.Response.StatusCode);
+        Assert.Equal("1200", status.Response.Headers["X-RateLimit-Limit"]);
+        Assert.Equal(StatusCodes.Status204NoContent, toolResult.Response.StatusCode);
+        Assert.Equal("1200", toolResult.Response.Headers["X-RateLimit-Limit"]);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, rejectedGeneral.Response.StatusCode);
+        Assert.Equal(242, forwarded);
+    }
+
+    private static DefaultHttpContext CreateContext(string clientId)
     {
         var context = new DefaultHttpContext();
         context.Connection.RemoteIpAddress = IPAddress.Loopback;
-        context.Request.Path = "/v1/capabilities";
-        context.Request.Headers[GoAiHeaders.ApiKey] = apiKey;
+        context.Request.Method = HttpMethods.Post;
+        context.Request.Path = "/v1/runs";
+        context.Request.Headers[GoAiHeaders.ClientId] = clientId;
         context.Response.Body = new MemoryStream();
         return context;
     }

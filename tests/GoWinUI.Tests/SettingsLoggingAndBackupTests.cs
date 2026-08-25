@@ -50,13 +50,13 @@ public sealed class SettingsLoggingAndBackupTests
         });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(11, restored.Version);
+        Assert.Equal(AppSettings.CurrentVersion, restored.Version);
         Assert.Equal("#8FBD45", restored.AccentColor);
         Assert.Equal("#8FBD45", restored.BackgroundColor);
     }
 
     [Fact]
-    public async Task VersionThreeSettingsMigrateTheFormer120BDefaultTo20B()
+    public async Task VersionThreeSettingsMigrateToTheShared120BDefault()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var settings = environment.Get<ISettingsStore>();
@@ -67,8 +67,8 @@ public sealed class SettingsLoggingAndBackupTests
         });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(11, restored.Version);
-        Assert.Equal("openai/gpt-oss-120b", restored.SelectedModel);
+        Assert.Equal(AppSettings.CurrentVersion, restored.Version);
+        Assert.Equal(AppSettings.DefaultSelectedModel, restored.SelectedModel);
     }
 
     [Fact]
@@ -82,22 +82,33 @@ public sealed class SettingsLoggingAndBackupTests
     }
 
     [Fact]
-    public async Task NewAndExistingSettingsDefaultToOfflineMode()
+    public async Task NewAndLegacySettingsStartOnlineAndMigrateTheDockerGateway()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var settings = environment.Get<ISettingsStore>();
 
-        Assert.False((await settings.LoadAsync()).IsAiConnectionEnabled);
+        var initial = await settings.LoadAsync();
+        Assert.True(initial.IsAiConnectionEnabled);
+        Assert.Equal("http://192.168.0.67:8080", initial.GoAiServerUrl);
 
-        await settings.SaveAsync(new AppSettings { Version = 5 });
+        await settings.SaveAsync(new AppSettings
+        {
+            Version = 12,
+            IsAiConnectionEnabled = false,
+            GoAiServerUrl = "https://192.168.0.67:8443",
+        });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(11, restored.Version);
-        Assert.False(restored.IsAiConnectionEnabled);
+        Assert.Equal(AppSettings.CurrentVersion, restored.Version);
+        Assert.True(restored.IsAiConnectionEnabled);
+        Assert.Equal("http://192.168.0.67:8080", restored.GoAiServerUrl);
+
+        await settings.SaveAsync(restored with { IsAiConnectionEnabled = false });
+        Assert.False((await settings.LoadAsync()).IsAiConnectionEnabled);
     }
 
     [Fact]
-    public async Task VersionNineSettingsMigrateCodingModelToQwen38Default()
+    public async Task VersionNineSettingsMigrateCodingModelToSharedDockerDefault()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var settings = environment.Get<ISettingsStore>();
@@ -105,8 +116,36 @@ public sealed class SettingsLoggingAndBackupTests
         await settings.SaveAsync(new AppSettings { Version = 9, SelectedCodingModel = "legacy-coding-model" });
 
         var restored = await settings.LoadAsync();
-        Assert.Equal(11, restored.Version);
+        Assert.Equal(AppSettings.CurrentVersion, restored.Version);
         Assert.Equal(AppSettings.DefaultSelectedCodingModel, restored.SelectedCodingModel);
+    }
+
+    [Fact]
+    public async Task VersionThirteenMigratesToQwenAndCurrentCodingSelectionsPersist()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+
+        await settings.SaveAsync(new AppSettings
+        {
+            Version = 13,
+            SelectedCodingModel = "gpt-oss-120b",
+        });
+        Assert.Equal("qwen3-coder-next-q8_0", (await settings.LoadAsync()).SelectedCodingModel);
+
+        await settings.SaveAsync(new AppSettings
+        {
+            Version = AppSettings.CurrentVersion,
+            SelectedCodingModel = "gpt-oss-120b",
+        });
+        Assert.Equal("gpt-oss-120b", (await settings.LoadAsync()).SelectedCodingModel);
+
+        await settings.SaveAsync(new AppSettings
+        {
+            Version = AppSettings.CurrentVersion,
+            SelectedCodingModel = "qwen3-coder-next-q8_0",
+        });
+        Assert.Equal("qwen3-coder-next-q8_0", (await settings.LoadAsync()).SelectedCodingModel);
     }
 
     [Fact]
@@ -165,10 +204,10 @@ public sealed class SettingsLoggingAndBackupTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Get<ILoggerFactory>();
         var log = environment.Get<ISessionLog>();
-        var logger = factory.CreateLogger("LMStudio");
+        var logger = factory.CreateLogger("AiGateway");
         SensitiveLog(logger, "streng geheim", "lokal", null);
 
-        var entry = Assert.Single(log.Snapshot(category: "LMStudio"));
+        var entry = Assert.Single(log.Snapshot(category: "AiGateway"));
         Assert.DoesNotContain("streng geheim", entry.Message, StringComparison.Ordinal);
         Assert.Equal("[ausgelassen]", entry.Properties["Prompt"]);
         await using var export = new MemoryStream();

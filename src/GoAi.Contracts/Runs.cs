@@ -175,7 +175,12 @@ public sealed record ModelGenerationEvent(
     string State,
     string? ToolName = null,
     int? ArgumentCharacters = null,
-    double? PromptProgress = null);
+    double? PromptProgress = null,
+    int? PromptTokens = null,
+    int? ProcessedPromptTokens = null,
+    int? GeneratedTokens = null,
+    double? TokensPerSecond = null,
+    int? CurrentTokens = null);
 
 public sealed record ContextChangedEvent(
     int EstimatedInputTokens,

@@ -22,6 +22,8 @@ namespace GoWinUI.App;
     Justification = "WinUI owns the Application lifetime; PrepareShutdownAsync cancels and disposes the monitor token.")]
 public partial class App : Application
 {
+    private static readonly TimeSpan AiAvailabilityProbeTimeout = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan AiDiagnosticProbeTimeout = TimeSpan.FromSeconds(5);
     private static readonly Action<ILogger, Guid, Exception?> LocalAutomationFailed =
         LoggerMessage.Define<Guid>(
             LogLevel.Error,
@@ -79,7 +81,6 @@ public partial class App : Application
                 services.AddSingleton<BricsCadBridgeLifecycle>();
                 services.AddHostedService(static provider => provider.GetRequiredService<BricsCadBridgeLifecycle>());
                 services.AddSingleton<SettingsCoordinator>();
-                services.AddSingleton<IAiSecretStore, WindowsCredentialSecretStore>();
                 services.AddSingleton<GoAiConnectionService>();
                 services.AddSingleton<SystemAudioCaptionService>();
                 services.AddSingleton<MicrophoneTranscriptionService>();
@@ -90,11 +91,7 @@ public partial class App : Application
                 services.AddSingleton<AssistantArtifactPreviewService>();
                 services.AddSingleton<LeanProofService>();
                 services.AddSingleton<CodingProofVerifier>();
-                services.AddSingleton<ICodingCampaignDefinition, EinsteinCodingCampaignDefinition>();
-                services.AddSingleton<ICodingCampaignDefinition, PhyMaCodingCampaignDefinition>();
                 services.AddSingleton<ICodingCampaignDefinition, PromptDrivenCodingCampaignDefinition>();
-                services.AddSingleton<ICodingCampaignDefinition, TheoreticalPhysicsCodingCampaignDefinition>();
-                services.AddSingleton<ICodingCampaignDefinition, TgaVentilationCodingCampaignDefinition>();
                 services.AddSingleton<CodingCampaignCatalog>();
                 services.AddSingleton<ShellViewModel>();
                 services.AddSingleton<RecentActivityService>();
@@ -108,6 +105,7 @@ public partial class App : Application
                 services.AddSingleton<WorkspaceRepositoryIndex>();
                 services.AddSingleton<DocumentContextPreparationService>();
                 services.AddSingleton<SessionContextPreparationService>();
+                services.AddSingleton<LocalDocumentToolService>();
                 services.AddSingleton<LocalToolBroker>();
                 services.AddSingleton<CodingDiffService>();
                 services.AddSingleton<CodingRunTraceService>();
@@ -201,14 +199,13 @@ public partial class App : Application
             await database.InitializeAsync();
             _ = await GetService<IChatRepository>().MarkStreamingMessagesInterruptedAsync();
             _ = await GetService<CodingRunTraceService>().ImportLegacyAsync();
-            _ = await GetService<IChatRepository>().DeleteEmptyTerminalMessagesAsync();
             var settings = GetService<SettingsCoordinator>();
             await settings.InitializeAsync();
             await settings.UpdateAsync(static current => current);
             await GetService<CodingCampaignService>().PrepareForClientStartAsync();
-            await GetService<GoAiAssistantService>().StopPersistedCampaignRunsAtStartupAsync();
+            await GetService<GoAiAssistantService>().StopPersistedRunsAtStartupAsync();
             _ = await GetService<ICodingRunRepository>().MarkRunningInterruptedAsync();
-            _ = await GetService<GoAiConnectionService>().TryProvisionLocalHostAsync();
+            _ = await GetService<IChatRepository>().DeleteEmptyTerminalMessagesAsync();
 
             var shell = GetService<ShellViewModel>();
             shell.IsAiConnectionEnabled = settings.Current.IsAiConnectionEnabled;
@@ -360,11 +357,14 @@ public partial class App : Application
         IReadOnlyList<ServiceStatusSnapshot>? serviceStatus = null;
         try
         {
+            using var availabilityCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            availabilityCancellation.CancelAfter(AiAvailabilityProbeTimeout);
+            var availabilityToken = availabilityCancellation.Token;
             using var client = await GetService<GoAiConnectionService>()
-                .CreateClientAsync(cancellationToken)
+                .CreateClientAsync(availabilityToken)
                 .ConfigureAwait(false);
-            var healthTask = client.GetReadyHealthAsync(cancellationToken);
-            var capabilitiesTask = client.GetCapabilitiesAsync(cancellationToken);
+            var healthTask = client.GetReadyHealthAsync(availabilityToken);
+            var capabilitiesTask = client.GetCapabilitiesAsync(availabilityToken);
 
             // Readiness may legitimately be degraded because one optional
             // model is still downloading. Capabilities is authenticated and
@@ -379,14 +379,16 @@ public partial class App : Application
                     capabilities.ProtocolVersion,
                     currentSettings.GoAiProtocolVersion,
                     StringComparison.Ordinal);
-            serverReady = connected
-                && string.Equals(health.Status, "ready", StringComparison.OrdinalIgnoreCase);
+            serverReady = connected && health.Status is "ready" or "modelLoading" or "modelNotLoaded";
 
             // Diagnostic endpoints enrich individual service chips but must
             // never downgrade an already authenticated gateway connection.
-            var gpuTask = client.GetGpuStatusAsync(cancellationToken);
-            var modelTask = client.GetModelStatusAsync(cancellationToken);
-            var serviceTask = client.GetServiceStatusAsync(cancellationToken);
+            using var diagnosticCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            diagnosticCancellation.CancelAfter(AiDiagnosticProbeTimeout);
+            var diagnosticToken = diagnosticCancellation.Token;
+            var gpuTask = client.GetGpuStatusAsync(diagnosticToken);
+            var modelTask = client.GetModelStatusAsync(diagnosticToken);
+            var serviceTask = client.GetServiceStatusAsync(diagnosticToken);
             gpuStatus = await AwaitOptionalStatusAsync(gpuTask, cancellationToken).ConfigureAwait(false);
             modelStatus = await AwaitOptionalStatusAsync(modelTask, cancellationToken).ConfigureAwait(false);
             serviceStatus = await AwaitOptionalStatusAsync(serviceTask, cancellationToken).ConfigureAwait(false);

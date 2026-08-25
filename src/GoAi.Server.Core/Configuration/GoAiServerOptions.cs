@@ -1,3 +1,5 @@
+using GoAi.Contracts;
+
 namespace GoAi.Server.Core.Configuration;
 
 public sealed class GoAiServerOptions
@@ -8,32 +10,35 @@ public sealed class GoAiServerOptions
 
     public string ExpectedLanIp { get; set; } = "192.168.0.67";
 
-    public string PublicUrl { get; set; } = "https://192.168.0.67:8443";
+    public string PublicUrl { get; set; } = "http://192.168.0.67:8080";
 
-    public int GatewayPort { get; set; } = 7080;
+    public int GatewayPort { get; set; } = 8080;
 
-    public Uri LmStudioUri { get; set; } = new("http://127.0.0.1:1234", UriKind.Absolute);
+    public Uri ModelRuntimeUri { get; set; } = new("http://llm:8080", UriKind.Absolute);
 
-    public Uri SearxngUri { get; set; } = new("http://127.0.0.1:7081", UriKind.Absolute);
+    public Uri SearxngUri { get; set; } = new("http://searxng:8080", UriKind.Absolute);
 
-    public Uri SpeechWorkerUri { get; set; } = new("http://127.0.0.1:7082", UriKind.Absolute);
+    public Uri SpeechWorkerUri { get; set; } = new("http://speech:8080", UriKind.Absolute);
 
-    public Uri MediaWorkerUri { get; set; } = new("http://127.0.0.1:7083", UriKind.Absolute);
+    public Uri MediaWorkerUri { get; set; } = new("http://media:8080", UriKind.Absolute);
 
-    public Uri ImageWorkerUri { get; set; } = new("http://127.0.0.1:7084", UriKind.Absolute);
+    public Uri ImageWorkerUri { get; set; } = new("http://image:8080", UriKind.Absolute);
 
-    public string GeneralModelId { get; set; } = "openai/gpt-oss-20b";
+    public string GeneralModelId { get; set; } = "gpt-oss-120b";
 
-    public int GeneralContextLength { get; set; } = 131_072;
+    public int GeneralContextLength { get; set; } = ModelContextProfiles.GptOss120BMaximum;
 
     public string CodeModelId { get; set; } = CodingModelCatalog.DefaultModelId;
 
-    // The selected coding model owns the exclusive LM Studio GPU lane.
-    public int CodeContextLength { get; set; } = 262_144;
+    public int CodeContextLength { get; set; } = ModelContextProfiles.Qwen3CoderNextMaximum;
 
     public string VisionModelId { get; set; } = "qwen3-vl-30b-a3b-instruct";
 
+    public int VisionContextLength { get; set; } = ModelContextProfiles.Qwen3VlMaximum;
+
     public string EmbeddingModelId { get; set; } = "text-embedding-bge-m3";
+
+    public int EmbeddingContextLength { get; set; } = ModelContextProfiles.BgeM3Maximum;
 
     public string? YouTubeApiKey { get; set; }
 
@@ -47,61 +52,24 @@ public sealed class GoAiServerOptions
 
     public int MaximumCodingToolCalls { get; set; } = 192;
 
-    public bool RequireLmStudioAuthentication { get; set; } = true;
-
-    public string? ProviderDataDirectory { get; set; }
-
-    public string? LmStudioTokenFile { get; set; }
-
-    public string? WorkerKeyDirectory { get; set; }
-
     /// <summary>
     /// Optional shared data root mounted into the media workers. This is normally
     /// identical to <see cref="DataDirectory"/> and is overridden only by isolated
-    /// live-smoke hosts whose database and client keys must remain temporary.
+    /// smoke hosts whose database and worker data must remain temporary.
     /// </summary>
     public string? WorkerDataDirectory { get; set; }
 
-    public string DatabasePath => Path.Combine(DataDirectory, "Data", "go-ai-server.db");
+    public string DatabasePath => Path.Combine(DataDirectory, "database", "go-ai-server.db");
 
-    public string UploadDirectory => Path.Combine(GetWorkerDataDirectory(), "Uploads");
+    public string UploadDirectory => Path.Combine(GetWorkerDataDirectory(), "uploads");
 
     public string ResolvedWorkerDataDirectory => GetWorkerDataDirectory();
 
-    public string ArtifactDirectory => Path.Combine(DataDirectory, "Artifacts");
+    public string ArtifactDirectory => Path.Combine(DataDirectory, "artifacts");
 
-    public string WorkerArtifactDirectory => Path.Combine(GetWorkerDataDirectory(), "Artifacts", "worker");
+    public string WorkerArtifactDirectory => Path.Combine(GetWorkerDataDirectory(), "artifacts", "worker");
 
-    public string SecretDirectory => Path.Combine(DataDirectory, "Secrets");
-
-    public string LogDirectory => Path.Combine(DataDirectory, "Logs");
-
-    public string LmStudioTokenPath => !string.IsNullOrWhiteSpace(LmStudioTokenFile)
-        ? Path.GetFullPath(LmStudioTokenFile)
-        : Path.Combine(GetProviderSecretDirectory(), "lmstudio-token.dpapi");
-
-    public string YouTubeApiKeyPath => Path.Combine(GetProviderSecretDirectory(), "youtube-api-key.dpapi");
-
-    public string BootstrapKeyExportPath => Path.Combine(SecretDirectory, "bootstrap-client-key.once");
-
-    public string GetWorkerKeyPath(string workerName)
-    {
-        var fileName = workerName switch
-        {
-            "speech" => "speech-worker.key",
-            "media" => "media-worker.key",
-            "image" => "image-worker.key",
-            _ => throw new ArgumentOutOfRangeException(nameof(workerName), workerName, "Unknown worker."),
-        };
-        var directory = string.IsNullOrWhiteSpace(WorkerKeyDirectory)
-            ? GetProviderSecretDirectory()
-            : Path.GetFullPath(WorkerKeyDirectory);
-        return Path.Combine(directory, fileName);
-    }
-
-    private string GetProviderSecretDirectory() => string.IsNullOrWhiteSpace(ProviderDataDirectory)
-        ? SecretDirectory
-        : Path.Combine(Path.GetFullPath(ProviderDataDirectory), "Secrets");
+    public string LogDirectory => Path.Combine(DataDirectory, "logs");
 
     private string GetWorkerDataDirectory() => string.IsNullOrWhiteSpace(WorkerDataDirectory)
         ? Path.GetFullPath(DataDirectory)
@@ -115,8 +83,8 @@ public sealed class GoAiServerOptions
             return Path.GetFullPath(requested);
         }
 
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "GO-AI-Server");
+        return OperatingSystem.IsWindows()
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GO-AI-Stack")
+            : "/data";
     }
 }

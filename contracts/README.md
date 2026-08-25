@@ -22,5 +22,5 @@ DACL that grants only the current user full access. Readers verify that ACL befo
 trusting the endpoint. The process id and creation time are checked together to
 reject stale files after PID reuse.
 
-The contract controls CAD capabilities only. AI/chat configuration and LM Studio
-traffic never cross this plugin boundary.
+The contract controls CAD capabilities only. AI/chat configuration and Docker
+gateway traffic never cross this plugin boundary.

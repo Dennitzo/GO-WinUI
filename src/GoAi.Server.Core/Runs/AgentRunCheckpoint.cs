@@ -30,6 +30,10 @@ public sealed record AgentRunCheckpoint(
     int ConsecutiveRoundsWithoutMutation = 0,
     IReadOnlyDictionary<string, int>? FailedReplaceTargetCounts = null,
     IReadOnlyDictionary<string, int>? TextMutationCountsSinceProcess = null,
-    bool ReasoningRecoveryRequired = false);
+    bool ReasoningRecoveryRequired = false,
+    string? SelectedToolName = null,
+    int RequiredToolCallRetryCount = 0,
+    bool HasSuccessfulClientToolEvidence = false,
+    int FailedPatchAttemptCount = 0);
 
 public sealed record WorkspaceReadRange(string Path, int StartLine, int EndLine);

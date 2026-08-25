@@ -1,7 +1,6 @@
 <Solution>
   <Project Path="src/GoAi.Client/GoAi.Client.csproj" />
   <Project Path="src/GoAi.Contracts/GoAi.Contracts.csproj" />
-  <Project Path="src/GoAi.Server.App/GoAi.Server.App.csproj" />
   <Project Path="src/GoAi.Server.Core/GoAi.Server.Core.csproj" />
   <Project Path="src/GoAi.Gateway/GoAi.Gateway.csproj" />
   <Project Path="src/GoAi.SmokeClient/GoAi.SmokeClient.csproj" />

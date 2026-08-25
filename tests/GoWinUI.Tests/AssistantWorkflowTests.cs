@@ -13,6 +13,91 @@ namespace GoWinUI.Tests;
 public sealed class AssistantWorkflowTests
 {
     [Fact]
+    public void LiveModelTokensUseOneCounterForTheCurrentModelRun()
+    {
+        var activeRunTokens = 0;
+        var hasRunStarted = false;
+
+        var started = GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("generationStarted"),
+            ref activeRunTokens,
+            ref hasRunStarted);
+        var firstTurn = GoAiAssistantService.FormatModelTokenProgress(new ModelGenerationEvent(
+            "tokenProgress",
+            PromptProgress: 0.75,
+            PromptTokens: 1_200,
+            ProcessedPromptTokens: 900,
+            GeneratedTokens: 42,
+            TokensPerSecond: 17.25),
+            ref activeRunTokens,
+            ref hasRunStarted);
+        var selectedTool = GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("toolSelected", "fs.readText"),
+            ref activeRunTokens,
+            ref hasRunStarted);
+        var nextTurn = GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("generationStarted"),
+            ref activeRunTokens,
+            ref hasRunStarted);
+        var secondTurn = GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("tokenProgress", GeneratedTokens: 8),
+            ref activeRunTokens,
+            ref hasRunStarted);
+
+        Assert.Equal("0 Token", started);
+        Assert.Equal("942 Token", firstTurn);
+        Assert.Equal("942 Token", selectedTool);
+        Assert.Equal("0 Token", nextTurn);
+        Assert.Equal("8 Token", secondTurn);
+        Assert.DoesNotContain("Prompt", secondTurn, StringComparison.Ordinal);
+        Assert.DoesNotContain("Token/s", secondTurn, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LiveModelTokensPreferLlamaCurrentTokensForModelsWithoutReasoning()
+    {
+        var activeRunTokens = 0;
+        var hasRunStarted = false;
+
+        _ = GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("generationStarted"),
+            ref activeRunTokens,
+            ref hasRunStarted);
+        var promptEvaluation = GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent(
+                "tokenProgress",
+                ProcessedPromptTokens: 13_331,
+                GeneratedTokens: 0,
+                CurrentTokens: 13_331),
+            ref activeRunTokens,
+            ref hasRunStarted);
+
+        Assert.Equal($"{13_331:N0} Token", promptEvaluation);
+        Assert.NotEqual("0 Token", promptEvaluation);
+    }
+
+    [Fact]
+    public void LiveModelTokensDeriveLlamaCurrentTokensFromOlderGatewayEvents()
+    {
+        var activeRunTokens = 0;
+        var hasRunStarted = false;
+
+        _ = GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("generationStarted"),
+            ref activeRunTokens,
+            ref hasRunStarted);
+        var promptEvaluation = GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent(
+                "tokenProgress",
+                ProcessedPromptTokens: 13_331,
+                GeneratedTokens: 0),
+            ref activeRunTokens,
+            ref hasRunStarted);
+
+        Assert.Equal($"{13_331:N0} Token", promptEvaluation);
+    }
+
+    [Fact]
     public void CodingContextTraceIgnoresTokenOnlyRetryChanges()
     {
         var first = new ContextChangedEvent(
@@ -258,7 +343,7 @@ public sealed class AssistantWorkflowTests
         using var chatPayload = JsonDocument.Parse(JsonSerializer.Serialize(new
         {
             sessionId = session.Id,
-            prompt = "Analysiere den nÃ¤chsten Fall.",
+            prompt = "Analysiere den nächsten Fall.",
         }));
 
         Assert.True(await coordinator.IsSpeechRequestAsync(speechPayload.RootElement));
@@ -273,7 +358,7 @@ public sealed class AssistantWorkflowTests
             Guid.NewGuid(),
             Guid.NewGuid(),
             ChatRole.Assistant,
-            "### Prozessbericht\n\nDie Schwarzschild-Metrik wird symbolisch geprÃ¼ft.",
+            "### Prozessbericht\n\nDie Schwarzschild-Metrik wird symbolisch geprüft.",
             MessageStatus.Completed,
             now,
             now);
@@ -417,6 +502,23 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("profile.supportedEfforts", app, StringComparison.Ordinal);
         Assert.Contains("reasoningEffort: elements.reasoning.value", app, StringComparison.Ordinal);
         Assert.Contains("Aktives Modell:", app, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SettingsExposeIndependentGeneralAndCodingModelSelectors()
+    {
+        var settingsPage = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "GoWinUI.App",
+            "Pages",
+            "SettingsPage.xaml"));
+
+        Assert.Contains("Header=\"General AI Modell\"", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.Models", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("Header=\"Coding AI Modell\"", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.CodingModels", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.SelectedCodingModel", settingsPage, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -1189,6 +1291,23 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public void FailedReadIsNotDisplayedAsSuccessfullyRead()
+    {
+        Assert.Equal(
+            "Datei konnte nicht gelesen werden",
+            GoAiAssistantService.CodingToolTitle(
+                ClientToolNames.FileSystemReadText,
+                completed: true,
+                succeeded: false));
+        Assert.Equal(
+            "Datei gelesen",
+            GoAiAssistantService.CodingToolTitle(
+                ClientToolNames.FileSystemReadText,
+                completed: true,
+                succeeded: true));
+    }
+
+    [Fact]
     public void DocumentAnswersKeepInlineCitationsButRemoveTheEvidenceFooter()
     {
         const string response = "Die XREF-Vorlage wird im Projekt geladen [Anleitung_C.A.T.S.pdf, S. 12].\n\n"
@@ -1650,6 +1769,51 @@ public sealed class AssistantWorkflowTests
     {
         Assert.Equal(4, GoAiAssistantService.ReconnectAttemptsAfterProgress(4, 120, 120));
         Assert.Equal(0, GoAiAssistantService.ReconnectAttemptsAfterProgress(4, 120, 121));
+    }
+
+    [Fact]
+    public void CodingPromptRetriesEveryTerminalProcessFailureButNeverAUserCancellation()
+    {
+        var terminal = new GoAiRunTerminalException(
+            "coding.verification_failed",
+            "Der Prozess wurde vor dem erfolgreichen Abschluss beendet.",
+            retryable: false);
+
+        Assert.True(GoAiAssistantService.ShouldRetryCurrentPrompt(
+            PromptTriggerAction.Code,
+            terminal));
+        Assert.False(GoAiAssistantService.ShouldRetryCurrentPrompt(
+            PromptTriggerAction.Code,
+            new OperationCanceledException()));
+
+        using var stopped = new CancellationTokenSource();
+        stopped.Cancel();
+        Assert.False(GoAiAssistantService.ShouldRetryCurrentPrompt(
+            PromptTriggerAction.Code,
+            terminal,
+            stopped.Token));
+    }
+
+    [Fact]
+    public void GeneralPromptOnlyRetriesFailuresMarkedAsRecoverable()
+    {
+        Assert.True(GoAiAssistantService.ShouldRetryCurrentPrompt(
+            action: null,
+            new GoAiRunTerminalException("run.timeout", "Zeitlimit", retryable: true)));
+        Assert.False(GoAiAssistantService.ShouldRetryCurrentPrompt(
+            action: null,
+            new GoAiRunTerminalException("run.invalid_operation", "Ungültiger Auftrag", retryable: false)));
+        Assert.True(GoAiAssistantService.IsRetryableServerErrorCode("provider.generation_terminated"));
+        Assert.False(GoAiAssistantService.IsRetryableServerErrorCode("coding.verification_failed"));
+    }
+
+    [Fact]
+    public void PromptAndStreamRetryBackoffIsBounded()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(2), GoAiAssistantService.PromptRetryDelay(1));
+        Assert.Equal(TimeSpan.FromSeconds(30), GoAiAssistantService.PromptRetryDelay(100));
+        Assert.Equal(TimeSpan.FromMilliseconds(500), GoAiAssistantService.StreamReconnectDelay(0));
+        Assert.Equal(TimeSpan.FromSeconds(30), GoAiAssistantService.StreamReconnectDelay(100));
     }
 
     private static ChatMessage Message(Guid sessionId, string content) => new(

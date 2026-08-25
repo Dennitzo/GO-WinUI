@@ -1,3 +1,5 @@
+using GoAi.Contracts;
+
 namespace GoAi.Server.Core.Configuration;
 
 public sealed record CodingModelProfile(
@@ -8,28 +10,22 @@ public sealed record CodingModelProfile(
 
 public static class CodingModelCatalog
 {
-    public const string Qwen38BId = "qwen3.8-27b";
-    public const string Qwen3CoderNextId = "qwen3-coder-next";
-    public const string GptOss120BId = "openai/gpt-oss-120b";
-    public const string DefaultModelId = Qwen38BId;
+    public const string GptOss120BId = "gpt-oss-120b";
+    public const string Qwen3CoderNextQ8Id = "qwen3-coder-next-q8_0";
+    public const string DefaultModelId = Qwen3CoderNextQ8Id;
 
     public static IReadOnlyList<CodingModelProfile> Models { get; } =
     [
         new(
-            Qwen38BId,
-            "Qwen3.8-27B · Q8_0",
-            262_144,
-            "qwen38-coder"),
-        new(
-            Qwen3CoderNextId,
-            "Qwen3-Coder-Next · Q6_K",
-            262_144,
-            "qwen-coder"),
-        new(
             GptOss120BId,
             "gpt-oss-120b",
-            131_072,
+            ModelContextProfiles.GptOss120BMaximum,
             "gpt-oss-coder"),
+        new(
+            Qwen3CoderNextQ8Id,
+            "Qwen3-Coder-Next · Q8_0",
+            ModelContextProfiles.Qwen3CoderNextMaximum,
+            "qwen3-coder-next"),
     ];
 
     public static bool TryGet(string? modelId, out CodingModelProfile profile)

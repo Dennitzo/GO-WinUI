@@ -17,7 +17,11 @@ public sealed class RunProcessor : BackgroundService
     internal const int ReservedCodingVerificationRounds = 12;
     internal const int CodingMutationProgressGuidanceThreshold = 6;
     internal const int CodingTextMutationLimitBeforeVerification = 3;
-    private static readonly string[] CodingVerificationStageOrder = ["test", "build", "start", "review"];
+    internal const int RequiredToolSelectorOutputTokenCeiling = 4_096;
+    internal const int MaximumRequiredToolCallRetries = 1;
+    internal const int SelectedToolOutputTokenFloor = 8_192;
+    internal const int SelectedContentToolOutputTokenFloor = 32_768;
+    private static readonly string[] CodingVerificationStageOrder = ["test", "build", "review"];
     private static readonly string[] GeneratedArtifactDirectoryPrefixes =
     [
         "artifacts/",
@@ -26,6 +30,18 @@ public sealed class RunProcessor : BackgroundService
         "simulation_data/",
         "visualizations/",
     ];
+    private static readonly HashSet<string> DocumentationFileExtensions = new(
+    [
+        ".adoc",
+        ".docx",
+        ".md",
+        ".odt",
+        ".pdf",
+        ".rst",
+        ".tex",
+        ".txt",
+    ],
+        StringComparer.OrdinalIgnoreCase);
     private static readonly Regex CodingMutationIntentRegex = new(
         @"(?:^|\b)(?:erstelle|erzeuge|\u00E4ndere|bearbeite|implementiere|behebe|repariere|f\u00FCge|entferne|l\u00F6sche|schreibe|aktualisiere|ersetze|refaktorisiere|optimiere|migriere|passe|create|generate|edit|modify|implement|fix|repair|add|remove|delete|write|update|replace|refactor|optimize|migrate)(?:\b|$)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -37,7 +53,7 @@ public sealed class RunProcessor : BackgroundService
     private readonly RunRepository _repository;
     private readonly ModelRouter _router;
     private readonly GpuLeaseScheduler _scheduler;
-    private readonly LmStudioClient _lmStudio;
+    private readonly ModelRuntimeClient _modelRuntime;
     private readonly WorkerOrchestrator _workers;
     private readonly AgentToolCatalog _toolCatalog;
     private readonly AgentToolExecutor _toolExecutor;
@@ -51,7 +67,7 @@ public sealed class RunProcessor : BackgroundService
         RunRepository repository,
         ModelRouter router,
         GpuLeaseScheduler scheduler,
-        LmStudioClient lmStudio,
+        ModelRuntimeClient modelRuntime,
         WorkerOrchestrator workers,
         AgentToolCatalog toolCatalog,
         AgentToolExecutor toolExecutor,
@@ -62,7 +78,7 @@ public sealed class RunProcessor : BackgroundService
         _repository = repository;
         _router = router;
         _scheduler = scheduler;
-        _lmStudio = lmStudio;
+        _modelRuntime = modelRuntime;
         _workers = workers;
         _toolCatalog = toolCatalog;
         _toolExecutor = toolExecutor;
@@ -131,7 +147,10 @@ public sealed class RunProcessor : BackgroundService
         var request = await _repository.GetRequestAsync(runId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Run request disappeared from storage.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(request.Limits?.TimeoutSeconds ?? 1800));
+        if (request.Mode != RunMode.Code)
+        {
+            timeout.CancelAfter(TimeSpan.FromSeconds(request.Limits?.TimeoutSeconds ?? 1800));
+        }
         var runCancellationToken = timeout.Token;
         try
         {
@@ -168,7 +187,9 @@ public sealed class RunProcessor : BackgroundService
         var maximumOutputTokens = request.Limits?.MaximumOutputTokens ?? 8_192;
         var effectiveTools = _toolCatalog.GetAvailableTools(request);
         var stagedWebResearchRequested = StagedWebResearchPipeline.IsRequested(request, effectiveTools);
-        var availableTools = StagedWebResearchPipeline.RemoveFromMainAgentTools(effectiveTools);
+        var availableTools = stagedWebResearchRequested
+            ? StagedWebResearchPipeline.RemoveFromMainAgentTools(effectiveTools)
+            : effectiveTools;
         var codingRun = IsCodingAgentRun(selection.Role, request.ConversationProfile);
         var codingIntent = codingRun ? ClassifyCodingRequest(request) : CodingRequestIntent.Analysis;
         var maximumModelRounds = codingRun ? _options.MaximumCodingModelRounds : _options.MaximumModelRounds;
@@ -219,15 +240,33 @@ public sealed class RunProcessor : BackgroundService
         var verificationFailed = checkpoint.VerificationFailed;
         var repairReminderCount = checkpoint.RepairReminderCount;
         var reasoningBudgetRetryCount = 0;
-        var reasoningRecoveryRequired = checkpoint.ReasoningRecoveryRequired;
+        var requiredToolCallRetryCount = checkpoint.RequiredToolCallRetryCount;
+        var selectedToolName = checkpoint.SelectedToolName;
+        if (selectedToolName is not null
+            && !availableTools.Any(tool => string.Equals(tool.Name, selectedToolName, StringComparison.Ordinal)))
+        {
+            selectedToolName = null;
+        }
         var finalSynthesisRequested = checkpoint.FinalSynthesisRequested;
         var failedToolFingerprints = new HashSet<string>(checkpoint.FailedToolFingerprints ?? [], StringComparer.Ordinal);
+        var failedPatchAttemptCount = Math.Max(
+            checkpoint.FailedPatchAttemptCount,
+            failedToolFingerprints.Count(static fingerprint =>
+                fingerprint.StartsWith(ClientToolNames.FileSystemProposePatch + ":", StringComparison.Ordinal)));
         // Tool names are never disabled globally after one bad call. Coding models
         // must be able to retry the same operation with corrected arguments.
         var blockedToolNames = new HashSet<string>(StringComparer.Ordinal);
         var successfulReadFingerprints = new HashSet<string>(checkpoint.SuccessfulReadFingerprints ?? [], StringComparer.Ordinal);
         var successfulReadRanges = (checkpoint.SuccessfulReadRanges ?? []).ToList();
         var successfulToolFingerprints = new HashSet<string>(checkpoint.SuccessfulToolFingerprints ?? [], StringComparer.Ordinal);
+        // This is deliberately separate from successfulToolFingerprints. Fingerprints are
+        // revision-local deduplication state and are cleared after a mutation so that a
+        // verifier can be rerun. Successful evidence is monotonic for the complete run.
+        var hasSuccessfulClientToolEvidence = checkpoint.HasSuccessfulClientToolEvidence
+            || successfulToolFingerprints.Count > 0
+            || evidencePaths.Count > 0
+            || mutatedPaths.Count > 0
+            || verificationStages.Count > 0;
         var consecutiveRedundantVerifications = checkpoint.ConsecutiveRedundantVerifications;
         var consecutiveRoundsWithoutMutation = checkpoint.ConsecutiveRoundsWithoutMutation;
         var failedReplaceTargetCounts = new Dictionary<string, int>(
@@ -236,9 +275,20 @@ public sealed class RunProcessor : BackgroundService
         var textMutationCountsSinceProcess = new Dictionary<string, int>(
             checkpoint.TextMutationCountsSinceProcess ?? new Dictionary<string, int>(),
             StringComparer.OrdinalIgnoreCase);
+        if (verificationRequired
+            && mutatedPaths.Count > 0
+            && mutatedPaths.All(static path => !RequiresCodingVerification(path)))
+        {
+            // Older checkpoints classified every file outside an artifact folder as
+            // executable source. A documentation-only run must not be trapped in a
+            // test/build loop after an upgrade.
+            verificationRequired = false;
+            verificationFailed = false;
+            verificationStages.Clear();
+        }
         string? CurrentCodingCompletionBlocker() => CodingCompletionBlocker(
             codingIntent,
-            successfulToolFingerprints.Count,
+            hasSuccessfulClientToolEvidence ? 1 : 0,
             evidencePaths.Count,
             mutatedPaths.Count);
 
@@ -724,13 +774,63 @@ public sealed class RunProcessor : BackgroundService
                 await SaveCheckpointAsync().ConfigureAwait(false);
             }
 
+            var requireCodingToolCall = ShouldRequireCodingToolCall(
+                codingRun,
+                finalSynthesisRequested,
+                verificationRequired,
+                VerificationComplete(),
+                CurrentCodingCompletionBlocker());
+            var modelTurnMaximumOutputTokens = ResolveModelTurnMaximumOutputTokens(
+                selectedToolName,
+                maximumOutputTokens,
+                contextLength,
+                requireToolCall: requireCodingToolCall || selectedToolName is not null);
             IReadOnlyList<LmChatMessage> modelMessages;
             CodingContextPlan contextPlan;
             for (var compactionAttempt = 0; ; compactionAttempt++)
             {
                 try
                 {
-                    contextPlan = CodingContextPlanner.Prepare(messages, contextLength, maximumOutputTokens);
+                    var inputTokenBudget = CodingContextPlanner.ComputeInputTokenBudget(
+                        contextLength,
+                        modelTurnMaximumOutputTokens);
+                    var estimatedTokens = CodingContextPlanner.EstimateTokens(messages);
+                    if (codingRun
+                        && estimatedTokens >= inputTokenBudget * 3L / 4L
+                        && FindCodingCompactionAnchorCount(messages) < messages.Count)
+                    {
+                        await _repository.AppendEventAsync(
+                            runId,
+                            RunEventTypes.ContextChanged,
+                            new ContextChangedEvent(
+                                estimatedTokens,
+                                inputTokenBudget,
+                                evidencePaths.Count,
+                                true,
+                                $"Der interne Coding-Arbeitskontext wird bei 75 Prozent Belegung durch {selection.ModelId} verdichtet; aktueller Prompt und Workspace bleiben unverändert.",
+                                "none",
+                                0,
+                                0,
+                                PreparationCompleted: false),
+                            cancellationToken).ConfigureAwait(false);
+                        messages = await CompactCodingRunMessagesWithModelAsync(
+                            runId,
+                            messages,
+                            selection.ModelId,
+                            selection.Role,
+                            contextLength,
+                            maximumOutputTokens,
+                            request.ReasoningEffort,
+                            inputTokenBudget,
+                            cancellationToken).ConfigureAwait(false);
+                        await SaveCheckpointAsync().ConfigureAwait(false);
+                    }
+
+                    contextPlan = CodingContextPlanner.Prepare(
+                        messages,
+                        contextLength,
+                        modelTurnMaximumOutputTokens,
+                        allowLossyCompaction: !codingRun);
                     break;
                 }
                 catch (CodingContextBudgetException exception) when (codingRun && compactionAttempt < 4)
@@ -823,27 +923,30 @@ public sealed class RunProcessor : BackgroundService
                     HistoryWasCompacted: request.SessionContext?.PreparedByAi == true),
                 cancellationToken).ConfigureAwait(false);
 
-            var requireCodingToolCall = ShouldRequireCodingToolCall(
-                codingRun,
-                finalSynthesisRequested,
-                verificationRequired,
-                VerificationComplete(),
-                CurrentCodingCompletionBlocker());
-            var modelTools = availableTools
+            var selectableTools = availableTools
                 .Where(tool => !blockedToolNames.Contains(tool.Name))
-                .Select(static tool => tool.ToLmDefinition())
+                .Where(tool => !IsToolSuppressedAfterRepeatedFailure(tool.Name, failedPatchAttemptCount))
                 .ToArray();
-            Func<LmStudioNativeAgentProgress, CancellationToken, ValueTask>? nativeProgress = codingRun
-                ? (progress, token) => new ValueTask(_repository.AppendEventAsync(
+            LmToolDefinition[] modelTools = selectedToolName is null
+                ? selectableTools.Length == 0
+                    ? []
+                    : [AgentToolCatalog.CreateSelectorDefinition(selectableTools)]
+                : [selectableTools.Single(tool => string.Equals(tool.Name, selectedToolName, StringComparison.Ordinal)).ToLmDefinition()];
+            Func<ModelRuntimeProgress, CancellationToken, ValueTask> nativeProgress =
+                (progress, token) => new ValueTask(_repository.AppendEventAsync(
                     runId,
                     RunEventTypes.ModelGeneration,
                     new ModelGenerationEvent(
                         progress.State,
                         progress.ToolName,
                         progress.ArgumentCharacters,
-                        progress.PromptProgress),
-                    token))
-                : null;
+                        progress.PromptProgress,
+                        progress.PromptTokens,
+                        progress.ProcessedPromptTokens,
+                        progress.GeneratedTokens,
+                        progress.TokensPerSecond,
+                        progress.CurrentTokens),
+                    token));
             LmChatResult response;
             var leaseMode = string.Equals(selection.Role, "general", StringComparison.Ordinal)
                 ? GpuLeaseMode.Shared
@@ -871,30 +974,120 @@ public sealed class RunProcessor : BackgroundService
                         new ModelLoadingEvent(selection.ModelId, "loaded", contextLength, contextLength),
                         cancellationToken).ConfigureAwait(false);
                 }
-                response = await _lmStudio.CompleteChatAsync(
+                response = await _modelRuntime.CompleteChatAsync(
                     selection.ModelId,
                     modelMessages,
                     modelTools,
-                    maximumOutputTokens,
+                    modelTurnMaximumOutputTokens,
                     modelRole: selection.Role,
                     reasoningEffort: ResolveReasoningEffortForRound(
                         selection.ModelId,
                         selection.Role,
-                        request.ReasoningEffort,
-                        reasoningRecoveryRequired),
+                        request.ReasoningEffort),
                     cancellationToken: cancellationToken,
-                    requireToolCall: requireCodingToolCall,
-                    requiredToolName: null,
+                    requireToolCall: requireCodingToolCall || selectedToolName is not null,
+                    requiredToolName: selectedToolName is not null
+                        ? selectedToolName
+                        : requireCodingToolCall && modelTools.Length > 0
+                            ? AgentToolCatalog.SelectorToolName
+                            : null,
                     nativeProgress: nativeProgress).ConfigureAwait(false);
             }
 
             roundCount++;
             inputTokens += response.InputTokens;
             outputTokens += response.OutputTokens;
-            if (reasoningRecoveryRequired
-                && (response.ToolCalls.Count > 0 || !string.IsNullOrWhiteSpace(response.Content)))
+            if (selectedToolName is null && response.ToolCalls.Count > 0)
             {
-                reasoningRecoveryRequired = false;
+                if (response.ToolCalls.Count != 1
+                    || !string.Equals(response.ToolCalls[0].Name, AgentToolCatalog.SelectorToolName, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("The compact tool-catalog turn returned an unexpected tool call.");
+                }
+                var selectorCall = response.ToolCalls[0];
+                var selected = _toolCatalog.ResolveSelection(selectorCall.Arguments, selectableTools);
+                messages.Add(CreateToolCallHistoryMessage([selectorCall]));
+                messages.Add(new LmChatMessage(
+                    "tool",
+                    JsonSerializer.Serialize(new
+                    {
+                        status = "selected",
+                        tool = selected.Name,
+                        next = "GO stellt im nächsten Modellturn ausschließlich das vollständige Schema dieses Werkzeugs bereit.",
+                    }, GoAiProtocol.CreateJsonOptions()),
+                    ToolCallId: selectorCall.Id));
+                selectedToolName = selected.Name;
+                await _repository.AppendEventAsync(
+                    runId,
+                    RunEventTypes.ModelGeneration,
+                    new ModelGenerationEvent("toolSelected", selected.Name),
+                    cancellationToken).ConfigureAwait(false);
+                requiredToolCallRetryCount = 0;
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                continue;
+            }
+            if (selectedToolName is not null)
+            {
+                if (response.ToolCalls.Count > 0
+                    && (response.ToolCalls.Count != 1
+                        || !string.Equals(response.ToolCalls[0].Name, selectedToolName, StringComparison.Ordinal)))
+                {
+                    throw new InvalidOperationException($"The selected tool '{selectedToolName}' was not returned as one complete native tool call.");
+                }
+                if (response.ToolCalls.Count == 1)
+                {
+                    selectedToolName = null;
+                    requiredToolCallRetryCount = 0;
+                }
+            }
+            var requiredToolCall = requireCodingToolCall || selectedToolName is not null;
+            if (IsMissingRequiredToolCall(requiredToolCall, response))
+            {
+                if (codingRun
+                    && selectedToolName is null
+                    && verificationRequired
+                    && !verificationFailed
+                    && HasIntegratedRepositoryVerifier(request))
+                {
+                    requiredToolCallRetryCount = 0;
+                    ScheduleIntegratedVerification();
+                    await SaveCheckpointAsync().ConfigureAwait(false);
+                    continue;
+                }
+
+                requiredToolCallRetryCount++;
+                if (requiredToolCallRetryCount > MaximumRequiredToolCallRetries)
+                {
+                    var requiredOperation = selectedToolName is null
+                        ? "die n\u00e4chste erforderliche Workspace-Aktion"
+                        : $"den bereits ausgew\u00e4hlten Tool-Call '{selectedToolName}'";
+                    throw new CodingEmptyResponseException(
+                        $"Das Coding-Modell hat {requiredOperation} wiederholt nicht als vollst\u00e4ndigen nativen Tool-Call geliefert. "
+                        + "GO hat die Wiederholung nach einem kompakten Korrekturversuch beendet; Workspace und bereits ausgef\u00fchrte Aktionen bleiben unver\u00e4ndert erhalten.");
+                }
+
+                var budgetWasExhausted = IsRequiredToolCallOutputBudgetExhausted(
+                    response,
+                    modelTurnMaximumOutputTokens);
+                var requiredOperationName = selectedToolName ?? AgentToolCatalog.SelectorToolName;
+                messages.Add(new LmChatMessage(
+                    "system",
+                    (budgetWasExhausted
+                        ? "Der letzte Modellturn endete am Ausgabebudget. "
+                        : "Der letzte Modellturn lieferte Text statt des erforderlichen Werkzeugaufrufs. ")
+                    + $"Erzeuge jetzt ohne Analyse oder Begleittext genau einen nativen Tool-Call f\u00fcr '{requiredOperationName}'. "
+                    + "Nutze nur die bereitgestellten Schemafelder und kompakte Argumente."));
+                await _repository.AppendEventAsync(
+                    runId,
+                    RunEventTypes.ModelGeneration,
+                    new ModelGenerationEvent("toolCallRetry", requiredOperationName),
+                    cancellationToken).ConfigureAwait(false);
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                continue;
+            }
+            if (response.ToolCalls.Count > 0)
+            {
+                requiredToolCallRetryCount = 0;
                 reasoningBudgetRetryCount = 0;
             }
             if (response.ToolCalls.Count == 0)
@@ -915,14 +1108,10 @@ public sealed class RunProcessor : BackgroundService
 
                     var reasoningBudgetExhausted = IsReasoningBudgetExhausted(
                         response,
-                        maximumOutputTokens);
+                        modelTurnMaximumOutputTokens);
                     reasoningBudgetRetryCount = reasoningBudgetExhausted
                         ? reasoningBudgetRetryCount + 1
                         : 0;
-                    if (reasoningBudgetExhausted)
-                    {
-                        reasoningRecoveryRequired = true;
-                    }
                     repairReminderCount++;
                     if (reasoningBudgetRetryCount > 1)
                     {
@@ -994,8 +1183,9 @@ public sealed class RunProcessor : BackgroundService
                             ? "Die letzte Verifikation ist fehlgeschlagen. Eine Abschlussantwort ist noch nicht zulässig. "
                                 + "Analysiere das unmittelbar vorherige Prozessresultat, lies die betroffenen Quellen, behebe die Ursache und starte danach die projektgeeigneten Test-, Build-/Validierungs- und Laufzeitprüfungen erneut."
                             : "Nach der letzten Dateiänderung fehlt noch eine erfolgreiche Verifikationsstufe. "
-                                + "Führe jetzt die fehlenden projektgeeigneten Stufen mit process.run (purpose test, build und start) aus. "
-                                + "Wenn das Repository keine solche Stufe besitzt, belege den externen Blocker konkret."));
+                                + "Führe jetzt die fehlenden projektgeeigneten Test- und Build-/Validierungsstufen mit process.run aus. "
+                                + "Führe einen Laufzeit-Smoke nur aus, wenn das Projekt ein startbares Ziel besitzt. "
+                                + "Wenn das Repository keine erforderliche Stufe besitzt, belege den externen Blocker konkret."));
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     continue;
                 }
@@ -1051,7 +1241,7 @@ public sealed class RunProcessor : BackgroundService
             {
                 consecutiveRoundsWithoutMutation++;
             }
-            messages.Add(new LmChatMessage("assistant", response.Content, response.ToolCalls));
+            messages.Add(CreateToolCallHistoryMessage(response.ToolCalls));
             activeCalls = response.ToolCalls.ToArray();
             nextToolIndex = 0;
             await SaveCheckpointAsync().ConfigureAwait(false);
@@ -1063,9 +1253,7 @@ public sealed class RunProcessor : BackgroundService
                 : $"Der Agent hat das Modellrundenlimit von {maximumModelRounds} erreicht.");
 
         bool CoreVerificationComplete() => !verificationRequired
-            || verificationStages.Contains("test")
-                && verificationStages.Contains("build")
-                && verificationStages.Contains("start");
+            || CoreCodingVerificationComplete(verificationStages);
 
         bool VerificationComplete() => CoreVerificationComplete()
             && (!verificationRequired || verificationStages.Contains("review"));
@@ -1155,11 +1343,36 @@ public sealed class RunProcessor : BackgroundService
             var completed = IsSuccessfulClientToolResult(call, result);
             if (completed)
             {
+                hasSuccessfulClientToolEvidence = true;
                 _ = successfulToolFingerprints.Add(CreateToolFingerprint(call));
             }
             if (!completed && codingRun)
             {
                 _ = failedToolFingerprints.Add(CreateToolFingerprint(call));
+                if (call.Name == ClientToolNames.FileSystemProposePatch)
+                {
+                    failedPatchAttemptCount++;
+                    if (failedPatchAttemptCount == 2)
+                    {
+                        messages.Add(new LmChatMessage(
+                            "system",
+                            "Zwei Unified-Diffs waren syntaktisch ungültig. fs.proposePatch ist für diesen Lauf nicht mehr verfügbar. "
+                            + "Lies das betroffene Ziel autoritativ und verwende danach fs.replaceText für einen exakt gelesenen Block "
+                            + "oder fs.writeText mit dem aktuellen expectedSha256."));
+                    }
+                }
+                if ((call.Name is ClientToolNames.FileSystemReadText
+                    or ClientToolNames.FileSystemStat
+                    or ClientToolNames.FileSystemList)
+                    && IsMissingWorkspacePathFailure(result))
+                {
+                    messages.Add(new LmChatMessage(
+                        "system",
+                        "Der zuletzt angeforderte relative Workspace-Pfad existiert nicht. Wiederhole diesen Pfad nicht. "
+                        + "Verwende einen exakt in GO_REPOSITORY_MAP_V1 aufgef\u00fchrten Pfad oder ermittle einen noch nicht sichtbaren Pfad einmal gezielt mit fs.findFiles beziehungsweise fs.list. "
+                        + "Enthält das unmittelbar vorherige Toolergebnis suggestedPaths, wähle daraus nur einen fachlich passenden Pfad und übernimm ihn exakt; leite daraus keine weiteren Pfadvarianten ab. "
+                        + "Ein fehlender vermuteter Standardpfad ist kein Beleg daf\u00fcr, dass der Workspace leer ist."));
+                }
                 if (call.Name == ClientToolNames.LeanProof)
                 {
                     messages.Add(new LmChatMessage(
@@ -1192,6 +1405,10 @@ public sealed class RunProcessor : BackgroundService
                 messages.Add(new LmChatMessage(
                     "system",
                     "proof.lean verify ist für das exakt benannte Theorem einschließlich Axiomprüfung bestanden. Der formale Nachweis ist abgeschlossen. Verändere die geprüfte Datei nicht erneut; führe nur noch eine ausstehende Diff-Prüfung aus und liefere dann die Abschlussantwort."));
+            }
+            if (completed && call.Name == ClientToolNames.FileSystemProposePatch)
+            {
+                failedPatchAttemptCount = 0;
             }
             if (call.Name == ClientToolNames.FileSystemSearch)
             {
@@ -1380,7 +1597,11 @@ public sealed class RunProcessor : BackgroundService
                 textMutationCountsSinceProcess
                     .OrderBy(static item => item.Key, StringComparer.OrdinalIgnoreCase)
                     .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.OrdinalIgnoreCase),
-                reasoningRecoveryRequired),
+                ReasoningRecoveryRequired: false,
+                SelectedToolName: selectedToolName,
+                RequiredToolCallRetryCount: requiredToolCallRetryCount,
+                HasSuccessfulClientToolEvidence: hasSuccessfulClientToolEvidence,
+                FailedPatchAttemptCount: failedPatchAttemptCount),
             cancellationToken);
     }
 
@@ -1527,7 +1748,7 @@ public sealed class RunProcessor : BackgroundService
             RunEventTypes.ModelGeneration,
             new ModelGenerationEvent(stage, request.RequiredToolName),
             cancellationToken).ConfigureAwait(false);
-        Func<LmStudioNativeAgentProgress, CancellationToken, ValueTask> progress =
+        Func<ModelRuntimeProgress, CancellationToken, ValueTask> progress =
             (value, token) => new ValueTask(_repository.AppendEventAsync(
                 runId,
                 RunEventTypes.ModelGeneration,
@@ -1535,9 +1756,14 @@ public sealed class RunProcessor : BackgroundService
                     value.State,
                     value.ToolName ?? request.RequiredToolName,
                     value.ArgumentCharacters,
-                    value.PromptProgress),
+                    value.PromptProgress,
+                    value.PromptTokens,
+                    value.ProcessedPromptTokens,
+                    value.GeneratedTokens,
+                    value.TokensPerSecond,
+                    value.CurrentTokens),
                 token));
-        return await _lmStudio.CompleteChatAsync(
+        return await _modelRuntime.CompleteChatAsync(
             request.ModelId,
             request.Messages,
             request.Tools,
@@ -1546,8 +1772,7 @@ public sealed class RunProcessor : BackgroundService
             reasoningEffort: ResolveReasoningEffortForRound(
                 request.ModelId,
                 request.ModelRole,
-                requestedReasoningEffort,
-                reasoningRecoveryRequired: request.DisableReasoning),
+                requestedReasoningEffort),
             requireToolCall: request.RequireToolCall,
             requiredToolName: request.RequiredToolName,
             nativeProgress: progress,
@@ -1812,7 +2037,7 @@ public sealed class RunProcessor : BackgroundService
                 new ModelLoadingEvent(modelId, "loading", contextLength, contextLength),
                 token).ConfigureAwait(false),
             cancellationToken).ConfigureAwait(false);
-        var result = await _lmStudio.CompleteChatAsync(
+        var result = await _modelRuntime.CompleteChatAsync(
             modelId,
             summaryMessages,
             [],
@@ -1821,8 +2046,7 @@ public sealed class RunProcessor : BackgroundService
             reasoningEffort: ResolveReasoningEffortForRound(
                 modelId,
                 modelRole,
-                requestedReasoningEffort,
-                reasoningRecoveryRequired: true),
+                requestedReasoningEffort),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(result.Content))
         {
@@ -1836,6 +2060,10 @@ public sealed class RunProcessor : BackgroundService
         ArgumentNullException.ThrowIfNull(messages);
         for (var index = 0; index < messages.Count; index++)
         {
+            if (messages[index].Content?.Contains("[GO_CODING_RUN_MEMORY]", StringComparison.Ordinal) == true)
+            {
+                return Math.Max(1, index);
+            }
             if (string.Equals(messages[index].Role, "assistant", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(messages[index].Role, "tool", StringComparison.OrdinalIgnoreCase))
             {
@@ -2135,8 +2363,13 @@ public sealed class RunProcessor : BackgroundService
         {
             return true;
         }
-        return !GeneratedArtifactDirectoryPrefixes.Any(prefix =>
-            normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        if (GeneratedArtifactDirectoryPrefixes.Any(prefix =>
+            normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        return !DocumentationFileExtensions.Contains(Path.GetExtension(normalized));
     }
 
     private static bool MatchesExecutable(string executable, params string[] candidates)
@@ -2235,6 +2468,10 @@ public sealed class RunProcessor : BackgroundService
         && !finalSynthesisRequested
         && (!string.IsNullOrWhiteSpace(completionBlocker)
             || verificationRequired && !verificationComplete);
+
+    internal static bool CoreCodingVerificationComplete(IReadOnlySet<string> completedStages) =>
+        completedStages.Contains("test")
+        && completedStages.Contains("build");
 
     internal static bool IsCodingAgentRun(string role, ConversationProfile? profile) =>
         string.Equals(role, "code", StringComparison.Ordinal)
@@ -2343,31 +2580,88 @@ public sealed class RunProcessor : BackgroundService
         LmChatResult response,
         int maximumOutputTokens) =>
         response.HadReasoning
-        && response.ToolCalls.Count == 0
-        && string.IsNullOrWhiteSpace(response.Content)
+        && IsEmptyModelResponse(response)
         && response.ReasoningTokens > 0
-        && response.OutputTokens >= Math.Max(1, maximumOutputTokens - 16)
-        && response.ReasoningTokens >= response.OutputTokens - 4;
+        && response.OutputTokens >= Math.Max(1, maximumOutputTokens - 128)
+        && response.ReasoningTokens >= response.OutputTokens - 128;
+
+    internal static bool IsRequiredToolCallOutputBudgetExhausted(
+        LmChatResult response,
+        int maximumOutputTokens) =>
+        response.ToolCalls.Count == 0
+        && response.OutputTokens >= Math.Max(1, maximumOutputTokens - 128);
+
+    internal static bool IsMissingRequiredToolCall(
+        bool requireToolCall,
+        LmChatResult response) =>
+        requireToolCall && response.ToolCalls.Count == 0;
+
+    internal static int ResolveModelTurnMaximumOutputTokens(
+        string? selectedToolName,
+        int configuredMaximumOutputTokens,
+        int contextLength,
+        bool requireToolCall)
+    {
+        var configured = Math.Clamp(configuredMaximumOutputTokens, 1, 65_536);
+        var contextSafeMaximum = Math.Clamp(contextLength - 2_048, 1, 65_536);
+        if (string.IsNullOrWhiteSpace(selectedToolName))
+        {
+            var turnMaximum = requireToolCall
+                ? Math.Min(configured, RequiredToolSelectorOutputTokenCeiling)
+                : configured;
+            return Math.Min(turnMaximum, contextSafeMaximum);
+        }
+
+        var carriesGeneratedContent = selectedToolName is
+            ClientToolNames.DocumentCreate or
+            ClientToolNames.FileSystemWriteText or
+            ClientToolNames.FileSystemReplaceText or
+            ClientToolNames.FileSystemProposePatch or
+            ClientToolNames.FileSystemProposeCreate;
+        var floor = carriesGeneratedContent
+            ? SelectedContentToolOutputTokenFloor
+            : SelectedToolOutputTokenFloor;
+        return Math.Min(Math.Max(configured, floor), contextSafeMaximum);
+    }
+
+    internal static LmChatMessage CreateToolCallHistoryMessage(IReadOnlyList<LmToolCall> toolCalls)
+    {
+        ArgumentNullException.ThrowIfNull(toolCalls);
+        if (toolCalls.Count == 0)
+        {
+            throw new ArgumentException("At least one tool call is required.", nameof(toolCalls));
+        }
+
+        // A model may emit a speculative process report beside a native tool call.
+        // Only the structured call is authoritative; retaining side text both pollutes
+        // later context and can make a simple argument turn consume its entire budget.
+        return new LmChatMessage("assistant", Content: null, ToolCalls: toolCalls);
+    }
+
+    internal static bool IsMissingWorkspacePathFailure(ClientToolResult result) =>
+        !string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase)
+        && (string.Equals(result.ErrorCode, "client.workspace_path_not_found", StringComparison.Ordinal)
+            || result.Message is { Length: > 0 } message
+                && (message.Contains("nicht gefunden", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("not found", StringComparison.OrdinalIgnoreCase)));
+
+    internal static bool IsToolSuppressedAfterRepeatedFailure(
+        string toolName,
+        int failedPatchAttemptCount) =>
+        failedPatchAttemptCount >= 2
+        && string.Equals(toolName, ClientToolNames.FileSystemProposePatch, StringComparison.Ordinal);
+
+    internal static bool IsEmptyModelResponse(LmChatResult response) =>
+        response.ToolCalls.Count == 0
+        && string.IsNullOrWhiteSpace(response.Content);
 
     internal static string? ResolveReasoningEffortForRound(
         string modelId,
         string role,
-        string? requestedEffort,
-        bool reasoningRecoveryRequired)
+        string? requestedEffort)
     {
         var profile = ModelReasoningProfiles.Resolve(modelId, role);
-        var selected = profile.Resolve(requestedEffort);
-        if (!reasoningRecoveryRequired)
-        {
-            return selected;
-        }
-
-        if (profile.Supports("off"))
-        {
-            return "off";
-        }
-
-        return profile.Supports("low") ? "low" : selected;
+        return profile.Resolve(requestedEffort);
     }
 
     internal static bool ShouldBlockRepeatedReplaceText(
@@ -2773,7 +3067,7 @@ public sealed class RunProcessor : BackgroundService
                 Code: "coding.context_budget",
                 Message: $"Der vorbereitete Repositorykontext ({context.EstimatedTokens:N0} Token) überschreitet das sichere Coding-Modellbudget ({context.BudgetTokens:N0} Token).",
                 Retryable: false),
-            LmStudioContextLengthException context => (
+            ModelContextLengthException context => (
                 Code: "coding.context_unavailable",
                 Message: $"Das Coding-Modell ist nur mit {context.AvailableContextLength:N0} statt der erforderlichen {context.RequestedContextLength:N0} Kontexttoken geladen.",
                 Retryable: true),
@@ -2789,9 +3083,9 @@ public sealed class RunProcessor : BackgroundService
                 Code: "coding.run_limit",
                 Message: limit.Message,
                 Retryable: false),
-            LmStudioGenerationTerminatedException => (
+            ModelGenerationTerminatedException => (
                 Code: "provider.generation_terminated",
-                Message: "LM Studio hat die Coding-Modellgenerierung wiederholt vor einem vollständigen Tool-Call beendet. Der Lauf kann mit unverändertem Workspace erneut gestartet werden.",
+                Message: "llama.cpp hat die Coding-Modellgenerierung wiederholt vor einem vollständigen Tool-Call beendet. Der Lauf kann mit unverändertem Workspace erneut gestartet werden.",
                 Retryable: true),
             HttpRequestException => (
                 Code: "provider.http_failed",

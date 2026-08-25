@@ -64,13 +64,9 @@ public sealed partial class SettingsPage : Page
                 await ViewModel.InitializeAsync();
                 SynchronizeControls();
                 UpdatePromptTriggerSortIndicators();
-                UpdateApiKeyState();
                 if (_shell.IsAiAvailable)
                 {
                     await ViewModel.RefreshModelsAsync();
-                    SynchronizeModelSelection();
-                    ApiKeyBox.Password = string.Empty;
-                    UpdateApiKeyState();
                 }
             });
         }
@@ -114,7 +110,6 @@ public sealed partial class SettingsPage : Page
             {
                 NewTriggerActionBox.SelectedIndex = 0;
             }
-            SynchronizeModelSelection();
         }
         finally
         {
@@ -127,8 +122,6 @@ public sealed partial class SettingsPage : Page
         await RunActionAsync(async () =>
         {
             await ViewModel.SaveAsync();
-            ApiKeyBox.Password = string.Empty;
-            UpdateApiKeyState();
             ShowStatus("Einstellungen gespeichert.", InfoBarSeverity.Success);
         });
     }
@@ -138,9 +131,6 @@ public sealed partial class SettingsPage : Page
         await RunActionAsync(async () =>
         {
             var status = await ViewModel.RefreshModelsAsync();
-            SynchronizeModelSelection();
-            ApiKeyBox.Password = string.Empty;
-            UpdateApiKeyState();
 
             ShowStatus(
                 ViewModel.ConnectionStatus,
@@ -156,48 +146,6 @@ public sealed partial class SettingsPage : Page
         {
             ViewModel.LiveCaptionLanguage = value;
         }
-    }
-
-    private void OnApiKeyChanged(object sender, RoutedEventArgs e)
-    {
-        if (!_synchronizing)
-        {
-            ViewModel.GoAiApiKey = ApiKeyBox.Password;
-        }
-    }
-
-    private async void OnImportConnectionBundle(object sender, RoutedEventArgs e)
-    {
-        await RunActionAsync(async () =>
-        {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-                ViewMode = PickerViewMode.List,
-            };
-            picker.FileTypeFilter.Add(".json");
-            InitializePicker(picker);
-            var file = await picker.PickSingleFileAsync();
-            if (file is null)
-            {
-                return;
-            }
-
-            await ViewModel.ImportConnectionBundleAsync(file.Path);
-            SynchronizeControls();
-            ShowStatus("Verbindungspaket und Caddy-Stammzertifikat wurden importiert.", InfoBarSeverity.Success);
-        });
-    }
-
-    private async void OnDeleteApiKey(object sender, RoutedEventArgs e)
-    {
-        await RunActionAsync(async () =>
-        {
-            await ViewModel.DeleteApiKeyAsync();
-            ApiKeyBox.Password = string.Empty;
-            UpdateApiKeyState();
-            ShowStatus("Der gespeicherte API-Schlüssel wurde gelöscht.", InfoBarSeverity.Success);
-        });
     }
 
     private async void OnSelectWorkspace(object sender, RoutedEventArgs e)
@@ -331,22 +279,6 @@ public sealed partial class SettingsPage : Page
         ShowStatus("Ausgewählte Prompt-Trigger zum Löschen vorgemerkt. Mit „Speichern“ übernehmen.", InfoBarSeverity.Success);
     }
 
-    private void OnModelChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_synchronizing && ModelBox.SelectedItem is LmModel model)
-        {
-            ViewModel.SelectedModel = model.Id;
-        }
-    }
-
-    private void OnCodingModelChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_synchronizing && CodingModelBox.SelectedItem is LmModel model)
-        {
-            ViewModel.SelectedCodingModel = model.Id;
-        }
-    }
-
     private void OnThemeChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_synchronizing
@@ -463,28 +395,6 @@ public sealed partial class SettingsPage : Page
         StatusBar.Message = message;
         StatusBar.Severity = severity;
         StatusBar.IsOpen = true;
-    }
-
-    private void SynchronizeModelSelection()
-    {
-        _synchronizing = true;
-        try
-        {
-            ModelBox.SelectedItem = ViewModel.Models.FirstOrDefault(model => model.Id == ViewModel.SelectedModel);
-            CodingModelBox.SelectedItem = ViewModel.CodingModels.FirstOrDefault(model =>
-                model.Id == ViewModel.SelectedCodingModel);
-        }
-        finally
-        {
-            _synchronizing = false;
-        }
-    }
-
-    private void UpdateApiKeyState()
-    {
-        ApiKeyStateText.Text = ViewModel.HasStoredApiKey
-            ? "Der GO-AI-Server-Schlüssel ist sicher im Windows-Anmeldeinformationsspeicher hinterlegt."
-            : "Noch kein GO-AI-Server-Schlüssel gespeichert.";
     }
 
     private static void SelectByTag(ComboBox comboBox, string value)

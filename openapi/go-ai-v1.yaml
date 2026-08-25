@@ -1,20 +1,17 @@
 openapi: 3.1.0
 info:
-  title: GO AI Server API
+  title: GO Docker Gateway API
   version: 1.0.0
-  description: Versionierte API des lokal betriebenen GO AI Servers.
+  description: Versionierte API des lokal betriebenen Docker-Gatewaystacks.
   license:
     name: Proprietär
 servers:
-  - url: https://192.168.0.67:8443
-security:
-  - goAiKey: []
+  - url: http://192.168.0.67:8080
 paths:
   /v1/health/live:
     get:
       summary: Prozess-Liveness abrufen
       operationId: getLiveHealth
-      security: []
       responses:
         "200":
           description: Prozess ist aktiv.
@@ -26,7 +23,6 @@ paths:
     get:
       summary: Betriebsbereitschaft abrufen
       operationId: getReadyHealth
-      security: []
       responses:
         "200":
           description: Server ist betriebsbereit.
@@ -53,49 +49,15 @@ paths:
                 $ref: "#/components/schemas/CapabilitySnapshot"
   /v1/models/status:
     get:
-      summary: LM-Studio-Modellstatus abrufen
+      summary: Docker-Modellstatus abrufen
       operationId: getModelStatus
       responses:
         "200":
-          description: LM-Studio-Modellstatus.
+          description: Status des privaten llama.cpp-Modellrouters.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ModelStatusSnapshot"
-  /v1/models/general:
-    post:
-      summary: General-AI-Modell auswählen und laden
-      operationId: selectGeneralModel
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/GeneralModelSelection"
-      responses:
-        "200":
-          description: Gespeicherte General-AI-Auswahl.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/GeneralModelSelection"
-  /v1/models/code:
-    post:
-      summary: Coding-Agent-Modell auswählen
-      operationId: selectCodingModel
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CodingModelSelection"
-      responses:
-        "200":
-          description: Gespeicherte Coding-Modellauswahl; das Modell wird erst beim Coding-Lauf geladen.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/CodingModelSelection"
   /v1/gpu/status:
     get:
       summary: GPU- und Warteschlangenstatus abrufen
@@ -784,11 +746,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/RunAccepted"
 components:
-  securitySchemes:
-    goAiKey:
-      type: apiKey
-      in: header
-      name: X-GO-AI-Key
   parameters:
     RunId:
       name: runId
@@ -884,7 +841,7 @@ components:
           type: array
           maxItems: 16
           items:
-            enum: [filesystem, code, process, bricscad, screenCapture, documents]
+            enum: [filesystem, code, process, bricscad, screenCapture, documents, documentIo]
         allowedServerTools:
           type: array
           maxItems: 32
@@ -903,7 +860,7 @@ components:
           maxLength: 512
         preferredCodeModelId:
           type: string
-          enum: [qwen3.8-27b, qwen3-coder-next, openai/gpt-oss-120b]
+          enum: [qwen3-coder-next-q8_0, gpt-oss-120b]
         reasoningEffort:
           description: Vom ausgewählten Modell tatsächlich unterstützte Reasoning-Stufe.
           enum: [off, on, low, medium, high]
@@ -1272,30 +1229,6 @@ components:
           type: integer
         displayName:
           type: string
-    GeneralModelSelection:
-      type: object
-      additionalProperties: false
-      required: [modelId, contextTokens, loaded]
-      properties:
-        modelId:
-          type: string
-        contextTokens:
-          type: integer
-        loaded:
-          type: boolean
-    CodingModelSelection:
-      type: object
-      additionalProperties: false
-      required: [modelId, displayName, contextTokens, loaded]
-      properties:
-        modelId:
-          enum: [qwen3.8-27b, qwen3-coder-next, openai/gpt-oss-120b]
-        displayName:
-          type: string
-        contextTokens:
-          type: integer
-        loaded:
-          type: boolean
     GpuStatusSnapshot:
       type: object
       additionalProperties: false

@@ -29,7 +29,7 @@ public sealed class GpuLeaseSchedulerTests
     }
 
     [Fact]
-    public async Task SpeechRemainsAvailableWhileQwenCoderOwnsTheLmStudioLane()
+    public async Task SpeechRemainsAvailableWhileCodingOwnsTheLlmLane()
     {
         using var context = new TestServerContext();
         using var scheduler = new GpuLeaseScheduler(context.Database, new ServerRuntimeState());
@@ -44,14 +44,14 @@ public sealed class GpuLeaseSchedulerTests
                 activity => Assert.Equal("live-caption", activity.Workload),
                 activity => Assert.Equal("llm-general", activity.Workload));
 
-            var qwenCoderTask = scheduler.AcquireAsync("llm-code", "run-code", GpuLeaseMode.Exclusive);
+            var codingModelTask = scheduler.AcquireAsync("llm-code", "run-code", GpuLeaseMode.Exclusive);
             await Task.Delay(100);
-            Assert.False(qwenCoderTask.IsCompleted);
+            Assert.False(codingModelTask.IsCompleted);
             Assert.Equal(1, scheduler.QueueLength);
 
             await general.DisposeAsync();
-            await using var qwenCoder = await qwenCoderTask;
-            Assert.Contains(qwenCoder.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
+            await using var codingModel = await codingModelTask;
+            Assert.Contains(codingModel.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
             Assert.Contains(speech.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
             Assert.Collection(
                 scheduler.ActiveActivities.OrderBy(static activity => activity.Workload),
@@ -83,8 +83,8 @@ public sealed class GpuLeaseSchedulerTests
     }
 
     [Theory]
-    [InlineData("llm-general", "gpt-oss-20b", "LM Studio")]
-    [InlineData("llm-code", "Coding-Agent", "LM Studio")]
+    [InlineData("llm-general", "gpt-oss-120b", "Docker · llama.cpp")]
+    [InlineData("llm-code", "Ausgewähltes Coding-Modell", "Docker · llama.cpp")]
     [InlineData("live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT")]
     [InlineData("text-to-speech", "Antwort wird vorgelesen", "Docker · ausgewählte Sprachausgabe · GPU 1")]
     [InlineData("image-generation", "Bild wird erstellt", "Docker · Image")]

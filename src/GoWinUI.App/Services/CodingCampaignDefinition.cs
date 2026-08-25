@@ -38,15 +38,23 @@ public sealed class CodingCampaignCatalog(IEnumerable<ICodingCampaignDefinition>
     private readonly IReadOnlyDictionary<string, ICodingCampaignDefinition> _definitions = definitions
         .ToDictionary(static item => item.Descriptor.Id, StringComparer.OrdinalIgnoreCase);
 
+    private ICodingCampaignDefinition DefaultDefinition =>
+        _definitions.TryGetValue(PromptDrivenCodingCampaignDefinition.DescriptorId, out var definition)
+            ? definition
+            : throw new InvalidOperationException("Die allgemeine Prompt-Workflow-Definition ist nicht registriert.");
+
     public IReadOnlyList<CodingCampaignDescriptor> List() => _definitions.Values
         .Select(static item => item.Descriptor)
         .OrderBy(static item => item.Title, StringComparer.CurrentCultureIgnoreCase)
         .ToArray();
 
+    public bool IsRegistered(string id) => _definitions.ContainsKey(id);
+
+    public string NormalizeDefinitionId(string id) =>
+        _definitions.ContainsKey(id) ? id : DefaultDefinition.Descriptor.Id;
+
     public ICodingCampaignDefinition GetRequired(string id) =>
-        _definitions.TryGetValue(id, out var definition)
-            ? definition
-            : throw new KeyNotFoundException($"Der Coding-Workflow „{id}“ ist nicht bekannt.");
+        _definitions.TryGetValue(id, out var definition) ? definition : DefaultDefinition;
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<CodingProofKind>))]

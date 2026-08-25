@@ -10,7 +10,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 25;
+    public const int CurrentSchemaVersion = 26;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -74,6 +74,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationTwentyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentyFourAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentySixAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -987,6 +988,40 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 
             command.Parameters.Clear();
             command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(25,$now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentySixAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=26;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE generated_documents(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    file_name TEXT NOT NULL,
+                    format TEXT NOT NULL CHECK(format IN ('markdown','text','docx','pdf')),
+                    source_markdown TEXT NOT NULL,
+                    sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+                    revision INTEGER NOT NULL CHECK(revision>=1),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(session_id,file_name COLLATE NOCASE)
+                ) STRICT;
+                CREATE INDEX idx_generated_documents_session_updated
+                    ON generated_documents(session_id,updated_at,id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(26,$now);
+                """;
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }

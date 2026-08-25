@@ -38,7 +38,6 @@ public sealed class GoAiDatabase : IDisposable
             Directory.CreateDirectory(_options.UploadDirectory);
             Directory.CreateDirectory(_options.ArtifactDirectory);
             Directory.CreateDirectory(_options.WorkerArtifactDirectory);
-            Directory.CreateDirectory(_options.SecretDirectory);
             Directory.CreateDirectory(_options.LogDirectory);
 
             await using var connection = await OpenConnectionCoreAsync(cancellationToken).ConfigureAwait(false);
@@ -120,14 +119,7 @@ public sealed class GoAiDatabase : IDisposable
             version INTEGER PRIMARY KEY,
             applied_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS api_keys (
-            key_id TEXT PRIMARY KEY,
-            key_hash BLOB NOT NULL,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            revoked_at TEXT NULL,
-            last_used_at TEXT NULL
-        );
+        DROP TABLE IF EXISTS api_keys;
         CREATE TABLE IF NOT EXISTS runs (
             run_id TEXT PRIMARY KEY,
             idempotency_key TEXT NULL UNIQUE,

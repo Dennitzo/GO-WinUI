@@ -31,12 +31,14 @@ public static class DependencyInjection
         services.AddSingleton<IPromptTriggerRepository, SqlitePromptTriggerRepository>();
         services.AddSingleton<IAssistantAttachmentRepository, SqliteAssistantAttachmentRepository>();
         services.AddSingleton<IChatArtifactRepository, SqliteChatArtifactRepository>();
+        services.AddSingleton<IGeneratedDocumentRepository, SqliteGeneratedDocumentRepository>();
         services.AddSingleton<IGoAiRunRepository, SqliteGoAiRunRepository>();
         services.AddSingleton<IClientToolExecutionRepository, SqliteClientToolExecutionRepository>();
         services.AddSingleton<IProjectRepository, SqliteProjectRepository>();
         services.AddSingleton<IProjectAssetWorkingCopyService, ProjectAssetWorkingCopyService>();
         services.AddSingleton<IBinaryObjectStore, SqliteBinaryObjectStore>();
         services.AddSingleton<IDocumentIngestor, DocumentIngestor>();
+        services.AddSingleton<IDocumentFileCodec, DocumentFileCodec>();
         services.AddSingleton<IContextAssembler, ContextAssembler>();
         services.AddSingleton<ISettingsStore, JsonSettingsStore>();
         services.AddSingleton<IBackupService, ZipBackupService>();

@@ -527,6 +527,7 @@ public sealed class SqliteClientToolExecutionRepository(SqliteDatabase database)
 
     public async Task<IReadOnlyList<ClientToolExecutionRecord>> ListPendingSubmissionsAsync(
         Guid localRunId,
+        string? serverRunId = null,
         CancellationToken cancellationToken = default)
     {
         if (localRunId == Guid.Empty)
@@ -537,10 +538,14 @@ public sealed class SqliteClientToolExecutionRepository(SqliteDatabase database)
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = SelectSql + " " + """
-             WHERE local_run_id=$localRun AND state='completed' AND result_json IS NOT NULL
+             WHERE local_run_id=$localRun
+               AND ($serverRun IS NULL OR server_run_id=$serverRun)
+               AND state='completed'
+               AND result_json IS NOT NULL
              ORDER BY event_id;
              """;
         command.Parameters.AddWithValue("$localRun", localRunId.ToString("D"));
+        command.Parameters.AddWithValue("$serverRun", (object?)serverRunId ?? DBNull.Value);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         var pending = new List<ClientToolExecutionRecord>();
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -727,6 +732,46 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         }, cancellationToken).ConfigureAwait(false);
         return run;
     }
+
+    public Task<GoAiRunRecord> BeginAttemptAsync(
+        GoAiRunRecord run,
+        CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = """
+                    INSERT INTO go_ai_runs
+                        (id, session_id, assistant_message_id, action, idempotency_key, server_run_id,
+                         last_event_id, state, selected_model, error_code, created_at, updated_at)
+                    VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated)
+                    ON CONFLICT(assistant_message_id) DO UPDATE SET
+                        action=excluded.action,
+                        idempotency_key=excluded.idempotency_key,
+                        server_run_id=NULL,
+                        last_event_id=0,
+                        state=excluded.state,
+                        selected_model=NULL,
+                        error_code=NULL,
+                        updated_at=excluded.updated_at;
+                    """;
+                Bind(command, run);
+                await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            }
+
+            await using var select = connection.CreateCommand();
+            select.Transaction = transaction;
+            select.CommandText = SelectSql + " WHERE r.assistant_message_id=$message;";
+            select.Parameters.AddWithValue("$message", run.AssistantMessageId.ToString("D"));
+            var persisted = (await ReadAsync(select, token).ConfigureAwait(false)).SingleOrDefault()
+                ?? throw new InvalidOperationException("Der lokale GO-AI-Lauf konnte nicht angelegt werden.");
+            if (persisted.SessionId != run.SessionId)
+            {
+                throw new InvalidDataException("Die AI-Nachricht ist bereits einem Lauf in einer anderen Sitzung zugeordnet.");
+            }
+            return persisted;
+        }, cancellationToken);
 
     public Task<GoAiRunRecord?> GetAsync(Guid id, CancellationToken cancellationToken = default) =>
         ReadSingleAsync("r.id=$value", id.ToString("D"), cancellationToken);

@@ -8,18 +8,16 @@ import uuid
 import warnings
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from common.worker_security import read_worker_key, require_worker_key, resolve_data_path
+from common.worker_security import resolve_data_path
 
 
 DATA_ROOT = Path("/data")
-UPLOAD_ROOT = DATA_ROOT / "Uploads"
-OUTPUT_ROOT = DATA_ROOT / "Artifacts" / "worker"
-WORKER_KEY = read_worker_key()
+UPLOAD_ROOT = DATA_ROOT / "uploads"
+OUTPUT_ROOT = DATA_ROOT / "artifacts" / "worker"
 Image.MAX_IMAGE_PIXELS = 50_000_000
 warnings.simplefilter("error", Image.DecompressionBombWarning)
 PROCESS_GATE = threading.Semaphore(1)
@@ -56,13 +54,6 @@ app = FastAPI(title="GO AI Media Worker", docs_url=None, redoc_url=None, openapi
 @app.get("/health")
 def health() -> dict:
     return {"status": "live", "worker": "media"}
-
-
-@app.middleware("http")
-async def authenticate(request: Request, call_next):
-    if request.url.path != "/health" and not require_worker_key(request, WORKER_KEY):
-        return JSONResponse(status_code=401, content={"errorCode": "worker.authentication_failed"})
-    return await call_next(request)
 
 
 @app.get("/status")

@@ -42,7 +42,7 @@ COPY --from=builder /src/build/bin /opt/stable-diffusion
 
 RUN groupadd --gid 10001 goai \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin goai \
-    && mkdir -p /app /data/Artifacts/worker \
+    && mkdir -p /app /data/artifacts/worker \
     && chown -R 10001:10001 /app /data
 
 COPY common /app/common

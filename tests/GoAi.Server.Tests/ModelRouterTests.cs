@@ -1,4 +1,5 @@
 using GoAi.Contracts;
+using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Runs;
 
 namespace GoAi.Server.Tests;
@@ -15,45 +16,58 @@ public sealed class ModelRouterTests
         var code = router.Select(CreateRequest(RunMode.Code, "TGA erklären"));
 
         Assert.Equal(context.Options.GeneralModelId, general.ModelId);
-        Assert.Equal("qwen3.8-27b", context.Options.CodeModelId);
+        Assert.Equal(CodingModelCatalog.Qwen3CoderNextQ8Id, context.Options.CodeModelId);
         Assert.Equal(context.Options.CodeModelId, code.ModelId);
     }
 
     [Fact]
-    public void ExplicitCodeModeHonorsThePersistedClientSelection()
+    public void ExplicitCodeModeUsesTheOnlyConfiguredModel()
     {
         using var context = new TestServerContext();
         var router = new ModelRouter(context.WrappedOptions);
         var request = CreateRequest(RunMode.Code, "Projekt analysieren") with
         {
-            PreferredCodeModelId = "qwen3-coder-next",
+            PreferredCodeModelId = "gpt-oss-120b",
         };
 
         var selection = router.Select(request);
 
         Assert.Equal("code", selection.Role);
-        Assert.Equal("qwen3-coder-next", selection.ModelId);
+        Assert.Equal("gpt-oss-120b", selection.ModelId);
     }
 
     [Fact]
-    public void ExplicitCodeModeCanUseGptOss120BIndependentlyFromGeneralRouting()
+    public void DefaultCodeModeUsesQwenAtItsNativeMaximumContext()
+    {
+        using var context = new TestServerContext();
+        var router = new ModelRouter(context.WrappedOptions);
+
+        var selection = router.Select(CreateRequest(RunMode.Code, "Projekt analysieren"));
+
+        Assert.Equal("code", selection.Role);
+        Assert.Equal(CodingModelCatalog.Qwen3CoderNextQ8Id, selection.ModelId);
+        Assert.Equal(262_144, selection.ContextLength);
+    }
+
+    [Fact]
+    public void GeneralAndCodeShareGptOssWithoutChangingRoles()
     {
         using var context = new TestServerContext();
         var router = new ModelRouter(context.WrappedOptions);
         var request = CreateRequest(RunMode.Code, "Behebe den Fehler im Projekt.") with
         {
-            PreferredCodeModelId = "openai/gpt-oss-120b",
+            PreferredCodeModelId = "gpt-oss-120b",
         };
 
         var selection = router.Select(request);
 
         Assert.Equal("code", selection.Role);
-        Assert.Equal("openai/gpt-oss-120b", selection.ModelId);
+        Assert.Equal("gpt-oss-120b", selection.ModelId);
         Assert.Equal(131_072, selection.ContextLength);
     }
 
     [Fact]
-    public void AutoRoutesCodeAttachmentToQwenCoder()
+    public void AutoRoutesCodeAttachmentToSharedCodingModel()
     {
         using var context = new TestServerContext();
         var router = new ModelRouter(context.WrappedOptions);
@@ -76,13 +90,13 @@ public sealed class ModelRouterTests
         var router = new ModelRouter(context.WrappedOptions);
         var request = CreateRequest(RunMode.General, "TGA erklären") with
         {
-            PreferredGeneralModelId = "openai/gpt-oss-120b",
+            PreferredGeneralModelId = "gpt-oss-120b",
         };
 
         var selection = router.Select(request);
 
         Assert.Equal("general", selection.Role);
-        Assert.Equal("openai/gpt-oss-120b", selection.ModelId);
+        Assert.Equal("gpt-oss-120b", selection.ModelId);
     }
 
     private static RunRequest CreateRequest(RunMode mode, string text) => new(

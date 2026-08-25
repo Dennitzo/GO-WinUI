@@ -21,16 +21,15 @@ import soundfile as sf
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
-from common.worker_security import read_worker_key, require_worker_key, resolve_data_path
+from common.worker_security import resolve_data_path
 
 
 DATA_ROOT = Path("/data")
 MODEL_ROOT = Path("/models")
-OUTPUT_ROOT = DATA_ROOT / "Artifacts" / "worker"
+OUTPUT_ROOT = DATA_ROOT / "artifacts" / "worker"
 WHISPER_MODEL = Path(os.environ.get("GO_AI_WHISPER_MODEL", MODEL_ROOT / "faster-whisper-large-v3"))
 SPEAKER_MODEL = Path(os.environ.get("GO_AI_SPEAKER_MODEL", MODEL_ROOT / "spkrec-ecapa-voxceleb"))
 WHISPER_CUDA_DEVICE = max(0, int(os.environ.get("GO_AI_WHISPER_CUDA_DEVICE", "0")))
@@ -93,7 +92,6 @@ SUPERTONIC_MODEL_CONTEXT_TOKENS = 1000
 SUPERTONIC_SILENCE_DURATION = 0.22
 SUPERTONIC_WARMUP_SILENCE_DURATION = 0.15
 SUPERTONIC_PROVIDER = "supertonic-3-f5-cuda"
-WORKER_KEY = read_worker_key()
 MAX_PARALLEL_SPEECH_OPERATIONS = 2
 PROCESS_GATE = threading.BoundedSemaphore(MAX_PARALLEL_SPEECH_OPERATIONS)
 TTS_EXECUTOR = ThreadPoolExecutor(
@@ -745,13 +743,6 @@ def preload_configured_models() -> None:
 @app.get("/health")
 def health() -> dict:
     return {"status": "live", "worker": "speech"}
-
-
-@app.middleware("http")
-async def authenticate(request: Request, call_next):
-    if request.url.path != "/health" and not require_worker_key(request, WORKER_KEY):
-        return JSONResponse(status_code=401, content={"errorCode": "worker.authentication_failed"})
-    return await call_next(request)
 
 
 @app.get("/status")

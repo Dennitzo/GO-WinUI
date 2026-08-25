@@ -17,7 +17,6 @@ public sealed class ServerRuntimeState
     private readonly string? _logFilePath;
     private string _gatewayState = "Startet";
     private string _readinessReason = "Initialisierung läuft";
-    private string? _oneTimeBootstrapKey;
     private int _logCount;
 
     public ServerRuntimeState()
@@ -39,8 +38,6 @@ public sealed class ServerRuntimeState
 
     public string ReadinessReason => Volatile.Read(ref _readinessReason);
 
-    public string? OneTimeBootstrapKey => Volatile.Read(ref _oneTimeBootstrapKey);
-
     public event EventHandler? Changed;
 
     public event EventHandler<ServerLogEntry>? LogAdded;
@@ -55,19 +52,6 @@ public sealed class ServerRuntimeState
     {
         Volatile.Write(ref _gatewayState, state);
         Volatile.Write(ref _readinessReason, reason);
-        NotifyChanged();
-    }
-
-    public void SetOneTimeBootstrapKey(string key)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(key);
-        Volatile.Write(ref _oneTimeBootstrapKey, key);
-        NotifyChanged();
-    }
-
-    public void ClearOneTimeBootstrapKey()
-    {
-        Volatile.Write(ref _oneTimeBootstrapKey, null);
         NotifyChanged();
     }
 

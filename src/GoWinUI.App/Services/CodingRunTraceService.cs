@@ -61,7 +61,12 @@ public sealed class CodingRunTraceService
         string? workspacePath,
         CancellationToken cancellationToken = default)
     {
-        _sequences[messageId] = 0;
+        var existing = await _repository.ListForMessageAsync(messageId, cancellationToken).ConfigureAwait(false);
+        var persistedSequence = existing.Count == 0 ? 0 : existing.Max(static entry => entry.Sequence);
+        _sequences.AddOrUpdate(
+            messageId,
+            persistedSequence,
+            (_, current) => Math.Max(current, persistedSequence));
         return await AppendAsync(
             localRunId,
             null,
@@ -208,7 +213,8 @@ public sealed class CodingRunTraceService
                 ReadInteger(proposal.Arguments, "endLine")));
         }
 
-        if (proposal.Name.StartsWith("documents.", StringComparison.Ordinal))
+        if (proposal.Name.StartsWith("documents.", StringComparison.Ordinal)
+            || proposal.Name.StartsWith("document.", StringComparison.Ordinal))
         {
             return ExtractDocumentTarget(proposal.Arguments);
         }
@@ -314,8 +320,10 @@ public sealed class CodingRunTraceService
     {
         var documentName = ReadString(arguments, "documentName")
             ?? ReadString(arguments, "fileName")
-            ?? ReadString(arguments, "name");
+            ?? ReadString(arguments, "name")
+            ?? ReadString(arguments, "reference");
         var query = ReadString(arguments, "query");
+        var sectionId = ReadString(arguments, "sectionId");
         var page = ReadInteger(arguments, "page");
         var startPage = ReadInteger(arguments, "startPage");
         var endPage = ReadInteger(arguments, "endPage");
@@ -327,6 +335,10 @@ public sealed class CodingRunTraceService
         if (!string.IsNullOrWhiteSpace(query))
         {
             parts.Add("Suche: " + query);
+        }
+        if (!string.IsNullOrWhiteSpace(sectionId))
+        {
+            parts.Add("Abschnitt: " + sectionId);
         }
         if (page is { } singlePage)
         {
@@ -702,7 +714,7 @@ public sealed class CodingRunTraceService
         }
         if (ReadBoolean(result, "available") is { } available)
         {
-            lines.Add($"Toolchain verfÃ¼gbar: {(available ? "ja" : "nein")}");
+            lines.Add($"Toolchain verfügbar: {(available ? "ja" : "nein")}");
         }
         if (ReadBoolean(result, "passed") is { } passed)
         {
@@ -855,15 +867,18 @@ public sealed class CodingRunTraceService
                     {
                         continue;
                     }
-                    await _repository.ImportAsync(
+                    var persisted = await _repository.ImportAsync(
                         group.Key.LocalRunId,
                         group.Key.ServerRunId,
                         group.Key.SessionId,
                         group.Key.MessageId,
                         entries,
                         cancellationToken).ConfigureAwait(false);
-                    _sequences[group.Key.MessageId] = entries[^1].Sequence;
-                    imported++;
+                    if (persisted)
+                    {
+                        _sequences[group.Key.MessageId] = entries[^1].Sequence;
+                        imported++;
+                    }
                 }
 
                 File.Move(path, path + ".imported", overwrite: true);

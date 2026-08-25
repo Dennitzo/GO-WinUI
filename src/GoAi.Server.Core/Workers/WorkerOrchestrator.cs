@@ -15,7 +15,7 @@ public sealed class WorkerOrchestrator : IDisposable
     internal const string ResidentSpeechWorkerName = "speech";
 
     private readonly WorkerApiClient _workers;
-    private readonly LmStudioClient _lmStudio;
+    private readonly ModelRuntimeClient _modelRuntime;
     private readonly GpuLeaseScheduler _scheduler;
     private readonly ArtifactService _artifacts;
     private readonly GoAiServerOptions _options;
@@ -25,14 +25,14 @@ public sealed class WorkerOrchestrator : IDisposable
 
     public WorkerOrchestrator(
         WorkerApiClient workers,
-        LmStudioClient lmStudio,
+        ModelRuntimeClient modelRuntime,
         GpuLeaseScheduler scheduler,
         ArtifactService artifacts,
         IOptions<GoAiServerOptions> options,
         ServerRuntimeState runtime)
     {
         _workers = workers;
-        _lmStudio = lmStudio;
+        _modelRuntime = modelRuntime;
         _scheduler = scheduler;
         _artifacts = artifacts;
         _options = options.Value;
@@ -114,12 +114,12 @@ public sealed class WorkerOrchestrator : IDisposable
             sessionId,
             GpuLeaseMode.Shared,
             cancellationToken).ConfigureAwait(false);
-        _ = await _lmStudio.EnsureModelLoadedAsync(
+        _ = await _modelRuntime.EnsureModelLoadedAsync(
             modelId,
             contextLength,
             cancellationToken).ConfigureAwait(false);
         var input = JsonSerializer.Serialize(segments.Select(static segment => segment.Text));
-        var result = await _lmStudio.CompleteChatAsync(
+        var result = await _modelRuntime.CompleteChatAsync(
             modelId,
             [
                 new LmChatMessage(
@@ -188,12 +188,12 @@ public sealed class WorkerOrchestrator : IDisposable
     {
         await WarmSpeechResourcesAsync(cancellationToken).ConfigureAwait(false);
         // Only speech input, speaker separation and TTS are resident for the
-        // GO AI Server lifetime. Startup never selects an LM Studio model: an
+        // Docker-stack lifetime. Startup never selects a llama.cpp model: an
         // already loaded model is preserved and the next AI run chooses its target.
         _runtime.WriteLog(
             "Information",
             "models.startup.on_demand",
-            "LM-Studio-Modelle werden ausschließlich durch konkrete AI-Läufe geladen; der vorhandene Modellzustand bleibt unverändert.");
+            "llama.cpp-Modelle werden ausschließlich durch konkrete AI-Läufe geladen; der vorhandene Modellzustand bleibt unverändert.");
     }
 
     public async Task<SpeechSessionSnapshot> BeginSpeechSessionAsync(
@@ -479,7 +479,7 @@ public sealed class WorkerOrchestrator : IDisposable
             loadingStarted: null,
             cancellationToken).ConfigureAwait(false)).InstanceId;
 
-    internal async Task<LmStudioModelPreparation> PrepareLmModelWithStatusAsync(
+    internal async Task<ModelPreparation> PrepareLmModelWithStatusAsync(
         string modelId,
         int contextLength,
         Func<CancellationToken, Task>? loadingStarted,
@@ -492,14 +492,14 @@ public sealed class WorkerOrchestrator : IDisposable
                 || string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase))
             {
-                // Heavy LM Studio targets replace optional worker allocations,
+                // Heavy llama.cpp targets replace optional worker allocations,
                 // while the resident speech stack remains available.
                 await _workers.ReleaseAllAsync(
                     exceptWorker: ResidentSpeechWorkerName,
                     cancellationToken).ConfigureAwait(false);
             }
 
-            return await _lmStudio.EnsureModelPreparedAsync(
+            return await _modelRuntime.EnsureModelPreparedAsync(
                 modelId,
                 contextLength,
                 loadingStarted,
@@ -518,7 +518,7 @@ public sealed class WorkerOrchestrator : IDisposable
             "speech" or "media" or "image" => workerName,
             _ => throw new ArgumentOutOfRangeException(nameof(workerName)),
         };
-        // Worker preparation is intentionally independent of LM Studio. Media,
+        // Worker preparation is intentionally independent of llama.cpp. Media,
         // image and speech work must not cause an implicit General-AI transition.
         await Task.CompletedTask.ConfigureAwait(false);
     }

@@ -18,8 +18,8 @@ public sealed class SharedModelWarmupService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // The desktop host can start before Docker. Retry only the resident speech
-        // stack; LM Studio model selection remains strictly request-driven.
+        // Compose may start the gateway before every worker is ready. Retry only
+        // the resident speech stack; llama.cpp model selection remains request-driven.
         var deadline = DateTimeOffset.UtcNow.AddMinutes(10);
         var attempt = 0;
         while (!stoppingToken.IsCancellationRequested && DateTimeOffset.UtcNow < deadline)
@@ -31,7 +31,7 @@ public sealed class SharedModelWarmupService : BackgroundService
                 _runtime.WriteLog(
                     "Information",
                     "models.startup.warm.completed",
-                    "Spracheingabe, Sprechertrennung und Sprachausgabe sind vorgeladen. LM-Studio-Modelle warten unverändert auf einen AI-Lauf.");
+                    "Spracheingabe, Sprechertrennung und Sprachausgabe sind vorgeladen. llama.cpp-Modelle warten unverändert auf einen AI-Lauf.");
                 return;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

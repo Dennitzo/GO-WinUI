@@ -29,8 +29,7 @@ public sealed class ServerMetricsService
                 (SELECT COUNT(*) FROM artifacts),
                 (SELECT COALESCE(SUM(total_length), 0) FROM artifacts),
                 (SELECT COUNT(*) FROM uploads WHERE state = 'Complete'),
-                (SELECT COALESCE(SUM(total_length), 0) FROM uploads WHERE state = 'Complete'),
-                (SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL);
+                (SELECT COALESCE(SUM(total_length), 0) FROM uploads WHERE state = 'Complete');
             """;
         command.Parameters.AddWithValue("$queued", RunState.Queued.ToString());
         command.Parameters.AddWithValue("$running", RunState.Running.ToString());
@@ -53,7 +52,6 @@ public sealed class ServerMetricsService
             reader.GetInt64(5),
             reader.GetInt64(6),
             reader.GetInt64(7),
-            reader.GetInt64(8),
             databaseBytes,
             drive?.AvailableFreeSpace ?? 0,
             _options.DataDirectory);
@@ -83,7 +81,6 @@ public sealed record ServerMetricsSnapshot(
     long ArtifactBytes,
     long UploadCount,
     long UploadBytes,
-    long ActiveApiKeys,
     long DatabaseBytes,
     long DiskFreeBytes,
     string DataDirectory);

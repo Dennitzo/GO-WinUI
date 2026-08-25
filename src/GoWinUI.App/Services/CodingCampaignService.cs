@@ -131,12 +131,33 @@ public sealed class CodingCampaignService(
             await StopLoopCoreAsync(markStopped: false, cancellationToken).ConfigureAwait(false);
             foreach (var state in await repository.ListAsync(cancellationToken).ConfigureAwait(false))
             {
+                var normalizedDefinitionId = catalog.NormalizeDefinitionId(state.DefinitionId);
+                var normalizedState = string.Equals(
+                    normalizedDefinitionId,
+                    state.DefinitionId,
+                    StringComparison.OrdinalIgnoreCase)
+                    ? state
+                    : state with
+                    {
+                        DefinitionId = normalizedDefinitionId,
+                        Phase = File.Exists(Path.Combine(
+                            state.WorkspacePath,
+                            PromptDrivenCodingCampaignDefinition.ContractRelativePath.Replace('/', Path.DirectorySeparatorChar)))
+                            ? CodingCampaignPhase.Iteration
+                            : CodingCampaignPhase.Bootstrap,
+                        CurrentChallenge = "Nächster Schritt aus Prompt und Workspace ableiten",
+                        UpdatedAt = DateTimeOffset.UtcNow,
+                    };
+                if (!ReferenceEquals(normalizedState, state))
+                {
+                    await repository.SaveAsync(normalizedState, cancellationToken).ConfigureAwait(false);
+                }
                 await MarkStoppedAsync(
-                    state,
+                    normalizedState,
                     "Der Client wurde neu gestartet; geladene Workflows starten immer gestoppt.",
                     cancellationToken).ConfigureAwait(false);
                 await PublishPlotsAsync(
-                    state,
+                    normalizedState,
                     "Geladener Workflow-Stand",
                     cancellationToken).ConfigureAwait(false);
             }
@@ -773,7 +794,7 @@ public sealed class CodingCampaignService(
                 relativePath.Replace('/', Path.DirectorySeparatorChar)));
             if (!IsInsideWorkspace(state.WorkspacePath, fullPath))
             {
-                issues.Add($"LÃ¶sungs-PDF konnte nicht vorbereitet werden, weil der Pfad auÃŸerhalb des Workspace liegt: {relativePath}.");
+                issues.Add($"Lösungs-PDF konnte nicht vorbereitet werden, weil der Pfad außerhalb des Workspace liegt: {relativePath}.");
                 continue;
             }
             if (!File.Exists(fullPath) || !SolutionExtensions.Contains(Path.GetExtension(fullPath)))
@@ -790,7 +811,7 @@ public sealed class CodingCampaignService(
             }
             catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
             {
-                issues.Add($"LÃ¶sungs-PDF fÃ¼r {relativePath} konnte nicht erzeugt werden: {VisibleError(exception)}");
+                issues.Add($"Lösungs-PDF für {relativePath} konnte nicht erzeugt werden: {VisibleError(exception)}");
                 OutputPublicationFailed(logger, fullPath, exception);
             }
         }

@@ -20,6 +20,18 @@ public sealed class RunRequestValidatorTests
     }
 
     [Fact]
+    public void SharedDocumentIoCapabilityIsAccepted()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.General,
+            [new RunMessage("user", [new ContentPart("text", "Erstelle einen Bericht.")])],
+            ClientCapabilities: ["documentIo"]);
+
+        RunRequestValidator.Validate(request);
+    }
+
+    [Fact]
     public void UnknownRolesCapabilitiesAndMalformedIdsAreRejected()
     {
         var systemRole = new RunRequest(
@@ -66,20 +78,21 @@ public sealed class RunRequestValidatorTests
             request with { Limits = request.Limits! with { TimeoutSeconds = 14_401 } }));
     }
 
-    [Theory]
-    [InlineData(CodingModelCatalog.Qwen38BId)]
-    [InlineData(CodingModelCatalog.Qwen3CoderNextId)]
-    [InlineData(CodingModelCatalog.GptOss120BId)]
-    public void EveryCatalogCodingModelIsAccepted(string modelId)
+    [Fact]
+    public void ConfiguredCodingModelIsAccepted()
     {
         var request = new RunRequest(
             GoAiProtocol.Version,
             RunMode.Code,
             [new RunMessage("user", [new ContentPart("text", "Behebe den Fehler und pr\u00fcfe die \u00c4nderung.")])],
             ClientCapabilities: ["filesystem", "code", "process"],
-            PreferredCodeModelId: modelId);
+            PreferredCodeModelId: CodingModelCatalog.GptOss120BId);
 
         RunRequestValidator.Validate(request);
+        RunRequestValidator.Validate(request with
+        {
+            PreferredCodeModelId = CodingModelCatalog.Qwen3CoderNextQ8Id,
+        });
     }
 
     [Fact]
@@ -99,32 +112,35 @@ public sealed class RunRequestValidatorTests
     [Fact]
     public void ReasoningEffortMustMatchTheSelectedModelsRealProfile()
     {
-        var qwen38 = new RunRequest(
+        var gptOss = new RunRequest(
             GoAiProtocol.Version,
             RunMode.Code,
             [new RunMessage("user", [new ContentPart("text", "Bearbeite das Projekt.")])],
-            PreferredCodeModelId: CodingModelCatalog.Qwen38BId,
-            ReasoningEffort: "on");
-        var gptOss = qwen38 with
-        {
-            PreferredCodeModelId = CodingModelCatalog.GptOss120BId,
-            ReasoningEffort = "high",
-        };
+            PreferredCodeModelId: CodingModelCatalog.GptOss120BId,
+            ReasoningEffort: "high");
 
-        RunRequestValidator.Validate(qwen38);
         RunRequestValidator.Validate(gptOss);
 
         var unsupportedQwenEffort = Assert.Throws<ArgumentException>(() =>
-            RunRequestValidator.Validate(qwen38 with { ReasoningEffort = "medium" }));
+            RunRequestValidator.Validate(gptOss with { ReasoningEffort = "on" }));
         Assert.Contains("nicht unterstützt", unsupportedQwenEffort.Message, StringComparison.OrdinalIgnoreCase);
 
         var fixedCoderEffort = Assert.Throws<ArgumentException>(() =>
-            RunRequestValidator.Validate(qwen38 with
+            RunRequestValidator.Validate(gptOss with
             {
-                PreferredCodeModelId = CodingModelCatalog.Qwen3CoderNextId,
-                ReasoningEffort = "low",
+                ReasoningEffort = "off",
             }));
-        Assert.Contains("keine steuerbare Stufe", fixedCoderEffort.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("reasoningEffort", fixedCoderEffort.Message, StringComparison.OrdinalIgnoreCase);
+
+        var qwen = gptOss with
+        {
+            PreferredCodeModelId = CodingModelCatalog.Qwen3CoderNextQ8Id,
+            ReasoningEffort = null,
+        };
+        RunRequestValidator.Validate(qwen);
+        var qwenReasoning = Assert.Throws<ArgumentException>(() =>
+            RunRequestValidator.Validate(qwen with { ReasoningEffort = "high" }));
+        Assert.Contains("keine steuerbare Stufe", qwenReasoning.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -215,7 +231,7 @@ public sealed class RunRequestValidatorTests
             [new RunMessage("user", [new ContentPart("text", "Verdichte den Verlauf.")])],
             ClientCapabilities: [],
             AllowedServerTools: [],
-            PreferredCodeModelId: CodingModelCatalog.Qwen38BId,
+            PreferredCodeModelId: CodingModelCatalog.GptOss120BId,
             ConversationProfile: ConversationProfile.ContextPreparation);
 
         RunRequestValidator.Validate(request);

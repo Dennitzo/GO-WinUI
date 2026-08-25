@@ -1,21 +1,6 @@
-import hmac
-import os
 from pathlib import Path
 
-from fastapi import HTTPException, Request, status
-
-
-def read_worker_key() -> bytes:
-    key_file = Path(os.environ.get("GO_AI_WORKER_KEY_FILE", "/run/secrets/worker_key"))
-    value = key_file.read_text(encoding="utf-8").strip()
-    if len(value) < 32:
-        raise RuntimeError("worker key is missing or too short")
-    return value.encode("utf-8")
-
-
-def require_worker_key(request: Request, expected: bytes) -> bool:
-    supplied = request.headers.get("x-go-ai-worker-key", "").encode("utf-8")
-    return hmac.compare_digest(supplied, expected)
+from fastapi import HTTPException, status
 
 
 def resolve_data_path(value: str, allowed_root: str) -> Path:

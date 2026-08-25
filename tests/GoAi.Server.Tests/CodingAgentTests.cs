@@ -53,42 +53,177 @@ public sealed class CodingAgentTests
         Assert.False(RunProcessor.IsReasoningBudgetExhausted(useful, 8_192));
     }
 
-    [Theory]
-    [InlineData(256, 128)]
-    [InlineData(8_192, 4_096)]
-    [InlineData(65_536, 4_096)]
-    public void QwenReasoningBudgetAlwaysReservesAnswerCapacity(int outputTokens, int expectedBudget)
+    [Fact]
+    public void ReasoningOnlyResponseAccountsForLlamaCppTokenAccountingOverhead()
     {
-        Assert.Equal(expectedBudget, LmStudioClient.ResolveCodingReasoningBudget(outputTokens));
-        Assert.True(expectedBudget < outputTokens);
-    }
+        var exhausted = new LmChatResult(
+            Content: null,
+            ToolCalls: [],
+            InputTokens: 16_141,
+            OutputTokens: 8_143,
+            HadReasoning: true,
+            ReasoningTokens: 8_143);
 
-    [Theory]
-    [InlineData(false, "on")]
-    [InlineData(true, "off")]
-    public void QwenReasoningExhaustionUsesOneDeterministicNoReasoningRecoveryRound(
-        bool recoveryRequired,
-        string expected)
-    {
-        Assert.Equal(
-            expected,
-            RunProcessor.ResolveReasoningEffortForRound(
-                "qwen3.8-27b",
-                "code",
-                "on",
-                recoveryRequired));
+        Assert.True(RunProcessor.IsEmptyModelResponse(exhausted));
+        Assert.True(RunProcessor.IsReasoningBudgetExhausted(exhausted, 8_192));
     }
 
     [Fact]
-    public void GptOssReasoningRecoveryDropsToLowEffort()
+    public void RequiredToolCallWithPartialContentAtOutputLimitIsRecoverable()
+    {
+        var exhausted = new LmChatResult(
+            Content: "{\"operation\":\"verify\"",
+            ToolCalls: [],
+            InputTokens: 16_141,
+            OutputTokens: 8_192,
+            HadReasoning: true,
+            ReasoningTokens: 8_192);
+        var completed = exhausted with
+        {
+            ToolCalls =
+            [
+                new LmToolCall(
+                    "call-lean",
+                    ClientToolNames.LeanProof,
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        operation = "verify",
+                        path = "proofs/example.lean",
+                    })),
+            ],
+        };
+
+        Assert.False(RunProcessor.IsEmptyModelResponse(exhausted));
+        Assert.True(RunProcessor.IsRequiredToolCallOutputBudgetExhausted(exhausted, 8_192));
+        Assert.True(RunProcessor.IsRequiredToolCallOutputBudgetExhausted(
+            exhausted with { HadReasoning = false, ReasoningTokens = 0 },
+            8_192));
+        Assert.False(RunProcessor.IsRequiredToolCallOutputBudgetExhausted(completed, 8_192));
+    }
+
+    [Theory]
+    [InlineData("low")]
+    [InlineData("medium")]
+    [InlineData("high")]
+    public void GptOssReasoningSelectionRemainsInvariant(string selectedEffort)
     {
         Assert.Equal(
-            "low",
+            selectedEffort,
             RunProcessor.ResolveReasoningEffortForRound(
                 "openai/gpt-oss-120b",
                 "code",
-                "high",
-                reasoningRecoveryRequired: true));
+                selectedEffort));
+    }
+
+    [Fact]
+    public void SelectedToolTurnsReceiveAnIndependentOutputBudget()
+    {
+        Assert.Equal(
+            8_192,
+            RunProcessor.ResolveModelTurnMaximumOutputTokens(
+                selectedToolName: null,
+                configuredMaximumOutputTokens: 8_192,
+                contextLength: 131_072,
+                requireToolCall: false));
+        Assert.Equal(
+            4_096,
+            RunProcessor.ResolveModelTurnMaximumOutputTokens(
+                selectedToolName: null,
+                configuredMaximumOutputTokens: 8_192,
+                contextLength: 131_072,
+                requireToolCall: true));
+        Assert.Equal(
+            8_192,
+            RunProcessor.ResolveModelTurnMaximumOutputTokens(
+                ClientToolNames.FileSystemReadText,
+                configuredMaximumOutputTokens: 8_192,
+                contextLength: 131_072,
+                requireToolCall: false));
+        Assert.Equal(
+            8_192,
+            RunProcessor.ResolveModelTurnMaximumOutputTokens(
+                ClientToolNames.FileSystemReadText,
+                configuredMaximumOutputTokens: 8_192,
+                contextLength: 131_072,
+                requireToolCall: true));
+        Assert.Equal(
+            32_768,
+            RunProcessor.ResolveModelTurnMaximumOutputTokens(
+                ClientToolNames.FileSystemWriteText,
+                configuredMaximumOutputTokens: 8_192,
+                contextLength: 131_072,
+                requireToolCall: false));
+        Assert.Equal(
+            32_768,
+            RunProcessor.ResolveModelTurnMaximumOutputTokens(
+                ClientToolNames.FileSystemWriteText,
+                configuredMaximumOutputTokens: 8_192,
+                contextLength: 131_072,
+                requireToolCall: true));
+    }
+
+    [Fact]
+    public void SelectedToolBudgetRemainsInsideACompactContextWindow()
+    {
+        Assert.Equal(
+            30_720,
+            RunProcessor.ResolveModelTurnMaximumOutputTokens(
+                ClientToolNames.FileSystemWriteText,
+                configuredMaximumOutputTokens: 8_192,
+                contextLength: 32_768,
+                requireToolCall: true));
+    }
+
+    [Fact]
+    public void RequiredToolCallRecoveryAlsoRejectsSpeculativeText()
+    {
+        var textOnly = new LmChatResult("Ich bin fertig.", [], 100, 50);
+        var toolCall = new LmChatResult(
+            null,
+            [new LmToolCall(
+                "call-read",
+                ClientToolNames.FileSystemReadText,
+                JsonSerializer.SerializeToElement(new { path = "README.md" }))],
+            100,
+            50);
+
+        Assert.True(RunProcessor.IsMissingRequiredToolCall(requireToolCall: true, textOnly));
+        Assert.False(RunProcessor.IsMissingRequiredToolCall(requireToolCall: false, textOnly));
+        Assert.False(RunProcessor.IsMissingRequiredToolCall(requireToolCall: true, toolCall));
+    }
+
+    [Fact]
+    public void ToolCallHistoryDropsSpeculativeAssistantText()
+    {
+        var call = new LmToolCall(
+            "call-read",
+            ClientToolNames.FileSystemReadText,
+            JsonSerializer.SerializeToElement(new { path = "chapters/classical_mechanics.md" }));
+
+        var history = RunProcessor.CreateToolCallHistoryMessage([call]);
+
+        Assert.Null(history.Content);
+        Assert.Single(history.ToolCalls!);
+        Assert.Equal(call, history.ToolCalls![0]);
+    }
+
+    [Fact]
+    public void MissingWorkspacePathFailureIsRecognizedForAgentRecovery()
+    {
+        var failure = new ClientToolResult(
+            "proposal-1",
+            "failed",
+            JsonSerializer.SerializeToElement(new { failed = true }),
+            "client.tool_failed",
+            "Der angeforderte Workspace-Pfad wurde nicht gefunden.");
+
+        Assert.True(RunProcessor.IsMissingWorkspacePathFailure(failure));
+        Assert.False(RunProcessor.IsMissingWorkspacePathFailure(failure with { Status = "completed" }));
+        Assert.True(RunProcessor.IsMissingWorkspacePathFailure(failure with
+        {
+            ErrorCode = "client.workspace_path_not_found",
+            Message = "Path unavailable.",
+        }));
     }
 
     [Theory]
@@ -306,7 +441,7 @@ public sealed class CodingAgentTests
         var messages = new List<LmChatMessage>
         {
             new("system", "Coding-Regeln"),
-            new("user", "FrÃ¼here Aufgabe"),
+            new("user", "Frühere Aufgabe"),
             new("assistant", new string('a', 900_000), [toolCall]),
             new("tool", new string('b', 300_000), ToolCallId: "tool-read-1"),
             new("user", "Analysiere die Sprachsteuerung und nenne konkrete Dateien."),
@@ -405,6 +540,19 @@ public sealed class CodingAgentTests
     }
 
     [Fact]
+    public void LibraryVerificationDoesNotRequireAStartableApplication()
+    {
+        Assert.True(RunProcessor.CoreCodingVerificationComplete(
+            new HashSet<string>(["test", "build"], StringComparer.Ordinal)));
+        Assert.True(RunProcessor.CoreCodingVerificationComplete(
+            new HashSet<string>(["test", "build", "start"], StringComparer.Ordinal)));
+        Assert.False(RunProcessor.CoreCodingVerificationComplete(
+            new HashSet<string>(["test"], StringComparer.Ordinal)));
+        Assert.False(RunProcessor.CoreCodingVerificationComplete(
+            new HashSet<string>(["build", "start"], StringComparer.Ordinal)));
+    }
+
+    [Fact]
     public void ContextPreparationUsesTheCodingModelWithoutActivatingTheCodingAgentLoop()
     {
         Assert.True(RunProcessor.IsCodingAgentRun("code", ConversationProfile.General));
@@ -416,7 +564,7 @@ public sealed class CodingAgentTests
             [new RunMessage("user", [new ContentPart("text", "Verdichte diese Historie.")])],
             ClientCapabilities: [],
             AllowedServerTools: [],
-            PreferredCodeModelId: GoAi.Server.Core.Configuration.CodingModelCatalog.Qwen38BId,
+            PreferredCodeModelId: GoAi.Server.Core.Configuration.CodingModelCatalog.GptOss120BId,
             ConversationProfile: ConversationProfile.ContextPreparation);
         var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
 
@@ -592,6 +740,11 @@ public sealed class CodingAgentTests
         Assert.Contains("Führe den echten Renderer aus", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("`repository.build` ausschließlich", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("`py_compile` oder `compileall`", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Deutsch verbindlicher Standard", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Programmiersprachen-Syntax", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("beschädigte Zeichenfolgen", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("Erfinde niemals einen Datei- oder Ordnerpfad", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        Assert.Contains("suggestedPaths", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Behandle einen neu geschriebenen Test, Checker oder Validator nicht automatisch als fachliche Autorität", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Ändere Produktdaten niemals nur, damit eine zu enge", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.Contains("Ein Prüforakel muss vom geprüften Produktcode unabhängig sein", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
@@ -604,6 +757,68 @@ public sealed class CodingAgentTests
         Assert.DoesNotContain("Button.Flyout", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("GO-WinUI", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
         Assert.DoesNotContain("Build-Portable.ps1", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SpreadsheetPromptReceivesFormatAndFormulaValidationWithoutNamedWorkflowRules()
+    {
+        var request = CreateCodingPolicyRequest(
+            "Erstelle eine visuell aufbereitete Excel-Arbeitsmappe mit Formeln und Diagrammen.");
+
+        var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
+
+        Assert.Contains("Tabellen- und Excel-Artefakte", policy, StringComparison.Ordinal);
+        Assert.Contains("OOXML-Formeln", policy, StringComparison.Ordinal);
+        Assert.Contains("Oeffne die erzeugte Datei", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("TGA-Lueftungsplanung", policy, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ScientificPublicationPromptReceivesIndependentProofAndRenderingGates()
+    {
+        var request = CreateCodingPolicyRequest(
+            "Erstelle fortlaufend ein PDF-Lehrbuch zur Mathematik und Physik mit Lean-Beweisen und numerischen Simulationen.");
+
+        var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
+
+        Assert.Contains("Promptabgeleiteter Workflow", policy, StringComparison.Ordinal);
+        Assert.Contains("Mathematische und physikalische Arbeit", policy, StringComparison.Ordinal);
+        Assert.Contains("analytische Cross-Checks", policy, StringComparison.Ordinal);
+        Assert.Contains("proof.lean", policy, StringComparison.Ordinal);
+        Assert.Contains("Buch-, Bericht- und PDF-Ausgabe", policy, StringComparison.Ordinal);
+        Assert.Contains("nicht doppelt vorkommen", policy, StringComparison.Ordinal);
+        Assert.Contains("gesamte Manuskript deutsch", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("PhyMa", policy, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GermanCodingPromptRequiresGermanReadableArtifactsWithoutTranslatingCodeSyntax()
+    {
+        var request = CreateCodingPolicyRequest(
+            "Erstelle ein Lehrbuchkapitel zur klassischen Mechanik mit Markdown, Lean und KaTeX.");
+
+        var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
+
+        Assert.Contains("Sprache und nutzerlesbare Artefakte", policy, StringComparison.Ordinal);
+        Assert.Contains("Markdown- und TeX-Dokumente", policy, StringComparison.Ordinal);
+        Assert.Contains("keine englischen Kapitelüberschriften", policy, StringComparison.Ordinal);
+        Assert.Contains("Eine ausdrücklich verlangte Zielsprache hat Vorrang", policy, StringComparison.Ordinal);
+        Assert.Contains("Programmiersprachen-Syntax", policy, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RelativityPromptReceivesNonVacuousTensorValidationWithoutEinsteinWorkflow()
+    {
+        var request = CreateCodingPolicyRequest(
+            "Untersuche eine Raumzeitmetrik und validiere Ricci- und Einstein-Tensor mathematisch.");
+
+        var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
+
+        Assert.Contains("Differentialgeometrie und Relativitaet", policy, StringComparison.Ordinal);
+        Assert.Contains("Ein vorab auf null gesetzter Tensor", policy, StringComparison.Ordinal);
+        Assert.Contains("perturbierte", policy, StringComparison.Ordinal);
+        Assert.Contains("Negativkontrolle", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("einstein-field-equations", policy, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -694,6 +909,21 @@ public sealed class CodingAgentTests
 
         throw new FileNotFoundException($"Repositorydatei nicht gefunden: {relativePath}");
     }
+
+    private static RunRequest CreateCodingPolicyRequest(string prompt) => new(
+        GoAiProtocol.Version,
+        RunMode.Code,
+        [new RunMessage("user", [new ContentPart("text", prompt)])],
+        ClientCapabilities: ["filesystem", "code", "process"],
+        Workspace: new WorkspaceDescriptor(
+            "workspace",
+            "fingerprint",
+            "revision",
+            "README.md\nsrc/\ntests/",
+            3,
+            1,
+            128,
+            DateTimeOffset.UtcNow));
 
     [Theory]
     [InlineData("npm", "test")]
@@ -868,6 +1098,9 @@ public sealed class CodingAgentTests
     [InlineData("visualizations/live_progress.svg")]
     [InlineData("artifacts/report.json")]
     [InlineData("coverage/index.html")]
+    [InlineData("README.md")]
+    [InlineData("book.pdf")]
+    [InlineData("solutions/formal-proof.tex")]
     public void GeneratedRuntimeArtifactsDoNotInvalidateCompletedCodeVerification(string path)
     {
         Assert.False(RunProcessor.RequiresCodingVerification(path));
@@ -1074,6 +1307,21 @@ public sealed class CodingAgentTests
         Assert.DoesNotContain(failedProcess, failed);
         Assert.DoesNotContain(failedRead, failed);
         Assert.Contains(failedMutation, failed);
+    }
+
+    [Theory]
+    [InlineData(ClientToolNames.FileSystemProposePatch, 0, false)]
+    [InlineData(ClientToolNames.FileSystemProposePatch, 1, false)]
+    [InlineData(ClientToolNames.FileSystemProposePatch, 2, true)]
+    [InlineData(ClientToolNames.FileSystemWriteText, 2, false)]
+    public void RepeatedMalformedPatchesSuppressOnlyThePatchTool(
+        string toolName,
+        int failedPatchAttemptCount,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            RunProcessor.IsToolSuppressedAfterRepeatedFailure(toolName, failedPatchAttemptCount));
     }
 
     [Theory]

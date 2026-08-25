@@ -26,8 +26,6 @@ internal static class GatewayEndpoints
         endpoints.MapGet("/v1/health/ready", WriteReadyHealthAsync);
         endpoints.MapGet("/v1/capabilities", WriteCapabilitiesAsync);
         endpoints.MapGet("/v1/models/status", WriteModelStatusAsync);
-        endpoints.MapPost("/v1/models/general", SelectGeneralModelAsync);
-        endpoints.MapPost("/v1/models/code", SelectCodingModelAsync);
         endpoints.MapGet("/v1/gpu/status", WriteGpuStatusAsync);
         endpoints.MapGet("/v1/services/status", WriteServiceStatusAsync);
         endpoints.MapPost("/v1/context/embeddings", CreateEmbeddingsAsync);
@@ -73,7 +71,7 @@ internal static class GatewayEndpoints
     {
         var readiness = context.RequestServices.GetRequiredService<ReadinessService>();
         var result = await readiness.GetSnapshotAsync(context.RequestAborted).ConfigureAwait(false);
-        if (!string.Equals(result.Status, "ready", StringComparison.Ordinal))
+        if (string.Equals(result.Status, "notReady", StringComparison.Ordinal))
         {
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
         }
@@ -89,26 +87,8 @@ internal static class GatewayEndpoints
 
     private static async Task WriteModelStatusAsync(HttpContext context)
     {
-        var lmStudio = context.RequestServices.GetRequiredService<LmStudioClient>();
-        await WriteJsonAsync(context, await lmStudio.GetStatusAsync(context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
-    }
-
-    private static async Task SelectGeneralModelAsync(HttpContext context)
-    {
-        var request = await ReadJsonAsync<GeneralModelSelection>(context).ConfigureAwait(false);
-        var selection = context.RequestServices.GetRequiredService<GeneralModelSelectionService>();
-        await WriteJsonAsync(
-            context,
-            await selection.SelectAsync(request.ModelId, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
-    }
-
-    private static async Task SelectCodingModelAsync(HttpContext context)
-    {
-        var request = await ReadJsonAsync<CodingModelSelection>(context).ConfigureAwait(false);
-        var selection = context.RequestServices.GetRequiredService<CodingModelSelectionService>();
-        await WriteJsonAsync(
-            context,
-            await selection.SelectAsync(request.ModelId, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+        var runtime = context.RequestServices.GetRequiredService<ModelRuntimeClient>();
+        await WriteJsonAsync(context, await runtime.GetStatusAsync(context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     private static async Task WriteGpuStatusAsync(HttpContext context)

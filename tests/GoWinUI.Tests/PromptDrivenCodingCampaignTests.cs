@@ -21,10 +21,22 @@ public sealed class PromptDrivenCodingCampaignTests
         Assert.Equal("prompt-workflow", definition.Descriptor.Id);
         Assert.Contains(catalog.List(), descriptor => descriptor.Id == "prompt-workflow");
         Assert.Contains(".go-campaign/prompt-workflow.json", bootstrap, StringComparison.Ordinal);
-        Assert.Contains("hartcodierte Test- oder Domänenlogik", bootstrap, StringComparison.Ordinal);
+        Assert.Contains("keine fest codierte Test-, Projekt- oder Domänenvorlage", bootstrap, StringComparison.Ordinal);
         Assert.Contains("Nutzeranweisung", bootstrap, StringComparison.Ordinal);
-        Assert.Contains("Neue Tests müssen", iteration, StringComparison.Ordinal);
-        Assert.Contains("keine versteckte", iteration, StringComparison.Ordinal);
+        Assert.Contains("keine vorgegebene Themenfolge", iteration, StringComparison.Ordinal);
+        Assert.Contains("Grenz-, Negativ- oder unabhängiger Referenzfall", iteration, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LegacyBuiltInWorkflowIdsResolveToTheGenericPromptDefinition()
+    {
+        var definition = new PromptDrivenCodingCampaignDefinition();
+        var catalog = new CodingCampaignCatalog([definition]);
+
+        Assert.False(catalog.IsRegistered("legacy-domain-workflow"));
+        Assert.Equal("prompt-workflow", catalog.NormalizeDefinitionId("legacy-domain-workflow"));
+        Assert.Same(definition, catalog.GetRequired("legacy-domain-workflow"));
+        Assert.Single(catalog.List());
     }
 
     [Fact]
@@ -36,11 +48,22 @@ public sealed class PromptDrivenCodingCampaignTests
             "GoAi.Server.Core",
             "Policies",
             "TgaAgentPolicies.cs"));
+        var guidance = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "GoAi.Server.Core",
+            "Policies",
+            "CodingTaskGuidancePolicy.cs"));
 
         Assert.Contains(".go-campaign/prompt-workflow.json", policy, StringComparison.Ordinal);
         Assert.Contains("reproduzierbaren Prüfvertrag", policy, StringComparison.Ordinal);
         Assert.Contains("Schreibe für frei formulierte Coding-Aufgaben eigene Tests", policy, StringComparison.Ordinal);
         Assert.Contains("Workflow erstellen", policy, StringComparison.Ordinal);
+        Assert.Contains("Tabellen- und Excel-Artefakte", guidance, StringComparison.Ordinal);
+        Assert.Contains("Mathematische und physikalische Arbeit", guidance, StringComparison.Ordinal);
+        Assert.Contains("Differentialgeometrie und Relativitaet", guidance, StringComparison.Ordinal);
+        Assert.Contains("Buch-, Bericht- und PDF-Ausgabe", guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("PhyMa", guidance, StringComparison.Ordinal);
     }
 
     [Fact]

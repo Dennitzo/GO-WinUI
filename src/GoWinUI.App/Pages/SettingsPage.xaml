@@ -24,7 +24,7 @@
           <TextBlock
             Margin="0,4,0,0"
             Foreground="{ThemeResource GoMutedTextBrush}"
-            Text="GO AI Server, Prompt-Trigger, lokale Werkzeuge, Darstellung und Datensicherung konfigurieren."
+            Text="Docker-Gateway, Prompt-Trigger, lokale Werkzeuge, Darstellung und Datensicherung konfigurieren."
             TextWrapping="Wrap" />
         </StackPanel>
         <Button Grid.Column="1" Click="OnSave" Content="Speichern" Style="{StaticResource GoPrimaryButtonStyle}" />
@@ -44,7 +44,7 @@
               <TextBlock
                 Margin="0,3,0,0"
                 Foreground="{ThemeResource GoMutedTextBrush}"
-                Text="Im GO AI Server unter „Sicherheit und Schlüssel“ einen GO-Client API-Schlüssel erzeugen, kopieren und hier einfügen."
+                Text="Direkte Verbindung zum Docker-Gateway auf dem GPU-Server. Es werden keine Schlüssel, Zertifikate oder Fingerprints benötigt."
                 TextWrapping="Wrap" />
             </StackPanel>
             <Border Grid.Column="1" Style="{StaticResource GoStatusPillStyle}">
@@ -67,28 +67,22 @@
             Text="Offline bleibt der AI-Assistent als Oberfläche verfügbar; GO führt dabei keinerlei API-Verbindungsversuche aus."
             TextWrapping="Wrap" />
 
-          <Grid RowSpacing="10">
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto" />
-              <RowDefinition Height="Auto" />
-              <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
-            <StackPanel Spacing="5">
-              <PasswordBox
-                x:Name="ApiKeyBox"
-                Header="GO-AI-Server-Schlüssel"
-                PasswordChanged="OnApiKeyChanged"
-                PlaceholderText="Auf dem Server erzeugten Schlüssel einfügen" />
-              <TextBlock x:Name="ApiKeyStateText" FontSize="12" Foreground="{ThemeResource GoMutedTextBrush}" />
-            </StackPanel>
-            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
-              <Button Click="OnDeleteApiKey" Content="Gespeicherten Schlüssel löschen" />
-              <Button
-                Click="OnRefreshModels"
-                Content="Verbindung testen und Fähigkeiten laden"
-                IsEnabled="{x:Bind ViewModel.IsAiConnectionEnabled, Mode=OneWay}"
-                Style="{StaticResource GoPrimaryButtonStyle}" />
-            </StackPanel>
+          <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox
+              Header="Docker-Gatewayadresse"
+              PlaceholderText="http://192.168.0.67:8080"
+              Text="{x:Bind ViewModel.GoAiServerUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <Button
+              Grid.Column="1"
+              Margin="0,24,0,0"
+              Click="OnRefreshModels"
+              Content="Verbindung testen und Fähigkeiten laden"
+              IsEnabled="{x:Bind ViewModel.IsAiConnectionEnabled, Mode=OneWay}"
+              Style="{StaticResource GoPrimaryButtonStyle}" />
           </Grid>
 
           <Grid ColumnSpacing="12">
@@ -115,21 +109,24 @@
               <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
             <ComboBox
-              x:Name="ModelBox"
-              DisplayMemberPath="DisplayName"
-              Header="General AI"
+              Header="General AI Modell"
               ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
-              PlaceholderText="Verbindung testen"
-              SelectionChanged="OnModelChanged" />
-            <ComboBox
-              x:Name="CodingModelBox"
-              Grid.Column="1"
               DisplayMemberPath="DisplayName"
-              Header="Coding-Agent"
+              SelectedValuePath="Id"
+              SelectedValue="{x:Bind ViewModel.SelectedModel, Mode=TwoWay}" />
+            <ComboBox
+              Grid.Column="1"
+              Header="Coding AI Modell"
               ItemsSource="{x:Bind ViewModel.CodingModels, Mode=OneWay}"
-              PlaceholderText="Verbindung testen"
-              SelectionChanged="OnCodingModelChanged" />
+              DisplayMemberPath="DisplayName"
+              SelectedValuePath="Id"
+              SelectedValue="{x:Bind ViewModel.SelectedCodingModel, Mode=TwoWay}" />
           </Grid>
+          <TextBlock
+            Margin="0,-6,0,0"
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            Text="General- und Coding-Läufe laden automatisch das jeweils ausgewählte Modell. Qwen3-Coder-Next arbeitet ohne einstellbares Reasoning."
+            TextWrapping="Wrap" />
 
         </StackPanel>
       </Border>

@@ -15,8 +15,8 @@ public sealed class GoAiClientTests
               "status": "notReady",
               "protocolVersion": "1.0",
               "timestamp": "2026-08-20T07:29:18Z",
-              "reason": "Erforderliche Modelle fehlen: qwen3-coder-next",
-              "repair": "Das Coding-Modell vollständig herunterladen."
+              "reason": "Das konfigurierte Modell gpt-oss-120b ist nicht geladen.",
+              "repair": "Den ersten AI-Lauf starten oder den Modellbestand prüfen."
             }
             """;
         using var http = new HttpClient(new StaticResponseHandler(
@@ -31,8 +31,8 @@ public sealed class GoAiClientTests
         var health = await client.GetReadyHealthAsync();
 
         Assert.Equal("notReady", health.Status);
-        Assert.Contains("qwen3-coder-next", health.Reason, StringComparison.Ordinal);
-        Assert.Contains("herunterladen", health.Repair, StringComparison.Ordinal);
+        Assert.Contains("gpt-oss-120b", health.Reason, StringComparison.Ordinal);
+        Assert.Contains("Modellbestand", health.Repair, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -145,6 +145,26 @@ public sealed class GoAiClientTests
 
         Assert.Equal("speech-0123456789abcdef0123456789abcdef", session.SessionId);
         Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task ClientToolResultRetriesRateLimitWithoutRepeatingTheLocalTool()
+    {
+        var handler = new RateLimitedClientToolResultHandler();
+        using var http = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("https://go-ai.test/"),
+        };
+        using var client = new GoAiClient(http, "goai_123456789abc_test");
+        var result = new ClientToolResult(
+            "proposal-0123456789abcdef0123456789abcdef",
+            "completed",
+            System.Text.Json.JsonSerializer.SerializeToElement(new { ok = true }));
+
+        await client.SubmitClientToolResultAsync("run-0123456789abcdef0123456789abcdef", result);
+
+        Assert.Equal(2, handler.RequestCount);
+        Assert.All(handler.RequestBodies, body => Assert.Contains("proposal-0123456789abcdef0123456789abcdef", body, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -333,6 +353,31 @@ public sealed class GoAiClientTests
             {
                 Content = new StringContent("wave-data", Encoding.UTF8, "application/octet-stream"),
             });
+        }
+    }
+
+    private sealed class RateLimitedClientToolResultHandler : HttpMessageHandler
+    {
+        public int RequestCount { get; private set; }
+
+        public List<string> RequestBodies { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            RequestBodies.Add(request.Content is null
+                ? string.Empty
+                : await request.Content.ReadAsStringAsync(cancellationToken));
+            if (RequestCount == 1)
+            {
+                var limited = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                limited.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.Zero);
+                return limited;
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
         }
     }
 

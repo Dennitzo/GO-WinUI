@@ -203,7 +203,7 @@ public sealed class BlobProjectAndDocumentTests
             maximumMessageCount: 1);
         var wrongModel = await chats.ListSessionContextPreparationsAsync(
             session.Id,
-            "qwen3-coder-next",
+            "gpt-oss-120b",
             maximumMessageCount: 1);
 
         Assert.NotNull(restored);

@@ -1,25 +1,15 @@
 using GoAi.Client;
 using GoAi.Contracts;
 using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 
 var options = Arguments.Parse(args);
-using var handler = new HttpClientHandler();
-if (!string.IsNullOrWhiteSpace(options.RootCertificatePath))
-{
-    var root = X509CertificateLoader.LoadCertificateFromFile(options.RootCertificatePath);
-    var validator = GoAiClientFactory.CreatePinnedChainValidator(root);
-    handler.ServerCertificateCustomValidationCallback = (_, certificate, chain, errors) =>
-        certificate is not null && validator(certificate, chain, errors);
-}
-
-using var http = new HttpClient(handler)
+using var http = new HttpClient(new HttpClientHandler { UseProxy = false })
 {
     BaseAddress = new Uri(options.ServerUrl.EndsWith('/') ? options.ServerUrl : options.ServerUrl + "/"),
     Timeout = TimeSpan.FromHours(3),
 };
-using var client = new GoAiClient(http, options.ApiKey);
+using var client = new GoAiClient(http, options.ClientId);
 var json = GoAiProtocol.CreateJsonOptions();
 json.WriteIndented = true;
 
@@ -70,10 +60,10 @@ async Task<object> RunBasicSmokeAsync()
     var models = await client.GetModelStatusAsync();
     var gpu = await client.GetGpuStatusAsync();
     Ensure(live.Status == "live", "Live health failed.");
-    Ensure(ready.Status == "ready", $"Readiness failed: {ready.Reason}");
+    Ensure(ready.Status is "ready" or "modelNotLoaded" or "modelLoading", $"Readiness failed: {ready.Reason}");
     Ensure(capabilities.ProtocolVersion == GoAiProtocol.Version, "Protocol version mismatch.");
     Ensure(capabilities.LiveCaptions?.Available == true, "Live system-audio captions are not advertised.");
-    Ensure(models.ProviderReachable, "LM Studio is not reachable.");
+    Ensure(models.ProviderReachable, "The private llama.cpp model router is not reachable.");
     Ensure(gpu.Available && gpu.Devices.Count > 0, "No GPU was detected.");
     return new
     {
@@ -148,7 +138,7 @@ async Task<object> RunLiveSmokeAsync()
         RunMode.General,
         "Dies ist ein Text-Smoke-Test. Antworte in genau einem kurzen deutschen Satz zum Thema TGA-Planung.");
     EnsureEvent(general, RunEventTypes.TextDelta);
-    EnsureCompletedWithModel(general, "gpt-oss-20b");
+    EnsureCompletedWithModel(general, "gpt-oss-120b");
     await AssertSseResumeAsync(general);
 
     var math = await CreateAndCompleteRunAsync(
@@ -162,7 +152,7 @@ async Task<object> RunLiveSmokeAsync()
         ["filesystem", "code"],
         respondToClientTools: true);
     EnsureToolEvent(code, ClientToolNames.FileSystemReadText, clientSide: true);
-    EnsureCompletedWithModel(code, "qwen3.8-27b");
+    EnsureCompletedWithModel(code, "qwen3-coder-next-q8_0");
 
     var embedding = await CreateAndCompleteRunAsync(
         RunMode.General,
@@ -208,7 +198,7 @@ async Task<object> RunLiveSmokeAsync()
     var transcription = await transcriptionTask;
     var caption = await captionTask;
     var completedCaptions = await client.StopLiveCaptionSessionAsync(captionSession.SessionId);
-    EnsureCompletedWithModel(parallelGeneral, "gpt-oss-20b");
+    EnsureCompletedWithModel(parallelGeneral, "gpt-oss-120b");
     Ensure(transcription.Segments.Count > 0 && !string.IsNullOrWhiteSpace(transcription.Text), "Parallel Whisper voice-control transcription returned no text.");
     Ensure(transcription.Provider.Contains("whisper", StringComparison.OrdinalIgnoreCase), "Unexpected parallel STT provider.");
     Ensure(caption.IsFinal && !string.IsNullOrWhiteSpace(caption.Text), "Live system-audio caption returned no final text.");
@@ -409,8 +399,7 @@ internal sealed record RunResult(RunSnapshot Snapshot, IReadOnlyList<RunEvent> E
 internal sealed record Arguments(
     string Command,
     string ServerUrl,
-    string ApiKey,
-    string? RootCertificatePath,
+    string ClientId,
     string Prompt,
     RunMode Mode,
     string? FilePath,
@@ -430,16 +419,14 @@ internal sealed record Arguments(
             return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
         }
 
-        var server = Read("--server") ?? Environment.GetEnvironmentVariable("GO_AI_SERVER_URL") ?? "http://127.0.0.1:7080";
-        var key = Read("--key") ?? Environment.GetEnvironmentVariable("GO_AI_API_KEY")
-            ?? throw new ArgumentException("Pass --key or set GO_AI_API_KEY.");
+        var server = Read("--server") ?? Environment.GetEnvironmentVariable("GO_AI_SERVER_URL") ?? "http://127.0.0.1:8080";
+        var clientId = Read("--client-id") ?? $"smoke-{Guid.NewGuid():N}";
         var mode = Enum.TryParse<RunMode>(Read("--mode"), ignoreCase: true, out var parsedMode) ? parsedMode : RunMode.General;
         var output = Read("--output") ?? Path.Combine(Path.GetTempPath(), "go-ai-smoke-artifacts");
         return new Arguments(
             command,
             server,
-            key,
-            Read("--ca") ?? Environment.GetEnvironmentVariable("GO_AI_ROOT_CERTIFICATE"),
+            clientId,
             Read("--prompt") ?? "Antworte nur mit: GO AI bereit.",
             mode,
             Read("--file"),

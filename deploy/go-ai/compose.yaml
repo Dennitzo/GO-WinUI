@@ -1,150 +1,195 @@
-name: go-ai-server
+name: go-ai-stack
+
+x-common: &common
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: local
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
   caddy:
+    <<: *common
     image: caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     container_name: go-ai-caddy
-    network_mode: host
-    restart: "no"
     read_only: true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    security_opt:
-      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    ports:
+      - "8080:8080"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Caddy/data:/data
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Caddy/config:/config
     tmpfs:
       - /tmp:size=64m,mode=1777
+      - /data:size=16m,mode=0700
+      - /config:size=16m,mode=0700
+    depends_on:
+      gateway:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-check-certificate", "--spider", "--quiet", "https://${GO_AI_EXPECTED_LAN_IP:-192.168.0.67}:8443/v1/health/live"]
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8080/v1/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [edge]
+
+  gateway:
+    <<: *common
+    image: go-ai/gateway:${GO_AI_IMAGE_VERSION:-1.0.0}
+    build:
+      context: ../..
+      dockerfile: src/GoAi.Gateway/Dockerfile
+    container_name: go-ai-gateway
+    read_only: true
+    cap_drop: [ALL]
+    volumes:
+      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/data:/data
+    environment:
+      GO_AI_DATA_DIRECTORY: /data
+      GO_AI_GATEWAY_PORT: "8080"
+      GO_AI_PUBLIC_URL: ${GO_AI_PUBLIC_URL:-http://192.168.0.67:8080}
+      GO_AI_EXPECTED_LAN_IP: ${GO_AI_EXPECTED_LAN_IP:-192.168.0.67}
+      GO_AI_MODEL_RUNTIME_URL: http://llm:8080
+      GO_AI_SEARXNG_URL: http://searxng:8080
+      GO_AI_SPEECH_WORKER_URL: http://speech:8080
+      GO_AI_MEDIA_WORKER_URL: http://media:8080
+      GO_AI_IMAGE_WORKER_URL: http://image:8080
+      GO_AI_WORKER_DATA_DIRECTORY: /data
+      GO_AI_YOUTUBE_API_KEY: ${GO_AI_YOUTUBE_API_KEY:-}
+      NVIDIA_VISIBLE_DEVICES: all
+    gpus: all
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    depends_on:
+      llm:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+      speech:
+        condition: service_healthy
+      media:
+        condition: service_healthy
+      image:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - /bin/bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080 &&
+          printf 'GET /v1/health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '200 OK' <&3
       interval: 15s
       timeout: 5s
       retries: 10
       start_period: 20s
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
+    networks: [edge, backend]
+
+  llm:
+    <<: *common
+    image: go-ai/llm:${GO_AI_IMAGE_VERSION:-1.0.0}
+    build:
+      context: ./llm
+      dockerfile: Dockerfile
+    container_name: go-ai-llm
+    read_only: true
+    cap_drop: [ALL]
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --models-dir
+      - /models
+      - --models-preset
+      - /config/models.ini
+      - --models-max
+      - "1"
+      - --models-autoload
+      - --sleep-idle-seconds
+      - "-1"
+      - --no-webui
+      - --log-colors
+      - off
+    environment:
+      CUDA_VISIBLE_DEVICES: "0,1"
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes:
+      - ${GO_AI_MODEL_ROOT:?GO_AI_MODEL_ROOT is required}:/models:ro
+      - ./llm/models.ini:/config/models.ini:ro
+    gpus: all
+    shm_size: "8gb"
+    mem_limit: 160g
+    pids_limit: 1024
+    tmpfs:
+      - /tmp:size=2g,mode=1777
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/models"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks: [backend]
 
   searxng:
+    <<: *common
     image: searxng/searxng@sha256:c2dc2d9e6b910653e8628361c23443222490e4cabbb9e02667b7847143db843b
     container_name: go-ai-searxng
-    # GO AI Server starts and stops the Compose project. While the server is
-    # active, SearXNG self-recovers after a container or engine failure.
-    restart: unless-stopped
     read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    ports:
-      - "127.0.0.1:7081:8080"
+    cap_drop: [ALL]
     volumes:
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Config/searxng/settings.yml:/etc/searxng/settings.yml:ro
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Cache/searxng:/var/cache/searxng
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/data/cache/searxng:/var/cache/searxng
     tmpfs:
       - /tmp:size=128m,mode=1777
     environment:
-      SEARXNG_BASE_URL: http://127.0.0.1:7081/
+      SEARXNG_BASE_URL: http://searxng:8080/
     healthcheck:
       test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8080/healthz"]
       interval: 15s
       timeout: 5s
       retries: 10
       start_period: 20s
-    networks:
-      - research
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  worker-edge:
-    image: caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
-    container_name: go-ai-worker-edge
-    restart: "no"
-    read_only: true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
-    security_opt:
-      - no-new-privileges:true
-    ports:
-      - "127.0.0.1:7082:7082"
-      - "127.0.0.1:7083:7083"
-      - "127.0.0.1:7084:7084"
-    volumes:
-      - ./caddy/WorkerEdge.Caddyfile:/etc/caddy/Caddyfile:ro
-    tmpfs:
-      - /tmp:size=32m,mode=1777
-      - /config:size=8m,mode=0700,uid=10001,gid=10001
-      - /data:size=8m,mode=0700,uid=10001,gid=10001
-    networks:
-      - edge
-      - workers
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
+    networks: [backend, egress]
 
   speech:
+    <<: *common
     image: go-ai/speech:${GO_AI_IMAGE_VERSION:-1.0.0}
     build:
       context: ../../workers
       dockerfile: speech/Dockerfile
     container_name: go-ai-speech
-    restart: "no"
     read_only: true
     user: "10001:10001"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
+    cap_drop: [ALL]
     volumes:
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Models:/models:ro
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Uploads:/data/Uploads:ro
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Artifacts/worker:/data/Artifacts/worker
-    secrets:
-      - source: speech_worker_key
-        target: worker_key
+      - ${GO_AI_MODEL_ROOT:?GO_AI_MODEL_ROOT is required}:/models:ro
+      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/data/uploads:/data/uploads:ro
+      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/data/artifacts/worker:/data/artifacts/worker
     environment:
-      GO_AI_WORKER_KEY_FILE: /run/secrets/worker_key
-      GO_AI_WHISPER_MODEL: /models/faster-whisper-large-v3
-      GO_AI_SPEAKER_MODEL: /models/spkrec-ecapa-voxceleb
+      GO_AI_WHISPER_MODEL: /models/speech/faster-whisper-large-v3
+      GO_AI_SPEAKER_MODEL: /models/speech/spkrec-ecapa-voxceleb
       GO_AI_WHISPER_CUDA_DEVICE: "0"
       GO_AI_SPEAKER_CUDA_DEVICE: "0"
       GO_AI_WHISPER_FILE_BEAM_SIZE: "10"
       GO_AI_WHISPER_LIVE_BEAM_SIZE: "8"
       GO_AI_WHISPER_BEST_OF: "8"
-      GO_AI_WHISPER_FILE_PATIENCE: "2.0"
-      GO_AI_WHISPER_LIVE_PATIENCE: "1.5"
-      GO_AI_WHISPER_LANGUAGE_DETECTION_SEGMENTS: "3"
-      GO_AI_WHISPER_RECENT_CONTEXT_CHARACTERS: "800"
       GO_AI_PRELOAD_SPEECH: "1"
-      GO_AI_SUPERTONIC_MODEL_ROOT: /models/supertonic-3
+      GO_AI_SUPERTONIC_MODEL_ROOT: /models/speech/supertonic-3
       GO_AI_SUPERTONIC_VOICE: F5
       GO_AI_SUPERTONIC_LANGUAGE: de
       GO_AI_SUPERTONIC_STEPS: "15"
       GO_AI_SUPERTONIC_MAX_CHUNK_LENGTH: "1000"
       GO_AI_SUPERTONIC_CUDA_DEVICE: "1"
-      GO_AI_SUPERTONIC_INTRA_OP_THREADS: "4"
       CUDA_VISIBLE_DEVICES: "0,1"
-      OMP_NUM_THREADS: "4"
-      OPENBLAS_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      NUMEXPR_NUM_THREADS: "1"
-      NUMBA_CACHE_DIR: /tmp/numba-cache
-      XDG_CACHE_HOME: /tmp/cache
-      TORCH_HOME: /tmp/torch
       NVIDIA_VISIBLE_DEVICES: all
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     gpus: all
     shm_size: "2gb"
     mem_limit: 32g
@@ -157,35 +202,21 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    networks:
-      - workers
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
+    networks: [backend]
 
   media:
+    <<: *common
     image: go-ai/media:${GO_AI_IMAGE_VERSION:-1.0.0}
     build:
       context: ../../workers
       dockerfile: media/Dockerfile
     container_name: go-ai-media
-    restart: "no"
     read_only: true
     user: "10001:10001"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
+    cap_drop: [ALL]
     volumes:
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Uploads:/data/Uploads:ro
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Artifacts/worker:/data/Artifacts/worker
-    secrets:
-      - source: media_worker_key
-        target: worker_key
-    environment:
-      GO_AI_WORKER_KEY_FILE: /run/secrets/worker_key
+      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/data/uploads:/data/uploads:ro
+      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/data/artifacts/worker:/data/artifacts/worker
     mem_limit: 8g
     pids_limit: 256
     tmpfs:
@@ -196,15 +227,10 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
-    networks:
-      - workers
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
+    networks: [backend]
 
   image:
+    <<: *common
     image: go-ai/image:${GO_AI_IMAGE_VERSION:-1.0.0}
     build:
       context: ../../workers
@@ -212,24 +238,16 @@ services:
       args:
         STABLE_DIFFUSION_CPP_COMMIT: de298c225bed97c3f9026b73cd7b71e7879bd41b
     container_name: go-ai-image
-    restart: "no"
     read_only: true
     user: "10001:10001"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
+    cap_drop: [ALL]
     volumes:
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Models:/models:ro
-      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Artifacts/worker:/data/Artifacts/worker
-    secrets:
-      - source: image_worker_key
-        target: worker_key
+      - ${GO_AI_MODEL_ROOT:?GO_AI_MODEL_ROOT is required}:/models:ro
+      - ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/data/artifacts/worker:/data/artifacts/worker
     environment:
-      GO_AI_WORKER_KEY_FILE: /run/secrets/worker_key
-      GO_AI_Z_IMAGE_MODEL: /models/z-image/z_image_turbo-Q4_K.gguf
-      GO_AI_Z_IMAGE_VAE: /models/z-image/ae.safetensors
-      GO_AI_Z_IMAGE_ENCODER: /models/z-image/Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+      GO_AI_Z_IMAGE_MODEL: /models/image/z-image/z_image_turbo-Q4_K.gguf
+      GO_AI_Z_IMAGE_VAE: /models/image/z-image/ae.safetensors
+      GO_AI_Z_IMAGE_ENCODER: /models/image/z-image/Qwen3-4B-Instruct-2507-Q4_K_M.gguf
       GO_AI_PRELOAD_IMAGE: "0"
       GO_AI_MODEL_TTL_SECONDS: "600"
       GO_AI_IMAGE_LOAD_TIMEOUT_SECONDS: "1200"
@@ -247,27 +265,13 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    networks:
-      - workers
-    logging:
-      driver: local
-      options:
-        max-size: "10m"
-        max-file: "3"
+    networks: [backend]
 
 networks:
   edge:
     driver: bridge
-  research:
-    driver: bridge
-  workers:
+  backend:
     driver: bridge
     internal: true
-
-secrets:
-  speech_worker_key:
-    file: ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Secrets/speech-worker.key
-  media_worker_key:
-    file: ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Secrets/media-worker.key
-  image_worker_key:
-    file: ${GO_AI_DATA_ROOT:?GO_AI_DATA_ROOT is required}/Secrets/image-worker.key
+  egress:
+    driver: bridge

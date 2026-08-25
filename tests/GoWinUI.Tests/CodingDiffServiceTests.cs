@@ -117,7 +117,7 @@ public sealed class CodingDiffServiceTests
             await GitAsync(root, "add", "tracked.cs");
             await GitAsync(root, "commit", "-m", "baseline");
 
-            // These changes exist before Qwen3-Coder-Next starts and must not be attributed to it.
+            // These changes exist before the coding model starts and must not be attributed to it.
             await File.WriteAllTextAsync(Path.Combine(root, "tracked.cs"), "original\npreexisting dirty line\n", new UTF8Encoding(false));
             await File.WriteAllTextAsync(Path.Combine(root, "preexisting-staged.txt"), "already staged\n", new UTF8Encoding(false));
             await File.WriteAllTextAsync(Path.Combine(root, "preexisting-untracked.txt"), "already untracked\n", new UTF8Encoding(false));

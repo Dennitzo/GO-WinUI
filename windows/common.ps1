@@ -53,61 +53,56 @@ function Resolve-GoDockerCommand {
     throw 'Docker Desktop command was not found. Install or start Docker Desktop.'
 }
 
-function New-GoRandomSecret {
+function Get-GoAiStackDefaults {
     param(
-        [ValidateRange(16, 256)]
-        [int] $ByteCount = 32
+        [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'GO-AI-Stack'),
+        [string] $ModelRoot
     )
 
-    $bytes = New-Object byte[] $ByteCount
-    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
-    try {
-        $generator.GetBytes($bytes)
+    $resolvedDataRoot = [IO.Path]::GetFullPath($DataRoot)
+    $resolvedModelRoot = if ([string]::IsNullOrWhiteSpace($ModelRoot)) {
+        Join-Path $resolvedDataRoot 'Models'
     }
-    finally {
-        $generator.Dispose()
+    else {
+        [IO.Path]::GetFullPath($ModelRoot)
     }
-
-    return [Convert]::ToBase64String($bytes)
-}
-
-function Get-GoLmStudioToken {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $DataRoot
-    )
-
-    $tokenPath = Join-Path ([IO.Path]::GetFullPath($DataRoot)) 'Secrets\lmstudio-token.dpapi'
-    if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) {
-        return $null
-    }
-
-    Add-Type -AssemblyName System.Security
-    $protectedBytes = [IO.File]::ReadAllBytes($tokenPath)
-    $entropy = [Text.Encoding]::UTF8.GetBytes('GO-AI-Server.LM-Studio.v1')
-    $clearBytes = [Security.Cryptography.ProtectedData]::Unprotect(
-        $protectedBytes,
-        $entropy,
-        [Security.Cryptography.DataProtectionScope]::LocalMachine)
-    try {
-        return [Text.Encoding]::UTF8.GetString($clearBytes)
-    }
-    finally {
-        [Array]::Clear($clearBytes, 0, $clearBytes.Length)
+    return [pscustomobject]@{
+        DataRoot = $resolvedDataRoot
+        ModelRoot = $resolvedModelRoot
+        ComposeFile = Resolve-GoRepositoryPath -RelativePath 'deploy\go-ai\compose.yaml'
+        EnvironmentFile = Join-Path $resolvedDataRoot 'stack.env'
     }
 }
 
-function Get-GoLmStudioHeaders {
+function Write-GoAiStackEnvironment {
     param(
-        [AllowNull()]
-        [string] $Token
+        [Parameter(Mandatory = $true)] $Paths,
+        [string] $ServerIp = '192.168.0.67',
+        [string] $ImageVersion = '1.0.0'
     )
 
-    if ([string]::IsNullOrWhiteSpace($Token)) {
-        return @{}
-    }
+    New-Item -ItemType Directory -Path $Paths.DataRoot -Force | Out-Null
+    $content = @(
+        "GO_AI_DATA_ROOT=$($Paths.DataRoot -replace '\\','/')"
+        "GO_AI_MODEL_ROOT=$($Paths.ModelRoot -replace '\\','/')"
+        "GO_AI_EXPECTED_LAN_IP=$ServerIp"
+        "GO_AI_PUBLIC_URL=http://${ServerIp}:8080"
+        "GO_AI_IMAGE_VERSION=$ImageVersion"
+    ) -join "`n"
+    [IO.File]::WriteAllText($Paths.EnvironmentFile, $content + "`n", [Text.UTF8Encoding]::new($false))
+}
 
-    return @{ Authorization = "Bearer $Token" }
+function Invoke-GoAiCompose {
+    param(
+        [Parameter(Mandatory = $true)] $Paths,
+        [Parameter(Mandatory = $true)] [string[]] $Arguments
+    )
+
+    $docker = Resolve-GoDockerCommand
+    & $docker compose --env-file $Paths.EnvironmentFile -f $Paths.ComposeFile @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker compose failed with exit code $LASTEXITCODE."
+    }
 }
 
 function Invoke-GoDotNet {

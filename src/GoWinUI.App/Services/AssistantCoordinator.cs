@@ -218,8 +218,10 @@ public sealed class AssistantCoordinator(
         }
 
         // A snapshot is local UI state. Never make sidebar/session interaction wait for
-        // LM Studio, which may take several seconds to time out when it is offline.
-        var contextLimit = session.PersistentToolAction == PersistentToolAction.Code ? 262_144 : 131_072;
+        // llama.cpp, which may take several seconds to time out when it is offline.
+        var contextLimit = session.PersistentToolAction == PersistentToolAction.Code
+            ? ModelContextProfiles.ResolveMaximum(settings.Current.SelectedCodingModel, "code")
+            : ModelContextProfiles.ResolveMaximum(settings.Current.SelectedModel, "general");
         var context = contextAssembler.Build(new(
             DefaultSystemPrompt,
             string.IsNullOrWhiteSpace(session.Draft) ? "Nächste Benutzereingabe" : session.Draft,
@@ -362,7 +364,7 @@ public sealed class AssistantCoordinator(
                 }
                 if (isFirstReady && goAi is not null)
                 {
-                    await goAi.StopPersistedCampaignRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
+                    await goAi.StopPersistedRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
                 }
                 campaigns?.AttachSinks(
                     update => EmitGoAiUpdateAsync(update, emit, "campaign"),
@@ -516,8 +518,16 @@ public sealed class AssistantCoordinator(
                     "code",
                     requestedReasoning ?? settings.Current.ReasoningEffort,
                     rejectUnsupported: requestedReasoning is not null);
+                var codingReasoningProfile = ModelReasoningProfiles.Resolve(
+                    settings.Current.SelectedCodingModel,
+                    "code");
                 await settings.UpdateAsync(
-                    current => current with { ReasoningEffort = codingReasoning },
+                    current => current with
+                    {
+                        ReasoningEffort = codingReasoningProfile.IsConfigurable
+                            ? codingReasoning
+                            : current.ReasoningEffort,
+                    },
                     cancellationToken).ConfigureAwait(false);
                 await chats.SaveDraftAsync(campaignSessionId, string.Empty, cancellationToken).ConfigureAwait(false);
                 await emit(
@@ -865,10 +875,15 @@ public sealed class AssistantCoordinator(
             isCodingRun ? "code" : "general",
             requestedReasoning ?? settings.Current.ReasoningEffort,
             rejectUnsupported: requestedReasoning is not null);
+        var reasoningProfile = ModelReasoningProfiles.Resolve(
+            isCodingRun ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel,
+            isCodingRun ? "code" : "general");
         await settings.UpdateAsync(current => current with
         {
             ActiveSessionId = sessionId,
-            ReasoningEffort = reasoning,
+            ReasoningEffort = reasoningProfile.IsConfigurable
+                ? reasoning
+                : current.ReasoningEffort,
         }, cancellationToken).ConfigureAwait(false);
         var speechMessageId = GetOptionalGuid(envelope.Payload, "speechMessageId");
         if (match?.Trigger.Action == PromptTriggerAction.TextToSpeech)
@@ -1242,7 +1257,7 @@ public sealed class AssistantCoordinator(
             ?? throw new InvalidOperationException("Der Workflow wurde nicht gefunden.");
         if (IsPromptCodingWorkflow(workflow))
         {
-            throw new InvalidOperationException("Coding-Workflows werden im Coding-Modus Ã¼ber Workflows geladen.");
+            throw new InvalidOperationException("Coding-Workflows werden im Coding-Modus über Workflows geladen.");
         }
         var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         await chats.SelectWorkflowAsync(session.Id, null, cancellationToken).ConfigureAwait(false);
@@ -1373,7 +1388,7 @@ public sealed class AssistantCoordinator(
             ?? throw new InvalidOperationException("Der Workflow wurde nicht gefunden.");
         if (!IsPromptCodingWorkflow(workflow))
         {
-            throw new InvalidOperationException("Der ausgewÃ¤hlte Eintrag ist kein Coding-Workflow.");
+            throw new InvalidOperationException("Der ausgewählte Eintrag ist kein Coding-Workflow.");
         }
 
         var session = await EnsureSessionWorkspaceAsync(
@@ -1384,7 +1399,7 @@ public sealed class AssistantCoordinator(
 
         if (string.IsNullOrWhiteSpace(session.WorkspacePath) || !Directory.Exists(session.WorkspacePath))
         {
-            throw new DirectoryNotFoundException("WÃ¤hle zuerst einen verfÃ¼gbaren Workspace fÃ¼r den Coding-Workflow aus.");
+            throw new DirectoryNotFoundException("Wähle zuerst einen verfügbaren Workspace für den Coding-Workflow aus.");
         }
 
         await chats.SetPersistentToolActionAsync(
@@ -1413,7 +1428,7 @@ public sealed class AssistantCoordinator(
             PromptDrivenCodingCampaignDefinition.DescriptorId,
             cancellationToken).ConfigureAwait(false);
         await recentActivity.RecordAsync(
-            $"Coding-Workflow â€ž{workflow.Title}â€œ geladen",
+            $"Coding-Workflow „{workflow.Title}“ geladen",
             CancellationToken.None).ConfigureAwait(false);
         await emit("campaign.changed", snapshot, envelope.RequestId).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);

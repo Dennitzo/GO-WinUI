@@ -32,15 +32,10 @@ public static class GoAiServerHostExtensions
         services.AddSingleton<IOptions<GoAiServerOptions>>(Options.Create(options));
         services.AddSingleton<ServerRuntimeState>();
         services.AddSingleton<GoAiDatabase>();
-        services.AddSingleton<ApiKeyStore>();
-        services.AddSingleton<DpapiSecretStore>();
-        services.AddSingleton<WorkerKeyStore>();
         services.AddSingleton<RunEventNotifier>();
         services.AddSingleton<RunRepository>();
         services.AddSingleton<RunWorkChannel>();
         services.AddSingleton<ModelRouter>();
-        services.AddSingleton<GeneralModelSelectionService>();
-        services.AddSingleton<CodingModelSelectionService>();
         services.AddSingleton<AgentToolCatalog>();
         services.AddSingleton<AgentToolExecutor>();
         services.AddSingleton<GpuLeaseScheduler>();
@@ -56,13 +51,11 @@ public static class GoAiServerHostExtensions
         services.AddSingleton<UtteranceIntentService>();
         services.AddSingleton<WorkerOrchestrator>();
         services.AddSingleton<LiveCaptionService>();
-        services.AddSingleton<ILmStudioNativeAgentClient, LmStudioNativeAgentClient>();
         services.AddHttpClient();
-        services.AddSingleton(static provider => new LmStudioClient(
+        services.AddSingleton(static provider => new ModelRuntimeClient(
+            provider.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(ModelRuntimeClient)),
             provider.GetRequiredService<IOptions<GoAiServerOptions>>(),
-            provider.GetRequiredService<DpapiSecretStore>(),
-            provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<LmStudioClient>>(),
-            provider.GetRequiredService<ILmStudioNativeAgentClient>()));
+            provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ModelRuntimeClient>>()));
         services.AddHttpClient<WorkerApiClient>();
         services.AddSingleton<RunProcessor>();
         if (includeHostedServices)
@@ -92,7 +85,7 @@ public static class GoAiServerHostExtensions
             webBuilder.SuppressStatusMessages(true);
             webBuilder.UseKestrel(kestrel =>
             {
-                kestrel.Listen(IPAddress.Loopback, options.GatewayPort, listen =>
+                kestrel.ListenAnyIP(options.GatewayPort, listen =>
                 {
                     listen.Protocols = HttpProtocols.Http1;
                 });
@@ -103,7 +96,6 @@ public static class GoAiServerHostExtensions
             {
                 application.UseMiddleware<ProblemDetailsMiddleware>();
                 application.UseRouting();
-                application.UseMiddleware<ApiKeyAuthenticationMiddleware>();
                 application.UseMiddleware<ApiRateLimitMiddleware>();
                 application.UseEndpoints(GatewayEndpoints.Map);
             });

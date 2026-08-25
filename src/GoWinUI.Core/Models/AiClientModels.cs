@@ -71,6 +71,17 @@ public sealed record ChatArtifact(
     DateTimeOffset CreatedAt,
     IReadOnlyDictionary<string, string>? Metadata = null);
 
+public sealed record GeneratedDocument(
+    Guid Id,
+    Guid SessionId,
+    string FileName,
+    string Format,
+    string SourceMarkdown,
+    string Sha256,
+    long Revision,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
 public sealed record GoAiRunRecord(
     Guid Id,
     Guid SessionId,

@@ -57,6 +57,41 @@ public sealed class CodingRunTraceServiceTests
     }
 
     [Fact]
+    public async Task StartingARetryAppendsToTheExistingTraceInsteadOfOverwritingIt()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var options = environment.Get<GoInfrastructureOptions>();
+        var repository = environment.Get<ICodingRunRepository>();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Coding-Retry");
+        var message = await chats.AddMessageAsync(
+            session.Id,
+            ChatRole.Assistant,
+            string.Empty,
+            MessageStatus.Streaming);
+        var localRunId = Guid.NewGuid();
+        var trace = new CodingRunTraceService(options, repository, NullLogger<CodingRunTraceService>.Instance);
+
+        await trace.StartAsync(localRunId, session.Id, message.Id, @"C:\Workspace\Demo");
+        await trace.AppendAsync(
+            localRunId,
+            "server-run-one",
+            session.Id,
+            message.Id,
+            "run",
+            "failed",
+            "Erster Versuch fehlgeschlagen");
+        await trace.StartAsync(localRunId, session.Id, message.Id, @"C:\Workspace\Demo");
+
+        var entries = await trace.GetForMessageAsync(message.Id);
+        Assert.Equal(3, entries.Count);
+        Assert.Equal([1L, 2L, 3L], entries.Select(static entry => entry.Sequence));
+        Assert.Equal("Coding-Lauf gestartet", entries[0].Title);
+        Assert.Equal("Erster Versuch fehlgeschlagen", entries[1].Title);
+        Assert.Equal("Coding-Lauf gestartet", entries[2].Title);
+    }
+
+    [Fact]
     public async Task TraceRetainsEveryEntryWhileOnlyTheWebViewViewportIsLimited()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -135,6 +170,39 @@ public sealed class CodingRunTraceServiceTests
         Assert.NotNull(second);
         Assert.Equal(revision, second.Revision);
         Assert.Single(second.Entries);
+    }
+
+    [Fact]
+    public async Task LegacyJsonlImportSkipsOrphanedMessagesAndArchivesTheFile()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var options = environment.Get<GoInfrastructureOptions>();
+        var repository = environment.Get<ICodingRunRepository>();
+        var sessionId = Guid.NewGuid();
+        var messageId = Guid.NewGuid();
+        var traceDirectory = Path.Combine(environment.Directory, "CodingRuns", "Traces");
+        Directory.CreateDirectory(traceDirectory);
+        var record = new CodingRunTraceRecord(
+            Guid.NewGuid(),
+            "run-orphaned",
+            sessionId,
+            messageId,
+            new CodingRunTraceEntry(
+                1,
+                DateTimeOffset.UtcNow,
+                "run",
+                "completed",
+                "Verwaister Legacy-Lauf"));
+        var tracePath = Path.Combine(traceDirectory, $"{messageId:N}.jsonl");
+        await File.WriteAllTextAsync(
+            tracePath,
+            JsonSerializer.Serialize(record, JsonOptions) + Environment.NewLine);
+        var service = new CodingRunTraceService(options, repository, NullLogger<CodingRunTraceService>.Instance);
+
+        Assert.Equal(0, await service.ImportLegacyAsync());
+        Assert.Null(await repository.GetLatestForSessionAsync(sessionId));
+        Assert.False(File.Exists(tracePath));
+        Assert.True(File.Exists(tracePath + ".imported"));
     }
 
     [Fact]
@@ -334,7 +402,7 @@ public sealed class CodingRunTraceServiceTests
             {
                 operation = "verify",
                 path = "proofs/cantor/formal/proof.lean",
-                theoremName = "PhyMa.Cantor.cantor_no_surj",
+                theoremName = "Example.Cantor.cantor_no_surj",
                 timeoutSeconds = 120,
             });
         var result = new ClientToolResult(
@@ -349,9 +417,9 @@ public sealed class CodingRunTraceServiceTests
                 cancelled = false,
                 leanVersion = "Lean 4.22.0",
                 lakeVersion = "Lake 5.0.0",
-                project = "PhyMa",
+                project = "ExampleProject",
                 path = "proofs/cantor/formal/proof.lean",
-                theoremName = "PhyMa.Cantor.cantor_no_surj",
+                theoremName = "Example.Cantor.cantor_no_surj",
                 exitCode = 2,
                 diagnostics = new[]
                 {
@@ -367,7 +435,7 @@ public sealed class CodingRunTraceServiceTests
                 axioms = Array.Empty<string>(),
                 forbiddenConstructs = LeanForbiddenConstructs,
                 durationMilliseconds = 913,
-                message = "Der Lean-Quelltext enthÃ¤lt unzulÃ¤ssige Beweiskonstrukte.",
+                message = "Der Lean-Quelltext enthält unzulässige Beweiskonstrukte.",
             }),
             null,
             null);
@@ -377,7 +445,7 @@ public sealed class CodingRunTraceServiceTests
 
         Assert.NotNull(running);
         Assert.Contains("proof.lean verify proofs/cantor/formal/proof.lean", running.Command, StringComparison.Ordinal);
-        Assert.Contains("-TheoremName PhyMa.Cantor.cantor_no_surj", running.Command, StringComparison.Ordinal);
+        Assert.Contains("-TheoremName Example.Cantor.cantor_no_surj", running.Command, StringComparison.Ordinal);
         Assert.Equal("verify", running.Purpose);
         Assert.NotNull(completed);
         Assert.Equal("failed", completed.Status);

@@ -1,0 +1,13 @@
+.git
+.vs
+artifacts
+**/.vs
+**/bin
+**/obj
+**/TestResults
+**/*.user
+**/*.suo
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.venv

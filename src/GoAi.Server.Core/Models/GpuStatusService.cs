@@ -21,7 +21,7 @@ public sealed class GpuStatusService
         {
             var startInfo = new ProcessStartInfo
             {
-                FileName = "nvidia-smi.exe",
+                FileName = OperatingSystem.IsWindows() ? "nvidia-smi.exe" : "nvidia-smi",
                 Arguments = "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu --format=csv,noheader,nounits",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -85,23 +85,23 @@ public sealed class GpuStatusService
 
     internal static (string DisplayName, string Runtime) DescribeWorkload(string workload) => workload switch
     {
-        "llm-general" => ("gpt-oss-20b", "LM Studio"),
-        "llm-code" => ("Coding-Agent", "LM Studio"),
+        "llm-general" => ("gpt-oss-120b", "Docker · llama.cpp"),
+        "llm-code" => ("Ausgewähltes Coding-Modell", "Docker · llama.cpp"),
         "speech-to-text" => ("Audio wird transkribiert", "Docker · Whisper STT"),
         "live-caption" => ("Sprache wird live transkribiert", "Docker · Whisper STT"),
         "live-caption-warmup" => ("Sprachmodell wird vorbereitet", "Docker · Whisper STT"),
-        "caption-translation" => ("Live-Untertitel werden übersetzt", "LM Studio · gpt-oss-20b"),
+        "caption-translation" => ("Live-Untertitel werden übersetzt", "Docker · llama.cpp · gpt-oss-120b"),
         "text-to-speech" => ("Antwort wird vorgelesen", "Docker · ausgewählte Sprachausgabe · GPU 1"),
         "image-generation" => ("Bild wird erstellt", "Docker · Image"),
         "media-analysis" => ("Medien werden analysiert", "Docker · Media"),
-        "vision" => ("Bild wird analysiert", "LM Studio · Vision"),
-        "audio-analysis" => ("Audio wird analysiert", "Docker + LM Studio"),
-        "video-audio-fusion" => ("Video und Audio werden zusammengeführt", "LM Studio · gpt-oss-20b"),
-        "embedding" => ("Kontext wird indiziert", "LM Studio · Embeddings"),
+        "vision" => ("Bild wird analysiert", "llama.cpp · Vision"),
+        "audio-analysis" => ("Audio wird analysiert", "Docker + llama.cpp"),
+        "video-audio-fusion" => ("Video und Audio werden zusammengeführt", "Docker · llama.cpp · gpt-oss-120b"),
+        "embedding" => ("Kontext wird indiziert", "llama.cpp · Embeddings"),
         "web-search" => ("Websuche wird ausgeführt", "Docker · SearXNG"),
         "youtube-search" => ("YouTube wird durchsucht", "YouTube API / SearXNG"),
-        "web-fetch" => ("Webquelle wird geladen", "GO AI Server"),
-        _ => (workload, "GO AI Server"),
+        "web-fetch" => ("Webquelle wird geladen", "Docker · Gateway"),
+        _ => (workload, "Docker · Gateway"),
     };
 
     private static GpuDeviceStatus ParseDevice(string line)
