@@ -34,6 +34,8 @@ public sealed record AgentRunCheckpoint(
     string? SelectedToolName = null,
     int RequiredToolCallRetryCount = 0,
     bool HasSuccessfulClientToolEvidence = false,
-    int FailedPatchAttemptCount = 0);
+    int FailedPatchAttemptCount = 0,
+    int CodingContinuationEpoch = 0,
+    int ConsecutiveModelTurnFailures = 0);
 
 public sealed record WorkspaceReadRange(string Path, int StartLine, int EndLine);

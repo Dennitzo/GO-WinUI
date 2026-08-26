@@ -96,9 +96,7 @@ public sealed class AgentToolCatalog
             throw new ArgumentException("A tool selector requires at least one available tool.", nameof(available));
         }
         var ordered = available.OrderBy(static tool => tool.Name, StringComparer.Ordinal).ToArray();
-        var catalog = string.Join(
-            "\n",
-            ordered.Select(static tool => $"- {tool.Name}: {BoundDescription(tool.Description)}"));
+        var catalog = string.Join("\n", ordered.Select(static tool => $"- {tool.Name}"));
         var schema = JsonSerializer.SerializeToElement(new
         {
             type = "object",
@@ -116,7 +114,7 @@ public sealed class AgentToolCatalog
         }, GoAiProtocol.CreateJsonOptions());
         return new LmToolDefinition(
             SelectorToolName,
-            "Wähle genau ein benötigtes Werkzeug aus dem kompakten Katalog. GO stellt danach ausschließlich dessen vollständiges Schema bereit.\n" + catalog,
+            "Wähle genau einen Werkzeugnamen. GO stellt im nächsten Modellturn ausschließlich Beschreibung und vollständiges Schema dieses Werkzeugs bereit.\n" + catalog,
             schema);
     }
 
@@ -131,12 +129,6 @@ public sealed class AgentToolCatalog
             throw new ArgumentException("go.selectTool requires exactly one non-empty string property named 'name'.");
         }
         return Resolve(value.GetString()!, available);
-    }
-
-    private static string BoundDescription(string description)
-    {
-        var normalized = string.Join(' ', description.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        return normalized.Length <= 180 ? normalized : normalized[..177] + "...";
     }
 
     public void Validate(AgentToolSpec tool, JsonElement arguments)

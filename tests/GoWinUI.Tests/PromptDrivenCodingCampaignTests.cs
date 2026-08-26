@@ -40,30 +40,28 @@ public sealed class PromptDrivenCodingCampaignTests
     }
 
     [Fact]
-    public void CodeSpecialistExplainsPromptDerivedWorkflowContracts()
+    public void CodeSpecialistDoesNotInjectWorkflowOrDomainGuidanceGlobally()
     {
+        var repositoryRoot = FindRepositoryRoot();
         var policy = File.ReadAllText(Path.Combine(
-            FindRepositoryRoot(),
+            repositoryRoot,
             "src",
             "GoAi.Server.Core",
             "Policies",
             "TgaAgentPolicies.cs"));
-        var guidance = File.ReadAllText(Path.Combine(
-            FindRepositoryRoot(),
+        var removedGuidancePath = Path.Combine(
+            repositoryRoot,
             "src",
             "GoAi.Server.Core",
             "Policies",
-            "CodingTaskGuidancePolicy.cs"));
+            "CodingTaskGuidancePolicy.cs");
 
-        Assert.Contains(".go-campaign/prompt-workflow.json", policy, StringComparison.Ordinal);
-        Assert.Contains("reproduzierbaren Prüfvertrag", policy, StringComparison.Ordinal);
-        Assert.Contains("Schreibe für frei formulierte Coding-Aufgaben eigene Tests", policy, StringComparison.Ordinal);
-        Assert.Contains("Workflow erstellen", policy, StringComparison.Ordinal);
-        Assert.Contains("Tabellen- und Excel-Artefakte", guidance, StringComparison.Ordinal);
-        Assert.Contains("Mathematische und physikalische Arbeit", guidance, StringComparison.Ordinal);
-        Assert.Contains("Differentialgeometrie und Relativitaet", guidance, StringComparison.Ordinal);
-        Assert.Contains("Buch-, Bericht- und PDF-Ausgabe", guidance, StringComparison.Ordinal);
-        Assert.DoesNotContain("PhyMa", guidance, StringComparison.Ordinal);
+        Assert.False(File.Exists(removedGuidancePath));
+        Assert.DoesNotContain(".go-campaign/prompt-workflow.json", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Tabellen- und Excel-Artefakte", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Mathematische und physikalische Arbeit", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Differentialgeometrie und Relativitaet", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Buch-, Bericht- und PDF-Ausgabe", policy, StringComparison.Ordinal);
     }
 
     [Fact]

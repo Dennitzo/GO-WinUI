@@ -233,8 +233,112 @@ public sealed class StagedWebResearchPipelineTests
 
         Assert.Equal("Suche Themen und Gleichungen der klassischen Mechanik.", normalized.Arguments.GetProperty("query").GetString());
         Assert.Equal("de-DE", normalized.Arguments.GetProperty("language").GetString());
-        Assert.Equal(8, normalized.Arguments.GetProperty("maximumResults").GetInt32());
+        Assert.Equal(20, normalized.Arguments.GetProperty("maximumResults").GetInt32());
         Assert.Single(diagnostics);
+    }
+
+    [Fact]
+    public async Task LargeFetchedEvidenceIsLosslesslySplitAndHierarchicallyCompacted()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest());
+        var search = catalog.Resolve("web.search", tools);
+        var fetch = catalog.Resolve("web.fetch", tools);
+        var modelRequests = new List<StagedWebResearchModelRequest>();
+        var sourceContent = string.Join(
+            "\n\n",
+            Enumerable.Range(1, 12).Select(index =>
+                $"Abschnitt {index}: " + new string((char)('a' + index % 20), 6_000)))
+            + "\n\nTAIL-EVIDENCE-MUST-SURVIVE";
+
+        var result = await StagedWebResearchPipeline.ExecuteAsync(
+            "Prüfe die vollständige Quelle.",
+            "gpt-oss-120b",
+            "code",
+            search,
+            fetch,
+            InvokeModelAsync,
+            ExecuteToolAsync,
+            catalog.Validate,
+            contextLength: 16_384);
+
+        Assert.True(modelRequests.Count > 3);
+        var compactionRequests = modelRequests
+            .Where(request => request.RequiredToolName is null
+                && request.Messages[1].Content?.Contains("Hierarchische Verdichtung:", StringComparison.Ordinal) == true)
+            .ToArray();
+        Assert.NotEmpty(compactionRequests);
+        Assert.Contains(
+            compactionRequests,
+            request => request.Messages[1].Content!.Contains("TAIL-EVIDENCE-MUST-SURVIVE", StringComparison.Ordinal));
+        Assert.DoesNotContain("[gekuerzt]", string.Join("\n", compactionRequests.SelectMany(static request => request.Messages).Select(static message => message.Content)), StringComparison.Ordinal);
+        Assert.Contains("Vollständige Evidenz wurde hierarchisch verdichtet.", result.Dossier, StringComparison.Ordinal);
+
+        Task<LmChatResult> InvokeModelAsync(
+            StagedWebResearchModelRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            modelRequests.Add(request);
+            if (request.RequiredToolName == "web.search")
+            {
+                return Task.FromResult(ToolResult(
+                    "web.search",
+                    new { query = "vollständige Quelle", maximumResults = 20, language = "de-DE" }));
+            }
+            if (request.RequiredToolName == "web.fetch")
+            {
+                return Task.FromResult(ToolResult("web.fetch", new { url = "https://example.com/large" }));
+            }
+            if (request.Messages[1].Content?.Contains("Hierarchische Verdichtung:", StringComparison.Ordinal) == true)
+            {
+                var suffix = request.Messages[1].Content!.Contains("TAIL-EVIDENCE-MUST-SURVIVE", StringComparison.Ordinal)
+                    ? " TAIL-EVIDENCE-MUST-SURVIVE"
+                    : string.Empty;
+                return Task.FromResult(new LmChatResult(
+                    "Quelle: Large | https://example.com/large | Relevante Fakten aus diesem Block." + suffix,
+                    [],
+                    500,
+                    50));
+            }
+            return Task.FromResult(new LmChatResult(
+                "Vollständige Evidenz wurde hierarchisch verdichtet.",
+                [],
+                500,
+                50));
+        }
+
+        Task<AgentToolExecutionResult> ExecuteToolAsync(
+            LmToolCall call,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(call.Name == "web.search"
+                ? Result(new WebSearchResponse(
+                    "vollständige Quelle",
+                    [new WebSearchResult("Large", "https://example.com/large", "Vollständiger Beleg")],
+                    "searxng",
+                    false,
+                    DateTimeOffset.UtcNow))
+                : Result(new WebFetchResponse(
+                    "https://example.com/large",
+                    "text/html",
+                    sourceContent,
+                    true,
+                    DateTimeOffset.UtcNow,
+                    [])));
+        }
+    }
+
+    [Fact]
+    public void EvidenceSplittingNeverDropsCharacters()
+    {
+        var source = string.Join("\n\n", Enumerable.Range(0, 200).Select(index => $"Absatz {index}: {new string('x', 73)}"));
+
+        var blocks = StagedWebResearchPipeline.SplitLosslessly(source, 512);
+
+        Assert.True(blocks.Count > 1);
+        Assert.Equal(source, string.Concat(blocks));
     }
 
     private static RunRequest CreateRequest() => new(

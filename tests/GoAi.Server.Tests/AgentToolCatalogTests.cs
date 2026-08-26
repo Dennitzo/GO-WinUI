@@ -18,6 +18,12 @@ public sealed class AgentToolCatalogTests
         var names = selector.Parameters.GetProperty("properties").GetProperty("name").GetProperty("enum");
         Assert.Equal(available.Count, names.GetArrayLength());
         Assert.DoesNotContain("maximumResults", selector.Parameters.GetRawText(), StringComparison.Ordinal);
+        Assert.All(available, tool =>
+        {
+            Assert.Contains($"- {tool.Name}", selector.Description, StringComparison.Ordinal);
+            Assert.DoesNotContain(tool.Description, selector.Description, StringComparison.Ordinal);
+        });
+        Assert.DoesNotContain(": ", selector.Description, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -33,6 +39,23 @@ public sealed class AgentToolCatalogTests
         Assert.Throws<ArgumentException>(() => catalog.ResolveSelection(
             JsonSerializer.SerializeToElement(new { name = "web.search", extra = true }),
             available));
+    }
+
+    [Fact]
+    public void ModelReceivesNamesFirstAndOnlyTheSelectedFullSchemaAfterward()
+    {
+        var catalog = new AgentToolCatalog();
+        var available = catalog.GetAvailableTools(CreateRequest(["code"]));
+        var selected = catalog.Resolve(ClientToolNames.FileSystemReadText, available);
+
+        var firstStage = Assert.Single(RunProcessor.CreateModelToolDefinitions(available, selectedToolName: null));
+        var secondStage = Assert.Single(RunProcessor.CreateModelToolDefinitions(available, selected.Name));
+
+        Assert.Equal(AgentToolCatalog.SelectorToolName, firstStage.Name);
+        Assert.DoesNotContain("startLine", firstStage.Parameters.GetRawText(), StringComparison.Ordinal);
+        Assert.Equal(selected.Name, secondStage.Name);
+        Assert.Equal(selected.Description, secondStage.Description);
+        Assert.Equal(selected.Schema.GetRawText(), secondStage.Parameters.GetRawText());
     }
 
     private static readonly string[] LeanMainArguments = ["Main.lean"];

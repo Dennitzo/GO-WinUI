@@ -15,19 +15,6 @@ public sealed class CodingAgentTests
     private static readonly string[] CheckerArguments = ["proofs/check.py"];
     private static readonly string[] FastCheckerArguments = ["proofs/check_fast.py"];
 
-    [Theory]
-    [InlineData(0, false)]
-    [InlineData(5, false)]
-    [InlineData(6, true)]
-    [InlineData(7, false)]
-    [InlineData(8, false)]
-    [InlineData(9, true)]
-    [InlineData(12, true)]
-    public void MutationProgressGuidanceIsDeterministicAndPeriodic(int rounds, bool expected)
-    {
-        Assert.Equal(expected, RunProcessor.ShouldAddCodingMutationProgressGuidance(rounds));
-    }
-
     [Fact]
     public void ReasoningOnlyResponseAtTheOutputLimitIsDetected()
     {
@@ -226,31 +213,6 @@ public sealed class CodingAgentTests
         }));
     }
 
-    [Theory]
-    [InlineData(ClientToolNames.ProcessRun, 5, 0, false)]
-    [InlineData(ClientToolNames.ProcessRun, 6, 0, true)]
-    [InlineData(ClientToolNames.ProcessRunPreset, 12, 0, true)]
-    [InlineData(ClientToolNames.ProcessRun, 12, 1, false)]
-    [InlineData(ClientToolNames.FileSystemReadText, 12, 0, false)]
-    public void MutationRunsCannotRemainInAProcessOnlyLoop(
-        string toolName,
-        int roundsWithoutMutation,
-        int mutatedPathCount,
-        bool expected)
-    {
-        var call = new LmToolCall(
-            "call-1",
-            toolName,
-            JsonSerializer.SerializeToElement(new { }));
-
-        Assert.Equal(
-            expected,
-            RunProcessor.ShouldBlockPreMutationProcessCall(
-                call,
-                roundsWithoutMutation,
-                mutatedPathCount));
-    }
-
     [Fact]
     public void RepeatedReplaceFailuresBlockOnlyTheAffectedTarget()
     {
@@ -376,7 +338,7 @@ public sealed class CodingAgentTests
             successfulToolCount: 2,
             evidencePathCount: 1,
             mutatedPathCount: 0));
-        Assert.NotNull(RunProcessor.CodingCompletionBlocker(
+        Assert.Null(RunProcessor.CodingCompletionBlocker(
             CodingRequestIntent.Analysis,
             successfulToolCount: 1,
             evidencePathCount: 0,
@@ -722,73 +684,53 @@ public sealed class CodingAgentTests
     }
 
     [Fact]
-    public void CodingPolicyAdaptsToArbitraryRepositoriesWithoutFrameworkSpecificInstructions()
+    public void CodingPolicyIsCompactGeneralAndContainsNoDomainSpecificRules()
     {
-        Assert.Contains("persistente Coding-Agent", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("native strukturierte Tool-Calls", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.DoesNotContain("web.search", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.DoesNotContain("web.fetch", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("nicht-denkenden Modus", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Unterstelle weder .NET", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Technologie- und Architekturadaption", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("purpose test, build und start", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("git.diff", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("niemals selbstständig `git add`", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Deaktiviere", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Eine bereits seit der letzten Mutation", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("widersprüchlicher Konsolenausgabe", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Führe den echten Renderer aus", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("`repository.build` ausschließlich", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("`py_compile` oder `compileall`", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Deutsch verbindlicher Standard", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Programmiersprachen-Syntax", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("beschädigte Zeichenfolgen", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Erfinde niemals einen Datei- oder Ordnerpfad", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("suggestedPaths", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Behandle einen neu geschriebenen Test, Checker oder Validator nicht automatisch als fachliche Autorität", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Ändere Produktdaten niemals nur, damit eine zu enge", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Ein Prüforakel muss vom geprüften Produktcode unabhängig sein", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Statusfeld ist selbst kein Nachweis", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Zielgröße nicht selbst als erwarteten Null-", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("Numerische Verifikation muss geschlossen fehlschlagen", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("niemals in ein Nullresiduum", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("ausnahmslos höchstens einen nativen Tool-Call", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.Contains("beende die Antwort unmittelbar", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.DoesNotContain("Button.Flyout", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.DoesNotContain("GO-WinUI", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
-        Assert.DoesNotContain("Build-Portable.ps1", GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist, StringComparison.Ordinal);
+        var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.CodeSpecialist;
+
+        Assert.InRange(policy.Length, 500, 4_000);
+        Assert.Contains("autonome Coding-Agent", policy, StringComparison.Ordinal);
+        Assert.Contains("workspace.map", policy, StringComparison.Ordinal);
+        Assert.Contains("zunächst nur ihre Namen", policy, StringComparison.Ordinal);
+        Assert.Contains("Tests und Build-/Validierungsschritte", policy, StringComparison.Ordinal);
+        Assert.Contains("belegter externer Blocker", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("TGA", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("mathematische", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("physikalische", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Ricci", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Tensor", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("OOXML", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("KaTeX", policy, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void SpreadsheetPromptReceivesFormatAndFormulaValidationWithoutNamedWorkflowRules()
+    public void SpreadsheetPromptDoesNotInjectArtifactSpecificRulesBeforeToolSelection()
     {
         var request = CreateCodingPolicyRequest(
             "Erstelle eine visuell aufbereitete Excel-Arbeitsmappe mit Formeln und Diagrammen.");
 
         var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
 
-        Assert.Contains("Tabellen- und Excel-Artefakte", policy, StringComparison.Ordinal);
-        Assert.Contains("OOXML-Formeln", policy, StringComparison.Ordinal);
-        Assert.Contains("Oeffne die erzeugte Datei", policy, StringComparison.Ordinal);
-        Assert.DoesNotContain("TGA-Lueftungsplanung", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("autonome Coding-Agent", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Tabellen- und Excel-Artefakte", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("OOXML-Formeln", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Arbeitsblaetter", policy, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ScientificPublicationPromptReceivesIndependentProofAndRenderingGates()
+    public void ScientificPublicationPromptReceivesNoAutomaticDomainPolicy()
     {
         var request = CreateCodingPolicyRequest(
             "Erstelle fortlaufend ein PDF-Lehrbuch zur Mathematik und Physik mit Lean-Beweisen und numerischen Simulationen.");
 
         var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
 
-        Assert.Contains("Promptabgeleiteter Workflow", policy, StringComparison.Ordinal);
-        Assert.Contains("Mathematische und physikalische Arbeit", policy, StringComparison.Ordinal);
-        Assert.Contains("analytische Cross-Checks", policy, StringComparison.Ordinal);
-        Assert.Contains("proof.lean", policy, StringComparison.Ordinal);
-        Assert.Contains("Buch-, Bericht- und PDF-Ausgabe", policy, StringComparison.Ordinal);
-        Assert.Contains("nicht doppelt vorkommen", policy, StringComparison.Ordinal);
-        Assert.Contains("gesamte Manuskript deutsch", policy, StringComparison.Ordinal);
-        Assert.DoesNotContain("PhyMa", policy, StringComparison.Ordinal);
+        Assert.Contains("autonome Coding-Agent", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Mathematische und physikalische Arbeit", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("analytische Cross-Checks", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Differentialgeometrie", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Buch-, Bericht- und PDF-Ausgabe", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("proof.lean", policy, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -799,26 +741,23 @@ public sealed class CodingAgentTests
 
         var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
 
-        Assert.Contains("Sprache und nutzerlesbare Artefakte", policy, StringComparison.Ordinal);
-        Assert.Contains("Markdown- und TeX-Dokumente", policy, StringComparison.Ordinal);
-        Assert.Contains("keine englischen Kapitelüberschriften", policy, StringComparison.Ordinal);
-        Assert.Contains("Eine ausdrücklich verlangte Zielsprache hat Vorrang", policy, StringComparison.Ordinal);
-        Assert.Contains("Programmiersprachen-Syntax", policy, StringComparison.Ordinal);
+        Assert.Contains("Sprache des aktuellen Prompts", policy, StringComparison.Ordinal);
+        Assert.Contains("Code, Bezeichner, APIs und Formate", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Markdown- und TeX-Dokumente", policy, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void RelativityPromptReceivesNonVacuousTensorValidationWithoutEinsteinWorkflow()
+    public void RelativityPromptReceivesNoHardCodedRelativityInstructions()
     {
         var request = CreateCodingPolicyRequest(
             "Untersuche eine Raumzeitmetrik und validiere Ricci- und Einstein-Tensor mathematisch.");
 
         var policy = GoAi.Server.Core.Policies.TgaAgentPolicies.ForConversation("code", request, []);
 
-        Assert.Contains("Differentialgeometrie und Relativitaet", policy, StringComparison.Ordinal);
-        Assert.Contains("Ein vorab auf null gesetzter Tensor", policy, StringComparison.Ordinal);
-        Assert.Contains("perturbierte", policy, StringComparison.Ordinal);
-        Assert.Contains("Negativkontrolle", policy, StringComparison.Ordinal);
-        Assert.DoesNotContain("einstein-field-equations", policy, StringComparison.Ordinal);
+        Assert.Contains("autonome Coding-Agent", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Differentialgeometrie", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Ricci", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Einstein-Tensor", policy, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -851,10 +790,10 @@ public sealed class CodingAgentTests
             ["web.search", "web.fetch"]);
 
         Assert.Contains("Gestufte Webrecherche", policy, StringComparison.Ordinal);
-        Assert.Contains("getrennten SDK-Läufen", policy, StringComparison.Ordinal);
+        Assert.Contains("hierarchische Evidenzverdichtung", policy, StringComparison.Ordinal);
         Assert.Contains("web.fetch", policy, StringComparison.Ordinal);
-        Assert.Contains("Titel und URL", policy, StringComparison.Ordinal);
-        Assert.Contains("keine Web-Werkzeugschemas", policy, StringComparison.Ordinal);
+        Assert.Contains("Titel sowie URL", policy, StringComparison.Ordinal);
+        Assert.Contains("statt der Web-Werkzeugschemas", policy, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -908,6 +847,52 @@ public sealed class CodingAgentTests
         }
 
         throw new FileNotFoundException($"Repositorydatei nicht gefunden: {relativePath}");
+    }
+
+    [Fact]
+    public void InitialCodingMessagesPlaceWorkspaceMapBeforeTheUserPrompt()
+    {
+        var request = CreateCodingPolicyRequest("Bearbeite src/App.cs.") with
+        {
+            Workspace = new WorkspaceDescriptor(
+                "workspace",
+                "fingerprint",
+                "revision",
+                "[GO_REPOSITORY_MAP_V1]\nDateien: 1 (Text: 1)\n- src/App.cs | C# | 120\n",
+                1,
+                0,
+                120,
+                DateTimeOffset.UtcNow),
+        };
+
+        var messages = RunProcessor.CreateInitialMessages(request, "code", ["fs.readText"]);
+
+        Assert.Equal(3, messages.Count);
+        Assert.Equal("system", messages[1].Role);
+        Assert.Contains("tool: workspace.map", messages[1].Content, StringComparison.Ordinal);
+        Assert.Contains("workspaceEmpty: false", messages[1].Content, StringComparison.Ordinal);
+        Assert.Contains("src/App.cs", messages[1].Content, StringComparison.Ordinal);
+        Assert.Equal("user", messages[2].Role);
+        Assert.Equal("Bearbeite src/App.cs.", messages[2].Content);
+    }
+
+    [Fact]
+    public void InitialWorkspaceMapExplicitlyMarksAnEmptyDirectory()
+    {
+        var workspace = new WorkspaceDescriptor(
+            "empty",
+            "fingerprint",
+            "revision",
+            "[GO_REPOSITORY_MAP_V1]\nDateien: 0 (Text: 0)\n",
+            0,
+            0,
+            0,
+            DateTimeOffset.UtcNow);
+
+        var context = RunProcessor.CreateInitialWorkspaceMapContext(workspace);
+
+        Assert.Contains("tool: workspace.map", context, StringComparison.Ordinal);
+        Assert.Contains("workspaceEmpty: true", context, StringComparison.Ordinal);
     }
 
     private static RunRequest CreateCodingPolicyRequest(string prompt) => new(
@@ -1402,6 +1387,20 @@ public sealed class CodingAgentTests
             47, 48, verificationRequired: false, verificationFailed: false, coreVerificationComplete: false, hasIntegratedVerifier: true));
         Assert.False(RunProcessor.ShouldForceIntegratedCodingVerification(
             47, 48, true, verificationFailed: false, coreVerificationComplete: false, hasIntegratedVerifier: false));
+    }
+
+    [Theory]
+    [InlineData(true, 96, 96, true)]
+    [InlineData(true, 9_600, 96, true)]
+    [InlineData(false, 95, 96, true)]
+    [InlineData(false, 96, 96, false)]
+    public void CodingLoopContinuesPastPerCycleRoundBudgetUntilStoppedOrCompleted(
+        bool codingRun,
+        int roundCount,
+        int maximumModelRounds,
+        bool expected)
+    {
+        Assert.Equal(expected, RunProcessor.ShouldContinueAgentLoop(codingRun, roundCount, maximumModelRounds));
     }
 
     [Theory]
