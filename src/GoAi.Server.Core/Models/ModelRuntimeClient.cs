@@ -553,22 +553,26 @@ public sealed class ModelRuntimeClient : IDisposable
     }
 
     private async Task<LmChatResult> CompleteStreamingChatWithBoundedRetryAsync(
-        object body,
+        IReadOnlyDictionary<string, object?> body,
         IReadOnlyDictionary<string, string> transportToolNames,
         Func<ModelRuntimeProgress, CancellationToken, ValueTask>? nativeProgress,
         bool structuredToolOnly,
         CancellationToken cancellationToken)
     {
         Exception? last = null;
+        string? protocolRepairTool = null;
         const int maximumAttempts = 3;
         for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
             try
             {
+                var requestBody = protocolRepairTool is null
+                    ? body
+                    : CreateToolProtocolRepairBody(body, protocolRepairTool);
                 using var response = await SendJsonAsync(
                     HttpMethod.Post,
                     "v1/chat/completions",
-                    body,
+                    requestBody,
                     cancellationToken).ConfigureAwait(false);
                 return await ParseStreamingChatResponseAsync(
                     response,
@@ -585,6 +589,9 @@ public sealed class ModelRuntimeClient : IDisposable
                 var incomplete = exception as IncompleteStreamingChatException;
                 var snapshot = incomplete?.Snapshot ?? StreamingAttemptSnapshot.Empty;
                 var failureKind = incomplete?.FailureKind ?? "transport";
+                protocolRepairTool = string.Equals(failureKind, "invalid_tool_json", StringComparison.Ordinal)
+                    ? snapshot.ToolName ?? "das ausgewählte Werkzeug"
+                    : null;
                 LogStreamingAttempt(
                     _logger,
                     attempt,
@@ -626,6 +633,34 @@ public sealed class ModelRuntimeClient : IDisposable
         throw new ModelGenerationTerminatedException("transport_retry_exhausted", last);
     }
 
+    internal static IReadOnlyDictionary<string, object?> CreateToolProtocolRepairBody(
+        IReadOnlyDictionary<string, object?> body,
+        string toolName)
+    {
+        var repaired = body.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal);
+        if (!repaired.TryGetValue("messages", out var value)
+            || value is not System.Collections.IEnumerable source)
+        {
+            return repaired;
+        }
+
+        var messages = new List<object>();
+        foreach (var item in source)
+        {
+            if (item is not null)
+            {
+                messages.Add(item);
+            }
+        }
+        messages.Add(new
+        {
+            role = "system",
+            content = $"Der vorherige Toolaufruf für '{toolName}' endete vor einem vollständigen JSON-Objekt. Wiederhole genau einen vollständigen und kompakten Toolaufruf. Begrenze große Textargumente auf höchstens 12.000 Unicode-Zeichen und schließe alle JSON-Felder sowie den Toolaufruf vollständig; eine kleinere lauffähige Arbeitsversion ist besser als abgeschnittene Ausgabe.",
+        });
+        repaired["messages"] = messages.ToArray();
+        return repaired;
+    }
+
     private static async Task<LmChatResult> ParseStreamingChatResponseAsync(
         HttpResponseMessage response,
         IReadOnlyDictionary<string, string> transportToolNames,
@@ -636,9 +671,19 @@ public sealed class ModelRuntimeClient : IDisposable
         var mediaType = response.Content.Headers.ContentType?.MediaType;
         if (!string.Equals(mediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase))
         {
-            using var document = JsonDocument.Parse(
-                await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-            return ParseChatResult(document.RootElement, transportToolNames, structuredToolOnly);
+            try
+            {
+                using var document = JsonDocument.Parse(
+                    await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+                return ParseChatResult(document.RootElement, transportToolNames, structuredToolOnly);
+            }
+            catch (JsonException exception)
+            {
+                throw new IncompleteStreamingChatException(
+                    "invalid_response_json",
+                    StreamingAttemptSnapshot.Empty,
+                    exception);
+            }
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -696,7 +741,17 @@ public sealed class ModelRuntimeClient : IDisposable
                 "premature_eof",
                 accumulator.CreateSnapshot(transportToolNames));
         }
-        return accumulator.Build(transportToolNames);
+        try
+        {
+            return accumulator.Build(transportToolNames);
+        }
+        catch (JsonException exception)
+        {
+            throw new IncompleteStreamingChatException(
+                "invalid_tool_json",
+                accumulator.CreateSnapshot(transportToolNames),
+                exception);
+        }
 
         async Task ProcessEventAsync()
         {
@@ -769,7 +824,9 @@ public sealed class ModelRuntimeClient : IDisposable
             var transportName = first?.Name.ToString();
             var logicalName = string.IsNullOrWhiteSpace(transportName)
                 ? null
-                : transportToolNames.GetValueOrDefault(transportName, transportName);
+                : TryResolveTransportToolName(transportName, transportToolNames, out var resolvedName)
+                    ? resolvedName
+                    : transportName;
             var arguments = first?.Arguments.ToString() ?? string.Empty;
             return new StreamingAttemptSnapshot(
                 GeneratedFragments,
@@ -867,9 +924,12 @@ public sealed class ModelRuntimeClient : IDisposable
                     throw new JsonException("Das Modell lieferte einen unvollständigen gestreamten Toolaufruf.");
                 }
                 using var arguments = JsonDocument.Parse(argumentsText);
+                var logicalName = TryResolveTransportToolName(name, transportToolNames, out var resolvedName)
+                    ? resolvedName
+                    : name;
                 calls.Add(new LmToolCall(
                     string.IsNullOrWhiteSpace(item.Id) ? $"call-{Guid.NewGuid():N}" : item.Id,
-                    transportToolNames.GetValueOrDefault(name, name),
+                    logicalName,
                     arguments.RootElement.Clone()));
             }
             if (calls.Count == 0
@@ -1083,11 +1143,14 @@ public sealed class ModelRuntimeClient : IDisposable
                     throw new JsonException("Das Modell lieferte einen unvollständigen Toolaufruf.");
                 }
                 using var arguments = JsonDocument.Parse(argumentsText);
+                var logicalName = TryResolveTransportToolName(name, transportToolNames, out var resolvedName)
+                    ? resolvedName
+                    : name;
                 calls.Add(new LmToolCall(
                     item.TryGetProperty("id", out var id) && !string.IsNullOrWhiteSpace(id.GetString())
                         ? id.GetString()!
                         : $"call-{Guid.NewGuid():N}",
-                    transportToolNames.GetValueOrDefault(name, name),
+                    logicalName,
                     arguments.RootElement.Clone()));
             }
         }
@@ -1244,20 +1307,68 @@ public sealed class ModelRuntimeClient : IDisposable
         IReadOnlyDictionary<string, string> transportToolNames,
         out string logicalName)
     {
+        return TryResolveTransportToolName(generatedName, transportToolNames, out logicalName);
+    }
+
+    internal static bool TryResolveTransportToolName(
+        string generatedName,
+        IReadOnlyDictionary<string, string> transportToolNames,
+        out string logicalName)
+    {
+        logicalName = string.Empty;
+        if (string.IsNullOrWhiteSpace(generatedName))
+        {
+            return false;
+        }
         if (transportToolNames.TryGetValue(generatedName, out logicalName!))
         {
             return true;
         }
-        foreach (var candidate in transportToolNames.Values)
+
+        var logicalMatches = transportToolNames.Values
+            .Where(candidate => string.Equals(candidate, generatedName, StringComparison.Ordinal))
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+        if (logicalMatches.Length == 1)
         {
-            if (string.Equals(candidate, generatedName, StringComparison.Ordinal))
-            {
-                logicalName = candidate;
-                return true;
-            }
+            logicalName = logicalMatches[0];
+            return true;
         }
-        logicalName = string.Empty;
+
+        // Some LM Studio chat templates expose the complete registered function
+        // name to the model but emit the readable part without GO's collision
+        // hash. Accept that normalization only when it identifies one schema
+        // unambiguously; otherwise the ordinary catalog validation must reject it.
+        var aliasMatches = transportToolNames
+            .Where(pair => string.Equals(
+                RemoveTransportHashSuffix(pair.Key),
+                generatedName,
+                StringComparison.Ordinal))
+            .Select(static pair => pair.Value)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+        if (aliasMatches.Length == 1)
+        {
+            logicalName = aliasMatches[0];
+            return true;
+        }
+
         return false;
+    }
+
+    private static string RemoveTransportHashSuffix(string transportName)
+    {
+        var separator = transportName.LastIndexOf('_');
+        if (separator <= 0 || transportName.Length - separator - 1 != 8)
+        {
+            return transportName;
+        }
+        var suffix = transportName[(separator + 1)..];
+        return suffix.All(static character => char.IsAsciiHexDigit(character))
+            ? transportName[..separator]
+            : transportName;
     }
 
     private static bool IsReasoningIdentifier(string value) =>

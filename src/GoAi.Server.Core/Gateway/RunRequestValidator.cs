@@ -33,9 +33,9 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("Run mode is invalid.");
         }
-        if (request.AgentProtocolVersion is not (1 or 2))
+        if (request.AgentProtocolVersion != 4)
         {
-            throw new ArgumentException("agentProtocolVersion must be 1 or 2.");
+            throw new ArgumentException("agentProtocolVersion must be 4.");
         }
         if (request.ConversationProfile is { } conversationProfile && !Enum.IsDefined(conversationProfile))
         {
@@ -151,19 +151,10 @@ public static class RunRequestValidator
             if (request.Mode != RunMode.Code
                 || string.IsNullOrWhiteSpace(workspace.Name)
                 || workspace.Name.Length > 256
-                || workspace.Fingerprint.Length != 64
-                || workspace.Revision.Length != 64
-                || workspace.RepositoryMap.Length is < 1 or > 256_000
-                || workspace.FileCount is < 0 or > 100_000
-                || workspace.TextFileCount < 0
-                || workspace.TextFileCount > workspace.FileCount
-                || workspace.TextBytes < 0)
+                || workspace.FileTree.Length is < 1 or > 256_000
+                || workspace.FileCount is < 0 or > 100_000)
             {
                 throw new ArgumentException("The coding workspace descriptor is invalid.");
-            }
-            if (!IsLowerHex(workspace.Fingerprint) || !IsLowerHex(workspace.Revision))
-            {
-                throw new ArgumentException("Workspace fingerprints must be lowercase SHA-256 values.");
             }
         }
         if (request.DocumentContext is { } documentContext)

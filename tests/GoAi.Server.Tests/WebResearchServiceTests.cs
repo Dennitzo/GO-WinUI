@@ -8,6 +8,7 @@ using GoAi.Server.Core.Runs;
 using Microsoft.Extensions.Options;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using UglyToad.PdfPig.Core;
 using UglyToad.PdfPig.Fonts.Standard14Fonts;
 using UglyToad.PdfPig.Writer;
@@ -109,7 +110,7 @@ public sealed class WebResearchServiceTests
     }
 
     [Fact]
-    public void FetchedDocumentIsBoundedBeforeItEntersCodingToolHistory()
+    public void FetchWithoutPhraseReturnsOnlyABoundedPreview()
     {
         var response = new WebFetchResponse(
             "https://example.com/large-reference",
@@ -118,12 +119,64 @@ public sealed class WebResearchServiceTests
             IsUntrusted: true,
             DateTimeOffset.UtcNow,
             []);
+        using var arguments = JsonDocument.Parse("""{"url":"https://example.com/large-reference"}""");
 
-        var trimmed = AgentToolExecutor.TrimFetch(response);
+        var targeted = AgentToolExecutor.CreateTargetedFetchResult(response, arguments.RootElement);
 
-        Assert.StartsWith(new string('x', 48_000), trimmed.Content, StringComparison.Ordinal);
-        Assert.Contains("auf 48.000 Zeichen gekürzt", trimmed.Content, StringComparison.Ordinal);
-        Assert.True(trimmed.Content.Length < 49_000);
+        Assert.Equal("query_required", targeted.State);
+        Assert.True(targeted.RequiresTargetedFetch);
+        Assert.Equal(80_000, targeted.SourceCharacters);
+        Assert.NotNull(targeted.Preview);
+        Assert.InRange(targeted.Preview!.Length, 1, 2_000);
+        Assert.Empty(targeted.Matches);
+    }
+
+    [Fact]
+    public void FetchWithPhraseReturnsOnlyBoundedMatchWindows()
+    {
+        var response = new WebFetchResponse(
+            "https://example.com/mechanics",
+            "text/plain",
+            new string('a', 10_000)
+                + " Newtons zweites Gesetz lautet Kraft gleich Masse mal Beschleunigung. "
+                + new string('z', 10_000),
+            IsUntrusted: true,
+            DateTimeOffset.UtcNow,
+            []);
+        using var arguments = JsonDocument.Parse("""
+            {"url":"https://example.com/mechanics","query":"Newtons zweites Gesetz","contextCharacters":120,"maximumCharacters":1000}
+            """);
+
+        var targeted = AgentToolExecutor.CreateTargetedFetchResult(response, arguments.RootElement);
+
+        Assert.Equal("matches_found", targeted.State);
+        Assert.True(targeted.Found);
+        var match = Assert.Single(targeted.Matches);
+        Assert.Contains("Kraft gleich Masse", match.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(new string('a', 500), match.Text, StringComparison.Ordinal);
+        Assert.Null(targeted.Preview);
+    }
+
+    [Fact]
+    public void MissingFetchPhraseIsReportedAuthoritatively()
+    {
+        var response = new WebFetchResponse(
+            "https://example.com/mechanics",
+            "text/plain",
+            "Impuls und Energie",
+            IsUntrusted: true,
+            DateTimeOffset.UtcNow,
+            []);
+        using var arguments = JsonDocument.Parse("""
+            {"url":"https://example.com/mechanics","query":"Lagrangefunktion"}
+            """);
+
+        var targeted = AgentToolExecutor.CreateTargetedFetchResult(response, arguments.RootElement);
+
+        Assert.Equal("not_present", targeted.State);
+        Assert.False(targeted.Found);
+        Assert.Equal(["Lagrangefunktion"], targeted.MissingQueries);
+        Assert.Empty(targeted.Matches);
     }
 
     [Fact]

@@ -126,7 +126,7 @@ public sealed class AssistantCoordinator(
             session.Id,
             session.AssistantMode,
             normalized,
-            WorkspaceRepositoryIndex.CreateWorkspaceFingerprint(normalized),
+            WorkspaceFileSystemView.CreateWorkspaceIdentity(normalized),
             cancellationToken).ConfigureAwait(false);
         await settings.UpdateAsync(
             current => current with { LocalToolWorkspacePath = normalized },
@@ -610,7 +610,7 @@ public sealed class AssistantCoordinator(
             session.Id,
             session.AssistantMode,
             workspace,
-            WorkspaceRepositoryIndex.CreateWorkspaceFingerprint(workspace),
+            WorkspaceFileSystemView.CreateWorkspaceIdentity(workspace),
             cancellationToken).ConfigureAwait(false);
         return (await chats.GetSessionAsync(session.Id, cancellationToken).ConfigureAwait(false))!;
     }

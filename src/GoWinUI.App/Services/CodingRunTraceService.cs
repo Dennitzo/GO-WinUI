@@ -178,11 +178,6 @@ public sealed class CodingRunTraceService
             return null;
         }
 
-        if (string.Equals(proposal.Name, ClientToolNames.FileSystemReadMany, StringComparison.Ordinal))
-        {
-            return ExtractReadManyTarget(proposal.Arguments);
-        }
-
         if (string.Equals(proposal.Name, ClientToolNames.FileSystemFindFiles, StringComparison.Ordinal))
         {
             return ExtractFindFilesTarget(proposal.Arguments);

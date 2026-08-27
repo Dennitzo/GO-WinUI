@@ -109,7 +109,6 @@ public sealed class GoAiAssistantService(
     DocumentContextPreparationService documentContexts,
     SessionContextPreparationService sessionContexts,
     LocalToolBroker toolBroker,
-    WorkspaceRepositoryIndex repositoryIndex,
     CodingDiffService codingDiffs,
     CodingRunTraceService codingTrace,
     SystemAudioCaptionService liveCaptions,
@@ -1108,7 +1107,7 @@ public sealed class GoAiAssistantService(
                         "diff",
                         "failed",
                         "Codeänderungs-Baseline nicht verfügbar",
-                        "Der Coding-Lauf wird fortgesetzt, aber Laufänderungen können nicht sicher als Git-Diff dargestellt werden.",
+                        "Der Coding-Lauf wird fortgesetzt, aber direkte Vorher-/Nachher-Diffs können für diesen Workspace nicht gespeichert werden.",
                         cancellationToken: cancellationToken).ConfigureAwait(false);
                 }
                 await update(new(
@@ -1343,10 +1342,6 @@ public sealed class GoAiAssistantService(
 
         return exception switch
         {
-            // Coding runs are workspace based. A fresh run sees every already committed
-            // tool change and can therefore continue the exact prompt after any terminal
-            // model/process failure, including a verification or turn-limit failure.
-            GoAiRunTerminalException when action == PromptTriggerAction.Code => true,
             GoAiRunTerminalException terminal => terminal.Retryable,
             GoAiStreamDisconnectedException => true,
             TimeoutException => true,
@@ -1369,7 +1364,6 @@ public sealed class GoAiAssistantService(
         or "session.context_preparation_failed"
         or "general.context_budget"
         or "coding.context_unavailable"
-        or "coding.empty_response"
         or "provider.generation_terminated"
         or "provider.http_failed"
         or "run.timeout"
@@ -1715,7 +1709,6 @@ public sealed class GoAiAssistantService(
                                     : "running",
                                 CodingAgentPhaseTitle(phase.Phase),
                                 phase.Detail,
-                                target: phase.WorkspaceRevision,
                                 serverEventId: item.Id,
                                 traceCancellationToken: cancellationToken).ConfigureAwait(false);
                         }
@@ -1730,7 +1723,7 @@ public sealed class GoAiAssistantService(
                                 $"Aktion {action.Sequence:N0}: {action.Tool} / {action.Operation}",
                                 string.Join(
                                     " · ",
-                                    new[] { action.Target, action.ActionId, $"Revision {action.WorkspaceRevision}" }
+                                    new[] { action.Target, action.ActionId }
                                         .Where(static value => !string.IsNullOrWhiteSpace(value))),
                                 tool: action.Tool,
                                 target: action.Target,
@@ -1750,41 +1743,42 @@ public sealed class GoAiAssistantService(
                                     " · ",
                                     new[]
                                     {
-                                        observation.ErrorCode ?? observation.EvidenceId,
+                                        observation.ErrorCode ?? observation.Message,
                                         observation.ActionId,
-                                        observation.CacheHit ? "Cachetreffer" : null,
-                                        $"Revision {observation.WorkspaceRevision}",
                                     }.Where(static value => !string.IsNullOrWhiteSpace(value))),
-                                target: observation.EvidenceId,
                                 serverEventId: item.Id,
                                 traceCancellationToken: cancellationToken).ConfigureAwait(false);
                         }
                         break;
-                    case RunEventTypes.AgentCacheChanged:
-                        var cache = item.Data.Deserialize<AgentCacheChangedEvent>(JsonOptions);
-                        if (cache is not null)
+                    case RunEventTypes.CodingStepChanged:
+                        var codingStep = item.Data.Deserialize<CodingStepChangedEvent>(JsonOptions);
+                        if (codingStep is not null)
                         {
+                            var metrics = codingStep.Step.Context is null
+                                ? null
+                                : $"Kontext {codingStep.Step.Context.EstimatedInputTokens:N0}/{codingStep.Step.Context.MaximumInputTokens:N0} Token · Ausgabe {codingStep.Step.Context.OutputTokens:N0}/{codingStep.Step.Context.MaximumOutputTokens:N0} Token";
+                            var stepDetail = string.Join(
+                                " · ",
+                                new[]
+                                {
+                                    codingStep.Step.Goal,
+                                    codingStep.Step.Tool,
+                                    codingStep.Step.Target,
+                                    metrics,
+                                    codingStep.Step.Detail,
+                                }.Where(static value => !string.IsNullOrWhiteSpace(value)));
                             await TraceCodingAsync(
-                                "agentCache",
-                                "completed",
-                                CodingAgentCacheTitle(cache.Cache, cache.Hit),
-                                $"{cache.Cache} · {cache.Key} · Revision {cache.WorkspaceRevision}",
-                                target: cache.Key,
-                                serverEventId: item.Id,
-                                traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                        }
-                        break;
-                    case RunEventTypes.AgentVerificationChanged:
-                        var verification = item.Data.Deserialize<AgentVerificationChangedEvent>(JsonOptions);
-                        if (verification is not null)
-                        {
-                            await TraceCodingAsync(
-                                "agentVerification",
-                                verification.Succeeded ? "completed" : "failed",
-                                verification.Succeeded ? "Prüfung verifiziert" : "Prüfung fehlgeschlagen",
-                                verification.Summary,
-                                tool: verification.Kind,
-                                target: verification.Target,
+                                "codingStep",
+                                codingStep.Step.Status switch
+                                {
+                                    CodingStepStatus.Completed => "completed",
+                                    CodingStepStatus.Failed or CodingStepStatus.Blocked => "failed",
+                                    _ => "running",
+                                },
+                                $"Schritt {codingStep.Step.Sequence:N0}: {codingStep.Step.Kind}",
+                                stepDetail,
+                                tool: codingStep.Step.Tool,
+                                target: codingStep.Step.Target,
                                 serverEventId: item.Id,
                                 traceCancellationToken: cancellationToken).ConfigureAwait(false);
                         }
@@ -2033,7 +2027,7 @@ public sealed class GoAiAssistantService(
                                 await TraceCodingAsync(
                                     "diff",
                                     "completed",
-                                    "Git-Diff aktualisiert",
+                                    "Codeänderungen aktualisiert",
                                     diff.FileCount == 0
                                         ? "Keine verbleibenden \u00C4nderungen dieses Laufs."
                                         : $"{diff.FileCount:N0} Dateien \u00B7 +{diff.AddedLines:N0} \u00B7 \u2212{diff.DeletedLines:N0}",
@@ -2311,6 +2305,7 @@ public sealed class GoAiAssistantService(
                 localRun.SessionId,
                 localRun.AssistantMessageId,
                 localRun.Action == PromptTriggerAction.Code,
+                localRun.Id,
                 cancellationToken).ConfigureAwait(false);
             var json = JsonSerializer.Serialize(result, JsonOptions);
             _ = await toolExecutions.CompleteAsync(proposal.ProposalId, json, CancellationToken.None).ConfigureAwait(false);
@@ -2362,12 +2357,10 @@ public sealed class GoAiAssistantService(
             {
                 ClientToolNames.DocumentRead => "Dokument konnte nicht gelesen werden",
                 ClientToolNames.DocumentCreate => "Dokument konnte nicht aktualisiert werden",
-                ClientToolNames.WorkspaceMap => "Workspace konnte nicht analysiert werden",
                 ClientToolNames.FileSystemList => "Ordner konnte nicht gelesen werden",
                 ClientToolNames.FileSystemStat => "Dateistatus konnte nicht gelesen werden",
                 ClientToolNames.FileSystemFindFiles => "Dateisuche fehlgeschlagen",
                 ClientToolNames.FileSystemReadText => "Datei konnte nicht gelesen werden",
-                ClientToolNames.FileSystemReadMany => "Dateien konnten nicht gelesen werden",
                 ClientToolNames.FileSystemSearch => "Quelltextsuche fehlgeschlagen",
                 ClientToolNames.FileSystemWriteText => "Datei konnte nicht geschrieben werden",
                 ClientToolNames.FileSystemReplaceText => "Datei konnte nicht ge\u00E4ndert werden",
@@ -2395,28 +2388,14 @@ public sealed class GoAiAssistantService(
         _ => "Coding-Agent aktualisiert",
     };
 
-    internal static string CodingAgentCacheTitle(string cache, bool hit)
-    {
-        var name = cache switch
-        {
-            "workspace" => "Workspacecache",
-            "research" => "Recherchecache",
-            "artifact" => "Artefaktcache",
-            _ => "Toolcache",
-        };
-        return hit ? $"{name} verwendet" : $"{name} aktualisiert";
-    }
-
     private static string CodingToolSuccessTitle(string toolName, bool completed) => toolName switch
     {
         ClientToolNames.DocumentRead => completed ? "Dokument gelesen" : "Dokument wird gelesen",
         ClientToolNames.DocumentCreate => completed ? "Dokument aktualisiert" : "Dokument wird aktualisiert",
-        ClientToolNames.WorkspaceMap => completed ? "Workspace analysiert" : "Workspace wird analysiert",
         ClientToolNames.FileSystemList => completed ? "Ordner gelesen" : "Ordner wird gelesen",
         ClientToolNames.FileSystemStat => completed ? "Dateistatus gelesen" : "Dateistatus wird gelesen",
         ClientToolNames.FileSystemFindFiles => completed ? "Dateien gefunden" : "Dateien werden gesucht",
         ClientToolNames.FileSystemReadText => completed ? "Datei gelesen" : "Datei wird gelesen",
-        ClientToolNames.FileSystemReadMany => completed ? "Dateien gelesen" : "Dateien werden gelesen",
         ClientToolNames.FileSystemSearch => completed ? "Quelltext durchsucht" : "Quelltext wird durchsucht",
         ClientToolNames.FileSystemWriteText => completed ? "Datei geschrieben" : "Datei wird geschrieben",
         ClientToolNames.FileSystemReplaceText => completed ? "Datei ge\u00E4ndert" : "Datei wird ge\u00E4ndert",
@@ -2726,27 +2705,26 @@ public sealed class GoAiAssistantService(
                 cancellationToken).ConfigureAwait(false);
         }
 
-        var sessionContext = coding
-            ? SessionContextPreparationService.CreateCurrentPromptOnlyCodingContext(codingContextLimit)
-            : await sessionContexts.PrepareAsync(
-                client,
-                sessionId,
-                historyBeforePrompt,
-                originalPrompt,
-                preferredGeneralModel,
-                coding: false,
-                contextProfile,
-                knownContextLength: documentContext?.ContextLength,
-                knownHistoryBudgetCharacters: documentContext?.HistoryBudgetCharacters,
-                async progress => await update(new(
-                    GoAiAssistantUpdateKind.Status,
-                    assistant,
-                    Status: progress.Status,
-                    Detail: progress.Detail,
-                    Model: preferredGeneralModel,
-                    ContextLimit: documentContext?.ContextLength,
-                    ContextWasCompacted: true)).ConfigureAwait(false),
-                cancellationToken).ConfigureAwait(false);
+        var selectedContextModel = coding ? preferredCodeModel! : preferredGeneralModel;
+        var sessionContext = await sessionContexts.PrepareAsync(
+            client,
+            sessionId,
+            historyBeforePrompt,
+            originalPrompt,
+            selectedContextModel,
+            coding,
+            contextProfile,
+            knownContextLength: coding ? codingContextLimit : documentContext?.ContextLength,
+            knownHistoryBudgetCharacters: coding ? null : documentContext?.HistoryBudgetCharacters,
+            async progress => await update(new(
+                GoAiAssistantUpdateKind.Status,
+                assistant,
+                Status: progress.Status,
+                Detail: progress.Detail,
+                Model: selectedContextModel,
+                ContextLimit: coding ? codingContextLimit : documentContext?.ContextLength,
+                ContextWasCompacted: true)).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
         var messages = sessionContext.Messages.ToList();
 
         var hasAudiobookHistory = historyBeforePrompt.Any(static message =>
@@ -2783,34 +2761,22 @@ public sealed class GoAiAssistantService(
             await update(new(
                 GoAiAssistantUpdateKind.Status,
                 assistant,
-                Status: "Repository wird indiziert",
+                Status: "Workspace wird gelesen",
                 Detail: Path.GetFileName(workspacePath),
                 ContextLimit: codingContextLimit)).ConfigureAwait(false);
-            var snapshot = await repositoryIndex.GetSnapshotForRunAsync(workspacePath, cancellationToken).ConfigureAwait(false);
-            var orientation = await repositoryIndex.BuildOrientationContextAsync(
-                snapshot,
-                originalPrompt,
-                maximumCharacters: 9_000,
-                cancellationToken).ConfigureAwait(false);
-            var map = WorkspaceRepositoryIndex.BuildRepositoryContextV2(snapshot, orientation);
+            cancellationToken.ThrowIfCancellationRequested();
+            var snapshot = WorkspaceFileSystemView.BuildTree(workspacePath);
+            var map = snapshot.Tree;
             workspaceDescriptor = new WorkspaceDescriptor(
                 Path.GetFileName(snapshot.Root),
-                snapshot.WorkspaceFingerprint,
-                snapshot.RevisionFingerprint,
                 map,
-                snapshot.Entries.Count,
-                snapshot.TextFileCount,
-                snapshot.TextBytes,
-                snapshot.IndexedAt,
+                snapshot.FileCount,
                 snapshot.IsTruncated);
-            latestParts.Add(new ContentPart(
-                "text",
-                Text: $"[GO_WORKSPACE]\nDer dauerhaft an diese Sitzung gebundene Workspace '{Path.GetFileName(workspacePath)}' ist aktiv. Verwende relative Pfade ab '.'. Nutze ausschließlich die sechs Coding-Agent-Werkzeuge und fordere weitere Quellbelege gezielt mit workspace.inspect an."));
             await update(new(
                 GoAiAssistantUpdateKind.Status,
                 assistant,
-                Status: "Repository bereit",
-                Detail: $"{snapshot.Entries.Count:N0} Dateien indiziert · {codingModelDisplayName}",
+                Status: "Workspace bereit",
+                Detail: $"{snapshot.FileCount:N0} Dateien aufgelistet · {codingModelDisplayName}",
                 ContextUsed: EstimateRequestTokens(messages, latestParts, map),
                 ContextLimit: codingContextLimit,
                 LoadedFiles: 0)).ConfigureAwait(false);
@@ -2864,10 +2830,10 @@ public sealed class GoAiAssistantService(
             PreferredGeneralModelId: coding ? null : preferredGeneralModel,
             PreferredCodeModelId: coding ? preferredCodeModel : null,
             DocumentContext: documentContext?.Descriptor,
-            SessionContext: coding ? null : sessionContext.Descriptor,
+            SessionContext: sessionContext.Descriptor,
             ConversationProfile: audiobook ? ConversationProfile.Audiobook : ConversationProfile.General,
             ReasoningEffort: null,
-            AgentProtocolVersion: 2);
+            AgentProtocolVersion: 4);
     }
 
     internal static string? ResolvePreferredModel(AppSettings current, bool coding) =>
@@ -2947,42 +2913,7 @@ public sealed class GoAiAssistantService(
         _ => ["math.evaluate", "context.embed", "context.retrieve"],
     };
 
-    internal static string BuildCodingPrompt(string prompt)
-    {
-        var task = prompt.Trim();
-        var directives = new List<string>();
-        if (ContainsCodingPdfDirective(task))
-        {
-            directives.Add(
-                "Dieser Coding-Auftrag betrifft ausdr\u00FCcklich PDF. Pflege daf\u00FCr zuerst eine textuelle Quelle im Workspace "
-                + "als Markdown, Text, TeX oder JSON und schreibe mathematische Ausdr\u00FCcke KaTeX-kompatibel mit $...$ "
-                + "beziehungsweise $$...$$. GO erzeugt und validiert das PDF nach der Quellen\u00E4nderung deterministisch; rufe "
-                + "daf\u00FCr kein PDF-Werkzeug auf und schreibe keine PDF-Datei mit Textwerkzeugen. Verwende weder ReportLab noch "
-                + "eigene HTML-/CDN-/Browser- oder Klartext-PDF-Skripte.");
-        }
-        if (directives.Count == 0)
-        {
-            return task;
-        }
-
-        return string.Join("\n\n", directives)
-            + "\n\n"
-            + "Coding-Auftrag:\n"
-            + task;
-    }
-
-    internal static bool ContainsCodingPdfDirective(string prompt)
-    {
-        if (string.IsNullOrWhiteSpace(prompt))
-        {
-            return false;
-        }
-
-        return Regex.IsMatch(
-            prompt,
-            @"(?<![\p{L}\p{N}])pdf(?:s)?(?![\p{L}\p{N}])",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-    }
+    internal static string BuildCodingPrompt(string prompt) => prompt.Trim();
 
     internal static bool ContainsWebResearchDirective(string? prompt)
     {
@@ -3375,9 +3306,9 @@ public sealed class GoAiAssistantService(
     private static int EstimateRequestTokens(
         IReadOnlyList<RunMessage> messages,
         IReadOnlyList<ContentPart> latestParts,
-        string repositoryMap)
+        string fileTree)
     {
-        var characters = repositoryMap.Length
+        var characters = fileTree.Length
             + messages.SelectMany(static message => message.Content).Sum(static part => part.Text?.Length ?? 0)
             + latestParts.Sum(static part => part.Text?.Length ?? 0);
         return Math.Max(1, (characters + 2) / 3);

@@ -87,6 +87,100 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Fact]
+    public void HashlessLmStudioToolAliasResolvesOnlyWhenUnambiguous()
+    {
+        var webFetch = ModelRuntimeClient.ToTransportToolName("web.fetch");
+        var tools = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [webFetch] = "web.fetch",
+        };
+
+        Assert.True(ModelRuntimeClient.TryResolveTransportToolName(
+            "go_web_fetch",
+            tools,
+            out var logicalName));
+        Assert.Equal("web.fetch", logicalName);
+
+        tools[ModelRuntimeClient.ToTransportToolName("web_fetch")] = "web_fetch";
+        Assert.False(ModelRuntimeClient.TryResolveTransportToolName(
+            "go_web_fetch",
+            tools,
+            out _));
+    }
+
+    [Fact]
+    public void HashlessLmStudioReasoningEnvelopeResolvesToLogicalToolName()
+    {
+        var tools = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [ModelRuntimeClient.ToTransportToolName("web.fetch")] = "web.fetch",
+        };
+
+        var parsed = ModelRuntimeClient.TryParseReasoningToolCall(
+            "<tool_call><function=go_web_fetch><parameter=url>https://example.test</parameter></function></tool_call>",
+            tools,
+            out var call);
+
+        Assert.True(parsed);
+        Assert.Equal("web.fetch", call.Name);
+        Assert.Equal("https://example.test", call.Arguments.GetProperty("url").GetString());
+    }
+
+    [Fact]
+    public void FragmentedQwen38ReasoningEnvelopeResolvesLikeLmStudioOutput()
+    {
+        var tools = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [ModelRuntimeClient.ToTransportToolName("web.fetch")] = "web.fetch",
+        };
+        var reasoning = """
+            <tool_call>
+            <function=go_web_fetch>
+            <parameter=url>
+            https://de.wikibooks.org/wiki/Formelsammlung_Physik:_Klassische_Mechanik
+            </parameter>
+            </function>
+            </tool_call>
+            """;
+
+        var parsed = ModelRuntimeClient.TryParseReasoningToolCall(
+            reasoning,
+            tools,
+            out var call);
+
+        Assert.True(parsed);
+        Assert.Equal("web.fetch", call.Name);
+        Assert.Equal(
+            "https://de.wikibooks.org/wiki/Formelsammlung_Physik:_Klassische_Mechanik",
+            call.Arguments.GetProperty("url").GetString());
+    }
+
+    [Fact]
+    public void InvalidToolJsonRetryAddsOneCompactProtocolRepairInstruction()
+    {
+        var body = new Dictionary<string, object?>
+        {
+            ["model"] = "coder-instance",
+            ["messages"] = new object[]
+            {
+                new { role = "system", content = "Kurz." },
+                new { role = "user", content = "Erstelle Physik.py." },
+            },
+            ["stream"] = true,
+        };
+
+        var repaired = ModelRuntimeClient.CreateToolProtocolRepairBody(body, "fs.proposeCreate");
+        var messages = Assert.IsType<object[]>(repaired["messages"]);
+        Assert.Equal(3, messages.Length);
+        var repair = JsonSerializer.Serialize(messages[^1]);
+
+        Assert.Contains("fs.proposeCreate", repair, StringComparison.Ordinal);
+        Assert.Contains("12.000", repair, StringComparison.Ordinal);
+        Assert.Equal("coder-instance", repaired["model"]);
+        Assert.Equal(2, Assert.IsType<object[]>(body["messages"]).Length);
+    }
+
+    [Fact]
     public void NativeLmStudioCatalogParsesCapabilitiesWithoutKnownModelIds()
     {
         using var document = JsonDocument.Parse("""

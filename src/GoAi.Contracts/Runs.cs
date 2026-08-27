@@ -58,7 +58,7 @@ public sealed record RunRequest(
     SessionContextDescriptor? SessionContext = null,
     ConversationProfile? ConversationProfile = null,
     string? ReasoningEffort = null,
-    int AgentProtocolVersion = 2);
+    int AgentProtocolVersion = 4);
 
 public sealed record DocumentContextDescriptor(
     DocumentContextMode Mode,
@@ -78,13 +78,8 @@ public sealed record SessionContextDescriptor(
 
 public sealed record WorkspaceDescriptor(
     string Name,
-    string Fingerprint,
-    string Revision,
-    string RepositoryMap,
+    string FileTree,
     int FileCount,
-    int TextFileCount,
-    long TextBytes,
-    DateTimeOffset IndexedAt,
     bool IsTruncated = false);
 
 public sealed record RunWorkload(
@@ -154,11 +149,10 @@ public static class RunEventTypes
     public const string AgentPhaseChanged = "agent.phase_changed";
     public const string AgentActionStarted = "agent.action_started";
     public const string AgentObservationCommitted = "agent.observation_committed";
-    public const string AgentVerificationChanged = "agent.verification_changed";
-    public const string AgentCacheChanged = "agent.cache_changed";
     public const string AgentMessageStarted = "agent.message_started";
     public const string AgentMessageDelta = "agent.message_delta";
     public const string AgentMessageCompleted = "agent.message_completed";
+    public const string CodingStepChanged = "coding.step_changed";
     public const string TextDelta = "text.delta";
     public const string ServerToolStarted = "server_tool.started";
     public const string ServerToolCompleted = "server_tool.completed";

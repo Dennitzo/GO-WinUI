@@ -242,20 +242,6 @@ public sealed class CodingRunTraceServiceTests
             "fs.readFile",
             ToolRiskClass.ReadOnly,
             new { path = "README.md" });
-        var readMany = Proposal(
-            ClientToolNames.FileSystemReadMany,
-            ToolRiskClass.ReadOnly,
-            new
-            {
-                items = new object[]
-                {
-                    new { path = "src/App.xaml.cs", startLine = 20, endLine = 40 },
-                    new { path = "src/MainWindow.xaml" },
-                    new { path = "tests/AppTests.cs", startLine = 5 },
-                    new { path = "README.md" },
-                    new { path = "docs/Architecture.md" },
-                },
-            });
         var findFiles = Proposal(
             ClientToolNames.FileSystemFindFiles,
             ToolRiskClass.ReadOnly,
@@ -274,11 +260,6 @@ public sealed class CodingRunTraceServiceTests
         Assert.Equal("src/GoWinUI.App", CodingRunTraceService.ExtractTarget(listDirectory));
         Assert.Equal("src/App.xaml.cs:20-40", CodingRunTraceService.ExtractTarget(readText));
         Assert.Equal("README.md", CodingRunTraceService.ExtractTarget(legacyReadFile));
-        var readManyTarget = CodingRunTraceService.ExtractTarget(readMany);
-        Assert.NotNull(readManyTarget);
-        Assert.Contains("src/App.xaml.cs:20-40", readManyTarget, StringComparison.Ordinal);
-        Assert.Contains("src/MainWindow.xaml", readManyTarget, StringComparison.Ordinal);
-        Assert.Contains("(+1 weitere)", readManyTarget, StringComparison.Ordinal);
         var findTarget = CodingRunTraceService.ExtractTarget(findFiles);
         Assert.NotNull(findTarget);
         Assert.Contains("src: *.cs, *.xaml, *.md, *.json", findTarget, StringComparison.Ordinal);
@@ -495,9 +476,7 @@ public sealed class CodingRunTraceServiceTests
         using var confirmation = new ToolConfirmationService(null!);
         var tools = new (string Name, ToolRiskClass Risk)[]
         {
-            (ClientToolNames.WorkspaceMap, ToolRiskClass.ReadOnly),
             (ClientToolNames.FileSystemReadText, ToolRiskClass.ReadOnly),
-            (ClientToolNames.FileSystemReadMany, ToolRiskClass.ReadOnly),
             (ClientToolNames.FileSystemSearch, ToolRiskClass.ReadOnly),
             (ClientToolNames.FileSystemWriteText, ToolRiskClass.LocalMutation),
             (ClientToolNames.FileSystemReplaceText, ToolRiskClass.LocalMutation),

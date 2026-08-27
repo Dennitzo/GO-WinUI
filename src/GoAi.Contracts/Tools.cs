@@ -41,13 +41,10 @@ public static class ClientToolNames
     public const string DocumentsList = "documents.list";
     public const string DocumentsSearch = "documents.search";
     public const string DocumentsReadPages = "documents.readPages";
-    public const string WorkspaceMap = "workspace.map";
-    public const string WorkspaceIndexQuery = "workspace.index.query";
     public const string FileSystemList = "fs.list";
     public const string FileSystemStat = "fs.stat";
     public const string FileSystemFindFiles = "fs.findFiles";
     public const string FileSystemReadText = "fs.readText";
-    public const string FileSystemReadMany = "fs.readMany";
     public const string FileSystemSearch = "fs.search";
     public const string FileSystemWriteText = "fs.writeText";
     public const string FileSystemReplaceText = "fs.replaceText";

@@ -17,7 +17,7 @@ public sealed class AiClientPersistenceTests
         var repository = environment.Get<IChatRepository>();
         var workspace = Path.Combine(environment.Directory, "arbitrary-language-workspace");
         Directory.CreateDirectory(workspace);
-        var fingerprint = WorkspaceRepositoryIndex.CreateWorkspaceFingerprint(workspace);
+        var fingerprint = WorkspaceFileSystemView.CreateWorkspaceIdentity(workspace);
         var session = await repository.CreateSessionAsync("Coding");
 
         await repository.SetAssistantContextAsync(

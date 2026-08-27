@@ -64,18 +64,41 @@ public sealed class RunRequestValidatorTests
             Limits: new RunLimits(8_192, 262_144, 14_400),
             Workspace: new WorkspaceDescriptor(
                 "GO-WinUI",
-                new string('a', 64),
-                new string('b', 64),
                 "[GO_REPOSITORY_MAP_V1]\n- windows/build.ps1",
                 42,
-                40,
-                123_456,
-                DateTimeOffset.UtcNow));
+                IsTruncated: false));
 
         RunRequestValidator.Validate(request);
 
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
             request with { Limits = request.Limits! with { TimeoutSeconds = 14_401 } }));
+    }
+
+    [Fact]
+    public void CodingRunAcceptsPreparedOrExactSessionHistoryDescriptor()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [
+                new RunMessage("user", [new ContentPart("text", "Vorheriger Auftrag")]),
+                new RunMessage("assistant", [new ContentPart("text", "Vorherige Antwort")]),
+                new RunMessage("user", [new ContentPart("text", "Aktueller Auftrag")]),
+            ],
+            ClientCapabilities: ["code"],
+            Workspace: new WorkspaceDescriptor("Workspace", "- README.md", 1),
+            SessionContext: new SessionContextDescriptor(
+                new string('a', 64),
+                OriginalMessageCount: 2,
+                IncludedMessageCount: 2,
+                EstimatedTokens: 12,
+                PreparedByAi: false));
+
+        RunRequestValidator.Validate(request);
+        RunRequestValidator.Validate(request with
+        {
+            SessionContext = request.SessionContext! with { PreparedByAi = true },
+        });
     }
 
     [Fact]

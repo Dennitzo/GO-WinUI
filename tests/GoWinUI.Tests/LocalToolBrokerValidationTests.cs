@@ -1,13 +1,21 @@
 using GoAi.Contracts;
 using GoWinUI.App.Services;
 using GoWinUI.BricsCad.Protocol;
-using GoWinUI.Infrastructure;
 using System.Text.Json;
 
 namespace GoWinUI.Tests;
 
 public sealed class LocalToolBrokerValidationTests
 {
+    [Fact]
+    public void ToolTextNormalizationRemovesOnlyIsolatedSurrogates()
+    {
+        var normalized = LocalToolBroker.NormalizeUnicodeScalarText(
+            "Quelle \udc81 und Emoji \ud83d\ude80 bleiben lesbar");
+
+        Assert.Equal("Quelle  und Emoji \ud83d\ude80 bleiben lesbar", normalized);
+    }
+
     [Theory]
     [InlineData("/")]
     [InlineData(".")]
@@ -19,10 +27,26 @@ public sealed class LocalToolBrokerValidationTests
         Assert.Equal(".", LocalToolBroker.NormalizeWorkspaceAlias(value));
     }
 
+    [Theory]
+    [InlineData("fs.list")]
+    [InlineData("fs.stat")]
+    public void ReadOnlyWorkspaceInspectionNeedsOnlyThePathDeclaredByItsSchema(string toolName)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var proposal = Create(
+            toolName,
+            ToolRiskClass.ReadOnly,
+            new { path = "." },
+            now);
+
+        LocalToolBroker.ValidateProposal(proposal, now);
+    }
+
     private static readonly string[] VersionArguments = ["--version"];
     private static readonly string[] LeanMainArguments = ["Main.lean"];
     private static readonly string[] VoiceSearchTerms = ["voice", "speech", "SpeechRecognition"];
     private static readonly string[] AllFilesGlob = ["**/*"];
+    private static readonly string[] CSharpFilesGlob = ["*.cs"];
 
     [Fact]
     public void SharedDocumentContractsAreAcceptedLocally()
@@ -479,7 +503,7 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Fact]
-    public void MultiSearchAndArbitraryFileExtensionsAreAccepted()
+    public void SearchAndArbitraryFileExtensionsAreAccepted()
     {
         var now = DateTimeOffset.UtcNow;
         var search = Create(
@@ -495,16 +519,9 @@ public sealed class LocalToolBrokerValidationTests
             },
             now);
         var read = Create(
-            ClientToolNames.FileSystemReadMany,
+            ClientToolNames.FileSystemReadText,
             ToolRiskClass.ReadOnly,
-            new
-            {
-                items = new[]
-                {
-                    new { path = "firmware/main.zig", startLine = 1, endLine = 500 },
-                    new { path = "config/toolchain.customlang", startLine = 1, endLine = 500 },
-                },
-            },
+            new { path = "config/toolchain.customlang", startLine = 1, endLine = 500 },
             now);
 
         LocalToolBroker.ValidateProposal(search, now);
@@ -548,18 +565,10 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Fact]
-    public void MissingReadPathSuggestionsComeOnlyFromActuallyIndexedTextFiles()
+    public void MissingReadPathSuggestionsComeOnlyFromExistingTextFiles()
     {
-        var now = DateTimeOffset.UtcNow;
-        WorkspaceIndexEntry Entry(string path, bool binary = false) => new(
-            path,
-            100,
-            now,
-            new string('a', 64),
-            binary,
-            true,
-            binary ? "binary" : "markdown");
-        WorkspaceIndexEntry[] entries =
+        WorkspacePathEntry Entry(string path, bool binary = false) => new(path, false, binary, 100);
+        WorkspacePathEntry[] entries =
         [
             Entry("docs/harmonic_oscillator.md"),
             Entry("chapters/harmonic-oscillator-de.md"),
@@ -580,18 +589,11 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Fact]
-    public void MissingReadPathWithoutEvidenceDoesNotInventASuggestion()
+    public void MissingReadPathWithoutMatchingFilesDoesNotInventASuggestion()
     {
-        WorkspaceIndexEntry[] entries =
+        WorkspacePathEntry[] entries =
         [
-            new(
-                "src/App.cs",
-                100,
-                DateTimeOffset.UtcNow,
-                new string('a', 64),
-                false,
-                true,
-                "csharp"),
+            new("src/App.cs", false, false, 100),
         ];
 
         var suggestions = LocalToolBroker.FindWorkspacePathSuggestions(
@@ -608,10 +610,6 @@ public sealed class LocalToolBrokerValidationTests
         var chapterDirectory = Path.Combine(root, "chapters");
         Directory.CreateDirectory(chapterDirectory);
         await File.WriteAllTextAsync(Path.Combine(chapterDirectory, "harmonic-oscillator-de.md"), "# Harmonischer Oszillator");
-        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions
-        {
-            DataDirectory = Path.Combine(root, ".go-test-cache"),
-        });
         var confirmation = new ToolConfirmationService(null!);
         var bricsCad = new BricsCadBridgeHost();
         try
@@ -621,7 +619,6 @@ public sealed class LocalToolBrokerValidationTests
                 settings: null!,
                 confirmation,
                 bricsCad,
-                index,
                 documents: null!);
             var proposal = Create(
                 ClientToolNames.FileSystemReadText,
@@ -640,7 +637,6 @@ public sealed class LocalToolBrokerValidationTests
         }
         finally
         {
-            index.Dispose();
             confirmation.Dispose();
             await bricsCad.DisposeAsync();
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
@@ -649,133 +645,268 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Fact]
-    public async Task MissingBoundedMultiReadReturnsStructuredExistingCandidatesToTheAgent()
+    public async Task RepeatedReadsAlwaysReturnTheCurrentUnchangedSourceText()
     {
-        var root = Path.Combine(Path.GetTempPath(), "GO", "missing-multi-path-test", Guid.NewGuid().ToString("N"));
-        var sourceDirectory = Path.Combine(root, "src");
-        Directory.CreateDirectory(sourceDirectory);
-        await File.WriteAllTextAsync(Path.Combine(sourceDirectory, "TemperatureController.cs"), "internal sealed class TemperatureController {}\n");
-        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions
-        {
-            DataDirectory = Path.Combine(root, ".go-test-cache"),
-        });
+        var root = Path.Combine(Path.GetTempPath(), "GO", "live-read-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "Program.cs");
+        const string firstText = "internal static class Program { }\n";
+        const string secondText = "internal static class Program { public static int Value => 1; }\n";
+        await File.WriteAllTextAsync(path, firstText, new System.Text.UTF8Encoding(false));
         var confirmation = new ToolConfirmationService(null!);
         var bricsCad = new BricsCadBridgeHost();
         try
         {
-            var broker = new LocalToolBroker(
-                connection: null!,
-                settings: null!,
-                confirmation,
-                bricsCad,
-                index,
-                documents: null!);
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, documents: null!);
             var proposal = Create(
-                ClientToolNames.FileSystemReadMany,
+                ClientToolNames.FileSystemReadText,
                 ToolRiskClass.ReadOnly,
-                new
-                {
-                    items = new[]
-                    {
-                        new { path = "src/TempratureController.cs", startLine = 1, endLine = 20 },
-                    },
-                    maximumCharacters = 12_000,
-                },
+                new { path = "Program.cs" },
+                DateTimeOffset.UtcNow);
+
+            var first = await broker.ExecuteAsync(proposal, root);
+            await File.WriteAllTextAsync(path, secondText, new System.Text.UTF8Encoding(false));
+            var second = await broker.ExecuteAsync(proposal with { ProposalId = "proposal-" + Guid.NewGuid().ToString("N") }, root);
+
+            Assert.Equal(firstText, first.Result.GetProperty("text").GetString());
+            Assert.Equal(secondText, second.Result.GetProperty("text").GetString());
+            Assert.True(second.Result.GetProperty("completeFile").GetBoolean());
+            Assert.False(second.Result.TryGetProperty("sha256", out _));
+            Assert.False(second.Result.TryGetProperty("evidenceId", out _));
+        }
+        finally
+        {
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task LargeUntargetedReadReturnsSearchInstructionWithoutSourceText()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "targeted-read-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "Large.cs"),
+            new string('x', 13_000),
+            new System.Text.UTF8Encoding(false));
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, documents: null!);
+            var proposal = Create(
+                ClientToolNames.FileSystemReadText,
+                ToolRiskClass.ReadOnly,
+                new { path = "Large.cs" },
                 DateTimeOffset.UtcNow);
 
             var result = await broker.ExecuteAsync(proposal, root);
 
-            Assert.Equal("failed", result.Status);
-            Assert.Equal("client.workspace_path_not_found", result.ErrorCode);
-            Assert.Equal("path_not_found", result.Result.GetProperty("reason").GetString());
-            Assert.Contains(
-                "src/TemperatureController.cs",
-                result.Result.GetProperty("suggestedPaths").EnumerateArray().Select(static item => item.GetString()));
+            Assert.Equal("completed", result.Status);
+            Assert.True(result.Result.GetProperty("requiresTargetedRead").GetBoolean());
+            Assert.Equal("search_required", result.Result.GetProperty("state").GetString());
+            Assert.Equal(ClientToolNames.FileSystemSearch, result.Result.GetProperty("recommendedTool").GetString());
+            Assert.False(result.Result.TryGetProperty("text", out _));
         }
         finally
         {
-            index.Dispose();
             confirmation.Dispose();
             await bricsCad.DisposeAsync();
-            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             Directory.Delete(root, recursive: true);
         }
     }
 
     [Fact]
-    public async Task WorkspaceWriteReturnsVersionEvidenceAndInvalidatesTheReadCache()
+    public async Task SearchWithoutMatchesExplicitlyReportsThatContentDoesNotExist()
     {
-        var root = Path.Combine(Path.GetTempPath(), "GO", "write-version-test", Guid.NewGuid().ToString("N"));
-        var cacheRoot = root + "-cache";
+        var root = Path.Combine(Path.GetTempPath(), "GO", "empty-search-test", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        var file = Path.Combine(root, "Program.cs");
-        const string original = "internal static class Program { }\n";
-        const string updated = "internal static class Program { public static int Value => 1; }\n";
-        await File.WriteAllTextAsync(file, original, new System.Text.UTF8Encoding(false));
-        var beforeSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(original))).ToLowerInvariant();
-        var afterSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(updated))).ToLowerInvariant();
-        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions
-        {
-            DataDirectory = cacheRoot,
-        });
+        await File.WriteAllTextAsync(Path.Combine(root, "App.cs"), "internal sealed class App { }\n");
         var confirmation = new ToolConfirmationService(null!);
         var bricsCad = new BricsCadBridgeHost();
         try
         {
-            _ = await index.GetSnapshotForRunAsync(root);
-            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, index, null!);
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, documents: null!);
+            var proposal = Create(
+                ClientToolNames.FileSystemSearch,
+                ToolRiskClass.ReadOnly,
+                new { path = ".", query = "MissingFunctionForTest", includeGlobs = CSharpFilesGlob },
+                DateTimeOffset.UtcNow);
+
+            var result = await broker.ExecuteAsync(proposal, root);
+
+            Assert.Equal("completed", result.Status);
+            Assert.False(result.Result.GetProperty("found").GetBoolean());
+            Assert.Equal("not_present", result.Result.GetProperty("state").GetString());
+            Assert.Empty(result.Result.GetProperty("matches").EnumerateArray());
+            Assert.Contains(
+                "MissingFunctionForTest",
+                result.Result.GetProperty("missingQueries").EnumerateArray().Select(static item => item.GetString()));
+            Assert.Contains("Wiederhole dieselbe Suche nicht", result.Result.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchReadRangeAndReplaceUseOneExactCrLfSourceBlock()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "search-replace-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "Service.cs");
+        const string source = "namespace Demo;\r\n\r\npublic sealed class Service\r\n{\r\n    public string State => \"old\";\r\n}\r\n";
+        await File.WriteAllTextAsync(path, source, new System.Text.UTF8Encoding(false));
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, documents: null!);
+            var search = await broker.ExecuteAsync(Create(
+                ClientToolNames.FileSystemSearch,
+                ToolRiskClass.ReadOnly,
+                new { path = ".", query = "public string State", includeGlobs = CSharpFilesGlob, contextLines = 1 },
+                DateTimeOffset.UtcNow), root);
+            var readRequest = Assert.Single(search.Result.GetProperty("matches").EnumerateArray())
+                .GetProperty("readRequest");
+            var read = await broker.ExecuteAsync(Create(
+                ClientToolNames.FileSystemReadText,
+                ToolRiskClass.ReadOnly,
+                new
+                {
+                    path = readRequest.GetProperty("path").GetString(),
+                    startLine = readRequest.GetProperty("startLine").GetInt32(),
+                    endLine = readRequest.GetProperty("endLine").GetInt32(),
+                    maximumCharacters = readRequest.GetProperty("maximumCharacters").GetInt32(),
+                },
+                DateTimeOffset.UtcNow), root);
+            var exactBlock = read.Result.GetProperty("text").GetString()!;
+            var replace = await broker.ExecuteAsync(Create(
+                ClientToolNames.FileSystemReplaceText,
+                ToolRiskClass.LocalMutation,
+                new
+                {
+                    path = "Service.cs",
+                    oldText = "public string State => \"old\";",
+                    newText = "public string State => \"ready\";",
+                    expectedContent = exactBlock,
+                    expectedContentMode = "fragment",
+                },
+                DateTimeOffset.UtcNow), root);
+
+            Assert.True(search.Result.GetProperty("found").GetBoolean());
+            Assert.Contains("\r\n", exactBlock, StringComparison.Ordinal);
+            Assert.Equal("completed", replace.Status);
+            Assert.Contains("State => \"ready\"", await File.ReadAllTextAsync(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExternalChangeAfterReadPreventsAStaleWrite()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "stale-content-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "notes.txt");
+        const string readText = "alpha\nbeta\n";
+        const string externalText = "alpha\nextern geändert\n";
+        await File.WriteAllTextAsync(path, readText, new System.Text.UTF8Encoding(false));
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, documents: null!);
+            await File.WriteAllTextAsync(path, externalText, new System.Text.UTF8Encoding(false));
             var write = Create(
                 ClientToolNames.FileSystemWriteText,
                 ToolRiskClass.LocalMutation,
-                new { path = "Program.cs", content = updated, expectedSha256 = beforeSha },
+                new { path = "notes.txt", content = "replacement\n", expectedContent = readText },
                 DateTimeOffset.UtcNow);
 
-            var writeResult = await broker.ExecuteAsync(write, root);
+            var result = await broker.ExecuteAsync(write, root);
 
-            Assert.Equal("completed", writeResult.Status);
-            Assert.Equal(beforeSha, writeResult.Result.GetProperty("beforeSha256").GetString());
-            Assert.Equal(afterSha, writeResult.Result.GetProperty("afterSha256").GetString());
-
-            var read = Create(
-                ClientToolNames.FileSystemReadText,
-                ToolRiskClass.ReadOnly,
-                new { path = "Program.cs", startLine = 1, endLine = 20 },
-                DateTimeOffset.UtcNow);
-            var readResult = await broker.ExecuteAsync(read, root);
-            Assert.Equal("completed", readResult.Status);
-            Assert.Equal(afterSha, readResult.Result.GetProperty("sha256").GetString());
-            Assert.Contains("Value", readResult.Result.GetProperty("text").GetString(), StringComparison.Ordinal);
+            Assert.Equal("failed", result.Status);
+            Assert.Equal("client.workspace_content_conflict", result.ErrorCode);
+            Assert.Equal(externalText, await File.ReadAllTextAsync(path));
         }
         finally
         {
-            index.Dispose();
             confirmation.Dispose();
             await bricsCad.DisposeAsync();
-            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             Directory.Delete(root, recursive: true);
-            if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
         }
     }
 
     [Fact]
-    public async Task ReplaceVersionConflictReturnsStructuredAuthoritativeReadRecovery()
+    public async Task SuccessfulMutationRecordsADirectDiffWithoutGitBaseline()
     {
-        var root = Path.Combine(Path.GetTempPath(), "GO", "replace-version-recovery", Guid.NewGuid().ToString("N"));
-        var cacheRoot = root + "-cache";
+        var root = Path.Combine(Path.GetTempPath(), "GO", "direct-diff-test", Guid.NewGuid().ToString("N"));
+        var state = Path.Combine(root, ".go-test-state");
         Directory.CreateDirectory(root);
-        const string current = "alpha\nbeta\n";
-        await File.WriteAllTextAsync(
-            Path.Combine(root, "notes.txt"),
-            current,
-            new System.Text.UTF8Encoding(false));
-        var actualSha = Convert.ToHexString(
-            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(current))).ToLowerInvariant();
-        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = cacheRoot });
+        var path = Path.Combine(root, "notes.txt");
+        const string before = "alpha\nbeta\n";
+        const string after = "alpha\ngamma\n";
+        await File.WriteAllTextAsync(path, before, new System.Text.UTF8Encoding(false));
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        using var diffs = new CodingDiffService(new GoWinUI.Infrastructure.GoInfrastructureOptions { DataDirectory = state });
+        try
+        {
+            var runId = Guid.NewGuid();
+            Assert.True(await diffs.BeginAsync(runId, root));
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, documents: null!, codingDiffs: diffs);
+            var replace = Create(
+                ClientToolNames.FileSystemReplaceText,
+                ToolRiskClass.LocalMutation,
+                new { path = "notes.txt", oldText = "beta", newText = "gamma", expectedContent = before },
+                DateTimeOffset.UtcNow);
+
+            var result = await broker.ExecuteAsync(
+                replace,
+                root,
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                codingMode: true,
+                codingRunId: runId);
+            var snapshot = Assert.IsType<CodingDiffSnapshot>(await diffs.RefreshAsync(runId, root));
+
+            Assert.Equal("completed", result.Status);
+            Assert.Equal(after, await File.ReadAllTextAsync(path));
+            Assert.Contains("-beta", snapshot.Diff, StringComparison.Ordinal);
+            Assert.Contains("+gamma", snapshot.Diff, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(Path.Combine(root, ".git")));
+        }
+        finally
+        {
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ReplaceTextRequiresOneExactOccurrenceAndNeverOverwritesAmbiguously()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "ambiguous-replace-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "notes.txt");
+        const string current = "beta\nalpha\nbeta\n";
+        await File.WriteAllTextAsync(path, current, new System.Text.UTF8Encoding(false));
         var confirmation = new ToolConfirmationService(null!);
         var bricsCad = new BricsCadBridgeHost();
         try
         {
-            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, index, null!);
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, documents: null!);
             var replace = Create(
                 ClientToolNames.FileSystemReplaceText,
                 ToolRiskClass.LocalMutation,
@@ -784,61 +915,46 @@ public sealed class LocalToolBrokerValidationTests
                     path = "notes.txt",
                     oldText = "beta",
                     newText = "gamma",
-                    expectedSha256 = new string('a', 64),
-                    replaceAll = false,
+                    expectedContent = current,
                 },
                 DateTimeOffset.UtcNow);
 
             var result = await broker.ExecuteAsync(replace, root);
 
             Assert.Equal("failed", result.Status);
-            Assert.Equal("client.workspace_version_conflict", result.ErrorCode);
-            Assert.Equal("stale_file_version", result.Result.GetProperty("reason").GetString());
-            Assert.Equal(actualSha, result.Result.GetProperty("actualSha256").GetString());
-            Assert.Equal("workspace.inspect", result.Result.GetProperty("requiredAgentTool").GetString());
-            Assert.Equal("read", result.Result.GetProperty("requiredOperation").GetString());
-            Assert.Equal(current, await File.ReadAllTextAsync(Path.Combine(root, "notes.txt")));
+            Assert.Equal("client.replace_text_ambiguous", result.ErrorCode);
+            Assert.Equal(current, await File.ReadAllTextAsync(path));
         }
         finally
         {
-            index.Dispose();
             confirmation.Dispose();
             await bricsCad.DisposeAsync();
-            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             Directory.Delete(root, recursive: true);
-            if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
         }
     }
 
     [Fact]
-    public async Task MissingReplaceTextReturnsStructuredRecoveryInsteadOfGenericToolFailure()
+    public async Task ReplaceTextRejectsWhitespaceOrLineEndingApproximation()
     {
-        var root = Path.Combine(Path.GetTempPath(), "GO", "replace-text-recovery", Guid.NewGuid().ToString("N"));
-        var cacheRoot = root + "-cache";
+        var root = Path.Combine(Path.GetTempPath(), "GO", "exact-replace-test", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        const string current = "alpha\nbeta\n";
-        await File.WriteAllTextAsync(
-            Path.Combine(root, "notes.txt"),
-            current,
-            new System.Text.UTF8Encoding(false));
-        var actualSha = Convert.ToHexString(
-            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(current))).ToLowerInvariant();
-        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = cacheRoot });
+        var path = Path.Combine(root, "View.xaml");
+        const string current = "<Grid>\r\n  <Button Content=\"Status\" />\r\n</Grid>\r\n";
+        await File.WriteAllTextAsync(path, current, new System.Text.UTF8Encoding(false));
         var confirmation = new ToolConfirmationService(null!);
         var bricsCad = new BricsCadBridgeHost();
         try
         {
-            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, index, null!);
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, documents: null!);
             var replace = Create(
                 ClientToolNames.FileSystemReplaceText,
                 ToolRiskClass.LocalMutation,
                 new
                 {
-                    path = "notes.txt",
-                    oldText = "nicht vorhanden",
-                    newText = "gamma",
-                    expectedSha256 = actualSha,
-                    replaceAll = false,
+                    path = "View.xaml",
+                    oldText = "<Grid>\n  <Button Content=\"Status\" />\n</Grid>\n",
+                    newText = "<Grid>\n  <Button Content=\"Bereit\" />\n</Grid>\n",
+                    expectedContent = current,
                 },
                 DateTimeOffset.UtcNow);
 
@@ -846,68 +962,13 @@ public sealed class LocalToolBrokerValidationTests
 
             Assert.Equal("failed", result.Status);
             Assert.Equal("client.replace_text_not_found", result.ErrorCode);
-            Assert.Equal("old_text_not_found", result.Result.GetProperty("reason").GetString());
-            Assert.Equal(actualSha, result.Result.GetProperty("actualSha256").GetString());
-            Assert.True(result.Result.GetProperty("authoritativeReadRequired").GetBoolean());
-            Assert.False(result.Result.TryGetProperty("text", out _));
-            Assert.Equal(current, await File.ReadAllTextAsync(Path.Combine(root, "notes.txt")));
+            Assert.Equal(current, await File.ReadAllTextAsync(path));
         }
         finally
         {
-            index.Dispose();
             confirmation.Dispose();
             await bricsCad.DisposeAsync();
-            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             Directory.Delete(root, recursive: true);
-            if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
-        }
-    }
-
-    [Fact]
-    public async Task RepeatedVersionedReadReturnsEvidenceMetadataWithoutSourceText()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "GO", "read-evidence-cache-test", Guid.NewGuid().ToString("N"));
-        var cacheRoot = root + "-cache";
-        Directory.CreateDirectory(root);
-        await File.WriteAllTextAsync(
-            Path.Combine(root, "Program.cs"),
-            "internal static class Program { public static int Value => 1; }\n",
-            new System.Text.UTF8Encoding(false));
-        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = cacheRoot });
-        var confirmation = new ToolConfirmationService(null!);
-        var bricsCad = new BricsCadBridgeHost();
-        try
-        {
-            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, index, null!);
-            var first = Create(
-                ClientToolNames.FileSystemReadText,
-                ToolRiskClass.ReadOnly,
-                new { path = "Program.cs", startLine = 1, endLine = 20 },
-                DateTimeOffset.UtcNow);
-            var firstResult = await broker.ExecuteAsync(first, root);
-            var evidenceId = firstResult.Result.GetProperty("evidenceId").GetString();
-
-            var repeated = Create(
-                ClientToolNames.FileSystemReadText,
-                ToolRiskClass.ReadOnly,
-                new { path = "Program.cs", startLine = 1, endLine = 20, knownEvidenceIds = new[] { evidenceId } },
-                DateTimeOffset.UtcNow);
-            var repeatedResult = await broker.ExecuteAsync(repeated, root);
-
-            Assert.Equal("completed", repeatedResult.Status);
-            Assert.Equal(evidenceId, repeatedResult.Result.GetProperty("evidenceId").GetString());
-            Assert.True(repeatedResult.Result.GetProperty("contentReused").GetBoolean());
-            Assert.True(repeatedResult.Result.GetProperty("textOmitted").GetBoolean());
-            Assert.False(repeatedResult.Result.TryGetProperty("text", out _));
-        }
-        finally
-        {
-            index.Dispose();
-            confirmation.Dispose();
-            await bricsCad.DisposeAsync();
-            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-            Directory.Delete(root, recursive: true);
-            if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
         }
     }
 
@@ -936,72 +997,12 @@ public sealed class LocalToolBrokerValidationTests
                 path = "src/TwitchAI.App/ViewModels/ShellViewModel.cs",
                 oldText = "public string Status",
                 newText = "public string RuntimeStatus",
-                expectedSha256 = new string('a', 64),
-                replaceAll = false,
+                expectedContent = "public string Status",
+                expectedContentMode = "fragment",
             },
             now);
 
         LocalToolBroker.ValidateProposal(proposal, now);
-    }
-
-    [Fact]
-    public void EmptyContentHashCanRepresentAnAtomicallyMissingWriteTarget()
-    {
-        Assert.True(LocalToolBroker.ExpectedHashRepresentsMissingTarget(
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            targetExists: false));
-        Assert.False(LocalToolBroker.ExpectedHashRepresentsMissingTarget(
-            new string('a', 64),
-            targetExists: false));
-        Assert.False(LocalToolBroker.ExpectedHashRepresentsMissingTarget(
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            targetExists: true));
-    }
-
-    [Fact]
-    public void ReplacementTextAdoptsCrLfFromAnExistingWinUiFile()
-    {
-        var existing = "<Grid>\r\n  <TextBlock />\r\n</Grid>\r\n";
-        var modelText = "<Grid>\n  <TextBlock />\n</Grid>";
-
-        var normalized = LocalToolBroker.NormalizeReplacementLineEndings(modelText, existing);
-
-        Assert.Equal("<Grid>\r\n  <TextBlock />\r\n</Grid>", normalized);
-    }
-
-    [Fact]
-    public void ReplacementTextPreservesLfFromAnExistingRepositoryFile()
-    {
-        var existing = "first\nsecond\n";
-        var modelText = "first\r\nreplacement\r\n";
-
-        var normalized = LocalToolBroker.NormalizeReplacementLineEndings(modelText, existing);
-
-        Assert.Equal("first\nreplacement\n", normalized);
-    }
-
-    [Fact]
-    public void XamlReplacementFindsOneElementDespiteDifferentAttributeWhitespace()
-    {
-        const string existing = "<Grid>\r\n  <Button Grid.Column=\"2\" VerticalAlignment=\"Center\" HorizontalAlignment=\"Right\" Content=\"Status\" />\r\n</Grid>\r\n";
-        const string requested = "<Button\n    Grid.Column=\"2\"\n    VerticalAlignment=\"Center\"\n    HorizontalAlignment=\"Right\"\n    Content=\"Status\" />";
-
-        var match = LocalToolBroker.FindUniqueWhitespaceTolerantMatch(existing, requested, out var occurrences);
-
-        Assert.Equal(1, occurrences);
-        Assert.Equal("<Button Grid.Column=\"2\" VerticalAlignment=\"Center\" HorizontalAlignment=\"Right\" Content=\"Status\" />", match);
-    }
-
-    [Fact]
-    public void WhitespaceTolerantReplacementRejectsAmbiguousShortcuts()
-    {
-        const string existing = "<TextBlock Text=\"Status\" />\n<TextBlock   Text=\"Status\" />\n";
-        const string requested = "<TextBlock Text=\"Status\" />";
-
-        var match = LocalToolBroker.FindUniqueWhitespaceTolerantMatch(existing, requested, out var occurrences);
-
-        Assert.Null(match);
-        Assert.Equal(2, occurrences);
     }
 
     [Fact]
@@ -1035,23 +1036,51 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Fact]
-    public void JsonUnicodeEscapesCopiedFromToolOutputCanBeNormalized()
+    public async Task InvalidPythonIsRejectedBeforeANewFileIsWritten()
     {
-        const string copied = @"value = \u0022Bereit\u0022; unit = \u0022m\u00B3/h\u0022;";
+        if (!LocalToolBroker.TryResolveSystemExecutable("python", out _))
+        {
+            return;
+        }
 
-        var normalized = LocalToolBroker.DecodeCopiedJsonUnicodeEscapes(copied);
+        var root = Path.Combine(Path.GetTempPath(), "GO", "python-syntax-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, documents: null!);
+            var proposal = Create(
+                ClientToolNames.FileSystemProposeCreate,
+                ToolRiskClass.LocalMutation,
+                new { path = "Physik.py", content = "class Wurf Bewegungen:\n    pass\n" },
+                DateTimeOffset.UtcNow);
 
-        Assert.Equal("value = \"Bereit\"; unit = \"m³/h\";", normalized);
+            var result = await broker.ExecuteAsync(proposal, root);
+
+            Assert.Equal("failed", result.Status);
+            Assert.Contains("syntaktisch ungültig", result.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.False(File.Exists(Path.Combine(root, "Physik.py")));
+        }
+        finally
+        {
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
-    public void DoubleEscapedLineBreaksAndHtmlEntitiesCanBeNormalized()
+    public void CreateProposalRejectsContentThatCannotFitInOneModelToolCall()
     {
-        const string copied = @"if ready:\n    return \u0022value -&gt; valid\u0022\n\nnext_step()";
+        var now = DateTimeOffset.UtcNow;
+        var oversized = Create(
+            ClientToolNames.FileSystemProposeCreate,
+            ToolRiskClass.LocalMutation,
+            new { path = "Physik.py", content = new string('x', 12_001) },
+            now);
 
-        var normalized = LocalToolBroker.DecodeCopiedJsonTextEscapes(copied);
-
-        Assert.Equal("if ready:\n    return \"value -> valid\"\n\nnext_step()", normalized);
+        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(oversized, now));
     }
 
     [Fact]

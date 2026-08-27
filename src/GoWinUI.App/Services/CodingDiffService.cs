@@ -1,9 +1,7 @@
 using GoWinUI.Infrastructure;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace GoWinUI.App.Services;
 
@@ -14,25 +12,23 @@ public sealed record CodingDiffSnapshot(
     int DeletedLines,
     bool IsTruncated);
 
+public sealed record CodingMutationState(
+    string Path,
+    bool Exists,
+    bool IsBinary,
+    string? Text,
+    long Length);
+
 /// <summary>
-/// Captures an immutable Git tree before a coding run and compares later workspace
-/// states with that tree. A private index is used, so the user's staging area and
-/// existing dirty worktree are never changed. A plain workspace is initialized as
-/// a local Git repository on first coding use; GO neither stages nor commits files.
+/// Persists only direct mutation diffs. It never indexes the workspace, snapshots
+/// repository contents, initializes Git, or stores complete source files.
 /// </summary>
-public sealed partial class CodingDiffService
+public sealed class CodingDiffService : IDisposable
 {
     private const int MaximumDiffCharacters = 2_000_000;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private static readonly string[] GeneratedPathspecExcludes =
-    [
-        ".lake", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-        ".tox", ".nox", "site-packages", "node_modules", "bower_components", ".npm", ".pnpm-store",
-        ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", "target", "vendor", "bin",
-        "obj", "artifacts", "TestResults", "coverage", "AppPackages", "BundleArtifacts",
-        "Generated Files", "build", "out", "render_tmp",
-    ];
     private readonly string _stateDirectory;
+    private readonly SemaphoreSlim _gate = new(1, 1);
 
     public CodingDiffService(GoInfrastructureOptions options)
     {
@@ -45,49 +41,69 @@ public sealed partial class CodingDiffService
         string? workspacePath,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
-        {
-            return false;
-        }
+        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath)) return false;
 
+        var workspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspacePath));
         var runDirectory = RunDirectory(runId);
-        var metadataPath = Path.Combine(runDirectory, "baseline.json");
-        if (File.Exists(metadataPath))
-        {
-            return true;
-        }
-
+        var metadataPath = MetadataPath(runId);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var workspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspacePath));
-            var repositoryRoot = await EnsureRepositoryRootAsync(workspace, cancellationToken).ConfigureAwait(false);
-            if (repositoryRoot is null)
-            {
-                return false;
-            }
-
             Directory.CreateDirectory(runDirectory);
-            var pathSpec = Path.GetRelativePath(repositoryRoot, workspace).Replace('\\', '/');
-            var tree = await CaptureTreeAsync(repositoryRoot, pathSpec, runDirectory, cancellationToken).ConfigureAwait(false);
-            if (tree is null)
+            if (File.Exists(metadataPath))
             {
-                return false;
+                var existing = JsonSerializer.Deserialize<RunMetadata>(
+                    await File.ReadAllTextAsync(metadataPath, cancellationToken).ConfigureAwait(false),
+                    JsonOptions);
+                return existing is not null && PathsEqual(existing.WorkspacePath, workspace);
             }
 
-            var metadata = new BaselineMetadata(repositoryRoot, workspace, pathSpec, tree, DateTimeOffset.UtcNow);
-            var temporaryPath = metadataPath + ".tmp";
+            var temporary = metadataPath + ".tmp";
             await File.WriteAllTextAsync(
-                temporaryPath,
-                JsonSerializer.Serialize(metadata, JsonOptions),
+                temporary,
+                JsonSerializer.Serialize(new RunMetadata(workspace, DateTimeOffset.UtcNow), JsonOptions),
                 new UTF8Encoding(false),
                 cancellationToken).ConfigureAwait(false);
-            File.Move(temporaryPath, metadataPath, overwrite: true);
+            File.Move(temporary, metadataPath, overwrite: true);
             PruneOldRuns(runId);
             return true;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or Win32Exception)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
         {
             return false;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task RecordMutationAsync(
+        Guid runId,
+        string proposalId,
+        CodingMutationState before,
+        CodingMutationState after,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(proposalId);
+        ArgumentNullException.ThrowIfNull(before);
+        ArgumentNullException.ThrowIfNull(after);
+        if (!File.Exists(MetadataPath(runId))) return;
+
+        var entry = await CreateEntryAsync(proposalId, before, after, cancellationToken).ConfigureAwait(false);
+        if (entry is null) return;
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var entries = await ReadEntriesAsync(runId, cancellationToken).ConfigureAwait(false);
+            if (entries.Any(value => string.Equals(value.ProposalId, proposalId, StringComparison.Ordinal))) return;
+            var json = JsonSerializer.Serialize(entry, JsonOptions) + Environment.NewLine;
+            await File.AppendAllTextAsync(EntriesPath(runId), json, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
         }
     }
 
@@ -96,66 +112,46 @@ public sealed partial class CodingDiffService
         string? workspacePath,
         CancellationToken cancellationToken = default)
     {
-        var runDirectory = RunDirectory(runId);
-        var metadataPath = Path.Combine(runDirectory, "baseline.json");
-        if (!File.Exists(metadataPath))
-        {
-            return null;
-        }
+        var metadataPath = MetadataPath(runId);
+        if (!File.Exists(metadataPath) || string.IsNullOrWhiteSpace(workspacePath)) return null;
 
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var metadata = JsonSerializer.Deserialize<BaselineMetadata>(
+            var metadata = JsonSerializer.Deserialize<RunMetadata>(
                 await File.ReadAllTextAsync(metadataPath, cancellationToken).ConfigureAwait(false),
                 JsonOptions);
-            if (metadata is null
-                || string.IsNullOrWhiteSpace(workspacePath)
-                || !PathsEqual(metadata.WorkspacePath, workspacePath)
-                || !Directory.Exists(metadata.RepositoryRoot))
-            {
-                return null;
-            }
+            if (metadata is null || !PathsEqual(metadata.WorkspacePath, workspacePath)) return null;
 
-            var currentTree = await CaptureTreeAsync(
-                metadata.RepositoryRoot,
-                metadata.PathSpec,
-                runDirectory,
-                cancellationToken).ConfigureAwait(false);
-            if (currentTree is null)
+            var entries = await ReadEntriesAsync(runId, cancellationToken).ConfigureAwait(false);
+            var builder = new StringBuilder();
+            var added = 0;
+            var deleted = 0;
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var truncated = false;
+            foreach (var entry in entries)
             {
-                return null;
+                var separator = builder.Length == 0 ? string.Empty : "\n";
+                if (builder.Length + separator.Length + entry.Diff.Length > MaximumDiffCharacters)
+                {
+                    truncated = true;
+                    break;
+                }
+                builder.Append(separator).Append(entry.Diff.TrimEnd()).Append('\n');
+                added += entry.AddedLines;
+                deleted += entry.DeletedLines;
+                paths.Add(entry.AfterPath ?? entry.BeforePath ?? "(unbekannt)");
             }
-
-            var result = await RunGitAsync(
-                metadata.RepositoryRoot,
-                BuildDiffArguments(metadata.BaselineTree, currentTree, metadata.PathSpec),
-                environment: null,
-                cancellationToken).ConfigureAwait(false);
-            if (result.ExitCode != 0)
-            {
-                return null;
-            }
-
-            var normalized = result.StandardOutput.ReplaceLineEndings("\n");
-            var truncated = normalized.Length > MaximumDiffCharacters;
-            if (truncated)
-            {
-                var boundary = normalized.LastIndexOf('\n', MaximumDiffCharacters - 1);
-                normalized = normalized[..(boundary > 0 ? boundary + 1 : MaximumDiffCharacters)]
-                    + "\n[Git-Diff wurde für die Chatdarstellung gekürzt.]\n";
-            }
-
-            var lines = normalized.Split('\n');
-            return new(
-                normalized,
-                DiffHeaderRegex().Count(normalized),
-                lines.Count(static line => line.StartsWith('+') && !line.StartsWith("+++", StringComparison.Ordinal)),
-                lines.Count(static line => line.StartsWith('-') && !line.StartsWith("---", StringComparison.Ordinal)),
-                truncated);
+            if (truncated) builder.Append("\n[Änderungsdiff wurde für die Chatdarstellung gekürzt.]\n");
+            return new(builder.ToString(), paths.Count, added, deleted, truncated);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or Win32Exception)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
         {
             return null;
+        }
+        finally
+        {
+            _gate.Release();
         }
     }
 
@@ -164,108 +160,71 @@ public sealed partial class CodingDiffService
         Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)),
         StringComparison.OrdinalIgnoreCase);
 
-    internal static async Task<string?> EnsureRepositoryRootAsync(
-        string workspacePath,
-        CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath)) return null;
-        var workspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspacePath));
-        var repositoryRoot = await ResolveRepositoryRootAsync(workspace, cancellationToken).ConfigureAwait(false);
-        if (repositoryRoot is not null && IsWithin(repositoryRoot, workspace)) return repositoryRoot;
-
-        var initialize = await RunGitAsync(
-            workspace,
-            ["init", "--quiet"],
-            environment: null,
-            cancellationToken).ConfigureAwait(false);
-        if (initialize.ExitCode != 0) return null;
-
-        repositoryRoot = await ResolveRepositoryRootAsync(workspace, cancellationToken).ConfigureAwait(false);
-        return repositoryRoot is not null && IsWithin(repositoryRoot, workspace)
-            ? repositoryRoot
-            : null;
-    }
-
-    private static async Task<string?> ResolveRepositoryRootAsync(string workspace, CancellationToken cancellationToken)
-    {
-        var result = await RunGitAsync(
-            workspace,
-            ["rev-parse", "--show-toplevel"],
-            environment: null,
-            cancellationToken).ConfigureAwait(false);
-        return result.ExitCode == 0 && !string.IsNullOrWhiteSpace(result.StandardOutput)
-            ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(result.StandardOutput.Trim()))
-            : null;
-    }
-
-    private static async Task<string?> CaptureTreeAsync(
-        string repositoryRoot,
-        string pathSpec,
-        string runDirectory,
+    private static async Task<MutationEntry?> CreateEntryAsync(
+        string proposalId,
+        CodingMutationState before,
+        CodingMutationState after,
         CancellationToken cancellationToken)
     {
-        var captureId = Guid.NewGuid().ToString("N");
-        var indexPath = Path.Combine(runDirectory, $"index-{captureId}");
-        var excludesPath = Path.Combine(runDirectory, $"generated-{captureId}.exclude");
-        var environment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        if (!before.Exists && !after.Exists) return null;
+        if (before.Exists == after.Exists
+            && string.Equals(before.Path, after.Path, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(before.Text, after.Text, StringComparison.Ordinal)
+            && before.IsBinary == after.IsBinary
+            && before.Length == after.Length)
         {
-            ["GIT_INDEX_FILE"] = indexPath,
-        };
+            return null;
+        }
+
+        var beforePath = before.Exists ? NormalizePath(before.Path) : null;
+        var afterPath = after.Exists ? NormalizePath(after.Path) : null;
+        string diff;
+        int added;
+        int deleted;
+        if (before.IsBinary || after.IsBinary || (before.Exists && before.Text is null) || (after.Exists && after.Text is null))
+        {
+            diff = $"diff --git a/{beforePath ?? afterPath} b/{afterPath ?? beforePath}\n"
+                + $"Binary files {(beforePath is null ? "/dev/null" : "a/" + beforePath)} and {(afterPath is null ? "/dev/null" : "b/" + afterPath)} differ\n";
+            added = 0;
+            deleted = 0;
+        }
+        else
+        {
+            diff = await CreateTextDiffAsync(beforePath, before.Text ?? string.Empty, afterPath, after.Text ?? string.Empty, cancellationToken).ConfigureAwait(false);
+            var lines = diff.Split('\n');
+            added = lines.Count(static line => line.StartsWith('+') && !line.StartsWith("+++", StringComparison.Ordinal));
+            deleted = lines.Count(static line => line.StartsWith('-') && !line.StartsWith("---", StringComparison.Ordinal));
+        }
+        return new MutationEntry(proposalId, beforePath, afterPath, diff, added, deleted, DateTimeOffset.UtcNow);
+    }
+
+    private static async Task<string> CreateTextDiffAsync(
+        string? beforePath,
+        string before,
+        string? afterPath,
+        string after,
+        CancellationToken cancellationToken)
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "GO-Coding-Diff", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        var beforeFile = Path.Combine(tempRoot, "before.txt");
+        var afterFile = Path.Combine(tempRoot, "after.txt");
         try
         {
-            await File.WriteAllLinesAsync(
-                excludesPath,
-                GeneratedPathspecExcludes.Select(static directory => $"{directory.Replace('\\', '/')}/"),
-                new UTF8Encoding(false),
-                cancellationToken).ConfigureAwait(false);
-
-            var readTree = await RunGitAsync(
-                repositoryRoot,
-                ["read-tree", "HEAD"],
-                environment,
-                cancellationToken).ConfigureAwait(false);
-            if (readTree.ExitCode != 0)
-            {
-                readTree = await RunGitAsync(
-                    repositoryRoot,
-                    ["read-tree", "--empty"],
-                    environment,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            if (readTree.ExitCode != 0) return null;
-
-            var add = await RunGitAsync(
-                repositoryRoot,
-                BuildAddArguments(pathSpec, excludesPath),
-                environment,
-                cancellationToken).ConfigureAwait(false);
-            if (add.ExitCode != 0) return null;
-
-            var writeTree = await RunGitAsync(
-                repositoryRoot,
-                ["write-tree"],
-                environment,
-                cancellationToken).ConfigureAwait(false);
-            return writeTree.ExitCode == 0 && GitObjectIdRegex().IsMatch(writeTree.StandardOutput.Trim())
-                ? writeTree.StandardOutput.Trim()
-                : null;
+            await File.WriteAllTextAsync(beforeFile, before, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(afterFile, after, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+            var generated = await RunNoIndexDiffAsync(tempRoot, cancellationToken).ConfigureAwait(false);
+            return RewriteHeader(generated, beforePath, afterPath, before, after);
         }
         finally
         {
-            TryDelete(indexPath);
-            TryDelete(indexPath + ".lock");
-            TryDelete(excludesPath);
+            try { Directory.Delete(tempRoot, recursive: true); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
         }
     }
 
-    private static async Task<GitResult> RunGitAsync(
-        string workingDirectory,
-        IReadOnlyList<string> arguments,
-        IReadOnlyDictionary<string, string?>? environment,
-        CancellationToken cancellationToken)
+    private static async Task<string> RunNoIndexDiffAsync(string workingDirectory, CancellationToken cancellationToken)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromMinutes(2));
         var startInfo = new ProcessStartInfo
         {
             FileName = "git",
@@ -277,33 +236,65 @@ public sealed partial class CodingDiffService
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
-        foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
-        if (environment is not null)
+        foreach (var argument in new[] { "diff", "--no-index", "--no-ext-diff", "--no-color", "--no-textconv", "--unified=3", "--", "before.txt", "after.txt" })
         {
-            foreach (var pair in environment)
-            {
-                if (pair.Value is null) startInfo.Environment.Remove(pair.Key);
-                else startInfo.Environment[pair.Key] = pair.Value;
-            }
+            startInfo.ArgumentList.Add(argument);
         }
+        try
+        {
+            using var process = Process.Start(startInfo);
+            if (process is null) return string.Empty;
+            var output = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            return await output.ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return string.Empty;
+        }
+    }
 
-        using var process = new Process { StartInfo = startInfo };
-        if (!process.Start()) return new(-1, string.Empty, "Git konnte nicht gestartet werden.");
-        var stdout = process.StandardOutput.ReadToEndAsync(timeout.Token);
-        var stderr = process.StandardError.ReadToEndAsync(timeout.Token);
-        await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-        return new(process.ExitCode, await stdout.ConfigureAwait(false), await stderr.ConfigureAwait(false));
+    private static string RewriteHeader(string generated, string? beforePath, string? afterPath, string before, string after)
+    {
+        var normalized = generated.ReplaceLineEndings("\n");
+        var hunk = normalized.IndexOf("@@ ", StringComparison.Ordinal);
+        var body = hunk >= 0 ? normalized[hunk..] : CreateWholeFileHunk(before, after);
+        var oldLabel = beforePath is null ? "/dev/null" : "a/" + beforePath;
+        var newLabel = afterPath is null ? "/dev/null" : "b/" + afterPath;
+        return $"diff --git a/{beforePath ?? afterPath} b/{afterPath ?? beforePath}\n--- {oldLabel}\n+++ {newLabel}\n{body.TrimEnd()}\n";
+    }
+
+    private static string CreateWholeFileHunk(string before, string after)
+    {
+        var oldLines = SplitLines(before);
+        var newLines = SplitLines(after);
+        var builder = new StringBuilder($"@@ -1,{oldLines.Length} +1,{newLines.Length} @@\n");
+        foreach (var line in oldLines) builder.Append('-').Append(line).Append('\n');
+        foreach (var line in newLines) builder.Append('+').Append(line).Append('\n');
+        return builder.ToString();
+    }
+
+    private static string[] SplitLines(string value) => string.IsNullOrEmpty(value)
+        ? []
+        : value.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n', StringSplitOptions.None);
+
+    private async Task<List<MutationEntry>> ReadEntriesAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var path = EntriesPath(runId);
+        if (!File.Exists(path)) return [];
+        var result = new List<MutationEntry>();
+        foreach (var line in await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var entry = JsonSerializer.Deserialize<MutationEntry>(line, JsonOptions);
+            if (entry is not null) result.Add(entry);
+        }
+        return result;
     }
 
     private string RunDirectory(Guid runId) => Path.Combine(_stateDirectory, runId.ToString("N"));
-
-    private static bool IsWithin(string root, string path)
-    {
-        var normalizedRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
-        var normalizedPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-        return string.Equals(normalizedRoot, normalizedPath, StringComparison.OrdinalIgnoreCase)
-            || normalizedPath.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-    }
+    private string MetadataPath(Guid runId) => Path.Combine(RunDirectory(runId), "metadata.json");
+    private string EntriesPath(Guid runId) => Path.Combine(RunDirectory(runId), "changes.jsonl");
 
     private void PruneOldRuns(Guid currentRunId)
     {
@@ -317,56 +308,24 @@ public sealed partial class CodingDiffService
                 if (Directory.GetLastWriteTimeUtc(directory) < cutoff) Directory.Delete(directory, recursive: true);
             }
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            // Diff cleanup is best effort and must never interrupt an AI run.
-        }
-    }
-
-    private static void TryDelete(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
     }
 
-    [GeneratedRegex("^diff --git ", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
-    private static partial Regex DiffHeaderRegex();
+    private static string NormalizePath(string path) => path.Replace('\\', '/').TrimStart('/');
 
-    [GeneratedRegex("^[0-9a-f]{40,64}$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex GitObjectIdRegex();
-
-    private sealed record BaselineMetadata(
-        string RepositoryRoot,
-        string WorkspacePath,
-        string PathSpec,
-        string BaselineTree,
-        DateTimeOffset CreatedAt);
-
-    private sealed record GitResult(int ExitCode, string StandardOutput, string StandardError);
-
-    private static string[] BuildAddArguments(string pathSpec, string excludesPath) =>
-        [
-            "-c", $"core.excludesFile={excludesPath.Replace('\\', '/')}",
-            "add", "-A", "--", pathSpec,
-        ];
-
-    private static string[] BuildDiffArguments(string baselineTree, string currentTree, string pathSpec) =>
-        [
-            "diff", "--no-ext-diff", "--no-color", "--no-textconv",
-            "--find-renames", "--find-copies", "--unified=3",
-            baselineTree, currentTree, "--", pathSpec, .. BuildGeneratedPathspecExcludes(),
-        ];
-
-    private static string[] BuildGeneratedPathspecExcludes()
+    public void Dispose()
     {
-        var excludes = new List<string>(GeneratedPathspecExcludes.Length * 2);
-        foreach (var directory in GeneratedPathspecExcludes)
-        {
-            var escaped = directory.Replace('\\', '/');
-            excludes.Add($":(exclude){escaped}/**");
-            excludes.Add($":(exclude)**/{escaped}/**");
-        }
-
-        return [.. excludes];
+        _gate.Dispose();
+        GC.SuppressFinalize(this);
     }
+
+    private sealed record RunMetadata(string WorkspacePath, DateTimeOffset CreatedAt);
+    private sealed record MutationEntry(
+        string ProposalId,
+        string? BeforePath,
+        string? AfterPath,
+        string Diff,
+        int AddedLines,
+        int DeletedLines,
+        DateTimeOffset CreatedAt);
 }

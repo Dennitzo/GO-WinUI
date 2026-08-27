@@ -1298,29 +1298,11 @@ public sealed class AssistantWorkflowTests
     [InlineData("Erstelle aus dem Manuskript eine PDF.")]
     [InlineData("Render the PDFs again.")]
     [InlineData("Behebe den PDF-Export.")]
-    public void CodingPdfPromptsUseTheDeterministicGoKatexExporter(string prompt)
+    public void CodingPromptsArePassedThroughWithoutInjectedInstructions(string prompt)
     {
         var transformed = GoAiAssistantService.BuildCodingPrompt(prompt);
 
-        Assert.True(GoAiAssistantService.ContainsCodingPdfDirective(prompt));
-        Assert.DoesNotContain("document.renderPdf", transformed, StringComparison.Ordinal);
-        Assert.Contains("deterministisch", transformed, StringComparison.Ordinal);
-        Assert.Contains("KaTeX-kompatibel", transformed, StringComparison.Ordinal);
-        Assert.Contains("ReportLab", transformed, StringComparison.Ordinal);
-        Assert.EndsWith(prompt, transformed, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void CodingPdfPromptDoesNotInjectWebToolsIntoTheNativeChannel()
-    {
-        const string prompt = "Nutze Websuche und erstelle danach eine PDF.";
-
-        var transformed = GoAiAssistantService.BuildCodingPrompt(prompt);
-
-        Assert.DoesNotContain("web.search", transformed, StringComparison.Ordinal);
-        Assert.DoesNotContain("web.fetch", transformed, StringComparison.Ordinal);
-        Assert.DoesNotContain("document.renderPdf", transformed, StringComparison.Ordinal);
-        Assert.Equal(1, transformed.Split("Coding-Auftrag:", StringSplitOptions.None).Length - 1);
+        Assert.Equal(prompt, transformed);
     }
 
     [Theory]
@@ -1343,16 +1325,6 @@ public sealed class AssistantWorkflowTests
     public void CodingTraceNamesV2PhasesClearly(CodingAgentPhase phase, string expected)
     {
         Assert.Equal(expected, GoAiAssistantService.CodingAgentPhaseTitle(phase));
-    }
-
-    [Theory]
-    [InlineData("workspace", true, "Workspacecache verwendet")]
-    [InlineData("workspace", false, "Workspacecache aktualisiert")]
-    [InlineData("research", true, "Recherchecache verwendet")]
-    [InlineData("artifact", false, "Artefaktcache aktualisiert")]
-    public void CodingTraceNamesV2CachesClearly(string cache, bool hit, string expected)
-    {
-        Assert.Equal(expected, GoAiAssistantService.CodingAgentCacheTitle(cache, hit));
     }
 
     [Theory]
@@ -1832,15 +1804,67 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void CodingSessionContextUsesOnlyTheCurrentPromptAndWorkspace()
+    public void CodingSessionContextSelectsTheSameCompletedHistoryAsGeneralChat()
     {
-        var context = SessionContextPreparationService.CreateCurrentPromptOnlyCodingContext(262_144);
+        var sessionId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var history = new[]
+        {
+            new ChatMessage(
+                Guid.NewGuid(), sessionId, ChatRole.User, "Vorherige Frage",
+                MessageStatus.Completed, now, now),
+            new ChatMessage(
+                Guid.NewGuid(), sessionId, ChatRole.Assistant, "Vorherige Antwort",
+                MessageStatus.Completed, now.AddSeconds(1), now.AddSeconds(1)),
+        };
 
-        Assert.Empty(context.Messages);
-        Assert.Equal(262_144, context.ContextLength);
-        Assert.Equal(0, context.Descriptor.OriginalMessageCount);
-        Assert.Equal(0, context.Descriptor.IncludedMessageCount);
-        Assert.Equal(0, context.Descriptor.EstimatedTokens);
+        var general = SessionContextPreparationService.SelectEligibleHistory(
+            history,
+            SessionContextProfile.General);
+        var coding = SessionContextPreparationService.SelectEligibleHistory(
+            history,
+            SessionContextProfile.Code);
+
+        Assert.Equal(general.Select(static item => item.Id), coding.Select(static item => item.Id));
+        Assert.Equal(2, coding.Length);
+    }
+
+    [Fact]
+    public async Task CodingSessionContextSendsExactHistoryWhenItFits()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var sessionId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var history = new[]
+        {
+            new ChatMessage(
+                Guid.NewGuid(), sessionId, ChatRole.User, "Vorherige Frage",
+                MessageStatus.Completed, now, now),
+            new ChatMessage(
+                Guid.NewGuid(), sessionId, ChatRole.Assistant, "Vorherige Antwort",
+                MessageStatus.Completed, now.AddSeconds(1), now.AddSeconds(1)),
+        };
+        using var http = new HttpClient { BaseAddress = new Uri("http://127.0.0.1/") };
+        using var client = new GoAi.Client.GoAiClient(http);
+        var service = new SessionContextPreparationService(environment.Get<IChatRepository>());
+
+        var context = await service.PrepareAsync(
+            client,
+            sessionId,
+            history,
+            "Aktueller Auftrag",
+            "qwen3-coder-next",
+            coding: true,
+            SessionContextProfile.Code,
+            knownContextLength: 262_144,
+            knownHistoryBudgetCharacters: null,
+            static _ => Task.CompletedTask);
+
+        Assert.Equal(["user", "assistant"], context.Messages.Select(static message => message.Role));
+        Assert.Equal("Vorherige Frage", context.Messages[0].Content[0].Text);
+        Assert.Equal("Vorherige Antwort", context.Messages[1].Content[0].Text);
+        Assert.Equal(2, context.Descriptor.OriginalMessageCount);
+        Assert.Equal(2, context.Descriptor.IncludedMessageCount);
         Assert.False(context.Descriptor.PreparedByAi);
     }
 
@@ -1852,14 +1876,14 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void CodingPromptRetriesEveryTerminalProcessFailureButNeverAUserCancellation()
+    public void CodingPromptDoesNotRetryNonRetryableTerminalFailures()
     {
         var terminal = new GoAiRunTerminalException(
             "coding.verification_failed",
             "Der Prozess wurde vor dem erfolgreichen Abschluss beendet.",
             retryable: false);
 
-        Assert.True(GoAiAssistantService.ShouldRetryCurrentPrompt(
+        Assert.False(GoAiAssistantService.ShouldRetryCurrentPrompt(
             PromptTriggerAction.Code,
             terminal));
         Assert.False(GoAiAssistantService.ShouldRetryCurrentPrompt(
@@ -1884,6 +1908,7 @@ public sealed class AssistantWorkflowTests
             action: null,
             new GoAiRunTerminalException("run.invalid_operation", "Ungültiger Auftrag", retryable: false)));
         Assert.True(GoAiAssistantService.IsRetryableServerErrorCode("provider.generation_terminated"));
+        Assert.False(GoAiAssistantService.IsRetryableServerErrorCode("coding.empty_response"));
         Assert.False(GoAiAssistantService.IsRetryableServerErrorCode("coding.verification_failed"));
     }
 

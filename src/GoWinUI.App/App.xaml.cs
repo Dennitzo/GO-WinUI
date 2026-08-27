@@ -103,7 +103,6 @@ public partial class App : Application
                 services.AddSingleton<SettingsViewModel>();
                 services.AddSingleton<MainWindow>();
                 services.AddSingleton<ToolConfirmationService>();
-                services.AddSingleton<WorkspaceRepositoryIndex>();
                 services.AddSingleton<DocumentContextPreparationService>();
                 services.AddSingleton<SessionContextPreparationService>();
                 services.AddSingleton<LocalDocumentToolService>();

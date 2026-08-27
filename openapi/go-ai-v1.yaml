@@ -8,12 +8,8 @@ info:
 servers:
   - url: http://192.168.0.67:8080
 security: []
-x-go-agent-protocol-v2:
-  workspaceFile: { $ref: "#/components/schemas/WorkspaceFileRef" }
-  action: { $ref: "#/components/schemas/AgentActionEnvelope" }
-  observation: { $ref: "#/components/schemas/AgentObservation" }
-  ledger: { $ref: "#/components/schemas/TaskLedgerSnapshot" }
-  providerState: { $ref: "#/components/schemas/ProviderConversationState" }
+x-go-agent-protocol-v3:
+  description: Code wird ausschließlich als normales Ergebnis eines Lese-Toolaufrufs im Modellverlauf geführt.
 paths:
   /v1/health/live:
     get:
@@ -180,11 +176,10 @@ paths:
                 agent.phase_changed: { $ref: "#/components/schemas/AgentPhaseChangedEvent" }
                 agent.action_started: { $ref: "#/components/schemas/AgentActionStartedEvent" }
                 agent.observation_committed: { $ref: "#/components/schemas/AgentObservationCommittedEvent" }
-                agent.cache_changed: { $ref: "#/components/schemas/AgentCacheChangedEvent" }
-                agent.verification_changed: { $ref: "#/components/schemas/AgentVerificationChangedEvent" }
                 agent.message_started: { $ref: "#/components/schemas/AgentMessageStartedEvent" }
                 agent.message_delta: { $ref: "#/components/schemas/AgentMessageDeltaEvent" }
                 agent.message_completed: { $ref: "#/components/schemas/AgentMessageCompletedEvent" }
+                coding.step_changed: { $ref: "#/components/schemas/CodingStepChangedEvent" }
   /v1/runs/{runId}/client-tool-results:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -883,8 +878,8 @@ components:
         agentProtocolVersion:
           description: Version des deterministischen Coding-Agent-Protokolls.
           type: integer
-          enum: [1, 2]
-          default: 2
+          enum: [4]
+          default: 4
         documentContext:
           $ref: "#/components/schemas/DocumentContextDescriptor"
         sessionContext:
@@ -1000,19 +995,13 @@ components:
     WorkspaceDescriptor:
       type: object
       additionalProperties: false
-      required: [name, fingerprint, revision, repositoryMap, fileCount, textFileCount, textBytes, indexedAt]
+      required: [name, fileTree, fileCount]
       properties:
         name:
           type: string
           minLength: 1
           maxLength: 256
-        fingerprint:
-          type: string
-          pattern: "^[a-f0-9]{64}$"
-        revision:
-          type: string
-          pattern: "^[a-f0-9]{64}$"
-        repositoryMap:
+        fileTree:
           type: string
           minLength: 1
           maxLength: 256000
@@ -1020,17 +1009,6 @@ components:
           type: integer
           minimum: 0
           maximum: 100000
-        textFileCount:
-          type: integer
-          minimum: 0
-          maximum: 100000
-        textBytes:
-          type: integer
-          format: int64
-          minimum: 0
-        indexedAt:
-          type: string
-          format: date-time
         isTruncated:
           type: boolean
     RunMessage:
@@ -1852,191 +1830,34 @@ components:
           enum: [question, instruction, cancel, noise]
         normalizedText:
           type: string
-    WorkspaceFileRef:
-      type: object
-      additionalProperties: false
-      required: [fileId, path, sha256, workspaceRevision, length, language]
-      properties:
-        fileId: { type: string }
-        path: { type: string }
-        sha256:
-          type: string
-          pattern: "^[A-Fa-f0-9]{64}$"
-        workspaceRevision: { type: string }
-        length: { type: integer, format: int64, minimum: 0 }
-        language: { type: string }
-        startLine: { type: [integer, "null"], minimum: 1 }
-        endLine: { type: [integer, "null"], minimum: 1 }
-    EvidenceRef:
-      type: object
-      additionalProperties: false
-      required: [evidenceId, kind, summary]
-      properties:
-        evidenceId: { type: string }
-        kind: { type: string }
-        summary: { type: string }
-        path: { type: [string, "null"] }
-        sha256: { type: [string, "null"] }
-        workspaceRevision: { type: [string, "null"] }
-        createdAt: { type: [string, "null"], format: date-time }
-    AgentActionEnvelope:
-      type: object
-      additionalProperties: false
-      required: [actionId, sequence, tool, operation, arguments, idempotencyKey, createdAt]
-      properties:
-        actionId: { type: string }
-        sequence: { type: integer, minimum: 1 }
-        tool:
-          type: string
-          enum: [workspace.inspect, workspace.change, execution.run, research.query, artifact.process, task.finish]
-        operation: { type: string }
-        arguments: { type: object }
-        idempotencyKey: { type: string }
-        workspaceRevision: { type: [string, "null"] }
-        createdAt: { type: string, format: date-time }
-        commentary: { type: [string, "null"], maxLength: 600 }
-        commentaryFingerprint: { type: [string, "null"] }
-    AgentObservation:
-      type: object
-      additionalProperties: false
-      required: [actionId, succeeded, result, resultHash, cacheHit]
-      properties:
-        actionId: { type: string }
-        succeeded: { type: boolean }
-        result: {}
-        resultHash:
-          type: string
-          pattern: "^[A-Fa-f0-9]{64}$"
-        errorCode: { type: [string, "null"] }
-        message: { type: [string, "null"] }
-        evidenceId: { type: [string, "null"] }
-        workspaceRevision: { type: [string, "null"] }
-        cacheHit: { type: boolean }
-        createdAt: { type: [string, "null"], format: date-time }
-    AgentChangeRecord:
-      type: object
-      additionalProperties: false
-      required: [path, actionId, summary]
-      properties:
-        path: { type: string }
-        beforeSha256: { type: [string, "null"] }
-        afterSha256: { type: [string, "null"] }
-        actionId: { type: string }
-        summary: { type: string }
-    AgentVerificationRecord:
-      type: object
-      additionalProperties: false
-      required: [verificationId, kind, target, succeeded, actionId, summary]
-      properties:
-        verificationId: { type: string }
-        kind: { type: string }
-        target: { type: string }
-        succeeded: { type: boolean }
-        actionId: { type: string }
-        summary: { type: string }
-    TaskLedgerSnapshot:
-      type: object
-      additionalProperties: false
-      required: [goal, taskKind, phase, workspaceRevision, constraints, evidence, changes, verifications, failures, nextStep, contextEpoch, consecutiveNoProgressTurns, reorientationUsed]
-      properties:
-        goal: { type: string }
-        taskKind:
-          enum: [analysis, change, creation, execution, research]
-        phase:
-          enum: [orienting, editing, verifying, finishing, blocked, completed]
-        workspaceRevision: { type: string }
-        constraints:
-          type: array
-          items: { type: string }
-        evidence:
-          type: array
-          items: { $ref: "#/components/schemas/EvidenceRef" }
-        changes:
-          type: array
-          items: { $ref: "#/components/schemas/AgentChangeRecord" }
-        verifications:
-          type: array
-          items: { $ref: "#/components/schemas/AgentVerificationRecord" }
-        failures:
-          type: array
-          items: { type: string }
-        nextStep: { type: string }
-        contextEpoch: { type: integer, minimum: 0 }
-        consecutiveNoProgressTurns: { type: integer, minimum: 0 }
-        reorientationUsed: { type: boolean }
-        lastCommentaryFingerprint: { type: [string, "null"] }
-        visibleRunMessage: { type: string }
-        visibleRunMessageDeltaCount: { type: integer, minimum: 0 }
-        workCycleStage:
-          enum: [orienting, researching, implementing, verifying, readyToFinish]
-        workCycle: { type: integer, minimum: 0 }
-        verifiedChangeCount: { type: integer, minimum: 0 }
-        contextGapResearchAllowed: { type: boolean }
-        activeResearchEvidenceId: { type: [string, "null"] }
-        activeContextGap: { type: [string, "null"] }
-    ProviderConversationState:
-      type: object
-      additionalProperties: false
-      required: [transport, prefixCacheKey, contextEpoch]
-      properties:
-        transport: { type: string }
-        responseId: { type: [string, "null"] }
-        modelInstanceId: { type: [string, "null"] }
-        prefixCacheKey: { type: string }
-        contextEpoch: { type: integer, minimum: 0 }
     AgentPhaseChangedEvent:
       type: object
       additionalProperties: false
-      required: [phase, detail, sequence, workspaceRevision]
+      required: [phase, detail, sequence]
       properties:
         phase:
           enum: [orienting, editing, verifying, finishing, blocked, completed]
         detail: { type: string }
         sequence: { type: integer, minimum: 0 }
-        workspaceRevision: { type: string }
     AgentActionStartedEvent:
       type: object
       additionalProperties: false
-      required: [actionId, sequence, tool, operation, workspaceRevision]
+      required: [actionId, sequence, tool, operation]
       properties:
         actionId: { type: string }
         sequence: { type: integer, minimum: 1 }
         tool: { type: string }
         operation: { type: string }
         target: { type: [string, "null"] }
-        workspaceRevision: { type: string }
     AgentObservationCommittedEvent:
       type: object
       additionalProperties: false
-      required: [actionId, succeeded, cacheHit, workspaceRevision]
+      required: [actionId, succeeded]
       properties:
         actionId: { type: string }
         succeeded: { type: boolean }
         errorCode: { type: [string, "null"] }
-        evidenceId: { type: [string, "null"] }
-        cacheHit: { type: boolean }
-        workspaceRevision: { type: string }
-    AgentCacheChangedEvent:
-      type: object
-      additionalProperties: false
-      required: [cache, hit, key, workspaceRevision]
-      properties:
-        cache: { type: string }
-        hit: { type: boolean }
-        key: { type: string }
-        workspaceRevision: { type: string }
-    AgentVerificationChangedEvent:
-      type: object
-      additionalProperties: false
-      required: [verificationId, kind, target, succeeded, actionId, summary, workspaceRevision]
-      properties:
-        verificationId: { type: string }
-        kind: { type: string }
-        target: { type: string }
-        succeeded: { type: boolean }
-        actionId: { type: string }
-        summary: { type: string }
-        workspaceRevision: { type: string }
+        message: { type: [string, "null"] }
     AgentMessageStartedEvent:
       type: object
       additionalProperties: false
@@ -2074,6 +1895,43 @@ components:
         text: { type: string }
         milestoneFingerprint: { type: string }
         deltaCount: { type: integer, minimum: 0 }
+    StepContextMetrics:
+      type: object
+      additionalProperties: false
+      required: [estimatedInputTokens, maximumInputTokens, outputTokens, maximumOutputTokens]
+      properties:
+        estimatedInputTokens: { type: integer, minimum: 0 }
+        maximumInputTokens: { type: integer, minimum: 1 }
+        outputTokens: { type: integer, minimum: 0 }
+        maximumOutputTokens: { type: integer, minimum: 1 }
+    CodingStepSnapshot:
+      type: object
+      additionalProperties: false
+      required: [stepId, sequence, kind, status, goal]
+      properties:
+        stepId: { type: string }
+        sequence: { type: integer, minimum: 1 }
+        kind:
+          enum: [capture, researchSearch, researchFetch, researchSummarize, workspaceInspect, mutation, verification, finish]
+        status:
+          enum: [pending, running, waitingForClient, completed, failed, blocked]
+        goal: { type: string }
+        tool: { type: [string, "null"] }
+        target: { type: [string, "null"] }
+        attempt: { type: integer, minimum: 0 }
+        context:
+          oneOf:
+            - $ref: "#/components/schemas/StepContextMetrics"
+            - type: "null"
+        detail: { type: [string, "null"] }
+    CodingStepChangedEvent:
+      type: object
+      additionalProperties: false
+      required: [step]
+      properties:
+        step:
+          $ref: "#/components/schemas/CodingStepSnapshot"
+        transition: { type: [string, "null"] }
     Problem:
       type: object
       required: [type, title, status, detail]

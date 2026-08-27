@@ -8,13 +8,26 @@ using GoAi.Server.Core.Workers;
 using Microsoft.Extensions.Options;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace GoAi.Server.Core.Runs;
 
 public sealed class AgentToolExecutor
 {
-    private const int MaximumAgentFetchCharacters = 48_000;
+    private const int DefaultTargetedFetchCharacters = 8_000;
+    private const int MaximumTargetedFetchCharacters = 12_000;
+    private const int DefaultFetchContextCharacters = 500;
+    private const int MaximumFetchPreviewCharacters = 2_000;
     private const int MaximumToolResultBytes = 512 * 1024;
+    private static readonly Regex ResearchBoilerplatePattern = new(
+        @"\b(?:navigation|menü|menu|anmelden|login|cookie|datenschutz|impressum|hauptseite|footer|breadcrumb|zurück|weiter)\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex ResearchContentWordPattern = new(
+        @"\p{L}[\p{L}\p{N}_-]{2,}",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly Regex ResearchFormulaPattern = new(
+        @"(?:\b\d+(?:[.,]\d+)?\s*(?:m|s|kg|N|J|W|Pa|Hz)\b|\\(?:frac|sqrt|sum|int)\b)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private readonly WebResearchService _research;
     private readonly WorkerOrchestrator _workers;
     private readonly UploadService _uploads;
@@ -190,9 +203,10 @@ public sealed class AgentToolExecutor
         CancellationToken cancellationToken)
     {
         using var activity = _serviceActivities.Begin("web-fetch", runId);
-        return Result(TrimFetch(await WebResearchService.FetchAsync(
+        var response = await WebResearchService.FetchAsync(
             new WebFetchRequest(arguments.GetProperty("url").GetString()!),
-            cancellationToken).ConfigureAwait(false)));
+            cancellationToken).ConfigureAwait(false);
+        return Result(CreateTargetedFetchResult(response, arguments));
     }
 
     private async Task<AgentToolExecutionResult> GenerateImagesAsync(
@@ -649,14 +663,228 @@ public sealed class AgentToolExecutor
             errorMessage);
     }
 
-    internal static WebFetchResponse TrimFetch(WebFetchResponse response) =>
-        response.Content.Length <= MaximumAgentFetchCharacters
-        ? response
-        : response with
+    internal static TargetedWebFetchResult CreateTargetedFetchResult(
+        WebFetchResponse response,
+        JsonElement arguments)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        var searchableContent = RemoveResearchBoilerplate(response.Content);
+        var queries = ReadFetchQueries(arguments);
+        if (queries.Length == 0)
         {
-            Content = response.Content[..MaximumAgentFetchCharacters]
-                + "\n[Inhalt für den Agentenkontext auf 48.000 Zeichen gekürzt]",
-        };
+            var previewLength = Math.Min(
+                searchableContent.Length,
+                Math.Min(MaximumFetchPreviewCharacters, GetInt(arguments, "maximumCharacters", DefaultTargetedFetchCharacters)));
+            return new TargetedWebFetchResult(
+                response.Url,
+                response.MediaType,
+                "query_required",
+                Found: false,
+                SourceCharacters: response.Content.Length,
+                Matches: [],
+                MissingQueries: [],
+                Preview: searchableContent[..previewLength].Trim(),
+                RequiresTargetedFetch: true,
+                Instruction: "Rufe web.fetch für dieselbe URL erneut mit query oder queries auf. Der vollständige Quelltext wird nicht in den Modellkontext geladen.",
+                response.IsUntrusted,
+                response.RetrievedAt,
+                response.RedirectChain);
+        }
+
+        var maximumResults = GetInt(arguments, "maximumResults", 8);
+        var contextCharacters = GetInt(arguments, "contextCharacters", DefaultFetchContextCharacters);
+        var maximumCharacters = GetInt(arguments, "maximumCharacters", DefaultTargetedFetchCharacters);
+        maximumResults = Math.Clamp(maximumResults, 1, 20);
+        contextCharacters = Math.Clamp(contextCharacters, 100, 2_000);
+        maximumCharacters = Math.Clamp(maximumCharacters, 1_000, MaximumTargetedFetchCharacters);
+
+        var candidates = new List<(TargetedWebFetchMatch Match, int Score)>();
+        foreach (var query in queries)
+        {
+            var searchStart = 0;
+            var occurrence = 0;
+            while (searchStart < searchableContent.Length && occurrence < 128)
+            {
+                var index = searchableContent.IndexOf(query, searchStart, StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
+                {
+                    break;
+                }
+                occurrence++;
+                var start = AlignExcerptStart(searchableContent, Math.Max(0, index - contextCharacters));
+                var end = AlignExcerptEnd(
+                    searchableContent,
+                    Math.Min(searchableContent.Length, index + query.Length + contextCharacters));
+                var excerpt = searchableContent[start..end].Trim();
+                if (excerpt.Length > 0)
+                {
+                    candidates.Add((
+                        new TargetedWebFetchMatch(
+                            query,
+                            occurrence,
+                            start,
+                            end,
+                            excerpt),
+                        ScoreResearchWindow(excerpt, query)));
+                }
+                searchStart = index + Math.Max(1, query.Length);
+            }
+        }
+
+        var matches = new List<TargetedWebFetchMatch>();
+        var matchedQueries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var emittedCharacters = 0;
+        foreach (var candidate in candidates
+                     .OrderByDescending(static item => item.Score)
+                     .ThenBy(static item => item.Match.StartCharacter))
+        {
+            if (matches.Count >= maximumResults || emittedCharacters >= maximumCharacters)
+            {
+                break;
+            }
+            var match = candidate.Match;
+            if (matches.Any(existing => match.StartCharacter < existing.EndCharacter && match.EndCharacter > existing.StartCharacter))
+            {
+                continue;
+            }
+            var remaining = maximumCharacters - emittedCharacters;
+            var excerpt = match.Text.Length <= remaining
+                ? match.Text
+                : match.Text[..remaining].TrimEnd();
+            if (excerpt.Length == 0)
+            {
+                continue;
+            }
+            matches.Add(match with
+            {
+                EndCharacter = Math.Min(searchableContent.Length, match.StartCharacter + excerpt.Length),
+                Text = excerpt,
+            });
+            emittedCharacters += excerpt.Length;
+            matchedQueries.Add(match.Query);
+        }
+
+        var missingQueries = queries
+            .Where(query => !matchedQueries.Contains(query))
+            .ToArray();
+        var found = matches.Count > 0;
+        return new TargetedWebFetchResult(
+            response.Url,
+            response.MediaType,
+            found ? "matches_found" : "not_present",
+            found,
+            response.Content.Length,
+            matches,
+            missingQueries,
+            Preview: null,
+            RequiresTargetedFetch: false,
+            Instruction: found
+                ? "Verwende ausschließlich die gelieferten Trefferfenster als Webbeleg. Suche bei fehlendem Kontext mit einer weiteren konkreten Phrase."
+                : "Keine der angeforderten Phrasen wurde in der Quelle gefunden. Wiederhole nicht dieselbe Suche; wähle eine andere Phrase oder Quelle.",
+            response.IsUntrusted,
+            response.RetrievedAt,
+            response.RedirectChain);
+    }
+
+    internal static string RemoveResearchBoilerplate(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return string.Empty;
+        }
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var output = new List<string>();
+        foreach (var rawLine in content.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            var line = Regex.Replace(rawLine, @"\s+", " ").Trim();
+            if (line.Length == 0)
+            {
+                if (output.Count > 0 && output[^1].Length > 0)
+                {
+                    output.Add(string.Empty);
+                }
+                continue;
+            }
+            if (line.Length < 180 && ResearchBoilerplatePattern.IsMatch(line))
+            {
+                continue;
+            }
+            if (line.Length < 140 && !seen.Add(line))
+            {
+                continue;
+            }
+            output.Add(line);
+        }
+        return string.Join('\n', output).Trim();
+    }
+
+    private static int ScoreResearchWindow(string excerpt, string query)
+    {
+        var words = ResearchContentWordPattern.Count(excerpt);
+        var sentences = excerpt.Count(static character => character is '.' or '!' or '?' or ';');
+        var formulas = excerpt.Count(static character => character is '=' or '∑' or '∫' or '√' or '^')
+            + ResearchFormulaPattern.Count(excerpt) * 2;
+        var queryHits = Math.Max(1, Regex.Count(excerpt, Regex.Escape(query), RegexOptions.IgnoreCase));
+        var boilerplate = ResearchBoilerplatePattern.Count(excerpt);
+        return words + sentences * 8 + formulas * 10 + queryHits * 12 - boilerplate * 45;
+    }
+
+    private static string[] ReadFetchQueries(JsonElement arguments)
+    {
+        var values = new List<string>();
+        if (GetString(arguments, "query") is { } query)
+        {
+            values.AddRange(query.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries));
+        }
+        if (arguments.TryGetProperty("queries", out var queries)
+            && queries.ValueKind == JsonValueKind.Array)
+        {
+            values.AddRange(queries.EnumerateArray()
+                .Where(static item => item.ValueKind == JsonValueKind.String)
+                .Select(static item => item.GetString()!.Trim())
+                .Where(static item => item.Length > 0));
+        }
+        return values
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(8)
+            .ToArray();
+    }
+
+    private static int AlignExcerptStart(string content, int start)
+    {
+        if (start <= 0)
+        {
+            return 0;
+        }
+        var lowerBound = Math.Max(0, start - 160);
+        for (var index = start - 1; index >= lowerBound; index--)
+        {
+            if (IsExcerptBoundary(content[index]))
+            {
+                return Math.Min(content.Length, index + 1);
+            }
+        }
+        return start;
+    }
+
+    private static int AlignExcerptEnd(string content, int end)
+    {
+        if (end >= content.Length)
+        {
+            return content.Length;
+        }
+        var upperBound = Math.Min(content.Length, end + 160);
+        for (var index = end; index < upperBound; index++)
+        {
+            if (IsExcerptBoundary(content[index]))
+            {
+                return Math.Min(content.Length, index + 1);
+            }
+        }
+        return end;
+    }
+
+    private static bool IsExcerptBoundary(char value) => value is '\r' or '\n' or '.' or '!' or '?';
 
     private static int GetInt(JsonElement value, string name, int fallback) =>
         value.TryGetProperty(name, out var property) && property.TryGetInt32(out var result) ? result : fallback;
@@ -780,3 +1008,25 @@ internal sealed record ResearchToolFailure(
     string ErrorCode,
     string Message,
     bool Retryable);
+
+internal sealed record TargetedWebFetchResult(
+    string Url,
+    string MediaType,
+    string State,
+    bool Found,
+    int SourceCharacters,
+    IReadOnlyList<TargetedWebFetchMatch> Matches,
+    IReadOnlyList<string> MissingQueries,
+    string? Preview,
+    bool RequiresTargetedFetch,
+    string Instruction,
+    bool IsUntrusted,
+    DateTimeOffset RetrievedAt,
+    IReadOnlyList<string> RedirectChain);
+
+internal sealed record TargetedWebFetchMatch(
+    string Query,
+    int Occurrence,
+    int StartCharacter,
+    int EndCharacter,
+    string Text);

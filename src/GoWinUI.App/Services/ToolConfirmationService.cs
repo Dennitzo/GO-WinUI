@@ -78,7 +78,6 @@ public sealed class ToolConfirmationService(MainWindow window) : IDisposable
     private static bool IsClientVerifiedReadOnly(ToolProposal proposal) =>
         proposal.RiskClass == ToolRiskClass.ReadOnly
         && proposal.Name is ClientToolNames.DocumentRead
-            or ClientToolNames.WorkspaceMap
             or ClientToolNames.DocumentsList
             or ClientToolNames.DocumentsSearch
             or ClientToolNames.DocumentsReadPages
@@ -86,19 +85,16 @@ public sealed class ToolConfirmationService(MainWindow window) : IDisposable
             or ClientToolNames.FileSystemStat
             or ClientToolNames.FileSystemFindFiles
             or ClientToolNames.FileSystemReadText
-            or ClientToolNames.FileSystemReadMany
             or ClientToolNames.FileSystemSearch
             or ClientToolNames.BricsCadGeometryQuery
             or ClientToolNames.BricsCadMeasure;
 
     private static bool IsTrustedWorkspaceAction(ToolProposal proposal) =>
         proposal.Name is ClientToolNames.DocumentCreate
-            or ClientToolNames.WorkspaceMap
             or ClientToolNames.FileSystemList
             or ClientToolNames.FileSystemStat
             or ClientToolNames.FileSystemFindFiles
             or ClientToolNames.FileSystemReadText
-            or ClientToolNames.FileSystemReadMany
             or ClientToolNames.FileSystemSearch
             or ClientToolNames.FileSystemWriteText
             or ClientToolNames.FileSystemReplaceText

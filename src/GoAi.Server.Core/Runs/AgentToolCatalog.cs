@@ -41,8 +41,6 @@ public sealed class AgentToolCatalog
         {
             names.UnionWith(
             [
-                ClientToolNames.WorkspaceMap,
-                ClientToolNames.WorkspaceIndexQuery,
                 ClientToolNames.FileSystemList,
                 ClientToolNames.FileSystemStat,
                 ClientToolNames.FileSystemFindFiles,
@@ -75,24 +73,10 @@ public sealed class AgentToolCatalog
             ]);
         }
 
-        return names.Select(name => _tools[name]).ToArray();
-    }
-
-    /// <summary>
-    /// Returns the granular implementation tools available to Coding Agent V2.
-    /// fs.readMany remains an internal bounded transport for workspace.inspect;
-    /// it is never advertised directly to the model.
-    /// </summary>
-    public IReadOnlyList<AgentToolSpec> GetCodingV2ImplementationTools(RunRequest request)
-    {
-        var tools = GetAvailableTools(request).ToList();
-        var capabilities = request.ClientCapabilities ?? [];
-        if ((HasCapability(capabilities, "filesystem") || HasCapability(capabilities, "code"))
-            && tools.All(static tool => tool.Name != ClientToolNames.FileSystemReadMany))
-        {
-            tools.Add(_tools[ClientToolNames.FileSystemReadMany]);
-        }
-        return tools;
+        return names
+            .OrderBy(static name => name, StringComparer.Ordinal)
+            .Select(name => _tools[name])
+            .ToArray();
     }
 
     public AgentToolSpec Resolve(string name, IReadOnlyList<AgentToolSpec> available)
@@ -184,6 +168,14 @@ public sealed class AgentToolCatalog
     {
         switch (name)
         {
+            case "web.fetch":
+                RequireString(value, "url", 1, 2_048);
+                OptionalString(value, "query", 1, 512);
+                OptionalStringArray(value, "queries", 8, 512);
+                OptionalInteger(value, "maximumResults", 1, 20);
+                OptionalInteger(value, "contextCharacters", 100, 2_000);
+                OptionalInteger(value, "maximumCharacters", 1_000, 12_000);
+                break;
             case ClientToolNames.DocumentRead:
                 var documentScope = RequireString(value, "scope", 1, 16);
                 var documentReadMode = RequireString(value, "mode", 1, 16);
@@ -248,9 +240,6 @@ public sealed class AgentToolCatalog
                 OptionalInteger(value, "maximumResults", 1, 20);
                 OptionalString(value, "language", 2, 16);
                 break;
-            case "web.fetch":
-                RequireString(value, "url", 1, 2048);
-                break;
             case "media.inspect":
             case "media.analyze":
                 RequireString(value, "uploadId", 39, 39);
@@ -287,16 +276,6 @@ public sealed class AgentToolCatalog
                 RequireStringArray(value, "documents", 1, 256, 32_768);
                 OptionalInteger(value, "topK", 1, 20);
                 break;
-            case ClientToolNames.WorkspaceMap:
-                OptionalInteger(value, "maximumDepth", 1, 32);
-                OptionalInteger(value, "maximumEntries", 1, 5000);
-                break;
-            case ClientToolNames.WorkspaceIndexQuery:
-                OptionalEnum(value, "operation", ["symbols", "references"]);
-                OptionalString(value, "path", 0, 1024);
-                RequireString(value, "query", 1, 1024);
-                OptionalInteger(value, "maximumResults", 1, 500);
-                break;
             case ClientToolNames.FileSystemList:
             case ClientToolNames.FileSystemStat:
                 RequireString(value, "path", 0, 1024);
@@ -310,10 +289,8 @@ public sealed class AgentToolCatalog
                 RequireString(value, "path", 1, 1024);
                 OptionalInteger(value, "startLine", 1, 10_000_000);
                 OptionalInteger(value, "endLine", 1, 10_000_000);
-                break;
-            case ClientToolNames.FileSystemReadMany:
-                ValidateReadManyItems(value);
-                OptionalInteger(value, "maximumCharacters", 1024, 4 * 1024 * 1024);
+                OptionalInteger(value, "maximumCharacters", 1_024, 12_000);
+                OptionalString(value, "matchText", 1, 4_096);
                 break;
             case ClientToolNames.FileSystemSearch:
                 RequireString(value, "path", 0, 1024);
@@ -328,39 +305,41 @@ public sealed class AgentToolCatalog
                 OptionalEnum(value, "matchMode", ["literal", "regex"]);
                 OptionalStringArray(value, "includeGlobs", 64, 256);
                 OptionalStringArray(value, "excludeGlobs", 64, 256);
-                OptionalInteger(value, "maximumResults", 1, 1000);
+                OptionalInteger(value, "maximumResults", 1, 100);
                 OptionalInteger(value, "contextLines", 0, 5);
                 break;
             case ClientToolNames.FileSystemWriteText:
                 RequireString(value, "path", 1, 1024);
                 RequireString(value, "content", 0, 4 * 1024 * 1024);
-                OptionalString(value, "expectedSha256", 64, 64);
+                RequireString(value, "expectedContent", 0, 65_536);
+                OptionalEnum(value, "expectedContentMode", ["complete", "fragment"]);
                 break;
             case ClientToolNames.FileSystemReplaceText:
                 RequireString(value, "path", 1, 1024);
                 RequireString(value, "oldText", 1, 2 * 1024 * 1024);
                 RequireString(value, "newText", 0, 2 * 1024 * 1024);
-                OptionalString(value, "expectedSha256", 64, 64);
-                OptionalBoolean(value, "replaceAll");
+                RequireString(value, "expectedContent", 0, 65_536);
+                OptionalEnum(value, "expectedContentMode", ["complete", "fragment"]);
                 break;
             case ClientToolNames.FileSystemMove:
                 RequireString(value, "source", 1, 1024);
                 RequireString(value, "destination", 1, 1024);
-                OptionalString(value, "expectedSha256", 64, 64);
                 OptionalBoolean(value, "overwrite");
                 break;
             case ClientToolNames.FileSystemProposePatch:
                 RequireString(value, "path", 1, 1024);
                 RequireString(value, "patch", 1, 4 * 1024 * 1024);
-                OptionalString(value, "expectedSha256", 64, 64);
+                RequireString(value, "expectedContent", 0, 65_536);
+                OptionalEnum(value, "expectedContentMode", ["complete", "fragment"]);
                 break;
             case ClientToolNames.FileSystemProposeCreate:
                 RequireString(value, "path", 1, 1024);
-                RequireString(value, "content", 0, 4 * 1024 * 1024);
+                RequireString(value, "content", 0, 12_000);
                 break;
             case ClientToolNames.FileSystemProposeDelete:
                 RequireString(value, "path", 1, 1024);
-                OptionalString(value, "expectedSha256", 64, 64);
+                RequireString(value, "expectedContent", 0, 65_536);
+                OptionalEnum(value, "expectedContentMode", ["complete", "fragment"]);
                 break;
             case ClientToolNames.ProcessRunPreset:
                 RequireString(value, "preset", 1, 64);
@@ -415,15 +394,13 @@ public sealed class AgentToolCatalog
         {
             Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Formuliere query in der Sprache des aktuellen Nutzerprompts und setze language passend; ohne eindeutige Sprache gilt de-DE.", ToolRiskClass.ReadOnly, SearchSchema()),
             Server("youtube.search", "Suche YouTube; ohne API-Key wird ein sichtbar gekennzeichneter SearXNG-Fallback verwendet.", ToolRiskClass.ReadOnly, SearchSchema()),
-            Server("web.fetch", "Rufe eine öffentliche HTTP(S)-Quelle SSRF-geschützt ab und extrahiere Text aus Webseiten, PDF-, DOCX- und RTF-Dokumenten. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, Schema("url", ("url", "string"))),
+            Server("web.fetch", "Durchsuche eine öffentliche HTTP(S)-Quelle SSRF-geschützt nach konkreten Phrasen. Bevorzuge queries und bündele bis zu acht unabhängig zu suchende Phrasen in einem Abruf. Zurückgegeben werden ausschließlich begrenzte Trefferfenster aus Webseiten, PDF-, DOCX- und RTF-Dokumenten, niemals die gesamte Quelle. Ohne Suchphrase liefert das Werkzeug nur eine kurze Vorschau und fordert eine gezielte Wiederholung an. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, WebFetchSchema()),
             Server("media.inspect", "Extrahiere sichere Metadaten, Audio und zeitcodierte Frames eines Uploads.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem Vision-Modell.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("image.generate", "Erzeuge Bilder mit Z-Image-Turbo.", ToolRiskClass.ReadOnly, ImageSchema()),
             Server("math.evaluate", "Führe deterministische skalare, Vektor- oder Matrixoperationen ohne Skriptausführung aus.", ToolRiskClass.ReadOnly, MathSchema()),
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
             Server("context.retrieve", "Ordne Dokumenttexte über BGE-M3 semantisch zu einer Anfrage.", ToolRiskClass.ReadOnly, RetrieveSchema()),
-            Client(ClientToolNames.WorkspaceMap, "Erzeuge eine kompakte Karte des freigegebenen Repositorys mit Projekten, Sprachen und relativen Dateipfaden.", ToolRiskClass.ReadOnly, WorkspaceMapSchema()),
-            Client(ClientToolNames.WorkspaceIndexQuery, "Durchsuche den lokalen Workspaceindex nach Symbolen oder Referenzen und liefere versionierte Belege.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"operation":{"type":"string","enum":["symbols","references"]},"path":{"type":"string"},"query":{"type":"string"},"maximumResults":{"type":"integer","minimum":1,"maximum":500}},"required":["operation","query"],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentRead, "Lese Dokumente tokeneffizient: zuerst Sitzungsdokumente auflisten oder eine Gliederung abrufen, danach nur benötigte Abschnitte, Fortsetzungen oder Suchtreffer. Unterstützt Sitzungsartefakte sowie Workspace-Dokumente.", ToolRiskClass.ReadOnly, DocumentReadSchema()),
             Client(ClientToolNames.DocumentCreate, "Erstelle oder bearbeite ein Dokument abschnittsweise über stabile sectionId-Werte. General AI erzeugt ein versioniertes Chat-Artefakt; Coding schreibt eine kanonische Workspace-Quelle. PDF wird deterministisch mit GO und KaTeX gerendert.", ToolRiskClass.LocalMutation, DocumentCreateSchema()),
             Client(ClientToolNames.DocumentsList, "Liste alle fertig aufbereiteten Dokumente der aktuellen GO-Sitzung mit Dateiname und Seitenzahl.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{},"required":[],"additionalProperties":false}""")),
@@ -431,16 +408,15 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.DocumentsReadPages, "Lese einen konkreten Seitenbereich eines Sitzungsdokuments als zitierfähigen Originalbeleg.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"documentId":{"type":"string"},"startPage":{"type":"integer","minimum":1},"endPage":{"type":"integer","minimum":1}},"required":["documentId","startPage","endPage"],"additionalProperties":false}""")),
             Client(ClientToolNames.FileSystemList, "Liste Einträge eines nachweislich vorhandenen Ordners im freigegebenen Client-Workspace. Verwende . oder einen leeren Pfad für die Workspace-Wurzel.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
             Client(ClientToolNames.FileSystemStat, "Lese Metadaten eines nachweislich vorhandenen Workspace-Pfads. Verwende . oder einen leeren Pfad für die Workspace-Wurzel.", ToolRiskClass.ReadOnly, Schema("path", ("path", "string"))),
-            Client(ClientToolNames.FileSystemFindFiles, "Finde tatsächlich vorhandene Dateien per Glob oder Dateiname im indexierten Workspace; nutze dies vor fs.readText, wenn ein Pfad nicht bereits aus Repositorykarte oder Toolergebnis belegt ist.", ToolRiskClass.ReadOnly, FindFilesSchema()),
-            Client(ClientToolNames.FileSystemReadText, "Lese eine vorhandene Textdatei oder einen bestimmten Zeilenbereich. path muss exakt aus Repositorykarte, fs.list, fs.findFiles, fs.search oder einer zuvor erfolgreichen Dateioperation stammen; erfinde keine Standardpfade.", ToolRiskClass.ReadOnly, ReadTextSchema()),
-            Client(ClientToolNames.FileSystemReadMany, "Lese mehrere relevante Dateien oder Zeilenbereiche gebündelt und kontextbegrenzt.", ToolRiskClass.ReadOnly, ReadManySchema()),
-            Client(ClientToolNames.FileSystemSearch, "Suche mehrere Literale oder reguläre Ausdrücke mit Globfiltern und Kontextzeilen im indexierten Workspace. Bei queries steht jedes Arrayelement für genau einen Suchbegriff; Pipe-Alternativen sind nur mit matchMode regex zulässig.", ToolRiskClass.ReadOnly, FileSearchSchema()),
-            Client(ClientToolNames.FileSystemWriteText, "Schreibe oder überschreibe eine Textdatei atomar im freigegebenen Workspace.", ToolRiskClass.LocalMutation, WriteTextSchema()),
-            Client(ClientToolNames.FileSystemReplaceText, "Ersetze einen exakt gelesenen Textblock atomar in einer vorhandenen Workspace-Datei. Verwende oldText/newText mit unveränderten Zeichen statt HTML-Entities; standardmäßig muss oldText genau einmal vorkommen.", ToolRiskClass.LocalMutation, ReplaceTextSchema()),
-            Client(ClientToolNames.FileSystemMove, "Verschiebe eine Datei oder einen Ordner innerhalb des freigegebenen Workspace.", ToolRiskClass.LocalMutation, MoveSchema()),
-            Client(ClientToolNames.FileSystemProposePatch, "Schlage einen Patch für eine vorhandene Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "patch"], ("path", "string"), ("patch", "string"), ("expectedSha256", "string"))),
-            Client(ClientToolNames.FileSystemProposeCreate, "Schlage das Erstellen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "content"], ("path", "string"), ("content", "string"))),
-            Client(ClientToolNames.FileSystemProposeDelete, "Schlage das Löschen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema("path", ("path", "string"), ("expectedSha256", "string"))),
+            Client(ClientToolNames.FileSystemFindFiles, "Finde aktuell vorhandene Dateien direkt im Workspace per Glob oder Dateiname.", ToolRiskClass.ReadOnly, FindFilesSchema()),
+            Client(ClientToolNames.FileSystemReadText, "Lese höchstens 12.000 Zeichen aus einer vorhandenen Textdatei. Bei größeren Dateien musst du zuerst fs.search verwenden und anschließend genau den gelieferten Zeilenbereich oder einen eindeutigen matchText nachladen. Ein Aufruf nur mit path liefert für große Dateien keinen Quelltext.", ToolRiskClass.ReadOnly, ReadTextSchema()),
+            Client(ClientToolNames.FileSystemSearch, "Suche vor dem Lesen großer Dateien gezielt nach Funktionsnamen, Symbolen oder Textphrasen. Treffer liefern Pfad und begrenzte Zeilenbereiche für fs.readText. found=false und state=not_present bedeutet verbindlich, dass der gesuchte Inhalt im durchsuchten Bestand noch nicht existiert; wiederhole dann nicht dieselbe Suche, sondern erstelle oder ergänze ihn am passenden Pfad.", ToolRiskClass.ReadOnly, FileSearchSchema()),
+            Client(ClientToolNames.FileSystemWriteText, "Schreibe eine unmittelbar zuvor vollständig gelesene Bestandsdatei atomar.", ToolRiskClass.LocalMutation, WriteTextSchema()),
+            Client(ClientToolNames.FileSystemReplaceText, "Ersetze einen exakt gelesenen Textblock atomar in einer vorhandenen Workspace-Datei. oldText muss mit allen Zeichen und Zeilenumbrüchen genau einmal vorkommen.", ToolRiskClass.LocalMutation, ReplaceTextSchema()),
+            Client(ClientToolNames.FileSystemMove, "Verschiebe oder benenne eine Workspace-Datei nur um, wenn das Nutzerziel dies verlangt.", ToolRiskClass.LocalMutation, MoveSchema()),
+            Client(ClientToolNames.FileSystemProposePatch, "Wende einen Patch nur auf eine unmittelbar zuvor vollständig gelesene Clientdatei an.", ToolRiskClass.LocalMutation, MutationSchema(["path", "patch"], ("path", "string"), ("patch", "string"))),
+            Client(ClientToolNames.FileSystemProposeCreate, "Erstelle eine neue Workspace-Datei am ausdrücklich verlangten Pfad. Liefere eine kompakte, vollständige Arbeitsversion mit höchstens 12.000 Unicode-Zeichen; erweitere sie bei Bedarf in späteren Werkzeugschritten. Quellcode muss syntaktisch gültig sein.", ToolRiskClass.LocalMutation, CreateFileSchema()),
+            Client(ClientToolNames.FileSystemProposeDelete, "Lösche nur eine unmittelbar zuvor vollständig gelesene Clientdatei.", ToolRiskClass.LocalMutation, MutationSchema(["path"], ("path", "string"))),
             Client(ClientToolNames.ProcessRunPreset, "Führe ein versioniertes Build-, Test-, Start- oder Git-Preset im freigegebenen Workspace aus. PDF-Artefakte werden von GO deterministisch nach einer Quellenänderung erzeugt.", ToolRiskClass.Process, ProcessSchema()),
             Client(ClientToolNames.ProcessRun, "Führe ein direktes Programm mit getrennter Argumentliste und Workspace-Arbeitsverzeichnis für Analyse, Setup, Test, Build oder Smoke-Start aus.", ToolRiskClass.Process, ProcessRunSchema()),
             Client(ClientToolNames.LeanProof, "Prüfe freiwillig einen mathematischen oder algorithmischen Beweis mit der gepinnten lokalen Lean-/Lake-Toolchain. Verwende niemals process.run für lean oder lake. check kompiliert eine Datei; verify kompiliert und prüft die Axiomabhängigkeiten des exakt deklarierten Theorems. Ein Dateiname erzeugt keinen Lean-Namespace.", ToolRiskClass.Process, LeanProofSchema()),
@@ -469,8 +445,8 @@ public sealed class AgentToolCatalog
         {"type":"object","properties":{"query":{"type":"string","description":"Kurze Suchanfrage in der Sprache des aktuellen Nutzerprompts; technische Eigennamen unveraendert lassen."},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string","description":"BCP-47-Suchsprache passend zum aktuellen Prompt; Standard de-DE."}},"required":["query"],"additionalProperties":false}
         """);
 
-    private static JsonElement WorkspaceMapSchema() => Parse("""
-        {"type":"object","properties":{"maximumDepth":{"type":"integer","minimum":1,"maximum":32},"maximumEntries":{"type":"integer","minimum":1,"maximum":5000}},"required":[],"additionalProperties":false}
+    private static JsonElement WebFetchSchema() => Parse("""
+        {"type":"object","properties":{"url":{"type":"string","maxLength":2048},"query":{"type":"string","minLength":1,"maxLength":512,"description":"Eine konkrete Phrase oder ein prägnanter Fachbegriff. Keine Liste mehrerer Begriffe als ein gemeinsamer String."},"queries":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":512},"description":"Bevorzugt verwenden, wenn mehrere Themen gesucht werden: jede Phrase als eigener Arrayeintrag in demselben Abruf."},"maximumResults":{"type":"integer","minimum":1,"maximum":20,"default":8},"contextCharacters":{"type":"integer","minimum":100,"maximum":2000,"default":500},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":12000,"default":8000}},"required":["url"],"additionalProperties":false}
         """);
 
     private static JsonElement DocumentReadSchema() => Parse("""
@@ -486,27 +462,27 @@ public sealed class AgentToolCatalog
         """);
 
     private static JsonElement ReadTextSchema() => Parse("""
-        {"type":"object","properties":{"path":{"type":"string"},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}
-        """);
-
-    private static JsonElement ReadManySchema() => Parse("""
-        {"type":"object","properties":{"items":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","properties":{"path":{"type":"string"},"startLine":{"type":"integer","minimum":1},"endLine":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}},"maximumCharacters":{"type":"integer","minimum":1024,"maximum":4194304}},"required":["items"],"additionalProperties":false}
+        {"type":"object","properties":{"path":{"type":"string"},"startLine":{"type":"integer","minimum":1,"description":"Erste gezielt zu lesende Zeile aus fs.search."},"endLine":{"type":"integer","minimum":1,"description":"Letzte gezielt zu lesende Zeile aus fs.search."},"maximumCharacters":{"type":"integer","minimum":1024,"maximum":12000,"default":8000},"matchText":{"type":"string","maxLength":4096,"description":"Eindeutige Funktion oder Textphrase, um nur deren unmittelbaren Quellblock zu laden."}},"required":["path"],"additionalProperties":false}
         """);
 
     private static JsonElement FileSearchSchema() => Parse("""
-        {"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string","description":"Ein einzelner Suchausdruck; im literal-Modus wird der ältere Wert a|b kompatibel in zwei Literale geteilt."},"queries":{"type":"array","minItems":1,"maxItems":64,"description":"Gebündelte Suchbegriffe. Jedes Element enthält genau ein Literal oder genau einen regulären Ausdruck.","items":{"type":"string"}},"matchMode":{"type":"string","enum":["literal","regex"]},"includeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"excludeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"maximumResults":{"type":"integer","minimum":1,"maximum":1000},"contextLines":{"type":"integer","minimum":0,"maximum":5}},"required":["path"],"additionalProperties":false}
+        {"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string","description":"Ein konkreter Funktionsname, ein Symbol oder eine Textphrase; im literal-Modus wird der ältere Wert a|b kompatibel geteilt."},"queries":{"type":"array","minItems":1,"maxItems":64,"description":"Gebündelte konkrete Suchbegriffe. Jedes Element enthält genau ein Literal oder einen regulären Ausdruck.","items":{"type":"string"}},"matchMode":{"type":"string","enum":["literal","regex"]},"includeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"excludeGlobs":{"type":"array","maxItems":64,"items":{"type":"string"}},"maximumResults":{"type":"integer","minimum":1,"maximum":100,"default":20},"contextLines":{"type":"integer","minimum":0,"maximum":5,"default":2}},"required":["path"],"additionalProperties":false}
         """);
 
     private static JsonElement WriteTextSchema() => Parse("""
-        {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"expectedSha256":{"type":"string"}},"required":["path","content"],"additionalProperties":false}
+        {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"expectedContent":{"type":"string"},"expectedContentMode":{"type":"string","enum":["complete","fragment"]}},"required":["path","content","expectedContent"],"additionalProperties":false}
         """);
 
     private static JsonElement ReplaceTextSchema() => Parse("""
-        {"type":"object","properties":{"path":{"type":"string"},"oldText":{"type":"string"},"newText":{"type":"string"},"expectedSha256":{"type":"string"},"replaceAll":{"type":"boolean"}},"required":["path","oldText","newText"],"additionalProperties":false}
+        {"type":"object","properties":{"path":{"type":"string"},"oldText":{"type":"string"},"newText":{"type":"string"},"expectedContent":{"type":"string"},"expectedContentMode":{"type":"string","enum":["complete","fragment"]}},"required":["path","oldText","newText","expectedContent"],"additionalProperties":false}
         """);
 
     private static JsonElement MoveSchema() => Parse("""
-        {"type":"object","properties":{"source":{"type":"string"},"destination":{"type":"string"},"expectedSha256":{"type":"string"},"overwrite":{"type":"boolean"}},"required":["source","destination"],"additionalProperties":false}
+        {"type":"object","properties":{"source":{"type":"string"},"destination":{"type":"string"},"overwrite":{"type":"boolean"}},"required":["source","destination"],"additionalProperties":false}
+        """);
+
+    private static JsonElement CreateFileSchema() => Parse("""
+        {"type":"object","properties":{"path":{"type":"string","maxLength":1024},"content":{"type":"string","maxLength":12000,"description":"Kompakte, syntaktisch vollständige Arbeitsversion; höchstens 12.000 Unicode-Zeichen."}},"required":["path","content"],"additionalProperties":false}
         """);
 
     private static JsonElement ImageSchema() => Parse("""
@@ -554,6 +530,16 @@ public sealed class AgentToolCatalog
         var propertyJson = string.Join(',', properties.Select(static item => $"\"{item.Name}\":{{\"type\":\"{item.Type}\"}}"));
         var requiredJson = string.Join(',', required.Select(static name => $"\"{name}\""));
         return Parse($"{{\"type\":\"object\",\"properties\":{{{propertyJson}}},\"required\":[{requiredJson}],\"additionalProperties\":false}}");
+    }
+
+    private static JsonElement MutationSchema(
+        IReadOnlyList<string> required,
+        params (string Name, string Type)[] properties)
+    {
+        var all = properties
+            .Concat([("expectedContent", "string"), ("expectedContentMode", "string")])
+            .ToArray();
+        return Schema(required.Concat(["expectedContent"]).ToArray(), all);
     }
 
     private static JsonElement Parse(string json)
@@ -709,26 +695,6 @@ public sealed class AgentToolCatalog
         }
     }
 
-    private static void ValidateReadManyItems(JsonElement value)
-    {
-        if (!value.TryGetProperty("items", out var items)
-            || items.ValueKind != JsonValueKind.Array
-            || items.GetArrayLength() is < 1 or > 128)
-        {
-            throw new ArgumentException("fs.readMany requires 1 to 128 items.");
-        }
-        foreach (var item in items.EnumerateArray())
-        {
-            if (item.ValueKind != JsonValueKind.Object
-                || item.EnumerateObject().Any(static property => property.Name is not ("path" or "startLine" or "endLine")))
-            {
-                throw new ArgumentException("Each fs.readMany item must use the bounded range schema.");
-            }
-            RequireString(item, "path", 1, 1024);
-            OptionalInteger(item, "startLine", 1, 10_000_000);
-            OptionalInteger(item, "endLine", 1, 10_000_000);
-        }
-    }
 }
 
 public sealed record AgentToolSpec(

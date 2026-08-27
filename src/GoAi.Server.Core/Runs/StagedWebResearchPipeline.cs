@@ -164,7 +164,9 @@ internal sealed class StagedWebResearchPipeline
             catch (Exception exception) when (IsRecoverableModelFailure(exception, cancellationToken))
             {
                 diagnostics.Add($"Eine Quellenauswahl wurde nach einem Modellfehler anhand der SearXNG-Reihenfolge fortgesetzt: {exception.GetType().Name}.");
-                fetchCall = CreateFetchFallbackCall(remaining[0].Url);
+                fetchCall = CreateFetchFallbackCall(
+                    remaining[0].Url,
+                    CreateTargetedFetchQuery(remaining[0], normalizedTask));
             }
 
             var selectedUrl = StringArgument(fetchCall.Arguments, "url");
@@ -173,9 +175,13 @@ internal sealed class StagedWebResearchPipeline
             {
                 diagnostics.Add("Eine nicht in den SearXNG-Treffern enthaltene URL wurde verworfen.");
                 selected = remaining[0];
-                fetchCall = CreateFetchFallbackCall(selected.Url);
+                fetchCall = CreateFetchFallbackCall(
+                    selected.Url,
+                    CreateTargetedFetchQuery(selected, normalizedTask));
             }
             remaining.Remove(selected);
+
+            fetchCall = EnsureTargetedFetchQuery(fetchCall, selected, normalizedTask);
 
             validateTool(fetchTool, fetchCall.Arguments);
             var fetchExecution = await executeTool(fetchCall, cancellationToken).ConfigureAwait(false);
@@ -186,22 +192,41 @@ internal sealed class StagedWebResearchPipeline
                 continue;
             }
 
-            WebFetchResponse page;
             try
             {
-                page = Deserialize<WebFetchResponse>(fetchExecution.Result, "web fetch result");
+                if (fetchExecution.Result.TryGetProperty("state", out _))
+                {
+                    var targeted = Deserialize<TargetedWebFetchResult>(fetchExecution.Result, "targeted web fetch result");
+                    if (!targeted.Found || targeted.Matches.Count == 0)
+                    {
+                        diagnostics.Add($"Die Quelle {selected.Url} enthielt keinen Treffer für die gezielte Phrase.");
+                        continue;
+                    }
+                    fetched.Add(new FetchedResearchSource(
+                        selected.Title,
+                        targeted.Url,
+                        targeted.MediaType,
+                        string.Join("\n\n", targeted.Matches.Select(static match => match.Text)),
+                        selected.Snippet));
+                }
+                else
+                {
+                    // Compatibility for persisted or older tool executors. New
+                    // agent calls always return TargetedWebFetchResult.
+                    var page = Deserialize<WebFetchResponse>(fetchExecution.Result, "web fetch result");
+                    fetched.Add(new FetchedResearchSource(
+                        selected.Title,
+                        page.Url,
+                        page.MediaType,
+                        page.Content,
+                        selected.Snippet));
+                }
             }
             catch (Exception exception) when (exception is JsonException or InvalidDataException)
             {
                 diagnostics.Add($"Die abgerufene Quelle {selected.Url} war nicht auswertbar: {exception.GetType().Name}.");
                 continue;
             }
-            fetched.Add(new FetchedResearchSource(
-                selected.Title,
-                page.Url,
-                page.MediaType,
-                page.Content,
-                selected.Snippet));
         }
 
         string? synthesis = null;
@@ -316,7 +341,8 @@ internal sealed class StagedWebResearchPipeline
             new(
                 "system",
                 "Waehle aus der angegebenen SearXNG-Liste genau eine fachlich relevante, noch nicht abgerufene Quelle. "
-                + "Rufe das einzige angebotene Werkzeug web.fetch genau einmal mit exakt dieser URL auf. "
+                + "Rufe das einzige angebotene Werkzeug web.fetch genau einmal mit exakt dieser URL und einer konkreten, relevanten Suchphrase in query auf. "
+                + "Der Agent erhaelt nur begrenzte Trefferfenster, niemals den vollstaendigen Seiteninhalt. "
                 + $"Bewerte die Relevanz fuer den {LanguageDisplayName(preferredLanguage)} Nutzerauftrag. "
                 + "Erfinde keine URL und antworte nicht mit Fliesstext."),
             new("user", builder.ToString()),
@@ -736,10 +762,47 @@ internal sealed class StagedWebResearchPipeline
         ("pl-PL", new HashSet<string>(["i", "oraz", "dla", "przez", "szukaj", "informacje", "równań", "rownan"], StringComparer.Ordinal)),
     ];
 
-    private static LmToolCall CreateFetchFallbackCall(string url) => new(
+    private static LmToolCall CreateFetchFallbackCall(string url, string query) => new(
         $"research-fetch-{Guid.NewGuid():N}",
         "web.fetch",
-        JsonSerializer.SerializeToElement(new { url }, JsonOptions));
+        JsonSerializer.SerializeToElement(new { url, query }, JsonOptions));
+
+    private static LmToolCall EnsureTargetedFetchQuery(
+        LmToolCall call,
+        WebSearchResult selected,
+        string task)
+    {
+        if (call.Arguments.TryGetProperty("query", out var query)
+            && query.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(query.GetString()))
+        {
+            return call;
+        }
+        if (call.Arguments.TryGetProperty("queries", out var queries)
+            && queries.ValueKind == JsonValueKind.Array
+            && queries.GetArrayLength() > 0)
+        {
+            return call;
+        }
+        return call with
+        {
+            Arguments = JsonSerializer.SerializeToElement(new
+            {
+                url = selected.Url,
+                query = CreateTargetedFetchQuery(selected, task),
+            }, JsonOptions),
+        };
+    }
+
+    private static string CreateTargetedFetchQuery(WebSearchResult selected, string task)
+    {
+        var candidate = selected.Title?.Trim();
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            candidate = task.Trim();
+        }
+        return Bound(candidate, 512);
+    }
 
     private static T Deserialize<T>(JsonElement value, string description) =>
         JsonSerializer.Deserialize<T>(value.GetRawText(), JsonOptions)

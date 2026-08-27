@@ -43,10 +43,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         ArgumentNullException.ThrowIfNull(progress);
 
         profile = coding ? SessionContextProfile.Code : profile;
-        if (coding || profile == SessionContextProfile.Code)
-        {
-            return CreateCurrentPromptOnlyCodingContext(knownContextLength);
-        }
         ArgumentException.ThrowIfNullOrWhiteSpace(currentPrompt);
 
         var eligible = SelectEligibleHistory(history, profile);
@@ -343,12 +339,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             CacheHit: reusedPersistentHistory);
     }
 
-    internal static SessionRunContext CreateCurrentPromptOnlyCodingContext(int? knownContextLength = null) => new(
-        [],
-        new SessionContextDescriptor(Hash("coding-current-prompt-only-v1"), 0, 0, 0),
-        Math.Max(2_048, knownContextLength ?? 262_144),
-        CacheHit: false);
-
     private async Task<SessionContextPreparation?> FindReusablePreparationAsync(
         Guid sessionId,
         string modelId,
@@ -535,7 +525,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         if (string.IsNullOrWhiteSpace(combined) || combined.Length > targetCharacters)
         {
             throw new InvalidDataException(
-                $"General AI hat das angeforderte Komprimierungsziel nach {pass:N0} aufeinanderfolgenden Läufen nicht eingehalten ({combined.Length:N0}/{targetCharacters:N0} Zeichen)." );
+                $"Das ausgewählte Modell hat das angeforderte Komprimierungsziel nach {pass:N0} aufeinanderfolgenden Läufen nicht eingehalten ({combined.Length:N0}/{targetCharacters:N0} Zeichen)." );
         }
         return combined.Trim();
     }
@@ -568,18 +558,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                 - als CONTINUATION_ANCHOR die letzten zusammenhängenden Absätze der neuesten erzählten Szene möglichst wörtlich.
                 Trenne bereits geschehene Ereignisse eindeutig von zukünftigen Serienvorgaben. Kürze Wiederholungen, aber erfinde,
                 löse oder verändere keine Handlung. Der Szenenanker darf niemals linear abgeschnitten werden.
-                """,
-            SessionContextProfile.Code => $"""
-                Verdichte den folgenden älteren Coding-Sitzungsverlauf zu einer verlustarmen, persistenten Arbeitschronik.
-                Zielumfang: höchstens {targetCharacters:N0} Zeichen. Antworte nicht auf alte Prompts und plane keinen neuen Arbeitsschritt.
-                Bewahre strukturiert und eindeutig:
-                - die aktuelle Nutzerabsicht und alle später hinzugekommenen oder geänderten Anweisungen;
-                - Workspacezustand, relevante relative Pfade, bereits gelesene Evidenz und deren belastbare Ergebnisse;
-                - tatsächlich durchgeführte Dateiänderungen, Builds, Tests, Starts, Webrecherche und formale Prüfungen;
-                - konkrete Fehlerdiagnosen, behobene Ursachen, weiterhin offene Fehler und noch ausstehende Verifikation;
-                - technische Entscheidungen, Annahmen, Versionen, Zahlen, Grenzwerte und externe Quellen, soweit sie für die Fortsetzung nötig sind.
-                Führe identische Kampagnenprompts und wiederholte Statusmeldungen genau einmal zusammen. Trenne sicher belegte Ergebnisse von
-                Vorschlägen und offenen Hypothesen. Erfinde keine Datei, Änderung, Prüfung oder Lösung. Gib ausschließlich die Arbeitschronik aus.
                 """,
             _ => $"""
                 Verdichte den folgenden älteren GO-Sitzungsverlauf für die verlustarme Weiterverwendung in derselben Sitzung.
@@ -678,7 +656,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         int? knownContextLength,
         CancellationToken cancellationToken)
     {
-        if (!coding && knownContextLength is >= 2_048)
+        if (knownContextLength is >= 2_048)
         {
             return (selectedModelId, knownContextLength.Value);
         }
