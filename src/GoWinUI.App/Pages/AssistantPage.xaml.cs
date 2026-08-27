@@ -359,9 +359,6 @@ public sealed partial class AssistantPage : Page, IDisposable
                 case "document.pick":
                     await PickDocumentAsync(args.Envelope, bridge);
                     break;
-                case "workspace.pick":
-                    await PickWorkspaceAsync(args.Envelope, bridge);
-                    break;
                 case "chat.exportPdf":
                     await ExportPdfAsync(args.Envelope, bridge, selectedMessageOnly: false);
                     break;
@@ -1876,31 +1873,6 @@ public sealed partial class AssistantPage : Page, IDisposable
         catch (ObjectDisposedException) when (_disposed)
         {
         }
-    }
-
-    private async Task PickWorkspaceAsync(WebBridgeEnvelope envelope, AssistantWebBridge bridge)
-    {
-        var picker = new FolderPicker
-        {
-            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-            ViewMode = PickerViewMode.List,
-        };
-        picker.FileTypeFilter.Add("*");
-        InitializePicker(picker);
-        var folder = await picker.PickSingleFolderAsync();
-        if (folder is null)
-        {
-            return;
-        }
-
-        var workspace = Path.GetFullPath(folder.Path);
-        await _coordinator.SetActiveWorkspaceAsync(
-            workspace,
-            _lifetime?.Token ?? CancellationToken.None);
-        await bridge.PostAsync(
-            "state.snapshot",
-            await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None),
-            envelope.RequestId);
     }
 
     private static void InitializePicker(object picker)

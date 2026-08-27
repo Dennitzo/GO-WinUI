@@ -44,7 +44,6 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
     <PackageReference Include="NAudio" />
-    <PackageReference Include="TreeSitter.DotNet" />
     <PackageReference Include="WinUI.TableView" />
   </ItemGroup>
 

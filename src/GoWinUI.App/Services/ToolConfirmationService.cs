@@ -14,10 +14,10 @@ public sealed class ToolConfirmationService(MainWindow window) : IDisposable
 
     public async Task<bool> ConfirmAsync(ToolProposal proposal, CancellationToken cancellationToken = default)
     {
-        // Die bewusste, dauerhaft gespeicherte Workspace-Freigabe und der
-        // abgesendete Prompt autorisieren Datei- und Codeaktionen innerhalb
-        // dieses Ordners. Die Pfadprüfung erfolgt weiterhin im Toolbroker.
-        if (IsTrustedWorkspaceAction(proposal) || IsClientVerifiedReadOnly(proposal))
+        // Ein abgesendeter Prompt autorisiert die Erstellung eines versionierten
+        // Sitzungsdokuments. Lesende Dokument- und CAD-Abfragen sind ebenfalls
+        // lokal begrenzt; CAD-Mutationen benötigen weiterhin eine Bestätigung.
+        if (proposal.Name == ClientToolNames.DocumentCreate || IsClientVerifiedReadOnly(proposal))
         {
             return true;
         }
@@ -81,30 +81,8 @@ public sealed class ToolConfirmationService(MainWindow window) : IDisposable
             or ClientToolNames.DocumentsList
             or ClientToolNames.DocumentsSearch
             or ClientToolNames.DocumentsReadPages
-            or ClientToolNames.FileSystemList
-            or ClientToolNames.FileSystemStat
-            or ClientToolNames.FileSystemFindFiles
-            or ClientToolNames.FileSystemReadText
-            or ClientToolNames.FileSystemSearch
             or ClientToolNames.BricsCadGeometryQuery
             or ClientToolNames.BricsCadMeasure;
-
-    private static bool IsTrustedWorkspaceAction(ToolProposal proposal) =>
-        proposal.Name is ClientToolNames.DocumentCreate
-            or ClientToolNames.FileSystemList
-            or ClientToolNames.FileSystemStat
-            or ClientToolNames.FileSystemFindFiles
-            or ClientToolNames.FileSystemReadText
-            or ClientToolNames.FileSystemSearch
-            or ClientToolNames.FileSystemWriteText
-            or ClientToolNames.FileSystemReplaceText
-            or ClientToolNames.FileSystemMove
-            or ClientToolNames.FileSystemProposePatch
-            or ClientToolNames.FileSystemProposeCreate
-            or ClientToolNames.FileSystemProposeDelete
-            or ClientToolNames.ProcessRunPreset
-            or ClientToolNames.ProcessRun
-            or ClientToolNames.LeanProof;
 
     private Task<T> RunOnUiThreadAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
     {

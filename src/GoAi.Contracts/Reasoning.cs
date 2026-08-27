@@ -44,7 +44,7 @@ public static class ModelReasoningProfiles
             return new(
                 GptOssFamily,
                 GptOssEfforts,
-                string.Equals(normalizedRole, "code", StringComparison.OrdinalIgnoreCase) ? "high" : "medium");
+                "medium");
         }
 
         if (normalizedModelId.Contains("qwen3.8-27b", StringComparison.OrdinalIgnoreCase))

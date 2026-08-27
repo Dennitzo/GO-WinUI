@@ -503,14 +503,14 @@ internal sealed class StagedWebResearchPipeline
         string preferredLanguage,
         int contextLength)
     {
-        var budget = CodingContextPlanner.ComputeInputTokenBudget(contextLength, SynthesisOutputTokens);
-        return CodingContextPlanner.EstimateTokens(
+        var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, SynthesisOutputTokens);
+        return ContextPlanner.EstimateTokens(
             CreateSynthesisMessages(task, search, evidence, preferredLanguage)) <= budget;
     }
 
     private static int CalculateCompactionBlockCharacters(int contextLength)
     {
-        var inputTokens = CodingContextPlanner.ComputeInputTokenBudget(contextLength, SynthesisOutputTokens);
+        var inputTokens = ContextPlanner.ComputeInputTokenBudget(contextLength, SynthesisOutputTokens);
         return Math.Clamp(
             inputTokens * 2,
             MinimumCompactionBlockCharacters,
@@ -815,13 +815,11 @@ internal sealed class StagedWebResearchPipeline
     private static string NormalizeTask(string task)
     {
         var normalized = task.Trim();
-        foreach (var label in new[] { "Coding-Auftrag:", "Rechercheauftrag:" })
+        const string label = "Rechercheauftrag:";
+        var marker = normalized.LastIndexOf(label, StringComparison.OrdinalIgnoreCase);
+        if (marker >= 0)
         {
-            var marker = normalized.LastIndexOf(label, StringComparison.OrdinalIgnoreCase);
-            if (marker >= 0)
-            {
-                normalized = normalized[(marker + label.Length)..].Trim();
-            }
+            normalized = normalized[(marker + label.Length)..].Trim();
         }
         normalized = normalized.Replace("[GO_WEB_RESEARCH_REQUEST]", string.Empty, StringComparison.Ordinal).Trim();
         return Bound(normalized, MaximumTaskCharacters);

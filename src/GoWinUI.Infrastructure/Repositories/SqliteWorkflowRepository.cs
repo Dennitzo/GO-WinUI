@@ -166,15 +166,6 @@ public sealed class SqliteWorkflowRepository(SqliteDatabase database) : IWorkflo
                 throw new ArgumentException("GO-Workflows benötigen ein 'blocks'-Array.", nameof(workflow));
             }
         }
-        else if (string.Equals(schema, "go.prompt-workflow.v1", StringComparison.Ordinal))
-        {
-            RequireString(root, "title", workflow);
-            RequireString(root, "objective", workflow);
-            RequireObject(root, "scope", workflow);
-            RequireArray(root, "acceptanceCriteria", workflow);
-            RequireArray(root, "verificationCommands", workflow);
-            RequireObject(root, "lastRun", workflow);
-        }
         else if (string.Equals(schema, "barebone.general.workflow.v1", StringComparison.Ordinal))
         {
             if (!root.TryGetProperty("kind", out var kind)
@@ -187,34 +178,6 @@ public sealed class SqliteWorkflowRepository(SqliteDatabase database) : IWorkflo
         else
         {
             throw new ArgumentException($"Nicht unterstütztes Workflow-Schema '{schema}'.", nameof(workflow));
-        }
-    }
-
-    private static void RequireString(JsonElement root, string propertyName, WorkflowDefinition workflow)
-    {
-        if (!root.TryGetProperty(propertyName, out var value)
-            || value.ValueKind != JsonValueKind.String
-            || string.IsNullOrWhiteSpace(value.GetString()))
-        {
-            throw new ArgumentException($"Coding-Workflows benoetigen '{propertyName}'.", nameof(workflow));
-        }
-    }
-
-    private static void RequireObject(JsonElement root, string propertyName, WorkflowDefinition workflow)
-    {
-        if (!root.TryGetProperty(propertyName, out var value)
-            || value.ValueKind != JsonValueKind.Object)
-        {
-            throw new ArgumentException($"Coding-Workflows benoetigen ein Objekt '{propertyName}'.", nameof(workflow));
-        }
-    }
-
-    private static void RequireArray(JsonElement root, string propertyName, WorkflowDefinition workflow)
-    {
-        if (!root.TryGetProperty(propertyName, out var value)
-            || value.ValueKind != JsonValueKind.Array)
-        {
-            throw new ArgumentException($"Coding-Workflows benoetigen eine Liste '{propertyName}'.", nameof(workflow));
         }
     }
 

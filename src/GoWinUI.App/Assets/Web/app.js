@@ -5,20 +5,8 @@
     sessions: [],
     messages: [],
     workflows: [],
-    campaignDefinitions: [],
-    codingCampaign: null,
-    codingRun: null,
     conversationRevision: 0,
     conversationRefreshPending: false,
-    codingWorkspaceOpen: false,
-    codingWorkspaceSessionId: null,
-    codingWorkspaceMaximized: false,
-    codingWorkspaceMaximizedScrollTop: 0,
-    codingWorkspaceMaximizedScrollLeft: 0,
-    assistantMode: "general",
-    workflowOverlayMode: "workflow",
-    selectedCampaignDefinitionId: null,
-    selectedCampaignWorkflowId: null,
     documents: [],
     attachments: [],
     documentGroupStatus: { total: 0, ready: 0, processing: 0, failed: 0, status: "ready" },
@@ -48,9 +36,6 @@
     },
     readFromContextTarget: null,
     messageRunStatus: new Map(),
-    maximizedCodingPanelKind: null,
-    maximizedCodingPanelScrollTop: 0,
-    maximizedCodingPanelScrollLeft: 0,
     artifactPreviewUrls: new Map(),
     artifactPreviewPending: new Set(),
     selectedToolAction: null,
@@ -59,8 +44,6 @@
     waitingForCapture: false,
     captureStopRequested: false,
     audioCaptureStopRequested: false,
-    workspacePath: null,
-    workspaceName: null,
     liveCaption: {
       isActive: false,
       mode: "transcribe",
@@ -106,13 +89,12 @@
   };
 
   const byId = id => document.getElementById(id);
-  const persistentToolActions = new Set(["code", "bricsCad", "audiobook"]);
+  const persistentToolActions = new Set(["bricsCad", "audiobook"]);
   const toolVisuals = Object.freeze({
     audioAnalysis: ["Audio analysieren", "M4 12h2m2-5 4 10 3-7 2 4h3"],
     imageAnalysis: ["Bild analysieren", "M4 5h16v14H4zM7 15l3-3 3 3 2-2 2 2"],
     imageGeneration: ["Bild erstellen", "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
     bricsCad: ["BricsCAD", "M4 18V6l8-3 8 3v12l-8 3zM12 3v18M4 6l8 4 8-4"],
-    code: ["Coding", "M9 18l-6-6 6-6M15 6l6 6-6 6"],
     audiobook: ["Hörbuch erstellen", "M4 5c3-1 5-1 8 1v14c-3-2-5-2-8-1zM20 5c-3-1-5-1-8 1v14c3-2 5-2 8-1z"],
     translation: ["Übersetzen", "M4 5h10M9 3v2c0 5-2 8-5 10M6 9c2 3 4 5 8 7M15 9l5 12M18 9l-5 12M14 18h7"],
     videoAnalysis: ["Video analysieren", "M3 6h13v12H3zM16 10l5-3v10l-5-3z"],
@@ -123,6 +105,11 @@
     "screenClip.toggle": ["Video aufnehmen", "M3 6h13v12H3zM16 10l5-3v10l-5-3z"],
     "liveCaption.start": ["Live-Untertitel", "M4 8h2M4 12h4M4 16h2M10 7v10M14 9v6M18 6v12M22 9v6"]
   });
+
+  function normalizeToolAction(action) {
+    const value = action || null;
+    return value && Object.prototype.hasOwnProperty.call(toolVisuals, value) ? value : null;
+  }
 
   function createToolIcon(pathData) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -154,20 +141,12 @@
     stop: byId("stop"),
     toolsButton: byId("tools-button"),
     toolsMenu: byId("tools-menu"),
-    workspaceButton: byId("workspace-button"),
     workflowsButton: byId("open-workflows"),
-    workflowsButtonLabel: byId("workflows-button-label"),
     context: byId("context-meter"),
     contextLabel: byId("context-label"),
     contextStrip: byId("context-strip"),
     activeTools: byId("active-tool-chips"),
     documents: byId("document-chips"),
-    codingWorkspace: byId("coding-workspace"),
-    codingWorkspaceToggle: byId("coding-workspace-toggle"),
-    codingWorkspaceStatus: byId("coding-workspace-status"),
-    codingWorkspaceClose: byId("coding-workspace-close"),
-    codingWorkspaceMaximize: byId("coding-workspace-maximize"),
-    codingWorkspaceContent: byId("coding-workspace-content"),
     liveCaption: byId("live-caption"),
     liveCaptionTitle: byId("live-caption-title"),
     liveCaptionStatus: byId("live-caption-status"),
@@ -414,7 +393,6 @@
   function renderMessages(scrollToEnd) {
     const previousScrollTop = elements.messageScroll.scrollTop;
     const previousScrollLeft = elements.messageScroll.scrollLeft;
-    captureMaximizedCodingPanelScroll();
     elements.messageList.replaceChildren();
     for (const message of state.messages) {
       elements.messageList.append(createMessage(message));
@@ -757,8 +735,6 @@
   const messageCopyIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
   const messagePdfIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M20 16v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-3"/></svg>';
   const messageDoneIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
-  const codingPanelMaximizeIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></svg>';
-  const codingPanelRestoreIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M20 15h-5v5M4 15h5v5"/></svg>';
 
   function flashMessageAction(button, originalIcon, label) {
     button.classList.add("copied");
@@ -844,486 +820,6 @@
     return footer;
   }
 
-  function captureMaximizedCodingPanelScroll() {
-    const panel = document.querySelector(".coding-panel--maximized");
-    if (!panel) return;
-    state.maximizedCodingPanelScrollTop = panel.scrollTop;
-    state.maximizedCodingPanelScrollLeft = panel.scrollLeft;
-  }
-
-  function captureMaximizedCodingWorkspaceScroll() {
-    if (!state.codingWorkspaceMaximized || elements.codingWorkspaceContent.hidden) return;
-    state.codingWorkspaceMaximizedScrollTop = elements.codingWorkspaceContent.scrollTop;
-    state.codingWorkspaceMaximizedScrollLeft = elements.codingWorkspaceContent.scrollLeft;
-  }
-
-  function maximizedCodingPanelUsesAutoScroll(panelKind) {
-    return panelKind === "trace" || panelKind === "powershell";
-  }
-
-  function restoreMaximizedCodingPanelScroll(panel, panelKind) {
-    requestAnimationFrame(() => {
-      if (!panel.classList.contains("coding-panel--maximized")
-        || state.maximizedCodingPanelKind !== panelKind) return;
-      panel.scrollTop = maximizedCodingPanelUsesAutoScroll(panelKind)
-        ? panel.scrollHeight
-        : state.maximizedCodingPanelScrollTop;
-      panel.scrollLeft = state.maximizedCodingPanelScrollLeft;
-      state.maximizedCodingPanelScrollTop = panel.scrollTop;
-      state.maximizedCodingPanelScrollLeft = panel.scrollLeft;
-    });
-  }
-
-  function clearCodingPanelMaximizedState() {
-    state.maximizedCodingPanelKind = null;
-    state.maximizedCodingPanelScrollTop = 0;
-    state.maximizedCodingPanelScrollLeft = 0;
-    document.body.classList.remove("coding-panel-maximized");
-  }
-
-  function clearCodingWorkspaceMaximizedState() {
-    state.codingWorkspaceMaximized = false;
-    state.codingWorkspaceMaximizedScrollTop = 0;
-    state.codingWorkspaceMaximizedScrollLeft = 0;
-    document.body.classList.remove("coding-workspace-maximized");
-    elements.codingWorkspace.classList.remove("coding-workspace--maximized");
-    if (elements.codingWorkspaceMaximize) {
-      elements.codingWorkspaceMaximize.innerHTML = codingPanelMaximizeIcon;
-      elements.codingWorkspaceMaximize.title = "Coding-Fenster maximieren";
-      elements.codingWorkspaceMaximize.setAttribute("aria-label", "Coding-Fenster maximieren");
-      elements.codingWorkspaceMaximize.setAttribute("aria-pressed", "false");
-    }
-  }
-
-  function restoreMaximizedCodingWorkspaceScroll() {
-    requestAnimationFrame(() => {
-      if (!state.codingWorkspaceMaximized
-        || !elements.codingWorkspace.classList.contains("coding-workspace--maximized")) return;
-      elements.codingWorkspaceContent.scrollTop = state.codingWorkspaceMaximizedScrollTop;
-      elements.codingWorkspaceContent.scrollLeft = state.codingWorkspaceMaximizedScrollLeft;
-    });
-  }
-
-  function setCodingWorkspaceMaximized(maximized) {
-    if (!maximized) {
-      clearCodingWorkspaceMaximizedState();
-      return;
-    }
-
-    clearCodingPanelMaximizedState();
-    state.codingWorkspaceOpen = true;
-    state.codingWorkspaceMaximized = true;
-    elements.codingWorkspaceContent.hidden = false;
-    elements.codingWorkspace.classList.add("is-open", "coding-workspace--maximized");
-    document.body.classList.add("coding-workspace-maximized");
-    elements.codingWorkspaceToggle.setAttribute("aria-expanded", "true");
-    if (elements.codingWorkspaceMaximize) {
-      elements.codingWorkspaceMaximize.innerHTML = codingPanelRestoreIcon;
-      elements.codingWorkspaceMaximize.title = "Coding-Fenster wiederherstellen";
-      elements.codingWorkspaceMaximize.setAttribute("aria-label", "Coding-Fenster wiederherstellen");
-      elements.codingWorkspaceMaximize.setAttribute("aria-pressed", "true");
-    }
-    restoreMaximizedCodingWorkspaceScroll();
-  }
-
-  function setCodingPanelMaximized(panel, button, label, maximized) {
-    if (maximized) clearCodingWorkspaceMaximizedState();
-    const panelKind = panel.dataset.codingPanelKind || label;
-    for (const otherPanel of document.querySelectorAll(".coding-panel--maximized")) {
-      if (otherPanel === panel) continue;
-      otherPanel.classList.remove("coding-panel--maximized");
-      const otherButton = otherPanel.querySelector(".coding-panel-maximize");
-      if (otherButton) {
-        otherButton.innerHTML = codingPanelMaximizeIcon;
-        otherButton.title = `${otherButton.dataset.panelLabel || "Modul"} maximieren`;
-        otherButton.setAttribute("aria-label", otherButton.title);
-        otherButton.setAttribute("aria-pressed", "false");
-      }
-    }
-    if (maximized && state.maximizedCodingPanelKind !== panelKind) {
-      state.maximizedCodingPanelScrollTop = 0;
-      state.maximizedCodingPanelScrollLeft = 0;
-    }
-    if (maximized) state.maximizedCodingPanelKind = panelKind;
-    else if (state.maximizedCodingPanelKind === panelKind) clearCodingPanelMaximizedState();
-    panel.classList.toggle("coding-panel--maximized", maximized);
-    document.body.classList.toggle("coding-panel-maximized", maximized);
-    button.innerHTML = maximized ? codingPanelRestoreIcon : codingPanelMaximizeIcon;
-    button.title = maximized ? `${label} wiederherstellen` : `${label} maximieren`;
-    button.setAttribute("aria-label", button.title);
-    button.setAttribute("aria-pressed", String(maximized));
-    if (maximized) {
-      restoreMaximizedCodingPanelScroll(panel, panelKind);
-    }
-  }
-
-  function attachCodingPanelMaximize(panel, header, label, panelKind) {
-    panel.dataset.codingPanelKind = panelKind;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "coding-panel-maximize";
-    button.dataset.panelLabel = label;
-    button.innerHTML = codingPanelMaximizeIcon;
-    button.title = `${label} maximieren`;
-    button.setAttribute("aria-label", button.title);
-    button.setAttribute("aria-pressed", "false");
-    button.addEventListener("click", event => {
-      event.preventDefault();
-      event.stopPropagation();
-      setCodingPanelMaximized(panel, button, label, !panel.classList.contains("coding-panel--maximized"));
-    });
-    header.append(button);
-    if (state.maximizedCodingPanelKind === panelKind) {
-      setCodingPanelMaximized(panel, button, label, true);
-    }
-  }
-
-  function createCodeDiff(message, force = false) {
-    const diff = String(message.codeDiff || "").replace(/\r\n?/g, "\n");
-    const hasDiff = Boolean(diff.trim());
-    if (!force && !hasDiff) return null;
-
-    const lines = hasDiff ? diff.split("\n") : [];
-    const fileCount = lines.filter(line => line.startsWith("diff --git ")).length;
-    const addedLines = lines.filter(line => line.startsWith("+") && !line.startsWith("+++")).length;
-    const deletedLines = lines.filter(line => line.startsWith("-") && !line.startsWith("---")).length;
-    const details = document.createElement("section");
-    details.className = "message-code-diff coding-workspace-module";
-
-    const summary = document.createElement("header");
-    summary.className = "message-code-diff__summary";
-    const icon = createToolIcon("M16 18l6-6-6-6M8 6l-6 6 6 6M14 4l-4 16");
-    icon.classList.add("message-code-diff__icon");
-    const title = document.createElement("span");
-    title.className = "message-code-diff__title";
-    title.textContent = "Codeänderungen";
-    const stats = document.createElement("span");
-    stats.className = "message-code-diff__stats";
-    stats.textContent = hasDiff
-      ? `${fileCount} ${fileCount === 1 ? "Datei" : "Dateien"} · +${addedLines} · −${deletedLines}`
-      : "Bereit";
-    summary.append(icon, title, stats);
-    attachCodingPanelMaximize(details, summary, "Codeänderungen", "diff");
-    details.append(summary);
-
-    if (hasDiff) {
-      const toolbar = document.createElement("div");
-      toolbar.className = "message-code-diff__toolbar";
-      const copy = createMessageIconAction("Git-Diff kopieren", messageCopyIcon, button => {
-        post("message.copy", { text: diff });
-        flashMessageAction(button, messageCopyIcon, "Git-Diff kopieren");
-      });
-      toolbar.append(copy);
-      details.append(toolbar);
-    }
-
-    const code = document.createElement("code");
-    const maximumRenderedLines = 5000;
-    for (const line of lines.slice(0, maximumRenderedLines)) {
-      const row = document.createElement("span");
-      row.className = line.startsWith("diff --git ") || line.startsWith("index ")
-        || line.startsWith("--- ") || line.startsWith("+++ ")
-        ? "diff-line diff-line--header"
-        : line.startsWith("@@")
-          ? "diff-line diff-line--hunk"
-          : line.startsWith("+")
-            ? "diff-line diff-line--added"
-            : line.startsWith("-")
-              ? "diff-line diff-line--deleted"
-              : "diff-line";
-      row.textContent = `${line}\n`;
-      code.append(row);
-    }
-    if (!hasDiff) {
-      const empty = document.createElement("span");
-      empty.className = "diff-line diff-line--notice";
-      empty.textContent = "Noch keine Codeänderungen.\n";
-      code.append(empty);
-    }
-    if (lines.length > maximumRenderedLines) {
-      const omitted = document.createElement("span");
-      omitted.className = "diff-line diff-line--notice";
-      omitted.textContent = `[${lines.length - maximumRenderedLines} weitere Zeilen – vollständigen Diff über die Kopierfunktion übernehmen]\n`;
-      code.append(omitted);
-    }
-    const pre = document.createElement("pre");
-    pre.className = "message-code-diff__content";
-    pre.append(code);
-    details.append(pre);
-    return details;
-  }
-
-  function createCodingTrace(message, force = false) {
-    const entries = Array.isArray(message.codingTrace) ? message.codingTrace : [];
-    const visibleEntries = entries.filter(entry => ![
-      "Coding-Modell wird geladen",
-      "Coding-Modell geladen"
-    ].includes(String(entry?.title || "")));
-    if (!force && !visibleEntries.length) return null;
-
-    const details = document.createElement("section");
-    details.className = "message-coding-trace coding-workspace-module";
-
-    const last = visibleEntries[visibleEntries.length - 1] || {};
-    const summary = document.createElement("header");
-    summary.className = "message-coding-trace__summary";
-    const icon = createToolIcon(toolVisuals.code[1]);
-    icon.classList.add("message-coding-trace__icon");
-    const title = document.createElement("span");
-    title.className = "message-coding-trace__title";
-    title.textContent = "Coding-Ablauf";
-    const current = document.createElement("span");
-    current.className = `message-coding-trace__current trace-status--${String(last.status || "running").toLowerCase()}`;
-    current.textContent = visibleEntries.length
-      ? `${visibleEntries.length} Schritte · ${last.title || "Wird vorbereitet"}`
-      : "Bereit · Warte auf Agentenaktion";
-    summary.append(icon, title, current);
-    attachCodingPanelMaximize(details, summary, "Coding-Ablauf", "trace");
-    details.append(summary);
-
-    const list = document.createElement("ol");
-    list.className = "message-coding-trace__list";
-    for (const entry of visibleEntries) {
-      const row = document.createElement("li");
-      row.className = `message-coding-trace__entry trace-status--${String(entry.status || "running").toLowerCase()}`;
-      const marker = document.createElement("span");
-      marker.className = "message-coding-trace__marker";
-      marker.setAttribute("aria-hidden", "true");
-      const text = document.createElement("div");
-      text.className = "message-coding-trace__text";
-      const heading = document.createElement("div");
-      heading.className = "message-coding-trace__heading";
-      const time = entry.timestamp ? timeLabel(entry.timestamp) : "";
-      heading.textContent = [time, entry.title].filter(Boolean).join(" · ");
-      const metadata = document.createElement("div");
-      metadata.className = "message-coding-trace__metadata";
-      const duration = Number.isFinite(entry.durationMilliseconds)
-        ? `${Math.max(0, entry.durationMilliseconds)} ms`
-        : null;
-      metadata.textContent = [entry.target, entry.tool, duration, entry.detail]
-        .filter(Boolean)
-        .join(" · ");
-      text.append(heading);
-      if (metadata.textContent) text.append(metadata);
-      row.append(marker, text);
-      list.append(row);
-    }
-    if (!visibleEntries.length) {
-      const row = document.createElement("li");
-      row.className = "message-coding-trace__entry trace-status--running";
-      const marker = document.createElement("span");
-      marker.className = "message-coding-trace__marker";
-      marker.setAttribute("aria-hidden", "true");
-      const text = document.createElement("div");
-      text.className = "message-coding-trace__text";
-      text.textContent = "Warte auf die erste Agentenaktion …";
-      row.append(marker, text);
-      list.append(row);
-    }
-    details.append(list);
-    requestAnimationFrame(() => {
-      list.scrollTop = list.scrollHeight;
-    });
-    return details;
-  }
-
-  function createPowerShellPanel(message, force = false) {
-    const entries = Array.isArray(message.codingTrace) ? message.codingTrace : [];
-    if (!force && !entries.length) return null;
-    const latestByOperation = new Map();
-    for (const entry of entries) {
-      const processConsole = entry?.processConsole;
-      const operationId = String(processConsole?.operationId || "");
-      if (operationId) latestByOperation.set(operationId, { ...processConsole, sequence: Number(entry.sequence) || 0 });
-    }
-    const consoles = [...latestByOperation.values()].sort((left, right) => left.sequence - right.sequence);
-
-    const details = document.createElement("section");
-    details.className = "message-coding-powershell coding-workspace-module";
-
-    const latest = consoles.length ? consoles[consoles.length - 1] : null;
-    const summary = document.createElement("header");
-    summary.className = "message-coding-powershell__summary";
-    const icon = createToolIcon("M4 5h16v14H4zM7 9l3 3-3 3M12 15h5");
-    icon.classList.add("message-coding-powershell__icon");
-    const title = document.createElement("span");
-    title.className = "message-coding-powershell__title";
-    title.textContent = "PowerShell";
-    const current = document.createElement("span");
-    current.className = `message-coding-powershell__current console-status--${String(latest?.status || "idle").toLowerCase()}`;
-    current.textContent = !latest
-      ? "Bereit"
-      : latest.status === "running"
-        ? "Befehl läuft"
-        : latest.exitCode == null
-          ? "Beendet"
-          : `Exit-Code ${latest.exitCode}`;
-    summary.append(icon, title, current);
-    attachCodingPanelMaximize(details, summary, "PowerShell", "powershell");
-    details.append(summary);
-
-    const body = document.createElement("div");
-    body.className = "message-coding-powershell__body";
-    if (!consoles.length) {
-      const idle = document.createElement("div");
-      idle.className = "message-coding-powershell__idle";
-      const idlePrompt = document.createElement("span");
-      idlePrompt.className = "message-coding-powershell__prompt";
-      idlePrompt.textContent = "PS>";
-      const idleText = document.createElement("span");
-      idleText.textContent = "Warte auf einen Terminalbefehl …";
-      idle.append(idlePrompt, idleText);
-      body.append(idle);
-    }
-    for (const item of consoles) {
-      const section = document.createElement("section");
-      section.className = `message-coding-powershell__run console-status--${String(item.status || "running").toLowerCase()}`;
-      const command = document.createElement("div");
-      command.className = "message-coding-powershell__command";
-      const prompt = document.createElement("span");
-      prompt.className = "message-coding-powershell__prompt";
-      prompt.textContent = "PS>";
-      const commandText = document.createElement("code");
-      commandText.textContent = item.command || "PowerShell-Befehl";
-      command.append(prompt, commandText);
-
-      const metadata = document.createElement("div");
-      metadata.className = "message-coding-powershell__metadata";
-      const purposeLabels = {
-        inspect: "Prüfung",
-        setup: "Setup",
-        test: "Test",
-        build: "Build",
-        start: "Programmstart",
-        verify: "Verifikation"
-      };
-      metadata.textContent = [
-        item.workingDirectory && item.workingDirectory !== "." ? item.workingDirectory : null,
-        purposeLabels[String(item.purpose || "").toLowerCase()] || "Terminalbefehl",
-        item.exitCode == null ? null : `Exit-Code ${item.exitCode}`
-      ].filter(Boolean).join(" · ");
-      section.append(command);
-      if (metadata.textContent) section.append(metadata);
-
-      const output = document.createElement("pre");
-      output.className = "message-coding-powershell__output";
-      const stdout = filterPowerShellOutput(item.standardOutput);
-      const stderr = filterPowerShellOutput(item.standardError);
-      if (stdout) {
-        const stdoutNode = document.createElement("span");
-        stdoutNode.textContent = stdout;
-        output.append(stdoutNode);
-      }
-      if (stderr) {
-        if (stdout) output.append(document.createTextNode("\n"));
-        const stderrNode = document.createElement("span");
-        stderrNode.className = "message-coding-powershell__stderr";
-        stderrNode.textContent = stderr;
-        output.append(stderrNode);
-      }
-      if (!stdout && !stderr) {
-        output.textContent = item.status === "running" ? "Befehl wird ausgeführt …" : "[Keine Konsolenausgabe]";
-      }
-      section.append(output);
-      body.append(section);
-    }
-    details.append(body);
-    requestAnimationFrame(() => {
-      body.scrollTop = body.scrollHeight;
-    });
-    return details;
-  }
-
-  function filterPowerShellOutput(value) {
-    const warning = /warning:\s+in the working copy of ['"][^'"\r\n]+['"],\s+(?:LF|CRLF) will be replaced by (?:LF|CRLF) the next time Git touches it\.?/gi;
-    return String(value || "")
-      .replace(warning, "")
-      .replace(/^[ \t]+$/gm, "")
-      .replace(/\n{3,}/g, "\n\n")
-      .trimEnd();
-  }
-
-  function isCodingWorkspaceActive() {
-    return state.assistantMode === "code" || state.persistentToolAction === "code";
-  }
-
-  function setCodingWorkspaceExpanded(expanded) {
-    state.codingWorkspaceOpen = Boolean(expanded) && isCodingWorkspaceActive();
-    if (!state.codingWorkspaceOpen) {
-      clearCodingWorkspaceMaximizedState();
-    }
-    renderCodingWorkspace();
-  }
-
-  function renderCodingWorkspace() {
-    const active = isCodingWorkspaceActive();
-    elements.codingWorkspace.hidden = !active;
-    if (!active) {
-      elements.codingWorkspaceContent.replaceChildren();
-      state.codingWorkspaceOpen = false;
-      clearCodingPanelMaximizedState();
-      clearCodingWorkspaceMaximizedState();
-      return;
-    }
-
-    const run = state.codingRun && String(state.codingRun.sessionId || "") === String(state.activeSessionId || "")
-      ? state.codingRun
-      : null;
-    const entries = Array.isArray(run?.entries) ? run.entries : [];
-    const visibleEntries = entries.filter(entry => ![
-      "Coding-Modell wird geladen",
-      "Coding-Modell geladen"
-    ].includes(String(entry?.title || "")));
-    const latest = visibleEntries[visibleEntries.length - 1];
-    const runStatus = String(run?.status || "idle").toLowerCase();
-    elements.codingWorkspaceStatus.textContent = latest?.title
-      || (runStatus === "running" ? "Agent arbeitet" : runStatus === "failed" ? "Fehlgeschlagen" : "Bereit");
-    elements.codingWorkspaceStatus.dataset.status = runStatus;
-    elements.codingWorkspaceToggle.setAttribute("aria-expanded", String(state.codingWorkspaceOpen));
-    elements.codingWorkspace.classList.toggle("is-open", state.codingWorkspaceOpen);
-    elements.codingWorkspace.classList.toggle("coding-workspace--maximized", state.codingWorkspaceMaximized);
-    document.body.classList.toggle("coding-workspace-maximized", state.codingWorkspaceMaximized);
-    if (elements.codingWorkspaceMaximize) {
-      elements.codingWorkspaceMaximize.innerHTML = state.codingWorkspaceMaximized ? codingPanelRestoreIcon : codingPanelMaximizeIcon;
-      elements.codingWorkspaceMaximize.title = state.codingWorkspaceMaximized ? "Coding-Fenster wiederherstellen" : "Coding-Fenster maximieren";
-      elements.codingWorkspaceMaximize.setAttribute("aria-label", elements.codingWorkspaceMaximize.title);
-      elements.codingWorkspaceMaximize.setAttribute("aria-pressed", String(state.codingWorkspaceMaximized));
-    }
-    elements.codingWorkspaceContent.hidden = !state.codingWorkspaceOpen;
-    if (!state.codingWorkspaceOpen) {
-      elements.codingWorkspaceContent.replaceChildren();
-      return;
-    }
-
-    captureMaximizedCodingPanelScroll();
-    captureMaximizedCodingWorkspaceScroll();
-    const oldDiff = elements.codingWorkspaceContent.querySelector(".message-code-diff__content");
-    const oldDiffScrollTop = oldDiff?.scrollTop || 0;
-    const oldDiffScrollLeft = oldDiff?.scrollLeft || 0;
-    const panelMessage = {
-      id: run?.messageId || run?.id || `coding-panels-${state.activeSessionId || "current"}`,
-      status: run?.status || (state.isRunning ? "streaming" : "completed"),
-      codingTrace: entries,
-      codeDiff: run?.codeDiff || ""
-    };
-    const grid = document.createElement("div");
-    grid.className = "message-coding-panels";
-    grid.append(
-      createCodingTrace(panelMessage, true),
-      createPowerShellPanel(panelMessage, true),
-      createCodeDiff(panelMessage, true)
-    );
-    elements.codingWorkspaceContent.replaceChildren(grid);
-    requestAnimationFrame(() => {
-      const nextDiff = elements.codingWorkspaceContent.querySelector(".message-code-diff__content");
-      if (nextDiff) {
-        nextDiff.scrollTop = oldDiffScrollTop;
-        nextDiff.scrollLeft = oldDiffScrollLeft;
-      }
-    });
-    restoreMaximizedCodingWorkspaceScroll();
-  }
-
   function sanitizeVisibleMessageContent(value) {
     const marker = /GO(?:\\?_)?SESSION(?:\\?_)?TITLE\s*:\s*/ig;
     return String(value || "")
@@ -1356,12 +852,6 @@
       meta.className = "message-meta";
       const messageTime = timeLabel(message.createdAt || message.updatedAt);
       meta.textContent = messageTime ? `AI - ${messageTime}` : "AI";
-      if (String(message.messagePhase || "").toLowerCase() === "commentary") {
-        const phase = document.createElement("span");
-        phase.className = "message-phase message-phase--commentary";
-        phase.textContent = "Zwischenstand";
-        meta.append(" · ", phase);
-      }
       const liveStatus = state.messageRunStatus.get(String(message.id));
       if (message.status && !message.tool && !liveStatus && !["completed", "Completed"].includes(message.status)) {
         const status = document.createElement("span");
@@ -1649,7 +1139,7 @@
     elements.activeTools.replaceChildren();
     elements.documents.replaceChildren();
 
-    if (state.selectedToolAction && state.selectedToolAction !== "code" && toolVisuals[state.selectedToolAction]) {
+    if (state.selectedToolAction && toolVisuals[state.selectedToolAction]) {
       const [label, iconPath] = toolVisuals[state.selectedToolAction];
       const chip = document.createElement("button");
       chip.type = "button";
@@ -1860,7 +1350,7 @@
   function updateContextStripVisibility() {
     elements.contextStrip.hidden = state.documents.length === 0
       && state.attachments.length === 0
-      && !(state.selectedToolAction && state.selectedToolAction !== "code")
+      && !state.selectedToolAction
       && !isAudioCaptureActive()
       && !isScreenClipActive()
       && !globalThis.goVoiceCapture?.isActive
@@ -1870,16 +1360,20 @@
   }
 
   function renderStatus() {
-    const campaignRunning = state.codingCampaign?.status === "running";
     // Speech playback is an independent activity. The composer stop button only
-    // cancels the current AI run or coding campaign; playback has its own chip
+    // cancels the current AI run; playback has its own chip
     // controls so sending/aborting a prompt cannot interrupt it.
-    const canStop = state.isRunning || campaignRunning;
+    const canStop = state.isRunning;
     elements.send.hidden = canStop;
     elements.stop.hidden = !canStop;
     elements.prompt.disabled = false;
     elements.newSession.disabled = state.isRunning;
-    elements.clearSessions.disabled = state.isRunning;
+    const hasUnpinnedSessions = state.sessions.some(session => !session.isPinned);
+    elements.clearSessions.disabled = state.isRunning || !hasUnpinnedSessions;
+    elements.clearSessions.title = hasUnpinnedSessions
+      ? "Alle nicht angepinnten Sitzungen löschen"
+      : "Keine nicht angepinnten Sitzungen vorhanden";
+    elements.clearSessions.setAttribute("aria-label", elements.clearSessions.title);
 
     const usedValue = Math.max(0, Number(state.contextUsed) || 0);
     const limitValue = Math.max(1, Number(state.contextLimit) || 8192);
@@ -1927,19 +1421,6 @@
     elements.composerSpeechPauseIcon.setAttribute("d", isPaused ? "M8 5l11 7-11 7z" : "M8 5v14M16 5v14");
     elements.composerSpeechStop.disabled = false;
     updateContextStripVisibility();
-  }
-
-  function renderWorkspace() {
-    const active = Boolean(state.workspacePath);
-    elements.workspaceButton.classList.remove("active");
-    elements.workspaceButton.setAttribute("aria-pressed", String(active));
-    elements.workspaceButton.title = active
-      ? `Workspace: ${state.workspacePath} · Klicken zum Ändern`
-      : "Workspace-Ordner freigeben";
-    const campaignMode = isCodingCampaignMode();
-    elements.workflowsButtonLabel.textContent = "Workflows";
-    elements.workflowsButton.title = campaignMode ? "Coding-Workflows öffnen" : "Workflow wählen";
-    elements.workflowsButton.setAttribute("aria-label", elements.workflowsButton.title);
   }
 
   function renderLiveCaption() {
@@ -2084,217 +1565,11 @@
     if (summary) summary.setAttribute("aria-expanded", "false");
   }
 
-  function isCodingCampaignMode() {
-    return state.assistantMode === "code" || state.persistentToolAction === "code";
-  }
-
-  function campaignStatusLabel(status) {
-    return ({ running: "Dauerlauf aktiv", faulted: "Laufzeitfehler", stopped: "Gestoppt" })[status] || status || "Inaktiv";
-  }
-
-  function campaignPhaseLabel(phase) {
-    return ({ bootstrap: "Projektgrundlage", iteration: "Iteration", correction: "Korrektur", validation: "Abnahme" })[phase] || phase || "";
-  }
-
-  function isCodingWorkflow(workflow) {
-    if (!workflow) return false;
-    if (workflow.schema === "go.prompt-workflow.v1") return true;
-    try {
-      return JSON.parse(workflow.contentJson || "{}")?.schema === "go.prompt-workflow.v1";
-    } catch {
-      return false;
-    }
-  }
-
-  function codingWorkflowItems() {
-    return state.workflows.filter(isCodingWorkflow);
-  }
-
-  function selectedCampaignDefinition() {
-    return state.campaignDefinitions.find(item => item.id === state.selectedCampaignDefinitionId)
-      || state.campaignDefinitions.find(item => item.id === state.codingCampaign?.definitionId)
-      || state.campaignDefinitions[0]
-      || null;
-  }
-
-  function selectedCampaignWorkflow() {
-    const workflows = codingWorkflowItems();
-    return workflows.find(item => item.id === state.selectedCampaignWorkflowId)
-      || (state.codingCampaign?.definitionId === "prompt-workflow"
-        ? workflows.find(item => item.title === state.codingCampaign?.title)
-        : null)
-      || null;
-  }
-
-  function preferredCampaignWorkflow() {
-    if (state.selectedCampaignDefinitionId) return selectedCampaignWorkflow();
-    return selectedCampaignWorkflow()
-      || codingWorkflowItems()[0]
-      || null;
-  }
-
-  function setCampaignFooterMode() {
-    const selectedDefinition = selectedCampaignDefinition();
-    const selectedWorkflow = selectedCampaignWorkflow();
-    const editing = state.isWorkflowEditing;
-
-    if (editing) {
-      setWorkflowFooterMode("edit", selectedWorkflow);
-      elements.selectWorkflow.textContent = "Workflow laden";
-      return;
-    }
-
-    if (selectedWorkflow) {
-      setWorkflowFooterMode("preview", selectedWorkflow);
-      elements.selectWorkflow.hidden = false;
-      elements.selectWorkflow.textContent = "Workflow laden";
-      return;
-    }
-
-    elements.deleteWorkflow.hidden = true;
-    elements.editWorkflow.hidden = true;
-    elements.cancelWorkflowEdit.hidden = true;
-    elements.saveWorkflow.hidden = true;
-    elements.selectWorkflow.hidden = !selectedDefinition;
-    elements.selectWorkflow.textContent = "Workflow laden";
-  }
-
-  function showCampaignPreview(definition) {
-    state.selectedCampaignDefinitionId = definition?.id || null;
-    state.selectedCampaignWorkflowId = null;
-    state.selectedWorkflowEditorId = null;
-    state.isWorkflowEditing = false;
-    setWorkflowIdentity(null);
-    elements.workflowEditor.hidden = true;
-    elements.workflowLock.hidden = true;
-    elements.workflowEmpty.hidden = Boolean(definition);
-    elements.workflowPreview.hidden = !definition;
-    if (definition) {
-      const active = state.codingCampaign?.definitionId === definition.id ? state.codingCampaign : null;
-      elements.workflowPreviewTitle.textContent = definition.title;
-      elements.workflowPreviewId.textContent = definition.category || "Coding-Workflow";
-      elements.workflowPreviewBadge.hidden = !active;
-      elements.workflowPreviewBadge.textContent = active ? campaignStatusLabel(active.status) : "";
-      elements.workflowPreviewTags.replaceChildren();
-      elements.workflowPreviewTags.hidden = true;
-      elements.workflowPreviewDescription.textContent = definition.description || "Fortlaufender autonomer Coding-Workflow.";
-      elements.workflowPreviewSummary.textContent = "Lädt den Workflow und vorhandene Lösungsstände. Der Dauerlauf beginnt erst über Senden im Promptfenster und endet über denselben Stop-Button.";
-      elements.workflowPreviewContent.textContent = active
-        ? [`Status: ${campaignStatusLabel(active.status)}`, `Iteration: ${active.iteration}`, `Phase: ${campaignPhaseLabel(active.phase)}`, active.challenge ? `Schwerpunkt: ${active.challenge}` : null, active.error ? `Fehler: ${active.error}` : null].filter(Boolean).join("\n")
-        : "Wird in den aktuell freigegebenen Workspace geladen und verwendet beim Start das gewählte Coding-Modell.";
-    }
-    setCampaignFooterMode();
-    renderCampaignList();
-  }
-
-  function showCampaignWorkflowPreview(workflow) {
-    state.selectedCampaignWorkflowId = workflow?.id || null;
-    state.selectedCampaignDefinitionId = null;
-    state.selectedWorkflowEditorId = workflow?.id || null;
-    state.isWorkflowEditing = false;
-    setWorkflowIdentity(workflow);
-    elements.workflowEditor.hidden = true;
-    elements.workflowLock.hidden = true;
-    elements.workflowEmpty.hidden = Boolean(workflow);
-    elements.workflowPreview.hidden = !workflow;
-    if (workflow) {
-      const active = state.codingCampaign?.definitionId === "prompt-workflow"
-        && state.codingCampaign?.title === workflow.title;
-      elements.workflowPreviewTitle.textContent = workflow.title || "Unbenannter Coding-Workflow";
-      elements.workflowPreviewId.textContent = [workflow.domain || "Coding", workflow.slug || workflow.id].filter(Boolean).join(" · ");
-      elements.workflowPreviewBadge.hidden = !active;
-      elements.workflowPreviewBadge.textContent = active ? campaignStatusLabel(state.codingCampaign.status) : "";
-      elements.workflowPreviewTags.replaceChildren();
-      for (const tag of workflow.tags || []) {
-        const chip = document.createElement("span");
-        chip.className = "workflow-tag";
-        chip.textContent = tag;
-        elements.workflowPreviewTags.append(chip);
-      }
-      elements.workflowPreviewTags.hidden = (workflow.tags || []).length === 0;
-      elements.workflowPreviewDescription.textContent = workflow.description || "Gespeicherter promptgetriebener Coding-Workflow.";
-      elements.workflowPreviewSummary.textContent = workflow.contextSummary || "Laedt den konkreten Workflow-Vertrag in den aktuellen Workspace.";
-      elements.workflowPreviewContent.textContent = readableWorkflowContent(workflow.contentJson);
-    }
-    setCampaignFooterMode();
-    renderCampaignList();
-  }
-
-  function renderCampaignList() {
-    const query = elements.workflowSearch.value.trim().toLocaleLowerCase();
-    const definitions = state.campaignDefinitions.filter(item => !query
-      || `${item.title} ${item.description} ${item.category}`.toLocaleLowerCase().includes(query));
-    const savedWorkflows = codingWorkflowItems().filter(item => !query
-      || `${item.title} ${item.description} ${item.domain} ${item.contextSummary} ${(item.tags || []).join(" ")}`
-        .toLocaleLowerCase().includes(query));
-    elements.workflowList.replaceChildren();
-    if (definitions.length === 0 && savedWorkflows.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "workflow-list-empty";
-      empty.textContent = query ? "Kein passender Coding-Workflow." : "Keine Coding-Workflows verfügbar.";
-      elements.workflowList.append(empty);
-      return;
-    }
-    for (const workflow of savedWorkflows) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `workflow-item${workflow.id === state.selectedCampaignWorkflowId ? " active" : ""}`;
-      const title = document.createElement("strong");
-      title.textContent = workflow.title;
-      const description = document.createElement("span");
-      description.textContent = workflow.description || workflow.contextSummary || "Gespeicherter Coding-Workflow";
-      button.append(title, description);
-      const badge = document.createElement("span");
-      badge.className = "built-in-badge";
-      badge.textContent = "Gespeichert";
-      button.append(badge);
-      button.addEventListener("click", () => showCampaignWorkflowPreview(workflow));
-      elements.workflowList.append(button);
-    }
-    for (const definition of definitions) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `workflow-item${definition.id === state.selectedCampaignDefinitionId ? " active" : ""}`;
-      const title = document.createElement("strong");
-      title.textContent = definition.title;
-      const description = document.createElement("span");
-      description.textContent = definition.description;
-      button.append(title, description);
-      if (definition.id === state.codingCampaign?.definitionId) {
-        const badge = document.createElement("span");
-        badge.className = "built-in-badge";
-        badge.textContent = campaignStatusLabel(state.codingCampaign.status);
-        button.append(badge);
-      }
-      button.addEventListener("click", () => showCampaignPreview(definition));
-      elements.workflowList.append(button);
-    }
-  }
-
-  function configureWorkflowOverlayMode() {
-    const campaignMode = state.workflowOverlayMode === "campaign";
-    elements.workflowDialogTitle.textContent = campaignMode ? "Coding-Workflows" : "Workflows";
-    elements.workflowDialogSubtitle.textContent = campaignMode
-      ? "Fortlaufende Coding-Workflows im freigegebenen Workspace"
-      : "Gespeicherte Abläufe auswählen und verwalten";
-    elements.workflowSearch.placeholder = campaignMode ? "Coding-Workflows durchsuchen …" : "Workflows durchsuchen …";
-    elements.newWorkflow.hidden = false;
-    if (campaignMode) {
-      const workflow = selectedCampaignWorkflow();
-      if (workflow) showCampaignWorkflowPreview(workflow);
-      else showCampaignPreview(selectedCampaignDefinition());
-    }
-  }
-
   function renderWorkflows() {
-    if (state.workflowOverlayMode === "campaign") {
-      renderCampaignList();
-      return;
-    }
     const query = elements.workflowSearch.value.trim().toLocaleLowerCase();
-    const workflows = state.workflows.filter(item => !isCodingWorkflow(item) && (!query ||
+    const workflows = state.workflows.filter(item => !query ||
       `${item.title} ${item.description} ${item.domain} ${item.contextSummary} ${(item.tags || []).join(" ")}`
-        .toLocaleLowerCase().includes(query)));
+        .toLocaleLowerCase().includes(query));
     elements.workflowList.replaceChildren();
 
     if (workflows.length === 0) {
@@ -2400,51 +1675,6 @@
     requestAnimationFrame(() => elements.workflowName.focus());
   }
 
-  function createCodingWorkflowDraft() {
-    return {
-      id: null,
-      revision: 0,
-      title: "Neuer Coding-Workflow",
-      domain: "Coding",
-      tags: ["Coding", "Prompt-Workflow"],
-      description: "Promptgetriebener Coding-Workflow.",
-      contextSummary: "Ziel, Prompt, Ausfuehrungen und Verifikation werden als Coding-Workflow gespeichert.",
-      contentJson: JSON.stringify({
-        schema: "go.prompt-workflow.v1",
-        title: "Neuer Coding-Workflow",
-        objective: "Beschreibe hier das konkrete Coding-Ziel, das autonom im Workspace bearbeitet werden soll.",
-        iteration: 0,
-        scope: { source: "workflow-overlay" },
-        assumptions: ["Der freigegebene Workspace ist die einzige Mutationsgrenze."],
-        acceptanceCriteria: ["Der Coding-Agent fuehrt passende Tests, Builds oder Pruefungen aus und dokumentiert echte Ergebnisse."],
-        verificationCommands: [
-          { purpose: "test", command: "Projektabhaengige Tests durch den Coding-Agenten bestimmen und ausfuehren." }
-        ],
-        artifacts: [],
-        openQuestions: [],
-        lastRun: {
-          status: "draft",
-          changedFiles: [],
-          checks: [],
-          nextAction: "Workflow laden und ueber den Promptbutton starten."
-        }
-      }, null, 2),
-      isBuiltIn: false
-    };
-  }
-
-  function normalizeWorkflowContentForSave(contentJson, title) {
-    if (state.workflowOverlayMode !== "campaign") return contentJson;
-    try {
-      const contract = JSON.parse(contentJson || "{}");
-      if (contract?.schema !== "go.prompt-workflow.v1") return contentJson;
-      contract.title = title;
-      return JSON.stringify(contract);
-    } catch {
-      return contentJson;
-    }
-  }
-
   function selectedWorkflowForDialog() {
     return state.workflows.find(item => item.id === state.selectedWorkflowEditorId)
       || state.workflows[0]
@@ -2453,19 +1683,8 @@
 
   function openWorkflows() {
     elements.overlay.hidden = false;
-    state.workflowOverlayMode = isCodingCampaignMode() ? "campaign" : "workflow";
-    configureWorkflowOverlayMode();
-    if (state.workflowOverlayMode === "campaign") {
-      post("campaign.list", { sessionId: state.activeSessionId });
-      post("workflow.list", { search: elements.workflowSearch.value });
-      state.selectedCampaignDefinitionId = null;
-      const workflow = preferredCampaignWorkflow();
-      if (workflow) showCampaignWorkflowPreview(workflow);
-      else showCampaignPreview(selectedCampaignDefinition());
-    } else {
-      post("workflow.list", { search: elements.workflowSearch.value });
-      showWorkflowPreview(selectedWorkflowForDialog());
-    }
+    post("workflow.list", { search: elements.workflowSearch.value });
+    showWorkflowPreview(selectedWorkflowForDialog());
     requestAnimationFrame(() => elements.workflowSearch.focus());
   }
 
@@ -2494,18 +1713,6 @@
     const prompt = elements.prompt.value.trim();
     state.voiceTurn = null;
     renderContext();
-    const loadedCodingWorkflow = isCodingCampaignMode() && Boolean(state.codingCampaign);
-    if (loadedCodingWorkflow) {
-      clearTimeout(draftTimer);
-      draftTimer = 0;
-      pendingDraft = null;
-      post("campaign.run", {
-        sessionId: state.activeSessionId,
-        instruction: prompt || null
-      });
-      elements.prompt.value = "";
-      return;
-    }
     if (!prompt) return;
     clearTimeout(draftTimer);
     draftTimer = 0;
@@ -2628,12 +1835,13 @@
 
   function selectToolAction(action, persist = true) {
     const previous = state.selectedToolAction;
-    const requested = action || null;
+    const requested = normalizeToolAction(action);
+    const persistentFallback = normalizeToolAction(state.persistentToolAction);
     state.selectedToolAction = !requested
       && previous
       && !persistentToolActions.has(previous)
-      && state.persistentToolAction
-        ? state.persistentToolAction
+      && persistentFallback
+        ? persistentFallback
         : requested;
     for (const option of document.querySelectorAll(".service-option[data-tool-action]")) {
       option.classList.toggle("active", option.dataset.toolAction === state.selectedToolAction);
@@ -2652,8 +1860,6 @@
         });
       }
     }
-    renderCodingWorkspace();
-    renderWorkspace();
   }
 
   function clearCompletedOneShotToolAction() {
@@ -2719,27 +1925,15 @@
     state.messages = nextMessages;
     state.conversationRevision = Number(payload.conversationRevision) || 0;
     state.conversationRefreshPending = false;
-    state.codingRun = payload.codingRun || null;
     state.workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
-    state.campaignDefinitions = Array.isArray(payload.codingCampaignDefinitions) ? payload.codingCampaignDefinitions : state.campaignDefinitions;
-    state.codingCampaign = payload.codingCampaign || null;
-    state.assistantMode = payload.assistantMode || "general";
     state.documents = Array.isArray(payload.documents) ? payload.documents : [];
     state.attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
     state.documentGroupStatus = payload.documentGroupStatus || { total: 0, ready: 0, processing: 0, failed: 0, status: "ready" };
     state.activeSessionId = nextSessionId;
     globalThis.goVoiceCapture?.setSessionId(state.activeSessionId);
-    const activeCodingMode = state.assistantMode === "code"
-      || payload.selectedToolAction === "code";
     if (previousSessionId !== state.activeSessionId) {
       state.messageRunStatus.clear();
       resetTransientVoiceStateForSessionChange();
-      state.codingWorkspaceOpen = false;
-      state.codingWorkspaceSessionId = state.activeSessionId;
-    }
-    if ((previousSessionId && previousSessionId !== state.activeSessionId) || !activeCodingMode) {
-      clearCodingPanelMaximizedState();
-      clearCodingWorkspaceMaximizedState();
     }
     state.isRunning = Boolean(payload.isRunning);
     state.model = payload.model || null;
@@ -2747,10 +1941,8 @@
     if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
     state.contextWasTruncated = Boolean(payload.contextWasTruncated);
     state.contextNotice = payload.contextNotice || null;
-    state.workspacePath = payload.workspacePath || null;
-    state.workspaceName = payload.workspaceName || null;
-    const serverToolAction = payload.selectedToolAction || null;
-    state.persistentToolAction = serverToolAction;
+    const serverToolAction = normalizeToolAction(payload.selectedToolAction);
+    state.persistentToolAction = persistentToolActions.has(serverToolAction) ? serverToolAction : null;
     const activeOneShotTool = state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction);
     if (previousSessionId !== state.activeSessionId || !activeOneShotTool) {
       selectToolAction(serverToolAction, false);
@@ -2773,23 +1965,13 @@
     renderMessages(currentSessionMessagesChanged);
     if (sessionChanged) restoreSessionScrollPosition(state.activeSessionId);
     renderContext();
-    renderCodingWorkspace();
-    renderWorkspace();
     renderStatus();
     renderLiveCaption();
     renderMicrophone();
     syncVoiceCaptureSuspension();
     renderScreenClip();
 
-    if (dialogWasOpen && isCodingCampaignMode()) {
-      state.workflowOverlayMode = "campaign";
-      configureWorkflowOverlayMode();
-      const selectedWorkflow = selectedCampaignWorkflow();
-      if (selectedWorkflow) showCampaignWorkflowPreview(selectedWorkflow);
-      else showCampaignPreview(selectedCampaignDefinition());
-    } else if (dialogWasOpen && !wasEditing) {
-      state.workflowOverlayMode = "workflow";
-      configureWorkflowOverlayMode();
+    if (dialogWasOpen && !wasEditing) {
       const pending = state.pendingWorkflowTitle
         ? state.workflows.find(item => item.title === state.pendingWorkflowTitle)
         : null;
@@ -2845,11 +2027,9 @@
     state.messages = nextMessages;
     sortCommittedMessages();
     state.conversationRevision = Number(payload.conversationRevision) || 0;
-    state.codingRun = payload.codingRun || null;
     state.conversationRefreshPending = false;
     pruneTerminalMessageRunStatuses();
     renderMessages(messagesChanged);
-    renderCodingWorkspace();
   }
 
   function acceptCommittedRevision(payload) {
@@ -2884,22 +2064,6 @@
     renderMessages(true);
   }
 
-  function applyCommittedRemoval(payload) {
-    if (!payload?.messageId || String(payload.sessionId || "") !== String(state.activeSessionId || "")) return;
-    if (!acceptCommittedRevision(payload)) return;
-    const messageId = String(payload.messageId);
-    state.messages = state.messages.filter(item => String(item.id || "") !== messageId);
-    state.messageRunStatus.delete(messageId);
-    renderMessages(false);
-  }
-
-  function applyCommittedCodingSnapshot(payload) {
-    if (!payload || String(payload.sessionId || "") !== String(state.activeSessionId || "")) return;
-    if (!acceptCommittedRevision(payload)) return;
-    state.codingRun = payload.codingRun || null;
-    renderCodingWorkspace();
-  }
-
   function handleHostMessage(event) {
     const { type, payload } = event.detail;
     switch (type) {
@@ -2911,12 +2075,6 @@
         break;
       case "conversation.messageCommitted":
         applyCommittedMessage(payload);
-        break;
-      case "conversation.messageRemoved":
-        applyCommittedRemoval(payload);
-        break;
-      case "coding.snapshotCommitted":
-        applyCommittedCodingSnapshot(payload);
         break;
       case "chat.started":
         state.isRunning = true;
@@ -2946,20 +2104,6 @@
         if (state.contextWasTruncated) showToast(state.contextNotice || "Der Modellkontext wurde gekürzt.");
         break;
       case "chat.delta": {
-        break;
-      }
-      case "chat.codeDiff": {
-        break;
-      }
-      case "chat.codingTrace": {
-        break;
-      }
-      case "chat.message": {
-        requestConversationRefresh();
-        break;
-      }
-      case "chat.removed": {
-        requestConversationRefresh();
         break;
       }
       case "chat.completed":
@@ -3052,34 +2196,8 @@
         if (state.selectedToolAction === action) selectToolAction(null, false);
         break;
       }
-      case "campaign.snapshot":
-      case "campaign.changed":
-        state.campaignDefinitions = Array.isArray(payload.definitions) ? payload.definitions : state.campaignDefinitions;
-        state.codingCampaign = payload.activeCampaign || null;
-        if (state.codingCampaign && state.codingCampaign.status !== "running") {
-          state.isRunning = false;
-        }
-        renderCodingWorkspace();
-        renderStatus();
-        if (!elements.overlay.hidden && state.workflowOverlayMode === "campaign") {
-          configureWorkflowOverlayMode();
-          const workflow = selectedCampaignWorkflow();
-          if (workflow) showCampaignWorkflowPreview(workflow);
-          else showCampaignPreview(selectedCampaignDefinition());
-        }
-        break;
       case "workflow.snapshot": {
         state.workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
-        if (state.workflowOverlayMode === "campaign") {
-          if (!state.isWorkflowEditing) {
-            const workflow = selectedCampaignWorkflow();
-            if (workflow) showCampaignWorkflowPreview(workflow);
-            else showCampaignPreview(selectedCampaignDefinition());
-          } else {
-            renderCampaignList();
-          }
-          break;
-        }
         if (!state.isWorkflowEditing) {
           const current = state.workflows.find(item => item.id === state.selectedWorkflowEditorId) || selectedWorkflowForDialog();
           showWorkflowPreview(current || null);
@@ -3090,10 +2208,6 @@
       }
       case "workflow.draft":
         elements.overlay.hidden = false;
-        state.workflowOverlayMode = payload?.mode === "campaign" || isCodingWorkflow(payload?.workflow)
-          ? "campaign"
-          : "workflow";
-        configureWorkflowOverlayMode();
         showWorkflowEditor(payload.workflow || null);
         break;
       case "status.changed": {
@@ -3278,17 +2392,6 @@
         renderContext();
         if (payload?.error) showToast(payload.error, true);
         break;
-      case "composer.transcript": {
-        const text = String(payload?.text || "").trim();
-        if (text) {
-          const current = elements.prompt.value.trim();
-          elements.prompt.value = current ? `${current}\n\n${text}` : text;
-          scheduleDraftSave();
-          elements.prompt.focus();
-          elements.prompt.setSelectionRange(elements.prompt.value.length, elements.prompt.value.length);
-        }
-        break;
-      }
       case "theme.changed":
         document.documentElement.dataset.theme = payload.highContrast ? "high-contrast" : payload.theme || "system";
         if (payload.highContrast) {
@@ -3342,7 +2445,9 @@
     document.body.classList.remove("sessions-open");
   });
   elements.clearSessions.addEventListener("click", () => {
-    if (state.sessions.length > 0 && globalThis.confirm("Alle Sitzungen und ihre Nachrichten endgültig löschen?")) {
+    const hasUnpinnedSessions = state.sessions.some(session => !session.isPinned);
+    if (hasUnpinnedSessions && globalThis.confirm(
+      "Alle nicht angepinnten Sitzungen und ihre Nachrichten endgültig löschen? Angepinnte Sitzungen bleiben erhalten.")) {
       flushDraft();
       post("session.clear", {});
     }
@@ -3362,33 +2467,7 @@
   });
   elements.send.addEventListener("click", submitPrompt);
   elements.stop.addEventListener("click", () => {
-    const stopsCodingCampaign = state.codingCampaign?.status === "running";
-    if (stopsCodingCampaign) {
-      state.codingCampaign = { ...state.codingCampaign, status: "stopping" };
-      state.isRunning = false;
-      renderCodingWorkspace();
-      renderStatus();
-    }
-    if (stopsCodingCampaign) {
-      post("campaign.stop", { sessionId: state.activeSessionId });
-    } else {
-      post("chat.cancel", {});
-    }
-  });
-  elements.codingWorkspaceToggle.addEventListener("click", () => {
-    setCodingWorkspaceExpanded(!state.codingWorkspaceOpen);
-  });
-  elements.codingWorkspaceMaximize.addEventListener("click", event => {
-    event.preventDefault();
-    event.stopPropagation();
-    setCodingWorkspaceMaximized(!state.codingWorkspaceMaximized);
-    renderCodingWorkspace();
-  });
-  elements.codingWorkspaceClose.addEventListener("click", event => {
-    event.preventDefault();
-    event.stopPropagation();
-    clearCodingWorkspaceMaximizedState();
-    selectToolAction(null);
+    post("chat.cancel", {});
   });
   elements.composerSpeechPause.addEventListener("click", () => {
     if (!elements.composerSpeechPause.disabled) post("microphone.toggleSpeechPause", {});
@@ -3484,61 +2563,28 @@
   });
 
   elements.workflowsButton.addEventListener("click", openWorkflows);
-  elements.workspaceButton.addEventListener("click", () => post("workspace.pick", {}));
   byId("close-workflows").addEventListener("click", closeWorkflows);
   elements.overlay.addEventListener("click", event => {
     if (event.target === elements.overlay) closeWorkflows();
   });
   elements.workflowSearch.addEventListener("input", renderWorkflows);
   elements.newWorkflow.addEventListener("click", () => {
-    showWorkflowEditor(state.workflowOverlayMode === "campaign" ? createCodingWorkflowDraft() : null);
+    showWorkflowEditor(null);
   });
   elements.selectWorkflow.addEventListener("click", () => {
-    if (state.workflowOverlayMode === "campaign") {
-      const workflow = selectedCampaignWorkflow();
-      if (workflow) {
-        post("campaign.loadWorkflow", { sessionId: state.activeSessionId, workflowId: workflow.id });
-        closeWorkflows();
-        return;
-      }
-      const definition = selectedCampaignDefinition();
-      if (definition) {
-        post("campaign.select", { sessionId: state.activeSessionId, definitionId: definition.id });
-        closeWorkflows();
-      }
-      return;
-    }
     if (state.selectedWorkflowEditorId) {
       post("workflow.insert", { workflowId: state.selectedWorkflowEditorId });
       closeWorkflows();
     }
   });
   elements.editWorkflow.addEventListener("click", () => {
-    if (state.workflowOverlayMode === "campaign") {
-      const workflow = selectedCampaignWorkflow();
-      if (workflow && !workflow.isBuiltIn) showWorkflowEditor(workflow);
-      return;
-    }
     const workflow = state.workflows.find(item => item.id === state.selectedWorkflowEditorId);
     if (workflow && !workflow.isBuiltIn) showWorkflowEditor(workflow);
   });
   elements.cancelWorkflowEdit.addEventListener("click", () => {
-    if (state.workflowOverlayMode === "campaign") {
-      const workflow = selectedCampaignWorkflow();
-      if (workflow) showCampaignWorkflowPreview(workflow);
-      else showCampaignPreview(selectedCampaignDefinition());
-      return;
-    }
     showWorkflowPreview(selectedWorkflowForDialog());
   });
   elements.deleteWorkflow.addEventListener("click", () => {
-    if (state.workflowOverlayMode === "campaign") {
-      const workflow = selectedCampaignWorkflow();
-      if (workflow && !workflow.isBuiltIn && globalThis.confirm("Diesen Workflow endgueltig loeschen?")) {
-        post("workflow.delete", { workflowId: workflow.id, revision: Number(workflow.revision || 0) });
-      }
-      return;
-    }
     const workflow = state.workflows.find(item => item.id === state.selectedWorkflowEditorId);
     if (workflow && !workflow.isBuiltIn && globalThis.confirm("Diesen Workflow endgültig löschen?")) {
       post("workflow.delete", { workflowId: workflow.id, revision: Number(workflow.revision || 0) });
@@ -3561,15 +2607,12 @@
       workflowId: elements.workflowId.value || null,
       revision: Number(elements.workflowRevision.value || 0),
       title,
-      domain: state.workflowOverlayMode === "campaign" ? "Coding" : elements.workflowDomain.value.trim(),
+      domain: elements.workflowDomain.value.trim(),
       tags: elements.workflowTags.value.split(",").map(tag => tag.trim()).filter(Boolean),
       description: elements.workflowDescription.value.trim(),
       contextSummary: elements.workflowSummary.value.trim(),
-      contentJson: normalizeWorkflowContentForSave(normalizedContent, title)
+      contentJson: normalizedContent
     };
-    if (state.workflowOverlayMode === "campaign" && !payload.tags.some(tag => tag.toLowerCase() === "coding")) {
-      payload.tags.push("Coding");
-    }
     state.pendingWorkflowTitle = title;
     state.isWorkflowEditing = false;
     post(payload.workflowId ? "workflow.update" : "workflow.create", payload);
@@ -3720,14 +2763,6 @@
   globalThis.goFinishBookPdf = finishBookPdf;
   globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf;
   globalThis.goFinishMessagePdf = finishBookPdf;
-  document.addEventListener("keydown", event => {
-    if (event.key !== "Escape") return;
-    const panel = document.querySelector(".coding-panel--maximized");
-    const button = panel?.querySelector(".coding-panel-maximize");
-    if (!panel || !button) return;
-    event.preventDefault();
-    setCodingPanelMaximized(panel, button, button.dataset.panelLabel || "Modul", false);
-  });
   globalThis.addEventListener("pagehide", flushDraft);
   globalThis.addEventListener("beforeunload", flushDraft);
   post("app.ready", {});

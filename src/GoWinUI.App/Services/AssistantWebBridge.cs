@@ -24,18 +24,16 @@ public sealed class AssistantWebBridge : IDisposable
         "artifact.save", "artifact.preview", "artifact.open", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
         "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
         "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.toggleSpeechPause", "microphone.stop", "microphone.cancel",
-        "liveCaption.start", "liveCaption.stop", "workspace.pick", "session.mode", "session.tool", "ui.sessionPane", "external.open",
-        "campaign.list", "campaign.select", "campaign.loadWorkflow", "campaign.run", "campaign.stop",
+        "liveCaption.start", "liveCaption.stop", "session.tool", "ui.sessionPane", "external.open",
     };
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
-        "state.snapshot", "chat.message", "chat.removed", "chat.started", "chat.delta", "chat.completed",
-        "chat.cancelled", "chat.failed", "chat.codeDiff", "chat.codingTrace", "session.changed", "workflow.snapshot",
+        "state.snapshot", "chat.started", "chat.delta", "chat.completed",
+        "chat.cancelled", "chat.failed", "session.changed", "workflow.snapshot",
         "workflow.changed", "workflow.draft", "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
         "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
-        "microphone.changed", "microphone.transcript", "composer.transcript", "artifact.previewReady", "host.error",
-        "campaign.snapshot", "campaign.changed", "conversation.snapshot", "conversation.messageCommitted",
-        "conversation.messageRemoved", "coding.snapshotCommitted",
+        "microphone.changed", "microphone.transcript", "artifact.previewReady", "host.error",
+        "conversation.snapshot", "conversation.messageCommitted",
     };
     private static readonly HashSet<string> ReadableBlockKinds = new(StringComparer.Ordinal)
     {

@@ -148,25 +148,6 @@ public sealed partial class SettingsPage : Page
         }
     }
 
-    private async void OnSelectWorkspace(object sender, RoutedEventArgs e)
-    {
-        await RunActionAsync(async () =>
-        {
-            var picker = new FolderPicker
-            {
-                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-                ViewMode = PickerViewMode.List,
-            };
-            picker.FileTypeFilter.Add("*");
-            InitializePicker(picker);
-            var folder = await picker.PickSingleFolderAsync();
-            if (folder is not null)
-            {
-                ViewModel.LocalToolWorkspacePath = folder.Path;
-            }
-        });
-    }
-
     private void OnAddTrigger(object sender, RoutedEventArgs e)
     {
         if (NewTriggerActionBox.SelectedItem is not PromptTriggerActionOption option)

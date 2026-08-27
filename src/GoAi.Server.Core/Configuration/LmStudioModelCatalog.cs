@@ -2,14 +2,14 @@ using GoAi.Contracts;
 
 namespace GoAi.Server.Core.Configuration;
 
-public sealed record CodingModelProfile(
+public sealed record LmStudioModelProfile(
     string Id,
     string RuntimeModelId,
     string DisplayName,
     int ContextLength,
     string SamplingProfile);
 
-public static class CodingModelCatalog
+public static class LmStudioModelCatalog
 {
     public const string GptOss120BId = "gpt-oss-120b";
     // LM Studio 0.4.18 exposes and loads the downloaded catalog entry by this
@@ -21,9 +21,9 @@ public static class CodingModelCatalog
     public const string Qwen3CoderNextQ8Id = "qwen3-coder-next";
     public const string Qwen3CoderNextLegacyId = "qwen3-coder-next-q8_0";
     public const string Qwen3CoderNextRuntimeId = "qwen3-coder-next";
-    public const string DefaultModelId = Qwen3CoderNextQ8Id;
+    public const string DefaultModelId = GptOss120BId;
 
-    public static IReadOnlyList<CodingModelProfile> Models { get; } =
+    public static IReadOnlyList<LmStudioModelProfile> Models { get; } =
     [
         new(
             Qwen38Id,
@@ -45,7 +45,7 @@ public static class CodingModelCatalog
             "qwen3-coder-next"),
     ];
 
-    public static bool TryGet(string? modelId, out CodingModelProfile profile)
+    public static bool TryGet(string? modelId, out LmStudioModelProfile profile)
     {
         var normalized = string.Equals(
             modelId?.Trim(),
@@ -58,11 +58,11 @@ public static class CodingModelCatalog
         return profile is not null;
     }
 
-    public static CodingModelProfile Get(string? modelId) =>
+    public static LmStudioModelProfile Get(string? modelId) =>
         TryGet(modelId, out var profile)
             ? profile
-            : throw new ArgumentException($"Nicht unterstütztes Coding-Modell: {modelId}", nameof(modelId));
+            : throw new ArgumentException($"Nicht unterstütztes LM-Studio-Modell: {modelId}", nameof(modelId));
 
     public static string GetDisplayName(string? modelId) =>
-        TryGet(modelId, out var profile) ? profile.DisplayName : modelId ?? "Coding-Agent";
+        TryGet(modelId, out var profile) ? profile.DisplayName : modelId ?? "AI-Modell";
 }

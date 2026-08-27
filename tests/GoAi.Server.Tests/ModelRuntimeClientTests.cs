@@ -25,8 +25,8 @@ public sealed class ModelRuntimeClientTests
 
         Assert.True(status.ProviderReachable);
         Assert.Contains(status.Models, model =>
-            model.Id == CodingModelCatalog.Qwen38Id
-            && model.Role == "code"
+            model.Id == LmStudioModelCatalog.Qwen38Id
+            && model.Role == "general"
             && model.Downloaded
             && model.ContextTokens == 262_144);
         Assert.Contains(status.Models, model =>
@@ -205,10 +205,10 @@ public sealed class ModelRuntimeClientTests
         using var client = CreateClient(new HttpClient(handler));
 
         _ = await client.CompleteChatAsync(
-            CodingModelCatalog.Qwen38Id,
+            LmStudioModelCatalog.Qwen38Id,
             [new LmChatMessage("user", "Prüfe das Projekt.")],
             [],
-            modelRole: "code",
+            modelRole: "general",
             reasoningEffort: "none");
 
         Assert.Equal(2, handler.ModelOperations.Count);
@@ -227,7 +227,7 @@ public sealed class ModelRuntimeClientTests
         using var client = CreateClient(new HttpClient(handler));
 
         var instance = await client.EnsureModelLoadedAsync(
-            CodingModelCatalog.Qwen3CoderNextQ8Id,
+            LmStudioModelCatalog.Qwen3CoderNextQ8Id,
             262_144);
 
         Assert.Equal("coder-instance", instance);
@@ -248,10 +248,10 @@ public sealed class ModelRuntimeClientTests
         });
 
         _ = await client.CompleteChatAsync(
-            CodingModelCatalog.Qwen38Id,
+            LmStudioModelCatalog.Qwen38Id,
             [new LmChatMessage("user", "Wähle das Werkzeug.")],
             [new LmToolDefinition("go.selectTool", "Werkzeug wählen", schema)],
-            modelRole: "code",
+            modelRole: "general",
             reasoningEffort: "none",
             requireToolCall: true,
             requiredToolName: "go.selectTool");
@@ -274,10 +274,10 @@ public sealed class ModelRuntimeClientTests
         });
 
         var result = await client.CompleteChatAsync(
-            CodingModelCatalog.Qwen38Id,
+            LmStudioModelCatalog.Qwen38Id,
             [new LmChatMessage("user", "Untersuche den Workspace.")],
             [new LmToolDefinition("workspace.inspect", "Workspace untersuchen", schema)],
-            modelRole: "code",
+            modelRole: "general",
             reasoningEffort: "none",
             requireToolCall: true);
 
@@ -347,10 +347,10 @@ public sealed class ModelRuntimeClientTests
         using var client = CreateClient(new HttpClient(handler));
 
         _ = await Assert.ThrowsAsync<InvalidOperationException>(() => client.CompleteChatAsync(
-            CodingModelCatalog.Qwen3CoderNextQ8Id,
+            LmStudioModelCatalog.Qwen3CoderNextQ8Id,
             [new LmChatMessage("user", "Prüfe das Projekt.")],
             [],
-            modelRole: "code",
+            modelRole: "general",
             reasoningEffort: "high"));
 
         Assert.Empty(handler.ChatBodies);
@@ -363,10 +363,10 @@ public sealed class ModelRuntimeClientTests
         using var client = CreateClient(new HttpClient(handler));
 
         _ = await client.CompleteChatAsync(
-            CodingModelCatalog.Qwen38Id,
+            LmStudioModelCatalog.Qwen38Id,
             [new LmChatMessage("user", "Antworte direkt.")],
             [],
-            modelRole: "code",
+            modelRole: "general",
             reasoningEffort: "none");
 
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
@@ -659,7 +659,6 @@ public sealed class ModelRuntimeClientTests
         {
             ModelRuntimeUri = new Uri("http://lmstudio.test:1234", UriKind.Absolute),
             GeneralModelId = "gpt-oss-120b",
-            CodeModelId = CodingModelCatalog.DefaultModelId,
         }),
         NullLogger<ModelRuntimeClient>.Instance);
 

@@ -59,16 +59,6 @@ public sealed class UtteranceIntentService
         {
             return new(UtteranceIntent.Cancel);
         }
-        if (_scheduler.ActiveActivities.Any(static activity =>
-                activity.Mode == GpuLeaseMode.Exclusive
-                && string.Equals(activity.Workload, "llm-code", StringComparison.Ordinal)))
-        {
-            // Qwen owns LM Studio while a coding run is active. Voice input must
-            // remain responsive instead of queuing an otherwise hidden General-AI
-            // intent request behind that potentially long run.
-            return ClassifyLocallyDuringCoding(text);
-        }
-
         await using var lease = await _scheduler.AcquireAsync(
             "voice-intent", null, GpuLeaseMode.Shared, cancellationToken).ConfigureAwait(false);
         _ = await _workers.PrepareLmModelAsync(
@@ -92,7 +82,7 @@ public sealed class UtteranceIntentService
         return Parse(result.Content, text);
     }
 
-    internal static UtteranceIntentResponse ClassifyLocallyDuringCoding(string text)
+    internal static UtteranceIntentResponse ClassifyLocally(string text)
     {
         var normalized = text.Trim();
         if (normalized.Length < 3)

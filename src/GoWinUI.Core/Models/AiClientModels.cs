@@ -17,7 +17,6 @@ public enum PromptTriggerAction
     WebSearch,
     YouTubeSearch,
     BricsCad,
-    Code,
     VoiceInput,
     LiveCaptions,
     LiveTranslation,
@@ -94,8 +93,7 @@ public sealed record GoAiRunRecord(
     string? SelectedModel,
     string? ErrorCode,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt,
-    Guid? FinalMessageId = null);
+    DateTimeOffset UpdatedAt);
 
 public sealed record ClientToolExecutionRecord(
     string ProposalId,

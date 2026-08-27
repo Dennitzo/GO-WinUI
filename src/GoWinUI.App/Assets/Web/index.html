@@ -16,7 +16,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
         <span class="sidebar-toolbar-spacer"></span>
-        <button id="clear-sessions" class="sidebar-icon-button" type="button" title="Alle Sitzungen löschen" aria-label="Alle Sitzungen löschen">
+        <button id="clear-sessions" class="sidebar-icon-button" type="button" title="Alle nicht angepinnten Sitzungen löschen" aria-label="Alle nicht angepinnten Sitzungen löschen">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg>
         </button>
         <button id="collapse-sessions" class="sidebar-icon-button mobile-only" type="button" aria-label="Sitzungen schließen">
@@ -67,21 +67,6 @@
           <p id="live-caption-transcript" class="live-caption__transcript">Warte auf Windows-Systemaudio …</p>
           <p id="live-caption-error" class="live-caption__error" hidden></p>
         </section>
-        <section id="coding-workspace" class="coding-workspace" aria-label="Coding-Werkzeuge" hidden>
-          <header class="coding-workspace__header">
-            <button id="coding-workspace-toggle" class="coding-workspace__toggle" type="button" aria-expanded="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18l-6-6 6-6M15 6l6 6-6 6"/></svg>
-              <strong>Coding</strong>
-              <span id="coding-workspace-status" class="coding-workspace__status">Bereit</span>
-              <svg class="coding-workspace__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
-            </button>
-            <button id="coding-workspace-close" class="coding-workspace__close" type="button" title="Coding deaktivieren" aria-label="Coding deaktivieren">×</button>
-            <button id="coding-workspace-maximize" class="coding-workspace__maximize" type="button" title="Coding-Fenster maximieren" aria-label="Coding-Fenster maximieren" aria-pressed="false">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></svg>
-            </button>
-          </header>
-          <div id="coding-workspace-content" class="coding-workspace__content" hidden></div>
-        </section>
         <div id="context-strip" class="context-strip" hidden>
           <div id="active-tool-chips" class="active-tool-chips"></div>
           <div id="document-chips" class="document-chips"></div>
@@ -117,7 +102,6 @@
                   <button class="service-option" type="button" role="menuitem" data-tool-action="imageAnalysis"><span>Bild analysieren</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="imageGeneration"><span>Bild erstellen</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="bricsCad"><span>BricsCAD</span></button>
-                  <button class="service-option" type="button" role="menuitem" data-tool-action="code"><span>Coding</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="audiobook"><span>Hörbuch erstellen</span></button>
                   <button id="start-live-captions" class="service-option" type="button" role="menuitem" data-tool-immediate="liveCaption.start"><span>Live-Untertitel</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="translation"><span>Übersetzen</span></button>
@@ -132,11 +116,6 @@
               <button id="open-workflows" class="tool-button" type="button" title="Workflow wählen">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
                 <span id="workflows-button-label">Workflows</span>
-              </button>
-
-              <button id="workspace-button" class="tool-button" type="button" title="Workspace-Ordner freigeben">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg>
-                <span>Workspace</span>
               </button>
 
               <div id="context-meter" class="context-meter" title="Kontext: 0 von 0 Tokens" role="img" aria-label="Kontext zu 0 Prozent belegt">

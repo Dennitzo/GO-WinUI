@@ -724,8 +724,8 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
             command.CommandText = """
                 INSERT INTO go_ai_runs
                     (id, session_id, assistant_message_id, action, idempotency_key, server_run_id,
-                     last_event_id, state, selected_model, error_code, created_at, updated_at, final_message_id)
-                VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated, $finalMessage);
+                     last_event_id, state, selected_model, error_code, created_at, updated_at)
+                VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated);
                 """;
             Bind(command, run);
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
@@ -738,14 +738,31 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
         {
+            await using (var validateAnchor = connection.CreateCommand())
+            {
+                validateAnchor.Transaction = transaction;
+                validateAnchor.CommandText = """
+                    SELECT 1
+                    FROM chat_messages
+                    WHERE id=$message AND session_id=$session AND role='assistant';
+                    """;
+                validateAnchor.Parameters.AddWithValue("$message", run.AssistantMessageId.ToString("D"));
+                validateAnchor.Parameters.AddWithValue("$session", run.SessionId.ToString("D"));
+                if (await validateAnchor.ExecuteScalarAsync(token).ConfigureAwait(false) is null)
+                {
+                    throw new InvalidDataException(
+                        "Der lokale GO-AI-Lauf benötigt eine AI-Nachricht aus derselben Sitzung.");
+                }
+            }
+
             await using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
                 command.CommandText = """
                     INSERT INTO go_ai_runs
                         (id, session_id, assistant_message_id, action, idempotency_key, server_run_id,
-                         last_event_id, state, selected_model, error_code, created_at, updated_at, final_message_id)
-                    VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated, $finalMessage)
+                         last_event_id, state, selected_model, error_code, created_at, updated_at)
+                    VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated)
                     ON CONFLICT(assistant_message_id) DO UPDATE SET
                         action=excluded.action,
                         idempotency_key=excluded.idempotency_key,
@@ -754,7 +771,6 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
                         state=excluded.state,
                         selected_model=NULL,
                         error_code=NULL,
-                        final_message_id=NULL,
                         updated_at=excluded.updated_at;
                     """;
                 Bind(command, run);
@@ -769,21 +785,30 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
                     SET content='',
                         status='streaming',
                         error=NULL,
-                        message_phase='finalanswer',
-                        source_run_id=NULL,
-                        source_item_id=NULL,
-                        source_delta_sequence=0,
                         revision=revision+1,
                         updated_at=$updated
                     WHERE id=$message AND session_id=$session AND role='assistant';
-                    UPDATE chat_sessions
-                    SET conversation_revision=conversation_revision+1,updated_at=$updated
-                    WHERE id=$session;
                     """;
                 resetAnchor.Parameters.AddWithValue("$message", run.AssistantMessageId.ToString("D"));
                 resetAnchor.Parameters.AddWithValue("$session", run.SessionId.ToString("D"));
                 resetAnchor.Parameters.AddWithValue("$updated", SqlitePromptTriggerRepository.Format(DateTimeOffset.UtcNow));
-                await resetAnchor.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+                if (await resetAnchor.ExecuteNonQueryAsync(token).ConfigureAwait(false) != 1)
+                {
+                    throw new InvalidDataException("Der AI-Nachrichtenanker konnte nicht zurückgesetzt werden.");
+                }
+
+                resetAnchor.Parameters.Clear();
+                resetAnchor.CommandText = """
+                    UPDATE chat_sessions
+                    SET conversation_revision=conversation_revision+1,updated_at=$updated
+                    WHERE id=$session;
+                    """;
+                resetAnchor.Parameters.AddWithValue("$session", run.SessionId.ToString("D"));
+                resetAnchor.Parameters.AddWithValue("$updated", SqlitePromptTriggerRepository.Format(DateTimeOffset.UtcNow));
+                if (await resetAnchor.ExecuteNonQueryAsync(token).ConfigureAwait(false) != 1)
+                {
+                    throw new InvalidDataException("Die Sitzung des lokalen GO-AI-Laufs wurde nicht gefunden.");
+                }
             }
 
             await using var select = connection.CreateCommand();
@@ -906,9 +931,6 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         command.Parameters.AddWithValue("$error", (object?)run.ErrorCode ?? DBNull.Value);
         command.Parameters.AddWithValue("$created", SqlitePromptTriggerRepository.Format(run.CreatedAt));
         command.Parameters.AddWithValue("$updated", SqlitePromptTriggerRepository.Format(run.UpdatedAt));
-        command.Parameters.AddWithValue("$finalMessage", run.FinalMessageId is null
-            ? DBNull.Value
-            : run.FinalMessageId.Value.ToString("D"));
     }
 
     private static async Task<IReadOnlyList<GoAiRunRecord>> ReadAsync(SqliteCommand command, CancellationToken cancellationToken)
@@ -923,16 +945,14 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
                 reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetInt64(6), reader.GetString(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9),
                 SqlitePromptTriggerRepository.ParseDate(reader.GetString(10)),
-                SqlitePromptTriggerRepository.ParseDate(reader.GetString(11)),
-                reader.IsDBNull(12) ? null : Guid.Parse(reader.GetString(12))));
+                SqlitePromptTriggerRepository.ParseDate(reader.GetString(11))));
         }
         return items;
     }
 
     private const string SelectSql = """
         SELECT r.id, r.session_id, r.assistant_message_id, r.action, r.idempotency_key, r.server_run_id,
-               r.last_event_id, r.state, r.selected_model, r.error_code, r.created_at, r.updated_at,
-               r.final_message_id
+               r.last_event_id, r.state, r.selected_model, r.error_code, r.created_at, r.updated_at
         FROM go_ai_runs r
         """;
 }

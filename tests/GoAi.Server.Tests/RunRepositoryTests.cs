@@ -58,7 +58,7 @@ public sealed class RunRepositoryTests
         var repository = new RunRepository(context.Database, new RunEventNotifier());
         var request = new RunRequest(
             GoAiProtocol.Version,
-            RunMode.Code,
+            RunMode.General,
             [new RunMessage("user", [new ContentPart("text", "Build")])]);
         var run = await repository.CreateAsync(request, null);
         using var arguments = System.Text.Json.JsonDocument.Parse("""{"preset":"dotnet.build"}""");
@@ -66,7 +66,7 @@ public sealed class RunRepositoryTests
         var proposal = new ToolProposal(
             "proposal-" + Guid.NewGuid().ToString("N"),
             run.Snapshot.RunId,
-            ClientToolNames.ProcessRunPreset,
+            ClientToolNames.DocumentCreate,
             arguments.RootElement.Clone(),
             ToolRiskClass.Process,
             "Build ausführen",
@@ -91,7 +91,7 @@ public sealed class RunRepositoryTests
         var repository = new RunRepository(context.Database, new RunEventNotifier());
         var request = new RunRequest(
             GoAiProtocol.Version,
-            RunMode.Code,
+            RunMode.General,
             [new RunMessage("user", [new ContentPart("text", "Build")])]);
         var run = await repository.CreateAsync(request, null);
         using var arguments = System.Text.Json.JsonDocument.Parse("""{"preset":"dotnet.build"}""");
@@ -99,7 +99,7 @@ public sealed class RunRepositoryTests
         var proposal = new ToolProposal(
             "proposal-" + Guid.NewGuid().ToString("N"),
             run.Snapshot.RunId,
-            ClientToolNames.ProcessRunPreset,
+            ClientToolNames.DocumentCreate,
             arguments.RootElement.Clone(),
             ToolRiskClass.Process,
             "Build ausführen",
@@ -111,8 +111,7 @@ public sealed class RunRepositoryTests
             0,
             0,
             PendingProposalId: proposal.ProposalId,
-            PendingToolCallId: "call-1",
-            HasSuccessfulClientToolEvidence: true);
+            PendingToolCallId: "call-1");
         var result = new ClientToolResult(proposal.ProposalId, "completed", resultJson.RootElement.Clone());
 
         await repository.SaveToolProposalAsync(proposal);
@@ -122,7 +121,7 @@ public sealed class RunRepositoryTests
 
         Assert.True(await repository.TryQueueClientToolContinuationAsync(run.Snapshot.RunId, proposal.ProposalId));
         Assert.Equal(RunState.Queued, (await repository.GetAsync(run.Snapshot.RunId))?.State);
-        Assert.True((await repository.GetCheckpointAsync(run.Snapshot.RunId))?.HasSuccessfulClientToolEvidence);
+        Assert.NotNull(await repository.GetCheckpointAsync(run.Snapshot.RunId));
         Assert.False(await repository.TryQueueClientToolContinuationAsync(run.Snapshot.RunId, proposal.ProposalId));
     }
 

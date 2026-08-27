@@ -28,10 +28,6 @@ public sealed class GoAiServerOptions
 
     public int GeneralContextLength { get; set; } = ModelContextProfiles.GptOss120BMaximum;
 
-    public string CodeModelId { get; set; } = CodingModelCatalog.DefaultModelId;
-
-    public int CodeContextLength { get; set; } = ModelContextProfiles.Qwen38Maximum;
-
     public string VisionModelId { get; set; } = "qwen3-vl-30b-a3b-instruct";
 
     public int VisionContextLength { get; set; } = ModelContextProfiles.Qwen3VlMaximum;
@@ -47,10 +43,6 @@ public sealed class GoAiServerOptions
     public int MaximumModelRounds { get; set; } = 12;
 
     public int MaximumToolCalls { get; set; } = 30;
-
-    public int MaximumCodingModelRounds { get; set; } = 96;
-
-    public int MaximumCodingToolCalls { get; set; } = 192;
 
     /// <summary>
     /// Optional shared data root mounted into the media workers. This is normally

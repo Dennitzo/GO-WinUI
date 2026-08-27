@@ -24,11 +24,6 @@ public partial class App : Application
 {
     private static readonly TimeSpan AiAvailabilityProbeTimeout = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan AiDiagnosticProbeTimeout = TimeSpan.FromSeconds(5);
-    private static readonly Action<ILogger, Guid, Exception?> LocalAutomationFailed =
-        LoggerMessage.Define<Guid>(
-            LogLevel.Error,
-            new EventId(5900, nameof(LocalAutomationFailed)),
-            "Local coding campaign automation command failed for session {SessionId}.");
     private static readonly string[] AccentBrushKeys =
     [
         "GoAccentBrush",
@@ -90,10 +85,6 @@ public partial class App : Application
                 services.AddSingleton<ScreenClipCaptureService>();
                 services.AddSingleton<ProjectAssetThumbnailService>();
                 services.AddSingleton<AssistantArtifactPreviewService>();
-                services.AddSingleton<LeanProofService>();
-                services.AddSingleton<CodingProofVerifier>();
-                services.AddSingleton<ICodingCampaignDefinition, PromptDrivenCodingCampaignDefinition>();
-                services.AddSingleton<CodingCampaignCatalog>();
                 services.AddSingleton<ShellViewModel>();
                 services.AddSingleton<RecentActivityService>();
                 services.AddSingleton<ProjectAssetActivityService>();
@@ -105,14 +96,10 @@ public partial class App : Application
                 services.AddSingleton<ToolConfirmationService>();
                 services.AddSingleton<DocumentContextPreparationService>();
                 services.AddSingleton<SessionContextPreparationService>();
+                services.AddSingleton<DocumentPdfExporter>();
                 services.AddSingleton<LocalDocumentToolService>();
                 services.AddSingleton<LocalToolBroker>();
-                services.AddSingleton<CodingDiffService>();
-                services.AddSingleton<CodingRunTraceService>();
-                services.AddSingleton<CodingSolutionPdfExporter>();
                 services.AddSingleton<GoAiAssistantService>();
-                services.AddSingleton<ICodingCampaignAgent>(static provider => provider.GetRequiredService<GoAiAssistantService>());
-                services.AddSingleton<CodingCampaignService>();
             })
             .Build();
     }
@@ -198,13 +185,10 @@ public partial class App : Application
             var database = GetService<IGoDatabase>();
             await database.InitializeAsync();
             _ = await GetService<IChatRepository>().MarkStreamingMessagesInterruptedAsync();
-            _ = await GetService<CodingRunTraceService>().ImportLegacyAsync();
             var settings = GetService<SettingsCoordinator>();
             await settings.InitializeAsync();
             await settings.UpdateAsync(static current => current);
-            await GetService<CodingCampaignService>().PrepareForClientStartAsync();
             await GetService<GoAiAssistantService>().StopPersistedRunsAtStartupAsync();
-            _ = await GetService<ICodingRunRepository>().MarkRunningInterruptedAsync();
             _ = await GetService<IChatRepository>().DeleteEmptyTerminalMessagesAsync();
 
             var shell = GetService<ShellViewModel>();
@@ -225,9 +209,6 @@ public partial class App : Application
             _window.BeforeCloseAsync = PrepareShutdownAsync;
             _window.Activate();
             await ApplyAiConnectionModeAsync(settings.Current.IsAiConnectionEnabled);
-            var initialArguments = string.Join(' ', Environment.GetCommandLineArgs().Skip(1));
-            _ = await TryExecuteLocalAutomationAsync(
-                string.IsNullOrWhiteSpace(initialArguments) ? args.Arguments : initialArguments);
         }
         catch (Exception exception)
         {
@@ -284,43 +265,7 @@ public partial class App : Application
 
     private void OnAppInstanceActivated(object? sender, AppActivationArguments args)
     {
-        var arguments = args.Kind == ExtendedActivationKind.Launch
-            && args.Data is Windows.ApplicationModel.Activation.ILaunchActivatedEventArgs launchArguments
-                ? launchArguments.Arguments
-                : null;
-        _window?.DispatcherQueue.TryEnqueue(async () =>
-        {
-            _window.BringToForeground();
-            _ = await TryExecuteLocalAutomationAsync(arguments);
-        });
-    }
-
-    private async Task<bool> TryExecuteLocalAutomationAsync(string? arguments)
-    {
-        if (!LocalAutomationCommand.TryParse(arguments, out var command) || command is null)
-        {
-            return false;
-        }
-
-        try
-        {
-            var campaigns = GetService<CodingCampaignService>();
-            if (command.Action == LocalAutomationAction.RunCodingCampaign)
-            {
-                _ = await campaigns.RunAsync(command.SessionId);
-            }
-            else
-            {
-                _ = await campaigns.StopAsync(command.SessionId);
-            }
-
-            return true;
-        }
-        catch (Exception exception)
-        {
-            LocalAutomationFailed(GetService<ILogger<App>>(), command.SessionId, exception);
-            return false;
-        }
+        _window?.DispatcherQueue.TryEnqueue(() => _window.BringToForeground());
     }
 
     private async Task MonitorLocalAiAvailabilityAsync(CancellationToken cancellationToken)

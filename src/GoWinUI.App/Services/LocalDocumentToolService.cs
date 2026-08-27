@@ -8,10 +8,9 @@ using GoWinUI.Core.Models;
 namespace GoWinUI.App.Services;
 
 /// <summary>
-/// Implements the shared, bounded document tools for General AI and Coding.
-/// The model exchanges outlines, sections and continuations instead of entire
-/// large files. Session documents are revisioned in SQLite; coding documents
-/// use a canonical Markdown source inside the authorized workspace.
+/// Implements the bounded document tools for General AI. The model exchanges
+/// outlines, sections and continuations instead of entire large files. Session
+/// documents are revisioned in SQLite and exported as chat artifacts.
 /// </summary>
 public sealed partial class LocalDocumentToolService(
     IGeneratedDocumentRepository generatedDocuments,
@@ -20,12 +19,11 @@ public sealed partial class LocalDocumentToolService(
     IBinaryObjectStore blobs,
     IChatRepository chats,
     IDocumentFileCodec codec,
-    CodingSolutionPdfExporter pdfExporter)
+    DocumentPdfExporter pdfExporter)
 {
     private const int DefaultMaximumCharacters = 12_000;
     private const int MaximumCharacters = 40_000;
     private const int MaximumUnits = 30;
-    private const int MaximumSourceCharacters = 4 * 1024 * 1024;
     private const long MaximumReadableDocumentBytes = 128L * 1024 * 1024;
     private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false);
     private static readonly HashSet<string> ReservedWindowsFileNames = new(StringComparer.OrdinalIgnoreCase)
@@ -37,7 +35,6 @@ public sealed partial class LocalDocumentToolService(
 
     public async Task<object> ReadAsync(
         JsonElement arguments,
-        string? workspacePath,
         Guid sessionId,
         CancellationToken cancellationToken)
     {
@@ -56,12 +53,11 @@ public sealed partial class LocalDocumentToolService(
         }
 
         var reference = RequiredString(arguments, "reference");
-        var source = scope switch
+        if (scope != "session")
         {
-            "session" => await ReadSessionSourceAsync(sessionId, reference, cancellationToken).ConfigureAwait(false),
-            "workspace" => await ReadWorkspaceSourceAsync(workspacePath, reference, cancellationToken).ConfigureAwait(false),
-            _ => throw new InvalidDataException("Der document.read-Bereich ist ungültig."),
-        };
+            throw new InvalidDataException("document.read ist nur für Sitzungsdokumente verfügbar.");
+        }
+        var source = await ReadSessionSourceAsync(sessionId, reference, cancellationToken).ConfigureAwait(false);
         var units = BuildUnits(source);
         return mode switch
         {
@@ -85,10 +81,8 @@ public sealed partial class LocalDocumentToolService(
 
     public async Task<object> CreateAsync(
         JsonElement arguments,
-        string? workspacePath,
         Guid sessionId,
         Guid assistantMessageId,
-        bool codingMode,
         CancellationToken cancellationToken)
     {
         var operation = RequiredString(arguments, "operation");
@@ -103,28 +97,17 @@ public sealed partial class LocalDocumentToolService(
             throw new InvalidDataException("Dokumentinhalt darf keine internen GO-Abschnittsmarker enthalten.");
         }
 
-        return codingMode
-            ? await CreateWorkspaceDocumentAsync(
-                workspacePath,
-                operation,
-                reference,
-                format,
-                sectionId,
-                heading,
-                content,
-                expectedSha256,
-                cancellationToken).ConfigureAwait(false)
-            : await CreateSessionDocumentAsync(
-                sessionId,
-                assistantMessageId,
-                operation,
-                reference,
-                format,
-                sectionId,
-                heading,
-                content,
-                expectedSha256,
-                cancellationToken).ConfigureAwait(false);
+        return await CreateSessionDocumentAsync(
+            sessionId,
+            assistantMessageId,
+            operation,
+            reference,
+            format,
+            sectionId,
+            heading,
+            content,
+            expectedSha256,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<object> ListSessionDocumentsAsync(
@@ -219,7 +202,7 @@ public sealed partial class LocalDocumentToolService(
 
         var artifact = await artifacts.GetAsync(id, cancellationToken).ConfigureAwait(false)
             ?? throw new FileNotFoundException("Die Sitzungsdokument-Referenz wurde nicht gefunden.");
-        var message = await chats.GetMessageAsync(artifact.MessageId, includeInternal: true, cancellationToken).ConfigureAwait(false);
+        var message = await chats.GetMessageAsync(artifact.MessageId, cancellationToken).ConfigureAwait(false);
         if (message?.SessionId != sessionId)
         {
             throw new UnauthorizedAccessException("Das Artefakt gehört nicht zur aktuellen Sitzung.");
@@ -229,61 +212,6 @@ public sealed partial class LocalDocumentToolService(
             artifact.Id.ToString("D"), artifact.FileName,
             Path.GetExtension(artifact.FileName).TrimStart('.').ToLowerInvariant(), artifact.Sha256, pagesFromArtifact,
             IsPaged: Path.GetExtension(artifact.FileName).Equals(".pdf", StringComparison.OrdinalIgnoreCase));
-    }
-
-    private async Task<DocumentSource> ReadWorkspaceSourceAsync(
-        string? workspacePath,
-        string reference,
-        CancellationToken cancellationToken)
-    {
-        var root = RequireWorkspace(workspacePath);
-        var path = ResolveWithinWorkspace(root, reference, requireExisting: true);
-        if (Directory.Exists(path)) throw new InvalidDataException("document.read erwartet eine Dokumentdatei und keinen Ordner.");
-        if (new FileInfo(path).Length > MaximumReadableDocumentBytes)
-        {
-            throw new InvalidDataException("Das Workspace-Dokument überschreitet die sichere Lesegrenze von 128 MiB.");
-        }
-        var extension = Path.GetExtension(path);
-        var format = extension.ToLowerInvariant() switch
-        {
-            ".md" or ".markdown" => "markdown",
-            ".txt" => "text",
-            ".docx" => "docx",
-            ".pdf" => "pdf",
-            _ => extension.TrimStart('.').ToLowerInvariant(),
-        };
-        var canonicalPath = CanonicalSourcePath(path, format);
-        if (!string.Equals(canonicalPath, path, StringComparison.OrdinalIgnoreCase)
-            && File.Exists(canonicalPath))
-        {
-            _ = ResolveWithinWorkspace(root, Path.GetRelativePath(root, canonicalPath), requireExisting: true);
-            if (new FileInfo(canonicalPath).Length > MaximumSourceCharacters)
-            {
-                throw new InvalidDataException("Die kanonische Dokumentquelle überschreitet die sichere Lesegrenze.");
-            }
-            var canonicalSource = await File.ReadAllTextAsync(canonicalPath, cancellationToken).ConfigureAwait(false);
-            if (MarkedSectionRegex().IsMatch(canonicalSource))
-            {
-                return new DocumentSource(
-                    Path.GetRelativePath(root, path).Replace('\\', '/'),
-                    Path.GetFileName(path),
-                    format,
-                    Hash(canonicalSource),
-                    [canonicalSource],
-                    IsCanonicalMarkdown: true);
-            }
-        }
-        var pages = await codec.ReadAsync(path, cancellationToken).ConfigureAwait(false);
-        var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
-        return new DocumentSource(
-            Path.GetRelativePath(root, path).Replace('\\', '/'),
-            Path.GetFileName(path),
-            format,
-            Hash(bytes),
-            pages,
-            IsPaged: extension.Equals(".pdf", StringComparison.OrdinalIgnoreCase),
-            IsCanonicalMarkdown: extension.Equals(".md", StringComparison.OrdinalIgnoreCase)
-                || extension.Equals(".markdown", StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task<IReadOnlyList<string>> ReadBlobAsync(ChatArtifact artifact, CancellationToken cancellationToken)
@@ -400,82 +328,6 @@ public sealed partial class LocalDocumentToolService(
             sectionId,
             changed,
             artifact.Length,
-        };
-    }
-
-    private async Task<object> CreateWorkspaceDocumentAsync(
-        string? workspacePath,
-        string operation,
-        string reference,
-        string format,
-        string sectionId,
-        string? heading,
-        string content,
-        string? expectedSha256,
-        CancellationToken cancellationToken)
-    {
-        var root = RequireWorkspace(workspacePath);
-        var outputPath = ResolveWithinWorkspace(root, NormalizeOutputReference(reference, format), requireExisting: false);
-        var sourcePath = CanonicalSourcePath(outputPath, format);
-        _ = ResolveWithinWorkspace(root, Path.GetRelativePath(root, sourcePath), requireExisting: false);
-        string original = File.Exists(sourcePath)
-            ? await File.ReadAllTextAsync(sourcePath, cancellationToken).ConfigureAwait(false)
-            : string.Empty;
-        string updated;
-        var changed = true;
-        if (operation == "create")
-        {
-            if (File.Exists(sourcePath) || (outputPath != sourcePath && File.Exists(outputPath)))
-            {
-                var desired = BuildSection(sectionId, heading, content);
-                if (string.Equals(original, desired, StringComparison.Ordinal))
-                {
-                    updated = original;
-                    changed = false;
-                }
-                else
-                {
-                    throw new IOException("Das Workspace-Dokument existiert bereits. Lies es und verwende appendSection oder replaceSection mit expectedSha256.");
-                }
-            }
-            else
-            {
-                updated = BuildSection(sectionId, heading, content);
-            }
-        }
-        else
-        {
-            if (!File.Exists(sourcePath)) throw new FileNotFoundException("Die kanonische Dokumentquelle wurde nicht gefunden.", sourcePath);
-            RequireExpectedHash(Hash(original), expectedSha256);
-            (updated, changed) = ApplySectionMutation(original, operation, sectionId, heading, content);
-        }
-
-        if (updated.Length > MaximumSourceCharacters) throw new InvalidDataException("Das Dokument überschreitet die lokale Größenbegrenzung.");
-        if (changed) await WriteAtomicAsync(sourcePath, updated, cancellationToken).ConfigureAwait(false);
-        if (format == "pdf")
-        {
-            outputPath = await pdfExporter.EnsureCurrentAsync(sourcePath, sourceChanged: changed, cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("Die PDF-Ausgabe konnte nicht erzeugt werden.");
-        }
-        else if (format == "docx")
-        {
-            await codec.WriteDocxAsync(updated, outputPath, cancellationToken).ConfigureAwait(false);
-        }
-        else if (format == "text")
-        {
-            await WriteAtomicAsync(outputPath, ToPlainText(updated), cancellationToken).ConfigureAwait(false);
-        }
-
-        var outputInfo = new FileInfo(outputPath);
-        return new
-        {
-            path = Path.GetRelativePath(root, outputPath).Replace('\\', '/'),
-            sourcePath = Path.GetRelativePath(root, sourcePath).Replace('\\', '/'),
-            format,
-            sha256 = Hash(updated),
-            sectionId,
-            changed,
-            length = outputInfo.Exists ? outputInfo.Length : Encoding.UTF8.GetByteCount(updated),
         };
     }
 
@@ -862,29 +714,6 @@ public sealed partial class LocalDocumentToolService(
         return normalized;
     }
 
-    private static string CanonicalSourcePath(string outputPath, string format) => format switch
-    {
-        "pdf" or "docx" or "text" => Path.ChangeExtension(outputPath, ".md"),
-        _ => outputPath,
-    };
-
-    private static async Task WriteAtomicAsync(string path, string content, CancellationToken cancellationToken)
-    {
-        var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("Der Dokumentpfad ist ungültig.");
-        Directory.CreateDirectory(directory);
-        var temporary = Path.Combine(directory, Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
-        try
-        {
-            await File.WriteAllTextAsync(temporary, content, Utf8, cancellationToken).ConfigureAwait(false);
-            File.Move(temporary, path, overwrite: true);
-        }
-        finally
-        {
-            try { if (File.Exists(temporary)) File.Delete(temporary); }
-            catch (IOException) { }
-        }
-    }
-
     private static string ToPlainText(string source) => string.Join('\n', source
         .Replace("\r\n", "\n", StringComparison.Ordinal)
         .Replace('\r', '\n')
@@ -892,55 +721,6 @@ public sealed partial class LocalDocumentToolService(
         .Where(static line => !SectionMarkerRegex().IsMatch(line))
         .Select(static line => InlineMarkdownRegex().Replace(line, string.Empty)))
         .Trim();
-
-    private static string RequireWorkspace(string? workspacePath)
-    {
-        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
-        {
-            throw new InvalidOperationException("Für document.read/create ist im Coding-Modus ein gültiger Workspace erforderlich.");
-        }
-        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspacePath));
-    }
-
-    private static string ResolveWithinWorkspace(string root, string reference, bool requireExisting)
-    {
-        if (string.IsNullOrWhiteSpace(reference) || reference.Length > 1_024)
-        {
-            throw new InvalidDataException("Die Dokumentreferenz ist ungültig.");
-        }
-        var combined = Path.IsPathFullyQualified(reference) ? reference : Path.Combine(root, reference);
-        var full = Path.GetFullPath(combined);
-        var prefix = root + Path.DirectorySeparatorChar;
-        if (!string.Equals(full, root, StringComparison.OrdinalIgnoreCase)
-            && !full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new UnauthorizedAccessException("Der Dokumentpfad liegt außerhalb des freigegebenen Workspace.");
-        }
-        if (requireExisting && !File.Exists(full) && !Directory.Exists(full))
-        {
-            throw new FileNotFoundException("Das Workspace-Dokument wurde nicht gefunden.", full);
-        }
-        RejectReparsePoints(root, full);
-        return full;
-    }
-
-    private static void RejectReparsePoints(string root, string path)
-    {
-        var relative = Path.GetRelativePath(root, path);
-        if (relative == ".") return;
-        var current = root;
-        foreach (var segment in relative.Split(
-            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-            StringSplitOptions.RemoveEmptyEntries))
-        {
-            current = Path.Combine(current, segment);
-            if (!File.Exists(current) && !Directory.Exists(current)) break;
-            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new UnauthorizedAccessException("Dokumentpfade über Verknüpfungen oder Reparse Points sind nicht freigegeben.");
-            }
-        }
-    }
 
     private static void RequireExpectedHash(string actual, string? expected)
     {

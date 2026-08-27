@@ -59,13 +59,13 @@ public sealed class ShellViewModelTests
     }
 
     [Fact]
-    public void FooterAlwaysContainsEveryConfiguredServiceIncludingCoding()
+    public void FooterAlwaysContainsEveryConfiguredService()
     {
         var viewModel = new ShellViewModel();
 
-        Assert.Equal(7, viewModel.AiServices.Count);
+        Assert.Equal(6, viewModel.AiServices.Count);
         Assert.Equal(
-            ["General AI", "Coding", "Spracherkennung", "Sprachausgabe", "Vision / Medien", "Bildgenerierung", "Web / YouTube"],
+            ["General AI", "Spracherkennung", "Sprachausgabe", "Vision / Medien", "Bildgenerierung", "Web / YouTube"],
             viewModel.AiServices.Select(static item => item.DisplayName));
         Assert.All(viewModel.AiServices, static item => Assert.False(string.IsNullOrWhiteSpace(item.Glyph)));
         Assert.Equal(viewModel.AiServices.Count, viewModel.AiServices.Select(static item => item.Glyph).Distinct().Count());
@@ -79,10 +79,6 @@ public sealed class ShellViewModelTests
 
         Assert.All(viewModel.AiServices, static item => Assert.True(item.IsReachable));
         Assert.All(viewModel.AiServices, static item => Assert.Equal("Bereit", item.StateLabel));
-        Assert.Contains(viewModel.AiServices, static item =>
-            item.DisplayName == "Coding"
-            && item.Runtime.Contains("Qwen3.8", StringComparison.Ordinal)
-            && item.Runtime.Contains("LM Studio", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -123,7 +119,7 @@ public sealed class ShellViewModelTests
             [],
             DateTimeOffset.UtcNow));
 
-        Assert.Equal(7, viewModel.AiServices.Count);
+        Assert.Equal(6, viewModel.AiServices.Count);
         Assert.True(viewModel.AiServices.Single(static item => item.Key == "general").IsActive);
     }
 
@@ -138,30 +134,11 @@ public sealed class ShellViewModelTests
             "Sprache wird live transkribiert",
             "Docker · Whisper STT");
 
-        Assert.Equal(7, viewModel.AiServices.Count);
+        Assert.Equal(6, viewModel.AiServices.Count);
         Assert.True(viewModel.AiServices.Single(static item => item.Key == "speech-to-text").IsActive);
 
         viewModel.SetClientAiRun("microphone-stt", false, string.Empty, string.Empty);
         Assert.False(viewModel.AiServices.Single(static item => item.Key == "speech-to-text").IsActive);
-    }
-
-    [Fact]
-    public void CodingWorkloadActivatesOnlyTheSharedCodingModelChip()
-    {
-        var now = DateTimeOffset.UtcNow;
-        var viewModel = new ShellViewModel();
-        viewModel.SetAiServiceAvailability(true, ReadyModels(), ReadyServices());
-
-        viewModel.SetActiveAiRuns(new GpuStatusSnapshot(
-            true,
-            0,
-            "lease-code",
-            [],
-            now,
-            ActiveWorkloads: [new("lease-code", "llm-code", "Coding-Agent · Qwen3.8 27B", "LM Studio", "run-code", now)]));
-
-        Assert.True(viewModel.AiServices.Single(static item => item.Key == "coding").IsActive);
-        Assert.False(viewModel.AiServices.Single(static item => item.Key == "general").IsActive);
     }
 
     private static ModelStatusSnapshot ReadyModels() => new(
@@ -169,8 +146,6 @@ public sealed class ShellViewModelTests
         "http://host.docker.internal:1234",
         [
             new("gpt-oss-120b", "general", true, true, "loaded", 131_072),
-            new("gpt-oss-120b", "code", true, false, "unloaded", 131_072),
-            new("qwen3.8-27b", "code", true, true, "loaded", 262_144),
             new("Qwen3-VL", "vision", true, false, "available", 262_144),
         ],
         DateTimeOffset.UtcNow);

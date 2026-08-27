@@ -727,7 +727,7 @@ def _speaker_tracker(session_id: str) -> SpeakerTracker:
 
 def _preload_models() -> None:
     # GO keeps speech input, speaker separation and TTS resident for the complete
-    # server lifetime, including while a coding model is active.
+    # server lifetime, including while another AI workload is active.
     for loader in (models.load_stt, models.load_speaker, models.load_tts):
         try:
             loader()

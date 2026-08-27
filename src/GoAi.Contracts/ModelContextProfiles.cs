@@ -37,8 +37,6 @@ public static class ModelContextProfiles
             return GptOss120BMaximum;
         }
 
-        return string.Equals(role?.Trim(), "code", StringComparison.OrdinalIgnoreCase)
-            ? Qwen38Maximum
-            : GptOss120BMaximum;
+        return GptOss120BMaximum;
     }
 }

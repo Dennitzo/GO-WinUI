@@ -40,9 +40,7 @@ public sealed class ReadinessService
                 "LM Studio starten und den lokalen Server auf 0.0.0.0:1234 freigeben.");
         }
 
-        var requiredModelIds = new HashSet<string>(
-            [_options.GeneralModelId, _options.CodeModelId],
-            StringComparer.OrdinalIgnoreCase);
+        var requiredModelIds = new HashSet<string>([_options.GeneralModelId], StringComparer.OrdinalIgnoreCase);
         var missingRequired = modelStatus.Models
             .Where(model => requiredModelIds.Contains(model.Id))
             .Where(static model => !model.Downloaded)
@@ -57,7 +55,7 @@ public sealed class ReadinessService
         }
 
         var selectableModels = modelStatus.Models
-            .Where(static model => model.Role is "general" or "code")
+            .Where(static model => model.Role == "general")
             .ToArray();
         var loading = selectableModels.FirstOrDefault(model =>
             !model.Loaded && string.Equals(model.State, "loading", StringComparison.OrdinalIgnoreCase));
@@ -73,7 +71,7 @@ public sealed class ReadinessService
                 "modelNotLoaded",
                 GoAiProtocol.Version,
                 DateTimeOffset.UtcNow,
-                "Kein General- oder Coding-Modell ist geladen.");
+                "Kein General-Modell ist geladen.");
         }
         _runtime.SetGatewayState("Bereit", "Gateway und Modellruntime sind bereit.");
         return new HealthSnapshot("ready", GoAiProtocol.Version, DateTimeOffset.UtcNow);

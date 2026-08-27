@@ -343,7 +343,7 @@ public sealed class StagedWebResearchPipelineTests
 
     private static RunRequest CreateRequest() => new(
         GoAiProtocol.Version,
-        RunMode.Code,
+        RunMode.General,
         [new RunMessage("user", [new ContentPart("text", Text: "Websuche")])],
         AllowedServerTools: ["web.search", "web.fetch"]);
 

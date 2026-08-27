@@ -1,22 +1,14 @@
-using System.Collections.ObjectModel;
-
 namespace GoWinUI.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
-public enum ChatMessageVisibility { Visible, Internal }
-public enum ChatMessagePhase { Commentary, FinalAnswer }
-public enum AssistantMode { General, Code }
-public enum PersistentToolAction { Code, BricsCad, Audiobook }
+public enum PersistentToolAction { BricsCad, Audiobook }
 public enum MessageContentProfile { General, Audiobook }
-public enum SessionContextProfile { General, Code, Audiobook }
+public enum SessionContextProfile { General, Audiobook }
 public enum ProjectStatus { Active, Archived }
 public enum AssetCategory { Pdf, Drawing, Image, Meeting, Other, Cpdb, Ifc }
 public enum AppTheme { System, Light, Dark }
 public enum WindowDisplayState { Normal, Maximized }
-public enum CodingCampaignStatus { Running, Faulted, Stopped }
-public enum CodingCampaignPhase { Bootstrap, Iteration, Correction, Validation }
-
 public sealed record ChatSession(
     Guid Id,
     string Title,
@@ -24,9 +16,6 @@ public sealed record ChatSession(
     DateTimeOffset UpdatedAt,
     Guid? SelectedWorkflowId = null,
     string Draft = "",
-    AssistantMode AssistantMode = AssistantMode.General,
-    string? WorkspacePath = null,
-    string? WorkspaceFingerprint = null,
     bool IsPinned = false,
     DateTimeOffset? PinnedAt = null,
     PersistentToolAction? PersistentToolAction = null,
@@ -44,88 +33,14 @@ public sealed record ChatMessage(
     ToolExecutionInfo? ToolExecution = null,
     string? ContextSummary = null,
     MessageContentProfile ContentProfile = MessageContentProfile.General,
-    string? CodeDiff = null,
-    ChatMessageVisibility Visibility = ChatMessageVisibility.Visible,
-    long Revision = 1,
-    ChatMessagePhase? MessagePhase = null,
-    string? SourceRunId = null,
-    string? SourceItemId = null,
-    long SourceDeltaSequence = 0);
+    long Revision = 1);
 
 public sealed record ChatTurn(ChatMessage UserMessage, ChatMessage AssistantMessage);
-
-public sealed record CodingProcessConsole(
-    string OperationId,
-    string Command,
-    string WorkingDirectory,
-    string Purpose,
-    string Status,
-    int? ExitCode = null,
-    string? StandardOutput = null,
-    string? StandardError = null);
-
-public sealed record CodingRunTraceEntry(
-    long Sequence,
-    DateTimeOffset Timestamp,
-    string Stage,
-    string Status,
-    string Title,
-    string? Detail = null,
-    string? Tool = null,
-    string? Target = null,
-    long? DurationMilliseconds = null,
-    long? ServerEventId = null,
-    CodingProcessConsole? ProcessConsole = null);
-
-public sealed record CodingRunSnapshot(
-    Guid Id,
-    Guid LocalRunId,
-    string? ServerRunId,
-    Guid SessionId,
-    Guid? MessageId,
-    string Status,
-    string? CodeDiff,
-    DateTimeOffset StartedAt,
-    DateTimeOffset UpdatedAt,
-    long Revision,
-    IReadOnlyList<CodingRunTraceEntry> Entries);
 
 public sealed record ConversationSnapshot(
     ChatSession Session,
     IReadOnlyList<ChatMessage> Messages,
-    IReadOnlyDictionary<Guid, IReadOnlyList<ChatArtifact>> Artifacts,
-    CodingRunSnapshot? CodingRun);
-
-public sealed record CodingCampaignState(
-    Guid Id,
-    Guid SessionId,
-    string DefinitionId,
-    string Title,
-    string WorkspacePath,
-    string WorkspaceFingerprint,
-    string ModelId,
-    CodingCampaignStatus Status,
-    CodingCampaignPhase Phase,
-    int Iteration,
-    string? CurrentChallenge,
-    string? LastError,
-    string ValidationJson,
-    int RestartCount,
-    DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
-
-public sealed record CodingCampaignIteration(
-    Guid Id,
-    Guid CampaignId,
-    int Iteration,
-    CodingCampaignPhase Phase,
-    string Challenge,
-    Guid? AssistantMessageId,
-    string Status,
-    string? Error,
-    string ValidationJson,
-    DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    IReadOnlyDictionary<Guid, IReadOnlyList<ChatArtifact>> Artifacts);
 
 public sealed record SessionContextPreparation(
     string CacheKey,
@@ -322,7 +237,6 @@ public sealed record AppSettings
 {
     public const int CurrentVersion = 16;
     public const string DefaultSelectedModel = "gpt-oss-120b";
-    public const string DefaultSelectedCodingModel = "qwen3-coder-next";
     public const string DefaultAccentColor = "#A970FF";
     public const string DefaultBackgroundColor = "#6B6872";
     public const int MaximumRecentActivityTextLength = 180;
@@ -332,10 +246,8 @@ public sealed record AppSettings
     public AiProviderKind AiProvider { get; init; } = AiProviderKind.GoAiServer;
     public string GoAiServerUrl { get; init; } = "http://192.168.0.67:8080";
     public string GoAiProtocolVersion { get; init; } = "1.0";
-    public string? LocalToolWorkspacePath { get; init; }
     public string LiveCaptionLanguage { get; init; } = "auto";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
-    public string SelectedCodingModel { get; init; } = DefaultSelectedCodingModel;
     // Legacy JSON field retained for backward-compatible deserialization. GO no
     // longer controls reasoning and always normalizes this value to "auto".
     public string ReasoningEffort { get; init; } = "auto";

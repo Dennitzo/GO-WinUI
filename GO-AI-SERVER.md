@@ -30,8 +30,6 @@ C:\Users\AMD\.lmstudio\models
 Standardprofile:
 
 - General AI: `openai/gpt-oss-120b`, 131.072 Kontexttoken.
-- Coding AI: `qwen/qwen3.8-27b` (`Qwen3.8-27B-Q4_K_M.gguf`), 262.144 Kontexttoken.
-- Alternative Codingmodelle: `openai/gpt-oss-120b` und `qwen3-coder-next` Q8_0.
 - Vision: `qwen3-vl-30b-a3b-instruct`.
 - Embeddings: `text-embedding-bge-m3`.
 
@@ -93,41 +91,17 @@ Das Skript validiert Dateigrößen, überschreibt keine vorhandene Datei und lä
 
 ## Client und Tools
 
-Der Client verbindet sich standardmäßig mit `http://192.168.0.67:8080`. In den Einstellungen werden General- und
-Codingmodell unabhängig gewählt; Qwen3.8 27B ist die Standardauswahl für Coding. Der Denkstatus zeigt das tatsächlich
-aktive Modell und die vom fertigen LM-Studio-Turn gemeldeten Tokenwerte.
+Der Client verbindet sich standardmäßig mit `http://192.168.0.67:8080` und verwendet das in den Einstellungen gewählte
+General-Modell. Der Denkstatus zeigt das tatsächlich aktive Modell und die vom fertigen LM-Studio-Turn gemeldeten
+Tokenwerte.
 
-General verwendet weiterhin den kompakten Toolkatalog mit nachgeliefertem Einzelschema. Coding Agent V2 erhält dagegen
-in stabiler Reihenfolge genau sechs kompakte Fassaden: `workspace.inspect`, `workspace.change`, `execution.run`,
-`research.query`, `artifact.process` und `task.finish`. Dadurch entfällt im Codingpfad ein eigener Modellturn nur zur
-Werkzeugnamensauswahl. Pro Modellturn ist genau ein Toolaufruf erlaubt; die Fassade wird deterministisch auf eine
-vorhandene GO-Operation abgebildet. Mutationen bleiben auf den vom Client freigegebenen Workspace begrenzt und verlangen
-bei vorhandenen Dateien die zuletzt belegte SHA-256-Version.
+General verwendet einen kompakten Toolkatalog mit nachgeliefertem Einzelschema. Serverseitige Recherche-, Medien- und
+Berechnungswerkzeuge werden mit den freigegebenen Servertools kombiniert. Der Client kann Sitzungsdokumente lesen und
+erstellen sowie optional BricsCAD-Aktionen anbieten. Workspace-Dateisystem, Prozessausführung und Lean-Prüfung gehören
+nicht mehr zum Clientvertrag. Dokumentmutationen bleiben bestätigungspflichtig und verwenden begrenzte Abschnittsfenster.
 
-Coding Agent V2 führt einen typisierten Arbeitsstand in den Phasen `Orientieren`, `Bearbeiten`, `Prüfen` und
-`Fertigstellen`. SQLite speichert jede Action und genau eine Observation sowie kompakte Checkpoints. Das Modell sieht nur
-den aktuellen Nutzerauftrag, einen kleinen Repositoryausschnitt, den begrenzten Task-Ledger und höchstens sechs aktuelle
-Action-/Observation-Paare. Ab sechzig Prozent des sicheren Kontextbudgets beginnt ein neuer Kontextepoch aus diesen
-strukturierten Daten; der vollständige Chatverlauf wird im Codingmodus nicht erneut übertragen.
-
-Der Client hält einen inhaltsadressierten Workspacecache mit SHA-256-Dateiversionen, Zeilenindex, FTS5-Volltextsuche,
-Symbolen und Import-/Referenzkanten. Ein `FileSystemWatcher` liefert schnelle Aktualisierungen; vor jedem Lauf gleicht ein
-Metadatenscan verpasste Ereignisse ab. Unveränderte, bereits bekannte Dateiversionen werden nur noch über ihre Beleg-ID
-referenziert. Vollständige lokale Quelltexte verbleiben im Clientcache und werden nach der Observation aus dem temporären
-Gateway-Transport entfernt.
-
-Der Codingprovider bleibt für einen Lauf fest auf dem nicht streamenden LM-Studio-Endpunkt `/v1/chat/completions`.
-Providerzustand und stabiler Promptpräfix sind nur Cachemetadaten; nach einem Modellreload wird der Lauf aus Task-Ledger
-und Clientbelegen rekonstruiert. Ein Wechsel auf `/v1/responses` findet nicht still innerhalb eines aktiven Laufs statt.
-
-Bei Qwen3.8 laufen ausschließlich die kurzen, zwingend strukturierten Tool-Transport-Turns mit
-`reasoning_effort: none`. Analyse- und Antwort-Turns behalten die im Client gewählte Stufe. Das umgeht den bekannten
-LM-Studio-Konflikt zwischen Qwen-Reasoning und nativer Tool-Call-Ausgabe, ohne die eigentliche Coding-Analyse zu
-deaktivieren.
-
-Da das Qwen-Chattemplate Systemnachrichten nur am Gesprächsanfang akzeptiert, fasst GO anfängliche Systemblöcke
-zusammen. Chronologische Retry- und Werkzeughinweise bleiben an ihrer Position und werden als gekennzeichnete interne
-Laufanweisung transportiert. Dadurch kann kein später `system`-Turn den LM-Studio-Engine-Kanal beenden.
+Antworten und native Function Calls laufen über LM Studios OpenAI-kompatiblen `/v1/chat/completions`-Endpunkt. GO fasst
+anfängliche Systemblöcke zusammen und erhält chronologische Retry- und Werkzeughinweise an ihrer Position.
 
 ## Abnahme
 

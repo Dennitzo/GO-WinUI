@@ -7,9 +7,6 @@ public static class RunRequestValidator
 {
     private static readonly HashSet<string> ClientCapabilities = new(StringComparer.OrdinalIgnoreCase)
     {
-        "filesystem",
-        "code",
-        "process",
         "bricscad",
         "screenCapture",
         "documents",
@@ -33,10 +30,6 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("Run mode is invalid.");
         }
-        if (request.AgentProtocolVersion != 4)
-        {
-            throw new ArgumentException("agentProtocolVersion must be 4.");
-        }
         if (request.ConversationProfile is { } conversationProfile && !Enum.IsDefined(conversationProfile))
         {
             throw new ArgumentException("Conversation profile is invalid.");
@@ -47,14 +40,13 @@ public static class RunRequestValidator
             throw new ArgumentException("Audiobook runs require general mode and an explicit empty server-tool allow-list.");
         }
         if (request.ConversationProfile == ConversationProfile.ContextPreparation
-            && (request.Mode is not (RunMode.General or RunMode.Code)
+            && (request.Mode != RunMode.General
                 || request.AllowedServerTools is not { Count: 0 }
                 || request.ClientCapabilities is not { Count: 0 }
-                || request.Workspace is not null
                 || request.DocumentContext is not null))
         {
             throw new ArgumentException(
-                "Context-preparation runs require general or code mode without tools, capabilities, workspace, or document descriptors.");
+                "Context-preparation runs require general mode without tools, capabilities, or document descriptors.");
         }
         if (request.Workload is not null)
         {
@@ -146,17 +138,6 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("sessionId may contain at most 128 characters.");
         }
-        if (request.Workspace is { } workspace)
-        {
-            if (request.Mode != RunMode.Code
-                || string.IsNullOrWhiteSpace(workspace.Name)
-                || workspace.Name.Length > 256
-                || workspace.FileTree.Length is < 1 or > 256_000
-                || workspace.FileCount is < 0 or > 100_000)
-            {
-                throw new ArgumentException("The coding workspace descriptor is invalid.");
-            }
-        }
         if (request.DocumentContext is { } documentContext)
         {
             if (!Enum.IsDefined(documentContext.Mode)
@@ -201,21 +182,10 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("preferredGeneralModelId must contain a bounded model ID.");
         }
-        if (request.PreferredCodeModelId is { } preferredCodeModel
-            && (request.Mode != RunMode.Code
-                || string.IsNullOrWhiteSpace(preferredCodeModel)
-                || preferredCodeModel.Length > 512
-                || preferredCodeModel.Any(char.IsControl)))
-        {
-            throw new ArgumentException(
-                "preferredCodeModelId is only valid in code mode and must name a supported coding model.");
-        }
         if (request.ReasoningEffort is { } reasoningEffort)
         {
-            var reasoningModelId = request.Mode == RunMode.Code
-                ? request.PreferredCodeModelId
-                : request.PreferredGeneralModelId;
-            var reasoningRole = request.Mode == RunMode.Code ? "code" : "general";
+            var reasoningModelId = request.PreferredGeneralModelId;
+            const string reasoningRole = "general";
             var reasoningProfile = ModelReasoningProfiles.Resolve(reasoningModelId, reasoningRole);
             if (string.IsNullOrWhiteSpace(reasoningModelId)
                 || reasoningEffort.Length > 16

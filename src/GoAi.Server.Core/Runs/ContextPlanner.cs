@@ -3,20 +3,20 @@ using System.Text.Json;
 
 namespace GoAi.Server.Core.Runs;
 
-public sealed record CodingContextPlan(
+public sealed record ContextPlan(
     IReadOnlyList<LmChatMessage> Messages,
     int EstimatedInputTokens,
     int InputTokenBudget,
     bool WasCompacted,
     string? Notice);
 
-public static class CodingContextPlanner
+public static class ContextPlanner
 {
     private const int CharactersPerEstimatedToken = 3;
     private const int PerMessageTokenOverhead = 32;
     private const int MaximumHistoricalToolArgumentCharacters = 16_384;
 
-    public static CodingContextPlan Prepare(
+    public static ContextPlan Prepare(
         IReadOnlyList<LmChatMessage> source,
         int contextLength,
         int maximumOutputTokens,
@@ -91,9 +91,9 @@ public static class CodingContextPlanner
         var estimated = EstimateTokens(messages);
         if (estimated > budget)
         {
-            throw new CodingContextBudgetException(estimated, budget);
+            throw new ContextBudgetException(estimated, budget);
         }
-        return new CodingContextPlan(
+        return new ContextPlan(
             messages,
             estimated,
             budget,
@@ -219,9 +219,9 @@ public static class CodingContextPlanner
     }
 }
 
-public sealed class CodingContextBudgetException(int estimatedTokens, int budgetTokens)
+public sealed class ContextBudgetException(int estimatedTokens, int budgetTokens)
     : InvalidOperationException(
-        $"Der Coding-Kontext benötigt geschätzt {estimatedTokens:N0} Token und überschreitet das sichere Budget von {budgetTokens:N0} Token.")
+        $"Der Modellkontext benötigt geschätzt {estimatedTokens:N0} Token und überschreitet das sichere Budget von {budgetTokens:N0} Token.")
 {
     public int EstimatedTokens { get; } = estimatedTokens;
 

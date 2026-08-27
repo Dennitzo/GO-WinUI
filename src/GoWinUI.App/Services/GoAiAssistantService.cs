@@ -4,7 +4,6 @@ using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Chat;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
-using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,15 +14,11 @@ namespace GoWinUI.App.Services;
 
 public enum GoAiAssistantUpdateKind
 {
-    MessageAdded,
-    MessageRemoved,
     Started,
     Delta,
     Status,
     ArtifactsChanged,
     DocumentsChanged,
-    CodeDiffChanged,
-    CodingTraceChanged,
     Completed,
     Cancelled,
     Failed,
@@ -41,8 +36,7 @@ public sealed record GoAiAssistantUpdate(
     int? ContextUsed = null,
     int? ContextLimit = null,
     int? LoadedFiles = null,
-    bool ContextWasCompacted = false,
-    CodingRunTraceEntry? CodingTrace = null);
+    bool ContextWasCompacted = false);
 
 public sealed record GoAiSpeechUpdate(
     bool IsActive,
@@ -64,9 +58,6 @@ public sealed class GoAiStreamDetachedException : OperationCanceledException
 internal sealed class GoAiStreamDisconnectedException(string message, Exception innerException)
     : IOException(message, innerException);
 
-internal sealed class GoAiAgentMessageReplayRequiredException(string message)
-    : InvalidOperationException(message);
-
 internal sealed class GoAiRunTerminalException(
     string errorCode,
     string message,
@@ -78,45 +69,23 @@ internal sealed class GoAiRunTerminalException(
     public bool Retryable { get; } = retryable;
 }
 
-public interface ICodingCampaignAgent
-{
-    bool IsRunning { get; }
-    Task<ChatMessage> SendAsync(
-        Guid sessionId,
-        string prompt,
-        PromptTriggerMatch? trigger,
-        Func<GoAiAssistantUpdate, Task> update,
-        CancellationToken cancellationToken = default);
-    Task<ChatMessage> SendWorkflowStepAsync(
-        Guid sessionId,
-        string prompt,
-        PromptTriggerMatch? trigger,
-        Func<GoAiAssistantUpdate, Task> update,
-        CancellationToken cancellationToken = default);
-    Task CancelCurrentAndWaitAsync(CancellationToken cancellationToken = default);
-}
-
 public sealed class GoAiAssistantService(
     GoAiConnectionService connection,
     IChatRepository chats,
     IAssistantAttachmentRepository attachments,
     IChatArtifactRepository artifacts,
     IGoAiRunRepository runs,
-    ICodingCampaignRepository codingCampaigns,
     IClientToolExecutionRepository toolExecutions,
     IBinaryObjectStore blobs,
     IDocumentIngestor documents,
     DocumentContextPreparationService documentContexts,
     SessionContextPreparationService sessionContexts,
     LocalToolBroker toolBroker,
-    CodingDiffService codingDiffs,
-    CodingRunTraceService codingTrace,
     SystemAudioCaptionService liveCaptions,
     MicrophoneTranscriptionService microphone,
     SettingsCoordinator settings,
-    ModelCapabilityRegistry modelCapabilities,
     RecentActivityService recentActivity,
-    ILogger<GoAiAssistantService> logger) : ICodingCampaignAgent, IDisposable
+    ILogger<GoAiAssistantService> logger) : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
     private static readonly Action<ILogger, string, string, Exception?> RunDiagnostic = LoggerMessage.Define<string, string>(
@@ -150,30 +119,13 @@ public sealed class GoAiAssistantService(
         Func<GoAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken = default) =>
         SendCoreAsync(
-            sessionId, prompt, trigger, update,
-            persistUserMessage: true,
-            internalAssistantMessage: false,
-            cancellationToken);
-
-    public Task<ChatMessage> SendWorkflowStepAsync(
-        Guid sessionId,
-        string prompt,
-        PromptTriggerMatch? trigger,
-        Func<GoAiAssistantUpdate, Task> update,
-        CancellationToken cancellationToken = default) =>
-        SendCoreAsync(
-            sessionId, prompt, trigger, update,
-            persistUserMessage: false,
-            internalAssistantMessage: true,
-            cancellationToken);
+            sessionId, prompt, trigger, update, cancellationToken);
 
     private async Task<ChatMessage> SendCoreAsync(
         Guid sessionId,
         string prompt,
         PromptTriggerMatch? trigger,
         Func<GoAiAssistantUpdate, Task> update,
-        bool persistUserMessage,
-        bool internalAssistantMessage,
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -192,66 +144,24 @@ public sealed class GoAiAssistantService(
         {
             var session = await chats.GetSessionAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
-            if (trigger?.Trigger.Action == PromptTriggerAction.Code
-                && (string.IsNullOrWhiteSpace(session.WorkspacePath) || !Directory.Exists(session.WorkspacePath)))
-            {
-                throw new DirectoryNotFoundException(
-                    "Der Coding-Workspace dieser Sitzung ist nicht verfügbar. Wähle den Workspace im Promptfenster erneut aus.");
-            }
             var historyBeforePrompt = await chats.ListMessagesAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
             var sessionAttachments = await attachments.ListAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
             var action = trigger?.Trigger.Action;
             var contentProfile = action == PromptTriggerAction.Audiobook
                 ? MessageContentProfile.Audiobook
                 : MessageContentProfile.General;
-            ChatMessage assistant;
-            if (persistUserMessage && !internalAssistantMessage)
-            {
-                var turn = action == PromptTriggerAction.Code
-                    ? await chats.AddCodingTurnAsync(
-                        sessionId,
-                        prompt.Trim(),
-                        contentProfile,
-                        _activeCancellation.Token).ConfigureAwait(false)
-                    : await chats.AddTurnAsync(
-                        sessionId,
-                        prompt.Trim(),
-                        contentProfile,
-                        _activeCancellation.Token).ConfigureAwait(false);
-                sessionAttachments = await BindCapturedMediaToMessageAsync(
-                    turn.UserMessage,
-                    sessionAttachments,
-                    _activeCancellation.Token).ConfigureAwait(false);
-                assistant = turn.AssistantMessage;
-            }
-            else
-            {
-                if (persistUserMessage)
-                {
-                    var user = await chats.AddMessageAsync(
-                        sessionId, ChatRole.User, prompt.Trim(), MessageStatus.Completed,
-                        cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
-                    sessionAttachments = await BindCapturedMediaToMessageAsync(
-                        user,
-                        sessionAttachments,
-                        _activeCancellation.Token).ConfigureAwait(false);
-                }
-                assistant = internalAssistantMessage
-                    ? await chats.AddInternalMessageAsync(
-                        sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
-                        contentProfile,
-                        cancellationToken: _activeCancellation.Token).ConfigureAwait(false)
-                    : await chats.AddMessageAsync(
-                        sessionId, ChatRole.Assistant, string.Empty, MessageStatus.Streaming,
-                        contentProfile,
-                        cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
-            }
-            var contextLimit = action == PromptTriggerAction.Code
-                ? ModelContextProfiles.ResolveMaximum(settings.Current.SelectedCodingModel, "code")
-                : ModelContextProfiles.ResolveMaximum(settings.Current.SelectedModel, "general");
-            var initialModel = action == PromptTriggerAction.Code
-                ? DescribeCodingModel(settings.Current.SelectedCodingModel)
-                : settings.Current.SelectedModel;
+            var turn = await chats.AddTurnAsync(
+                sessionId,
+                prompt.Trim(),
+                contentProfile,
+                _activeCancellation.Token).ConfigureAwait(false);
+            sessionAttachments = await BindCapturedMediaToMessageAsync(
+                turn.UserMessage,
+                sessionAttachments,
+                _activeCancellation.Token).ConfigureAwait(false);
+            var assistant = turn.AssistantMessage;
+            var contextLimit = ModelContextProfiles.ResolveMaximum(settings.Current.SelectedModel, "general");
+            var initialModel = settings.Current.SelectedModel;
             await update(new(
                 GoAiAssistantUpdateKind.Started,
                 assistant,
@@ -284,7 +194,7 @@ public sealed class GoAiAssistantService(
             }
             catch (OperationCanceledException)
             {
-                var current = await chats.GetMessageAsync(assistant.Id, includeInternal: true, cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                var current = await chats.GetMessageAsync(assistant.Id, CancellationToken.None).ConfigureAwait(false)
                     ?? assistant;
                 await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Cancelled, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 var cancelled = current with { Status = MessageStatus.Cancelled, UpdatedAt = DateTimeOffset.UtcNow };
@@ -293,13 +203,13 @@ public sealed class GoAiAssistantService(
             }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
-                var current = await chats.GetMessageAsync(assistant.Id, includeInternal: true, cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                var current = await chats.GetMessageAsync(assistant.Id, CancellationToken.None).ConfigureAwait(false)
                     ?? assistant;
                 var visible = string.IsNullOrWhiteSpace(current.Content)
                     ? VisibleFailure(exception)
                     : current.Content;
                 await chats.UpdateMessageAsync(assistant.Id, visible, MessageStatus.Failed, exception.Message, CancellationToken.None).ConfigureAwait(false);
-                var failed = await chats.GetMessageAsync(assistant.Id, includeInternal: true, cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                var failed = await chats.GetMessageAsync(assistant.Id, CancellationToken.None).ConfigureAwait(false)
                     ?? current with { Content = visible, Status = MessageStatus.Failed, Error = exception.Message };
                 await update(new(GoAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Fehlgeschlagen")).ConfigureAwait(false);
                 return failed;
@@ -332,7 +242,6 @@ public sealed class GoAiAssistantService(
             {
                 var message = await chats.GetMessageAsync(
                     run.AssistantMessageId,
-                    includeInternal: true,
                     cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
                 if (message is null || string.IsNullOrWhiteSpace(run.ServerRunId))
                 {
@@ -372,7 +281,6 @@ public sealed class GoAiAssistantService(
             var serverRunIds = await StopPersistedRunsLocallyAsync(
                 runs,
                 chats,
-                codingCampaigns,
                 cancellationToken).ConfigureAwait(false);
             await CancelPersistedServerRunsAsync(serverRunIds, cancellationToken).ConfigureAwait(false);
         }
@@ -386,44 +294,34 @@ public sealed class GoAiAssistantService(
     internal static async Task<IReadOnlyList<string>> StopPersistedRunsLocallyAsync(
         IGoAiRunRepository runRepository,
         IChatRepository chatRepository,
-        ICodingCampaignRepository campaignRepository,
         CancellationToken cancellationToken = default)
     {
-        var campaignSessionIds = (await campaignRepository.ListAsync(cancellationToken).ConfigureAwait(false))
-            .Select(static campaign => campaign.SessionId)
-            .ToHashSet();
         var staleRuns = await runRepository.ListResumableAsync(cancellationToken).ConfigureAwait(false);
         var serverRunIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var run in staleRuns)
         {
-            var isCampaignRun = campaignSessionIds.Contains(run.SessionId);
             await runRepository.UpdateAsync(
                 run.Id,
                 run.ServerRunId,
                 run.LastEventId,
                 "cancelled",
                 run.SelectedModel,
-                isCampaignRun ? "client.workflow_stopped_on_start" : "client.run_stopped_on_start",
+                "client.run_stopped_on_start",
                 CancellationToken.None).ConfigureAwait(false);
 
             var message = await chatRepository.GetMessageAsync(
                 run.AssistantMessageId,
-                includeInternal: true,
                 cancellationToken: CancellationToken.None).ConfigureAwait(false);
             if (message?.Status is MessageStatus.Pending or MessageStatus.Streaming or MessageStatus.Interrupted)
             {
                 var content = string.IsNullOrWhiteSpace(message.Content)
-                    ? isCampaignRun
-                        ? "Der Coding-Workflow ist geladen und startet gestoppt. Senden startet ihn erneut."
-                        : "Der vorherige AI-Lauf wurde beim Clientstart gestoppt."
+                    ? "Der vorherige AI-Lauf wurde beim Clientstart gestoppt."
                     : message.Content;
                 await chatRepository.UpdateMessageAsync(
                     message.Id,
                     content,
                     MessageStatus.Cancelled,
-                    isCampaignRun
-                        ? "Der Workflow wurde beim Clientstart gestoppt."
-                        : "Der AI-Lauf wurde beim Clientstart gestoppt.",
+                    "Der AI-Lauf wurde beim Clientstart gestoppt.",
                     CancellationToken.None).ConfigureAwait(false);
             }
 
@@ -541,9 +439,8 @@ public sealed class GoAiAssistantService(
         var playbackId = Guid.NewGuid();
         long playbackEventSequence = 0;
 
-        // Read-aloud is an independent media operation. In particular, it must not acquire
-        // the chat/run gate: coding campaigns can continue while an already persisted
-        // process report is spoken.
+        // Read-aloud is an independent media operation and must not acquire the
+        // chat/run gate while a response is still being generated.
         await _speechGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         Interlocked.Exchange(ref _speechActive, 1);
         var speechCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -952,9 +849,6 @@ public sealed class GoAiAssistantService(
         CancellationToken cancellationToken)
     {
         var retryCount = 0;
-        var codingDiffBaselineId = trigger?.Trigger.Action == PromptTriggerAction.Code
-            ? Guid.NewGuid()
-            : (Guid?)null;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -967,7 +861,6 @@ public sealed class GoAiAssistantService(
                     sessionAttachments,
                     historyBeforePrompt,
                     update,
-                    codingDiffBaselineId,
                     cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (ShouldRetryCurrentPrompt(
@@ -983,34 +876,11 @@ public sealed class GoAiAssistantService(
                     $"prompt retry {retryCount} scheduled after {exception.GetType().Name}",
                     exception);
 
-                if (trigger?.Trigger.Action == PromptTriggerAction.Code
-                    && await codingTrace.GetLatestForSessionAsync(
-                        assistant.SessionId,
-                        CancellationToken.None).ConfigureAwait(false) is { } latestTrace
-                    && latestTrace.MessageId == assistant.Id)
-                {
-                    var retryTrace = await codingTrace.AppendAsync(
-                        latestTrace.LocalRunId,
-                        latestTrace.ServerRunId,
-                        assistant.SessionId,
-                        assistant.Id,
-                        "retry",
-                        "running",
-                        "Prompt wird erneut ausgeführt",
-                        $"Technischer Abbruch · Versuch {retryCount} startet in {delay.TotalSeconds:0} Sekunden",
-                        cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                    await update(new(
-                        GoAiAssistantUpdateKind.CodingTraceChanged,
-                        assistant,
-                        CodingTrace: retryTrace)).ConfigureAwait(false);
-                }
-
-                await chats.ResetAgentMessageForRetryAsync(
+                await chats.ResetMessageForRetryAsync(
                     assistant.Id,
                     CancellationToken.None).ConfigureAwait(false);
                 assistant = await chats.GetMessageAsync(
                     assistant.Id,
-                    includeInternal: true,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false)
                     ?? assistant with
                     {
@@ -1028,9 +898,7 @@ public sealed class GoAiAssistantService(
                     assistant,
                     Status: "Wird erneut versucht",
                     Detail: $"Derselbe Prompt wird nach einem technischen Abbruch erneut ausgeführt · Versuch {retryCount} in {delay.TotalSeconds:0} Sekunden",
-                    Model: trigger?.Trigger.Action == PromptTriggerAction.Code
-                        ? settings.Current.SelectedCodingModel
-                        : settings.Current.SelectedModel)).ConfigureAwait(false);
+                    Model: settings.Current.SelectedModel)).ConfigureAwait(false);
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -1043,7 +911,6 @@ public sealed class GoAiAssistantService(
         IReadOnlyList<AssistantAttachment> sessionAttachments,
         IReadOnlyList<ChatMessage> historyBeforePrompt,
         Func<GoAiAssistantUpdate, Task> update,
-        Guid? codingDiffBaselineId,
         CancellationToken cancellationToken)
     {
         using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
@@ -1084,38 +951,6 @@ public sealed class GoAiAssistantService(
                 Guid.NewGuid(), assistant.SessionId, assistant.Id, action, idempotencyKey, null, 0, "queued",
                 null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
             localRun = await runs.BeginAttemptAsync(attempt, cancellationToken).ConfigureAwait(false);
-            if (action == PromptTriggerAction.Code)
-            {
-                var codingSession = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
-                var codingDiffReady = await codingDiffs.BeginAsync(
-                        codingDiffBaselineId ?? localRun.Id,
-                        codingSession?.WorkspacePath,
-                        cancellationToken).ConfigureAwait(false);
-                var trace = await codingTrace.StartAsync(
-                    localRun.Id,
-                    localRun.SessionId,
-                    localRun.AssistantMessageId,
-                    codingSession?.WorkspacePath,
-                    cancellationToken).ConfigureAwait(false);
-                if (!codingDiffReady)
-                {
-                    trace = await codingTrace.AppendAsync(
-                        localRun.Id,
-                        null,
-                        localRun.SessionId,
-                        localRun.AssistantMessageId,
-                        "diff",
-                        "failed",
-                        "Codeänderungs-Baseline nicht verfügbar",
-                        "Der Coding-Lauf wird fortgesetzt, aber direkte Vorher-/Nachher-Diffs können für diesen Workspace nicht gespeichert werden.",
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
-                }
-                await update(new(
-                    GoAiAssistantUpdateKind.CodingTraceChanged,
-                    assistant,
-                    CodingTrace: trace)).ConfigureAwait(false);
-            }
-
             if (action == PromptTriggerAction.ImageGeneration)
             {
                 var imagePrompt = RequireRemaining(trigger!, "Beschreibe nach der Triggerphrase das gewünschte Bild.");
@@ -1158,30 +993,12 @@ public sealed class GoAiAssistantService(
             await runs.UpdateAsync(localRun.Id, accepted.RunId, 0, localRun.State, cancellationToken: cancellationToken).ConfigureAwait(false);
             _activeServerRunId = accepted.RunId;
             RunDiagnostic(logger, accepted.RunId, "accepted", null);
-            if (action == PromptTriggerAction.Code)
-            {
-                var trace = await codingTrace.AppendAsync(
-                    localRun.Id,
-                    accepted.RunId,
-                    localRun.SessionId,
-                    localRun.AssistantMessageId,
-                    "run",
-                    "running",
-                    "Serverlauf angenommen",
-                    $"Run-ID: {accepted.RunId}",
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
-                await update(new(
-                    GoAiAssistantUpdateKind.CodingTraceChanged,
-                    assistant,
-                    CodingTrace: trace)).ConfigureAwait(false);
-            }
             var result = await StreamRunWithReconnectAsync(
                 localRun,
                 assistant,
                 update,
                 cancellationToken,
-                client,
-                codingDiffBaselineId).ConfigureAwait(false);
+                client).ConfigureAwait(false);
             return result;
         }
         catch (GoAiStreamDisconnectedException)
@@ -1201,23 +1018,6 @@ public sealed class GoAiAssistantService(
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not GoAiStreamDetachedException and not OutOfMemoryException)
         {
-            if (action == PromptTriggerAction.Code && localRun is not null)
-            {
-                var trace = await codingTrace.AppendAsync(
-                    localRun.Id,
-                    localRun.ServerRunId,
-                    localRun.SessionId,
-                    localRun.AssistantMessageId,
-                    "run",
-                    "failed",
-                    "Coding-Lauf fehlgeschlagen",
-                    exception.Message,
-                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                await update(new(
-                    GoAiAssistantUpdateKind.CodingTraceChanged,
-                    assistant,
-                    CodingTrace: trace)).ConfigureAwait(false);
-            }
             if (localRun is not null && string.IsNullOrWhiteSpace(localRun.ServerRunId))
             {
                 await runs.UpdateAsync(
@@ -1253,8 +1053,7 @@ public sealed class GoAiAssistantService(
         ChatMessage assistant,
         Func<GoAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken,
-        GoAiClient? suppliedClient = null,
-        Guid? codingDiffBaselineId = null)
+        GoAiClient? suppliedClient = null)
     {
         var current = localRun;
         var consecutiveReconnectAttempts = 0;
@@ -1268,8 +1067,7 @@ public sealed class GoAiAssistantService(
                     assistant,
                     update,
                     cancellationToken,
-                    suppliedClient,
-                    codingDiffBaselineId).ConfigureAwait(false);
+                    suppliedClient).ConfigureAwait(false);
             }
             catch (GoAiStreamDisconnectedException exception) when (!cancellationToken.IsCancellationRequested)
             {
@@ -1280,42 +1078,15 @@ public sealed class GoAiAssistantService(
                     current.LastEventId);
                 assistant = await chats.GetMessageAsync(
                     current.AssistantMessageId,
-                    includeInternal: true,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false) ?? assistant;
                 var attemptNumber = (long)consecutiveReconnectAttempts + 1;
                 var delay = StreamReconnectDelay(consecutiveReconnectAttempts);
-                if (current.Action == PromptTriggerAction.Code)
-                {
-                    var trace = await codingTrace.AppendAsync(
-                        current.Id,
-                        current.ServerRunId,
-                        current.SessionId,
-                        current.AssistantMessageId,
-                        "connection",
-                        "running",
-                        "Verbindung wird wiederhergestellt",
-                        $"Versuch {attemptNumber} · Wiederholung bis der Serverlauf wieder erreichbar ist",
-                        serverEventId: current.LastEventId,
-                        cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                    await update(new(
-                        GoAiAssistantUpdateKind.CodingTraceChanged,
-                        assistant,
-                        CodingTrace: trace)).ConfigureAwait(false);
-                    await update(new(
-                        GoAiAssistantUpdateKind.Status,
-                        assistant,
-                        Status: "Denkt nach",
-                        Model: current.SelectedModel)).ConfigureAwait(false);
-                }
-                else
-                {
-                    await update(new(
-                        GoAiAssistantUpdateKind.Status,
-                        assistant,
-                        Status: "Verbindung wird wiederhergestellt",
-                        Detail: $"SSE ab Ereignis {current.LastEventId} · Versuch {attemptNumber}"))
-                        .ConfigureAwait(false);
-                }
+                await update(new(
+                    GoAiAssistantUpdateKind.Status,
+                    assistant,
+                    Status: "Verbindung wird wiederhergestellt",
+                    Detail: $"SSE ab Ereignis {current.LastEventId} · Versuch {attemptNumber}"))
+                    .ConfigureAwait(false);
                 RunDiagnostic(logger, current.ServerRunId ?? current.Id.ToString("D"), "stream reconnect", exception);
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                 lastObservedEventId = current.LastEventId;
@@ -1363,22 +1134,10 @@ public sealed class GoAiAssistantService(
         "document.context_preparation_failed"
         or "session.context_preparation_failed"
         or "general.context_budget"
-        or "coding.context_unavailable"
         or "provider.generation_terminated"
         or "provider.http_failed"
         or "run.timeout"
         or "run.gateway_stopped";
-
-    internal static string CodingContextTraceFingerprint(ContextChangedEvent context) =>
-        string.Join(
-            "|",
-            context.LoadedFiles.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            context.WasCompacted ? "1" : "0",
-            context.ContextMode?.Trim().ToLowerInvariant() ?? "none",
-            context.DocumentTokens.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            context.DocumentPages.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            context.HistoryWasCompacted ? "1" : "0",
-            context.Detail?.Trim() ?? string.Empty);
 
     internal static string? FormatModelTokenProgress(
         ModelGenerationEvent progress,
@@ -1415,155 +1174,82 @@ public sealed class GoAiAssistantService(
         ChatMessage assistant,
         Func<GoAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken,
-        GoAiClient? suppliedClient = null,
-        Guid? codingDiffBaselineId = null)
+        GoAiClient? suppliedClient = null)
     {
         var ownsClient = suppliedClient is null;
         var client = suppliedClient ?? await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
         var content = assistant.Content;
         var model = localRun.SelectedModel;
-        var collectedArtifacts = (await artifacts.ListForMessageAsync(assistant.Id, cancellationToken).ConfigureAwait(false)).ToList();
-        string? lastCodingContextTraceFingerprint = null;
+        var collectedArtifacts = (await artifacts.ListForMessageAsync(
+            assistant.Id,
+            cancellationToken).ConfigureAwait(false)).ToList();
         var activeModelRunTokens = 0;
         var hasModelRunStarted = false;
 
-        async Task TraceCodingAsync(
-            string stage,
-            string status,
-            string title,
-            string? detail = null,
-            string? tool = null,
-            string? target = null,
-            long? durationMilliseconds = null,
-            long? serverEventId = null,
-            CodingProcessConsole? processConsole = null,
-            CancellationToken traceCancellationToken = default)
+        async Task<ChatMessage> CompleteAsync(
+            string runId,
+            long eventId,
+            string? selectedModel,
+            string? serverSessionTitle)
         {
-            if (localRun.Action != PromptTriggerAction.Code)
+            model = selectedModel ?? model;
+            if (string.IsNullOrWhiteSpace(content))
             {
-                return;
+                content = collectedArtifacts.Count > 0
+                    ? "Der Auftrag wurde abgeschlossen. Das Ergebnis ist unten lokal gespeichert."
+                    : "Der GO-AI-Auftrag wurde abgeschlossen.";
             }
 
-            var trace = await codingTrace.AppendAsync(
-                localRun.Id,
-                localRun.ServerRunId,
-                localRun.SessionId,
-                localRun.AssistantMessageId,
-                stage,
-                status,
-                title,
-                detail,
-                tool,
-                target,
-                durationMilliseconds,
-                serverEventId,
-                processConsole,
-                traceCancellationToken).ConfigureAwait(false);
-            await update(new(
-                GoAiAssistantUpdateKind.CodingTraceChanged,
-                assistant,
-                CodingTrace: trace)).ConfigureAwait(false);
-        }
-
-        async Task PublishStatusAsync(GoAiAssistantUpdate statusUpdate)
-        {
-            if (localRun.Action == PromptTriggerAction.Code)
-            {
-                statusUpdate = statusUpdate with
-                {
-                    Status = "Denkt nach",
-                    Detail = statusUpdate.Detail is { Length: > 0 }
-                        && statusUpdate.Detail.Contains("Token", StringComparison.Ordinal)
-                            ? statusUpdate.Detail
-                            : null,
-                    Model = model,
-                };
-            }
-            await update(statusUpdate).ConfigureAwait(false);
-        }
-
-        async Task<ChatMessage> CommitAgentDeltaAsync(
-            AgentMessageDeltaEvent agentDelta,
-            CancellationToken token)
-        {
-            var incomingSequence = checked((long)agentDelta.DeltaIndex + 1L);
-            var existing = await chats.GetAgentMessageAsync(
-                localRun.ServerRunId!,
-                agentDelta.ItemId,
-                token).ConfigureAwait(false);
-            if (existing is not null && existing.SourceDeltaSequence >= incomingSequence)
-            {
-                return existing;
-            }
-            if (agentDelta.DeltaIndex > 0
-                && (existing is null || existing.SourceDeltaSequence != agentDelta.DeltaIndex))
-            {
-                var anchor = await chats.GetMessageAsync(
-                    localRun.AssistantMessageId,
-                    includeInternal: true,
-                    token).ConfigureAwait(false);
-                if (existing is null
-                    && anchor is { Status: MessageStatus.Streaming }
-                    && (string.IsNullOrWhiteSpace(anchor.SourceRunId)
-                        || !string.Equals(anchor.SourceRunId, localRun.ServerRunId, StringComparison.Ordinal)))
-                {
-                    await chats.ResetAgentMessageForRetryAsync(
-                        localRun.AssistantMessageId,
-                        CancellationToken.None).ConfigureAwait(false);
-                    throw new GoAiAgentMessageReplayRequiredException(
-                        $"Der Nachrichtenanker gehörte zum vorherigen Serverlauf '{anchor.SourceRunId}' und wird aus dem aktuellen Lauf neu aufgebaut.");
-                }
-                throw new InvalidDataException(
-                    $"Die Agentennachricht '{agentDelta.ItemId}' besitzt eine Delta-Lücke vor Index {agentDelta.DeltaIndex}.");
-            }
-            var fullContent = (existing?.Content ?? string.Empty) + agentDelta.Delta;
-            return await chats.CommitAgentMessageAsync(
-                localRun.SessionId,
-                localRun.AssistantMessageId,
-                localRun.ServerRunId!,
-                agentDelta.ItemId,
-                ToChatMessagePhase(agentDelta.Phase),
-                fullContent,
-                MessageStatus.Streaming,
-                incomingSequence,
-                token).ConfigureAwait(false);
-        }
-
-        async Task RefreshFinalCodingDiffAsync(long? serverEventId)
-        {
-            if (localRun.Action != PromptTriggerAction.Code) return;
-
-            var codingSession = await chats.GetSessionAsync(localRun.SessionId, CancellationToken.None).ConfigureAwait(false);
-            var diff = await codingDiffs.RefreshAsync(
-                codingDiffBaselineId ?? localRun.Id,
-                codingSession?.WorkspacePath,
+            var parsed = GeneralAgentResponseParser.Parse(content, serverSessionTitle ?? string.Empty);
+            content = RemoveDocumentEvidenceFooter(parsed.Message);
+            await chats.UpdateMessageAsync(
+                assistant.Id,
+                content,
+                MessageStatus.Completed,
+                cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            await chats.SetMessageContextSummaryAsync(
+                assistant.Id,
+                parsed.ContextSummary,
                 CancellationToken.None).ConfigureAwait(false);
-            if (diff is null) return;
 
-            var finalDiff = string.IsNullOrWhiteSpace(diff.Diff) ? null : diff.Diff;
-            await codingTrace.SetCodeDiffAsync(localRun.Id, finalDiff, CancellationToken.None).ConfigureAwait(false);
-            assistant = assistant with { CodeDiff = finalDiff, UpdatedAt = DateTimeOffset.UtcNow };
-            await TraceCodingAsync(
-                "diff",
+            var requestedTitle = GeneralAgentResponseParser.NormalizeTitle(serverSessionTitle)
+                ?? parsed.SessionTitle;
+            if (!string.IsNullOrWhiteSpace(requestedTitle))
+            {
+                await chats.RenameSessionAsync(
+                    assistant.SessionId,
+                    requestedTitle,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+
+            await runs.UpdateAsync(
+                localRun.Id,
+                runId,
+                eventId,
                 "completed",
-                "Finaler Lauf-Diff geprüft",
-                diff.FileCount == 0
-                    ? "Keine Codeänderungen dieses Laufs."
-                    : $"{diff.FileCount:N0} Dateien · +{diff.AddedLines:N0} · −{diff.DeletedLines:N0}",
-                serverEventId: serverEventId,
-                traceCancellationToken: CancellationToken.None).ConfigureAwait(false);
+                model,
+                cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            var final = await chats.GetMessageAsync(
+                assistant.Id,
+                cancellationToken: CancellationToken.None).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("Die AI-Nachricht des abgeschlossenen Laufs fehlt.");
+            var session = await chats.GetSessionAsync(
+                assistant.SessionId,
+                CancellationToken.None).ConfigureAwait(false);
+            await recentActivity.RecordAsync(
+                $"AI-Sitzung „{session?.Title ?? "Neue Sitzung"}“ bearbeitet",
+                CancellationToken.None).ConfigureAwait(false);
             await update(new(
-                GoAiAssistantUpdateKind.CodeDiffChanged,
-                assistant,
-                Status: "Codeänderungen",
-                Detail: diff.FileCount == 0
-                    ? "Keine Codeänderungen dieses Laufs."
-                    : $"{diff.FileCount:N0} Dateien · +{diff.AddedLines:N0} · −{diff.DeletedLines:N0}"))
-                .ConfigureAwait(false);
+                GoAiAssistantUpdateKind.Completed,
+                final,
+                collectedArtifacts.ToArray(),
+                session,
+                "Fertig",
+                Model: model)).ConfigureAwait(false);
+            return final;
         }
 
         var acknowledgedEventId = localRun.LastEventId;
-
         try
         {
             var pendingSubmissions = await toolExecutions
@@ -1573,16 +1259,13 @@ public sealed class GoAiAssistantService(
             {
                 var pendingResult = JsonSerializer.Deserialize<ClientToolResult>(pending.ResultJson!, JsonOptions)
                     ?? throw new InvalidDataException("Ein gespeichertes Client-Toolergebnis ist ungültig.");
-                await TraceCodingAsync(
-                    "tool",
-                    "running",
-                    "Tool-Ergebnis wird wieder übertragen",
-                    pending.ToolName,
-                    pending.ToolName,
-                    serverEventId: pending.EventId,
-                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                await client.SubmitClientToolResultAsync(pending.ServerRunId, pendingResult, cancellationToken).ConfigureAwait(false);
-                await toolExecutions.MarkSubmittedAsync(pending.ProposalId, CancellationToken.None).ConfigureAwait(false);
+                await client.SubmitClientToolResultAsync(
+                    pending.ServerRunId,
+                    pendingResult,
+                    cancellationToken).ConfigureAwait(false);
+                await toolExecutions.MarkSubmittedAsync(
+                    pending.ProposalId,
+                    CancellationToken.None).ConfigureAwait(false);
                 acknowledgedEventId = Math.Max(acknowledgedEventId, pending.EventId);
                 localRun = localRun with
                 {
@@ -1596,43 +1279,29 @@ public sealed class GoAiAssistantService(
                     "running",
                     model,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                await TraceCodingAsync(
-                    "tool",
-                    "completed",
-                    "Tool-Ergebnis wieder übertragen",
-                    pending.ToolName,
-                    pending.ToolName,
-                    serverEventId: pending.EventId,
-                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
-            await foreach (var item in client.StreamRunEventsAsync(localRun.ServerRunId!, acknowledgedEventId, cancellationToken).ConfigureAwait(false))
+            await foreach (var item in client.StreamRunEventsAsync(
+                localRun.ServerRunId!,
+                acknowledgedEventId,
+                cancellationToken).ConfigureAwait(false))
             {
                 switch (item.Type)
                 {
                     case RunEventTypes.QueueChanged:
                         var queue = item.Data.Deserialize<QueueChangedEvent>(JsonOptions);
-                        await TraceCodingAsync(
-                            "queue",
-                            "running",
-                            "GPU-Warteschlange",
-                            queue is null ? null : $"Position {queue.Position}",
-                            serverEventId: item.Id,
-                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                        await PublishStatusAsync(new(GoAiAssistantUpdateKind.Status, assistant, Status: "In Warteschlange", Detail: queue is null ? null : $"Position {queue.Position}")).ConfigureAwait(false);
+                        await update(new(
+                            GoAiAssistantUpdateKind.Status,
+                            assistant,
+                            Status: "In Warteschlange",
+                            Detail: queue is null ? null : $"Position {queue.Position}"))
+                            .ConfigureAwait(false);
                         break;
                     case RunEventTypes.ModelSelected:
                     case RunEventTypes.ModelFallback:
                         var selected = item.Data.Deserialize<ModelSelectedEvent>(JsonOptions);
-                        model = DescribeCodingModel(selected?.ModelId ?? model);
-                        await TraceCodingAsync(
-                            "model",
-                            "running",
-                            selected?.IsFallback == true ? "Fallback-Modell gew\u00E4hlt" : "Coding-Modell gew\u00E4hlt",
-                            model,
-                            serverEventId: item.Id,
-                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                        await PublishStatusAsync(new(
+                        model = selected?.ModelId ?? model;
+                        await update(new(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: selected?.IsFallback == true ? "Fallback-Modell" : "Modell gewählt",
@@ -1640,264 +1309,43 @@ public sealed class GoAiAssistantService(
                         break;
                     case RunEventTypes.ModelLoading:
                         var loading = item.Data.Deserialize<ModelLoadingEvent>(JsonOptions);
-                        model = DescribeCodingModel(loading?.ModelId ?? model);
-                        await TraceCodingAsync(
-                            "model",
-                            loading?.State == "loaded" ? "completed" : "running",
-                            loading?.State == "loaded" ? "Coding-Modell geladen" : "Coding-Modell wird geladen",
-                            model,
-                            serverEventId: item.Id,
-                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                        await PublishStatusAsync(new(
+                        model = loading?.ModelId ?? model;
+                        await update(new(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: loading?.State == "loaded" ? "Denkt nach" : "Modell wird geladen",
-                            Detail: loading?.State == "loaded"
-                                ? null
-                                : "Ausgewähltes Modell wird geladen.",
+                            Detail: loading?.State == "loaded" ? null : "Ausgewähltes Modell wird geladen.",
                             Model: model,
                             ContextLimit: loading?.EffectiveContextLength)).ConfigureAwait(false);
                         break;
-                    case RunEventTypes.AgentMessageStarted:
-                        var agentStarted = item.Data.Deserialize<AgentMessageStartedEvent>(JsonOptions)
-                            ?? throw new InvalidDataException("Der Server hat einen ungültigen Start einer Agentennachricht gesendet.");
-                        ValidateAgentMessageRun(agentStarted.RunId, item.RunId);
-                        break;
-                    case RunEventTypes.AgentMessageDelta:
-                        var agentDelta = item.Data.Deserialize<AgentMessageDeltaEvent>(JsonOptions)
-                            ?? throw new InvalidDataException("Der Server hat ein ungültiges Agentennachrichten-Delta gesendet.");
-                        ValidateAgentMessageRun(agentDelta.RunId, item.RunId);
-                        var streamedAgentMessage = await CommitAgentDeltaAsync(agentDelta, cancellationToken).ConfigureAwait(false);
-                        if (streamedAgentMessage.MessagePhase == ChatMessagePhase.FinalAnswer)
-                        {
-                            assistant = streamedAgentMessage;
-                            content = streamedAgentMessage.Content;
-                        }
-                        await update(new(GoAiAssistantUpdateKind.Delta, streamedAgentMessage)).ConfigureAwait(false);
-                        break;
-                    case RunEventTypes.AgentMessageCompleted:
-                        var agentCompleted = item.Data.Deserialize<AgentMessageCompletedEvent>(JsonOptions)
-                            ?? throw new InvalidDataException("Der Server hat einen ungültigen Abschluss einer Agentennachricht gesendet.");
-                        ValidateAgentMessageRun(agentCompleted.RunId, item.RunId);
-                        var completedAgentMessage = await chats.CommitAgentMessageAsync(
-                            localRun.SessionId,
-                            localRun.AssistantMessageId,
-                            localRun.ServerRunId!,
-                            agentCompleted.ItemId,
-                            ToChatMessagePhase(agentCompleted.Phase),
-                            agentCompleted.Text,
-                            agentCompleted.Phase == AgentMessagePhase.FinalAnswer
-                                ? MessageStatus.Completed
-                                : MessageStatus.Streaming,
-                            Math.Max(1L, agentCompleted.DeltaCount),
-                            cancellationToken).ConfigureAwait(false);
-                        if (completedAgentMessage.MessagePhase == ChatMessagePhase.FinalAnswer)
-                        {
-                            assistant = completedAgentMessage;
-                            content = completedAgentMessage.Content;
-                        }
-                        await update(new(GoAiAssistantUpdateKind.Delta, completedAgentMessage)).ConfigureAwait(false);
-                        break;
-                    case RunEventTypes.AgentPhaseChanged:
-                        var phase = item.Data.Deserialize<AgentPhaseChangedEvent>(JsonOptions);
-                        if (phase is not null)
-                        {
-                            await TraceCodingAsync(
-                                "agentPhase",
-                                phase.Phase is CodingAgentPhase.Completed ? "completed"
-                                    : phase.Phase is CodingAgentPhase.Blocked ? "failed"
-                                    : "running",
-                                CodingAgentPhaseTitle(phase.Phase),
-                                phase.Detail,
-                                serverEventId: item.Id,
-                                traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                        }
-                        break;
-                    case RunEventTypes.AgentActionStarted:
-                        var action = item.Data.Deserialize<AgentActionStartedEvent>(JsonOptions);
-                        if (action is not null)
-                        {
-                            await TraceCodingAsync(
-                                "agentAction",
-                                "running",
-                                $"Aktion {action.Sequence:N0}: {action.Tool} / {action.Operation}",
-                                string.Join(
-                                    " · ",
-                                    new[] { action.Target, action.ActionId }
-                                        .Where(static value => !string.IsNullOrWhiteSpace(value))),
-                                tool: action.Tool,
-                                target: action.Target,
-                                serverEventId: item.Id,
-                                traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                        }
-                        break;
-                    case RunEventTypes.AgentObservationCommitted:
-                        var observation = item.Data.Deserialize<AgentObservationCommittedEvent>(JsonOptions);
-                        if (observation is not null)
-                        {
-                            await TraceCodingAsync(
-                                "agentObservation",
-                                observation.Succeeded ? "completed" : "failed",
-                                observation.Succeeded ? "Agentenbeleg gespeichert" : "Agentenaktion fehlgeschlagen",
-                                string.Join(
-                                    " · ",
-                                    new[]
-                                    {
-                                        observation.ErrorCode ?? observation.Message,
-                                        observation.ActionId,
-                                    }.Where(static value => !string.IsNullOrWhiteSpace(value))),
-                                serverEventId: item.Id,
-                                traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                        }
-                        break;
-                    case RunEventTypes.CodingStepChanged:
-                        var codingStep = item.Data.Deserialize<CodingStepChangedEvent>(JsonOptions);
-                        if (codingStep is not null)
-                        {
-                            var metrics = codingStep.Step.Context is null
-                                ? null
-                                : $"Kontext {codingStep.Step.Context.EstimatedInputTokens:N0}/{codingStep.Step.Context.MaximumInputTokens:N0} Token · Ausgabe {codingStep.Step.Context.OutputTokens:N0}/{codingStep.Step.Context.MaximumOutputTokens:N0} Token";
-                            var stepDetail = string.Join(
-                                " · ",
-                                new[]
-                                {
-                                    codingStep.Step.Goal,
-                                    codingStep.Step.Tool,
-                                    codingStep.Step.Target,
-                                    metrics,
-                                    codingStep.Step.Detail,
-                                }.Where(static value => !string.IsNullOrWhiteSpace(value)));
-                            await TraceCodingAsync(
-                                "codingStep",
-                                codingStep.Step.Status switch
-                                {
-                                    CodingStepStatus.Completed => "completed",
-                                    CodingStepStatus.Failed or CodingStepStatus.Blocked => "failed",
-                                    _ => "running",
-                                },
-                                $"Schritt {codingStep.Step.Sequence:N0}: {codingStep.Step.Kind}",
-                                stepDetail,
-                                tool: codingStep.Step.Tool,
-                                target: codingStep.Step.Target,
-                                serverEventId: item.Id,
-                                traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                        }
-                        break;
                     case RunEventTypes.ModelGeneration:
                         var generation = item.Data.Deserialize<ModelGenerationEvent>(JsonOptions);
-                        if (generation is null)
+                        if (generation is not null)
                         {
-                            break;
+                            await update(new(
+                                GoAiAssistantUpdateKind.Status,
+                                assistant,
+                                Status: "Denkt nach",
+                                Detail: FormatModelTokenProgress(
+                                    generation,
+                                    ref activeModelRunTokens,
+                                    ref hasModelRunStarted),
+                                Model: model)).ConfigureAwait(false);
                         }
-                        switch (generation.State)
-                        {
-                            case "toolCallGenerationStart":
-                                await TraceCodingAsync(
-                                    "modelTool",
-                                    "running",
-                                    "Toolaufruf wird erzeugt",
-                                    "LM Studio erzeugt Toolname und Argumente im nativen Tool-Kanal.",
-                                    serverEventId: item.Id,
-                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                                break;
-                            case "toolCallGenerationNameReceived":
-                                await TraceCodingAsync(
-                                    "modelTool",
-                                    "running",
-                                    "Tool ausgewählt",
-                                    generation.ToolName,
-                                    tool: generation.ToolName,
-                                    serverEventId: item.Id,
-                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                                break;
-                            case "toolCallGenerationEnd":
-                                await TraceCodingAsync(
-                                    "modelTool",
-                                    "completed",
-                                    "Toolaufruf erzeugt",
-                                    generation.ArgumentCharacters is > 0
-                                        ? $"{generation.ToolName} · {generation.ArgumentCharacters:N0} Argumentzeichen"
-                                        : generation.ToolName,
-                                    tool: generation.ToolName,
-                                    serverEventId: item.Id,
-                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                                break;
-                            case "toolCallGenerationFailed":
-                                await TraceCodingAsync(
-                                    "modelTool",
-                                    "failed",
-                                    "Toolaufruf unvollständig",
-                                    "LM Studio hat den nativen Toolaufruf nicht validieren können; der Tool-Kanal korrigiert ihn einmal.",
-                                    serverEventId: item.Id,
-                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                                break;
-                            case "toolCallRetry":
-                                await TraceCodingAsync(
-                                    "modelTool",
-                                    "running",
-                                    "Toolaufruf wird kompakt korrigiert",
-                                    string.IsNullOrWhiteSpace(generation.ToolName)
-                                        ? "GO verwirft den unvollständigen Modelltext und erlaubt genau einen begrenzten Korrekturversuch."
-                                        : $"{generation.ToolName} wird ohne erneute Langzeitanalyse genau einmal korrigiert.",
-                                    tool: generation.ToolName,
-                                    serverEventId: item.Id,
-                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                                break;
-                            case "transportRetry":
-                                await TraceCodingAsync(
-                                    "modelTool",
-                                    "running",
-                                    "LM-Studio-Modellkanal wird wiederhergestellt",
-                                    string.IsNullOrWhiteSpace(generation.ToolName)
-                                        ? "Die abgebrochene native Vorhersage wird einmal mit derselben Aufgabe wiederholt."
-                                        : $"{generation.ToolName} wird nach einem Transportabbruch einmal erneut erzeugt.",
-                                    tool: generation.ToolName,
-                                    serverEventId: item.Id,
-                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                                break;
-                        }
-                        await PublishStatusAsync(new(
-                            GoAiAssistantUpdateKind.Status,
-                            assistant,
-                            Status: "Denkt nach",
-                            Detail: FormatModelTokenProgress(
-                                generation,
-                                ref activeModelRunTokens,
-                                ref hasModelRunStarted),
-                            Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ContextChanged:
                         var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
                         if (context is not null)
                         {
                             var contextDetail = string.IsNullOrWhiteSpace(context.Detail)
-                                ? context.LoadedFiles > 0
-                                    ? $"{context.LoadedFiles:N0} Quelldateien im aktuellen Lauf geladen"
-                                    : "Repositoryübersicht und Sitzungsregeln stehen dem Coding-Modell zur Verfügung."
+                                ? context.DocumentPages > 0
+                                    ? $"{context.DocumentPages:N0} Dokumentseiten im Kontext"
+                                    : "Sitzungskontext ist bereit."
                                 : context.Detail.Trim();
-                            var contextTraceFingerprint = CodingContextTraceFingerprint(context);
-                            if (!string.Equals(
-                                    lastCodingContextTraceFingerprint,
-                                    contextTraceFingerprint,
-                                    StringComparison.Ordinal))
-                            {
-                                await TraceCodingAsync(
-                                    "context",
-                                    "completed",
-                                    context.WasCompacted
-                                        ? "Repositorykontext verdichtet"
-                                        : context.LoadedFiles > 0
-                                            ? "Repositorykontext aktualisiert"
-                                            : "Repositorykontext bereit",
-                                    contextDetail,
-                                    serverEventId: item.Id,
-                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                                lastCodingContextTraceFingerprint = contextTraceFingerprint;
-                            }
-                            await PublishStatusAsync(new(
+                            await update(new(
                                 GoAiAssistantUpdateKind.Status,
                                 assistant,
-                                Status: context.WasCompacted ? "Kontext verdichtet" : "Repositorykontext bereit",
+                                Status: context.WasCompacted ? "Kontext verdichtet" : "Kontext bereit",
                                 Detail: contextDetail,
                                 Model: model,
                                 ContextUsed: context.EstimatedInputTokens,
@@ -1907,100 +1355,67 @@ public sealed class GoAiAssistantService(
                         }
                         break;
                     case RunEventTypes.ServerToolStarted:
-                        var startedServerTool = StringProperty(item.Data, "tool");
-                        var startedServerTarget = StringProperty(item.Data, "target");
-                        await TraceCodingAsync(
-                            "serverTool",
-                            "running",
-                            CodingServerToolTitle(startedServerTool, completed: false),
-                            startedServerTarget ?? startedServerTool,
-                            tool: startedServerTool,
-                            target: startedServerTarget,
-                            serverEventId: item.Id,
-                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                        await PublishStatusAsync(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Serverwerkzeug", Detail: startedServerTarget ?? startedServerTool, Model: model)).ConfigureAwait(false);
+                        await update(new(
+                            GoAiAssistantUpdateKind.Status,
+                            assistant,
+                            Status: "Serverwerkzeug",
+                            Detail: StringProperty(item.Data, "target")
+                                ?? StringProperty(item.Data, "tool"),
+                            Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ServerToolCompleted:
-                        var completedServerTool = StringProperty(item.Data, "tool");
-                        var completedServerTarget = StringProperty(item.Data, "target");
-                        var completedServerToolSucceeded = BooleanProperty(item.Data, "success", fallback: true);
-                        var completedServerToolError = StringProperty(item.Data, "errorMessage");
-                        var completedServerToolDetail = completedServerToolSucceeded
-                            ? completedServerTarget ?? completedServerTool
-                            : string.IsNullOrWhiteSpace(completedServerToolError)
-                                ? completedServerTarget ?? completedServerTool
-                                : completedServerToolError;
-                        await TraceCodingAsync(
-                            "serverTool",
-                            completedServerToolSucceeded ? "completed" : "failed",
-                            completedServerToolSucceeded
-                                ? CodingServerToolTitle(completedServerTool, completed: true)
-                                : CodingServerToolFailureTitle(completedServerTool),
-                            completedServerToolDetail,
-                            tool: completedServerTool,
-                            target: completedServerTarget,
-                            serverEventId: item.Id,
-                            traceCancellationToken: cancellationToken).ConfigureAwait(false);
                         var extracted = ExtractToolResultText(item.Data);
-                        if (localRun.Action != PromptTriggerAction.Code && !string.IsNullOrWhiteSpace(extracted))
+                        if (!string.IsNullOrWhiteSpace(extracted))
                         {
                             content = AppendContent(content, extracted);
-                            await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Streaming, cancellationToken: cancellationToken).ConfigureAwait(false);
-                            assistant = assistant with { Content = content, Status = MessageStatus.Streaming, UpdatedAt = DateTimeOffset.UtcNow };
+                            await chats.UpdateMessageAsync(
+                                assistant.Id,
+                                content,
+                                MessageStatus.Streaming,
+                                cancellationToken: cancellationToken).ConfigureAwait(false);
+                            assistant = assistant with
+                            {
+                                Content = content,
+                                Status = MessageStatus.Streaming,
+                                UpdatedAt = DateTimeOffset.UtcNow,
+                            };
                             await update(new(GoAiAssistantUpdateKind.Delta, assistant)).ConfigureAwait(false);
                         }
                         break;
                     case RunEventTypes.TextDelta:
-                        var delta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions)?.Delta ?? string.Empty;
-                        if (localRun.Action == PromptTriggerAction.Code)
+                        content += item.Data.Deserialize<TextDeltaEvent>(JsonOptions)?.Delta ?? string.Empty;
+                        await chats.UpdateMessageAsync(
+                            assistant.Id,
+                            content,
+                            MessageStatus.Streaming,
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                        assistant = assistant with
                         {
-                            break;
-                        }
-                        content += delta;
-                        await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Streaming, cancellationToken: cancellationToken).ConfigureAwait(false);
-                        assistant = assistant with { Content = content, Status = MessageStatus.Streaming, UpdatedAt = DateTimeOffset.UtcNow };
+                            Content = content,
+                            Status = MessageStatus.Streaming,
+                            UpdatedAt = DateTimeOffset.UtcNow,
+                        };
                         await update(new(GoAiAssistantUpdateKind.Delta, assistant)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ClientToolProposed:
                         var proposal = item.Data.Deserialize<ToolProposal>(JsonOptions)
-                            ?? throw new InvalidDataException("Der Server hat einen ungültigen Client-Toolvorschlag gesendet.");
+                            ?? throw new InvalidDataException(
+                                "Der Server hat einen ungültigen Client-Toolvorschlag gesendet.");
                         if (!string.Equals(proposal.RunId, item.RunId, StringComparison.Ordinal))
                         {
-                            throw new InvalidDataException("Der Client-Toolvorschlag gehört nicht zum aktiven Serverlauf.");
+                            throw new InvalidDataException(
+                                "Der Client-Toolvorschlag gehört nicht zum aktiven Serverlauf.");
                         }
-                        var target = CodingRunTraceService.ExtractTarget(proposal);
-                        var runningProcessConsole = CodingRunTraceService.CreateProcessConsole(proposal);
-                        await TraceCodingAsync(
-                            "tool",
-                            "running",
-                            runningProcessConsole is null
-                                ? CodingToolTitle(proposal.Name, completed: false)
-                                : "PowerShell-Befehl wird ausgeführt",
-                            proposal.Summary,
-                            proposal.Name,
-                            target,
-                            serverEventId: item.Id,
-                            traceCancellationToken: cancellationToken,
-                            processConsole: runningProcessConsole).ConfigureAwait(false);
-                        await PublishStatusAsync(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Lokale Aktion", Detail: proposal.Summary, Model: model)).ConfigureAwait(false);
-                        var toolStopwatch = Stopwatch.StartNew();
-                        var result = await ExecuteClientToolOnceAsync(localRun, item, proposal, cancellationToken).ConfigureAwait(false);
-                        toolStopwatch.Stop();
-                        var completedProcessConsole = CodingRunTraceService.CreateProcessConsole(proposal, result);
-                        var toolCompleted = string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase)
-                            && !string.Equals(completedProcessConsole?.Status, "failed", StringComparison.OrdinalIgnoreCase);
-                        await TraceCodingAsync(
-                            "tool",
-                            toolCompleted ? "completed" : "failed",
-                            runningProcessConsole is null
-                                ? CodingToolTitle(proposal.Name, completed: true, succeeded: toolCompleted)
-                                : "PowerShell-Befehl abgeschlossen",
-                            CodingRunTraceService.DescribeResult(result),
-                            proposal.Name,
-                            target,
-                            toolStopwatch.ElapsedMilliseconds,
-                            item.Id,
-                            completedProcessConsole,
+                        await update(new(
+                            GoAiAssistantUpdateKind.Status,
+                            assistant,
+                            Status: "Lokale Aktion",
+                            Detail: proposal.Summary,
+                            Model: model)).ConfigureAwait(false);
+                        var result = await ExecuteClientToolOnceAsync(
+                            localRun,
+                            item,
+                            proposal,
                             cancellationToken).ConfigureAwait(false);
                         if (proposal.Name == ClientToolNames.DocumentCreate
                             && string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase))
@@ -2014,126 +1429,50 @@ public sealed class GoAiAssistantService(
                                 assistant,
                                 collectedArtifacts.ToArray())).ConfigureAwait(false);
                         }
-                        if (localRun.Action == PromptTriggerAction.Code
-                            && IsSuccessfulWorkspaceMutation(proposal, result))
-                        {
-                            var codingSession = await chats.GetSessionAsync(localRun.SessionId, cancellationToken).ConfigureAwait(false);
-                            var diff = await codingDiffs.RefreshAsync(
-                                codingDiffBaselineId ?? localRun.Id,
-                                codingSession?.WorkspacePath,
-                                cancellationToken).ConfigureAwait(false);
-                            if (diff is not null)
-                            {
-                                await TraceCodingAsync(
-                                    "diff",
-                                    "completed",
-                                    "Codeänderungen aktualisiert",
-                                    diff.FileCount == 0
-                                        ? "Keine verbleibenden \u00C4nderungen dieses Laufs."
-                                        : $"{diff.FileCount:N0} Dateien \u00B7 +{diff.AddedLines:N0} \u00B7 \u2212{diff.DeletedLines:N0}",
-                                    serverEventId: item.Id,
-                                    traceCancellationToken: cancellationToken).ConfigureAwait(false);
-                                await codingTrace.SetCodeDiffAsync(localRun.Id, diff.Diff, cancellationToken).ConfigureAwait(false);
-                                assistant = assistant with { CodeDiff = diff.Diff, UpdatedAt = DateTimeOffset.UtcNow };
-                                await update(new(
-                                    GoAiAssistantUpdateKind.CodeDiffChanged,
-                                    assistant,
-                                    Status: "Codeänderungen",
-                                    Detail: diff.FileCount == 0
-                                        ? "Keine verbleibenden Änderungen dieses Laufs."
-                                        : $"{diff.FileCount:N0} Dateien · +{diff.AddedLines:N0} · −{diff.DeletedLines:N0}"))
-                                    .ConfigureAwait(false);
-                            }
-                        }
-                        await client.SubmitClientToolResultAsync(item.RunId, result, cancellationToken).ConfigureAwait(false);
-                        await toolExecutions.MarkSubmittedAsync(proposal.ProposalId, CancellationToken.None).ConfigureAwait(false);
+                        await client.SubmitClientToolResultAsync(
+                            item.RunId,
+                            result,
+                            cancellationToken).ConfigureAwait(false);
+                        await toolExecutions.MarkSubmittedAsync(
+                            proposal.ProposalId,
+                            CancellationToken.None).ConfigureAwait(false);
+                        break;
+                    case RunEventTypes.RunWaitingForClient:
+                        await update(new(
+                            GoAiAssistantUpdateKind.Status,
+                            assistant,
+                            Status: "Lokale Aktion wird erwartet",
+                            Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ArtifactCreated:
                         var descriptor = item.Data.Deserialize<ArtifactDescriptor>(JsonOptions)
                             ?? throw new InvalidDataException("Der Server hat ein ungültiges Artefakt beschrieben.");
-                        var imported = await DownloadArtifactAsync(client, assistant.Id, descriptor, model ?? "GO AI Server", cancellationToken).ConfigureAwait(false);
+                        var imported = await DownloadArtifactAsync(
+                            client,
+                            assistant.Id,
+                            descriptor,
+                            model ?? "GO AI Server",
+                            cancellationToken).ConfigureAwait(false);
                         if (collectedArtifacts.All(value => value.Id != imported.Id))
                         {
                             collectedArtifacts.Add(imported);
                         }
-                        await update(new(GoAiAssistantUpdateKind.ArtifactsChanged, assistant, collectedArtifacts.ToArray(), Status: "Artefakt gespeichert", Detail: imported.FileName)).ConfigureAwait(false);
+                        await update(new(
+                            GoAiAssistantUpdateKind.ArtifactsChanged,
+                            assistant,
+                            collectedArtifacts.ToArray(),
+                            Status: "Artefakt gespeichert",
+                            Detail: imported.FileName)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.RunCompleted:
                         var completed = item.Data.Deserialize<RunCompletedEvent>(JsonOptions);
-                        model = completed?.ModelId ?? model;
-                        if (string.IsNullOrWhiteSpace(content))
-                        {
-                            content = collectedArtifacts.Count > 0
-                                ? "Der Auftrag wurde abgeschlossen. Das Ergebnis ist unten lokal gespeichert."
-                                : "Der GO-AI-Auftrag wurde abgeschlossen.";
-                        }
-                        string? responseSessionTitle = null;
-                        if (localRun.Action == PromptTriggerAction.Code)
-                        {
-                            if (assistant.MessagePhase != ChatMessagePhase.FinalAnswer
-                                || assistant.Visibility != ChatMessageVisibility.Visible
-                                || string.IsNullOrWhiteSpace(assistant.Content))
-                            {
-                                assistant = await chats.CommitAgentMessageAsync(
-                                    localRun.SessionId,
-                                    localRun.AssistantMessageId,
-                                    item.RunId,
-                                    "final-recovered",
-                                    ChatMessagePhase.FinalAnswer,
-                                    content,
-                                    MessageStatus.Completed,
-                                    1,
-                                    CancellationToken.None).ConfigureAwait(false);
-                            }
-                            content = assistant.Content;
-                        }
-                        else
-                        {
-                            var parsedResponse = GeneralAgentResponseParser.Parse(content, completed?.SessionTitle ?? string.Empty);
-                            content = RemoveDocumentEvidenceFooter(parsedResponse.Message);
-                            responseSessionTitle = parsedResponse.SessionTitle;
-                            await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Completed, cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                            await chats.SetMessageContextSummaryAsync(assistant.Id, parsedResponse.ContextSummary, CancellationToken.None).ConfigureAwait(false);
-                        }
-                        if (!string.IsNullOrWhiteSpace(completed?.SessionTitle))
-                        {
-                            var sessionTitle = GeneralAgentResponseParser.NormalizeTitle(completed.SessionTitle);
-                            if (sessionTitle is not null)
-                            {
-                                await chats.RenameSessionAsync(assistant.SessionId, sessionTitle, CancellationToken.None).ConfigureAwait(false);
-                            }
-                        }
-                        else if (!string.IsNullOrWhiteSpace(responseSessionTitle))
-                        {
-                            await chats.RenameSessionAsync(assistant.SessionId, responseSessionTitle, CancellationToken.None).ConfigureAwait(false);
-                        }
-                        await runs.UpdateAsync(localRun.Id, item.RunId, item.Id, "completed", model, cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                        await RefreshFinalCodingDiffAsync(item.Id).ConfigureAwait(false);
-                        var final = await chats.GetMessageAsync(
-                            assistant.Id,
-                            includeInternal: true,
-                            cancellationToken: CancellationToken.None).ConfigureAwait(false)
-                            ?? throw new InvalidOperationException("Die AI-Nachricht des abgeschlossenen Laufs fehlt.");
-                        var session = await chats.GetSessionAsync(assistant.SessionId, CancellationToken.None).ConfigureAwait(false);
-                        await recentActivity.RecordAsync($"AI-Sitzung „{session?.Title ?? "Neue Sitzung"}“ bearbeitet", CancellationToken.None).ConfigureAwait(false);
-                        await TraceCodingAsync(
-                            "run",
-                            "completed",
-                            "Coding-Lauf abgeschlossen",
-                            model,
-                            serverEventId: item.Id,
-                            traceCancellationToken: CancellationToken.None).ConfigureAwait(false);
-                        await update(new(GoAiAssistantUpdateKind.Completed, final, collectedArtifacts.ToArray(), session, "Fertig", model)).ConfigureAwait(false);
-                        return final;
+                        return await CompleteAsync(
+                            item.RunId,
+                            item.Id,
+                            completed?.ModelId,
+                            completed?.SessionTitle).ConfigureAwait(false);
                     case RunEventTypes.RunFailed:
                         var failed = item.Data.Deserialize<RunFailedEvent>(JsonOptions);
-                        await TraceCodingAsync(
-                            "run",
-                            "failed",
-                            "Serverlauf fehlgeschlagen",
-                            failed?.Message,
-                            serverEventId: item.Id,
-                            traceCancellationToken: CancellationToken.None).ConfigureAwait(false);
                         await runs.UpdateAsync(
                             localRun.Id,
                             item.RunId,
@@ -2147,13 +1486,13 @@ public sealed class GoAiAssistantService(
                             failed?.Message ?? "Der Serverlauf ist fehlgeschlagen.",
                             failed?.Retryable ?? false);
                     case RunEventTypes.RunCancelled:
-                        await TraceCodingAsync(
-                            "run",
+                        await runs.UpdateAsync(
+                            localRun.Id,
+                            item.RunId,
+                            item.Id,
                             "cancelled",
-                            "Coding-Lauf abgebrochen",
-                            serverEventId: item.Id,
-                            traceCancellationToken: CancellationToken.None).ConfigureAwait(false);
-                        await runs.UpdateAsync(localRun.Id, item.RunId, item.Id, "cancelled", model, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                            model,
+                            cancellationToken: CancellationToken.None).ConfigureAwait(false);
                         throw new OperationCanceledException(cancellationToken);
                 }
 
@@ -2172,47 +1511,16 @@ public sealed class GoAiAssistantService(
                     cancellationToken: CancellationToken.None).ConfigureAwait(false);
             }
 
-            var snapshot = await client.GetRunAsync(localRun.ServerRunId!, cancellationToken).ConfigureAwait(false);
+            var snapshot = await client.GetRunAsync(
+                localRun.ServerRunId!,
+                cancellationToken).ConfigureAwait(false);
             if (snapshot.State == RunState.Completed)
             {
-                if (string.IsNullOrWhiteSpace(content))
-                {
-                    content = "Der GO-AI-Auftrag wurde abgeschlossen.";
-                }
-                if (localRun.Action == PromptTriggerAction.Code)
-                {
-                    if (assistant.MessagePhase != ChatMessagePhase.FinalAnswer
-                        || assistant.Visibility != ChatMessageVisibility.Visible
-                        || string.IsNullOrWhiteSpace(assistant.Content))
-                    {
-                        assistant = await chats.CommitAgentMessageAsync(
-                            localRun.SessionId,
-                            localRun.AssistantMessageId,
-                            snapshot.RunId,
-                            "final-recovered",
-                            ChatMessagePhase.FinalAnswer,
-                            content,
-                            MessageStatus.Completed,
-                            1,
-                            CancellationToken.None).ConfigureAwait(false);
-                    }
-                }
-                else
-                {
-                    var snapshotResponse = GeneralAgentResponseParser.Parse(content, string.Empty);
-                    content = RemoveDocumentEvidenceFooter(snapshotResponse.Message);
-                    await chats.UpdateMessageAsync(assistant.Id, content, MessageStatus.Completed, cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                    await chats.SetMessageContextSummaryAsync(assistant.Id, snapshotResponse.ContextSummary, CancellationToken.None).ConfigureAwait(false);
-                }
-                await runs.UpdateAsync(localRun.Id, snapshot.RunId, snapshot.LastEventId, "completed", snapshot.SelectedModel, cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                await RefreshFinalCodingDiffAsync(snapshot.LastEventId).ConfigureAwait(false);
-                var final = await chats.GetMessageAsync(
-                    assistant.Id,
-                    includeInternal: true,
-                    cancellationToken: CancellationToken.None).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException("Die AI-Nachricht des abgeschlossenen Laufs fehlt.");
-                await update(new(GoAiAssistantUpdateKind.Completed, final, collectedArtifacts.ToArray(), await chats.GetSessionAsync(assistant.SessionId, CancellationToken.None), "Fertig", snapshot.SelectedModel)).ConfigureAwait(false);
-                return final;
+                return await CompleteAsync(
+                    snapshot.RunId,
+                    snapshot.LastEventId,
+                    snapshot.SelectedModel,
+                    snapshot.SessionTitle).ConfigureAwait(false);
             }
             if (snapshot.State is RunState.Failed or RunState.Interrupted)
             {
@@ -2234,26 +1542,21 @@ public sealed class GoAiAssistantService(
             }
             if (snapshot.State == RunState.Cancelled)
             {
-                await runs.UpdateAsync(localRun.Id, snapshot.RunId, snapshot.LastEventId, "cancelled", snapshot.SelectedModel, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                await runs.UpdateAsync(
+                    localRun.Id,
+                    snapshot.RunId,
+                    snapshot.LastEventId,
+                    "cancelled",
+                    snapshot.SelectedModel,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 throw new OperationCanceledException(cancellationToken);
             }
-            throw new IOException("Der SSE-Stream wurde beendet, bevor der Serverlauf einen Endzustand erreicht hat.");
+            throw new IOException(
+                "Der SSE-Stream wurde beendet, bevor der Serverlauf einen Endzustand erreicht hat.");
         }
         catch (GoAiRunTerminalException)
         {
             throw;
-        }
-        catch (GoAiAgentMessageReplayRequiredException exception)
-        {
-            await runs.RewindEventsAsync(
-                localRun.Id,
-                0,
-                "running",
-                "client.agent_message_replay",
-                CancellationToken.None).ConfigureAwait(false);
-            throw new GoAiStreamDisconnectedException(
-                "Der Nachrichtenstream wird nach einem lokalen Zustandskonflikt deterministisch neu abgespielt.",
-                exception);
         }
         catch (GoAiStreamDisconnectedException)
         {
@@ -2261,7 +1564,14 @@ public sealed class GoAiAssistantService(
         }
         catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
         {
-            await runs.UpdateAsync(localRun.Id, localRun.ServerRunId, localRun.LastEventId, "running", model, "client.stream_detached", CancellationToken.None).ConfigureAwait(false);
+            await runs.UpdateAsync(
+                localRun.Id,
+                localRun.ServerRunId,
+                localRun.LastEventId,
+                "running",
+                model,
+                "client.stream_detached",
+                CancellationToken.None).ConfigureAwait(false);
             throw new GoAiStreamDisconnectedException(
                 "Die Verbindung zum laufenden GO-AI-Auftrag wurde unterbrochen.",
                 exception);
@@ -2297,15 +1607,10 @@ public sealed class GoAiAssistantService(
                     now,
                     now),
                 cancellationToken).ConfigureAwait(false);
-            var session = await chats.GetSessionAsync(localRun.SessionId, cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("Die Workspace-Sitzung des lokalen Werkzeugs wurde nicht gefunden.");
             var result = await toolBroker.ExecuteAsync(
                 proposal,
-                session.WorkspacePath,
                 localRun.SessionId,
                 localRun.AssistantMessageId,
-                localRun.Action == PromptTriggerAction.Code,
-                localRun.Id,
                 cancellationToken).ConfigureAwait(false);
             var json = JsonSerializer.Serialize(result, JsonOptions);
             _ = await toolExecutions.CompleteAsync(proposal.ProposalId, json, CancellationToken.None).ConfigureAwait(false);
@@ -2344,85 +1649,6 @@ public sealed class GoAiAssistantService(
     {
         return "Supertonic F5 Ultra";
     }
-
-    private static bool IsSuccessfulWorkspaceMutation(ToolProposal proposal, ClientToolResult result) =>
-        proposal.RiskClass == ToolRiskClass.LocalMutation
-        && string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase);
-
-    internal static string CodingToolTitle(string toolName, bool completed, bool succeeded = true)
-    {
-        if (completed && !succeeded)
-        {
-            return toolName switch
-            {
-                ClientToolNames.DocumentRead => "Dokument konnte nicht gelesen werden",
-                ClientToolNames.DocumentCreate => "Dokument konnte nicht aktualisiert werden",
-                ClientToolNames.FileSystemList => "Ordner konnte nicht gelesen werden",
-                ClientToolNames.FileSystemStat => "Dateistatus konnte nicht gelesen werden",
-                ClientToolNames.FileSystemFindFiles => "Dateisuche fehlgeschlagen",
-                ClientToolNames.FileSystemReadText => "Datei konnte nicht gelesen werden",
-                ClientToolNames.FileSystemSearch => "Quelltextsuche fehlgeschlagen",
-                ClientToolNames.FileSystemWriteText => "Datei konnte nicht geschrieben werden",
-                ClientToolNames.FileSystemReplaceText => "Datei konnte nicht ge\u00E4ndert werden",
-                ClientToolNames.FileSystemMove => "Datei konnte nicht verschoben werden",
-                ClientToolNames.FileSystemProposePatch => "Patch konnte nicht angewendet werden",
-                ClientToolNames.FileSystemProposeCreate => "Datei konnte nicht erstellt werden",
-                ClientToolNames.FileSystemProposeDelete => "Datei konnte nicht gel\u00F6scht werden",
-                ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun => "Pr\u00FCfung fehlgeschlagen",
-                ClientToolNames.LeanProof => "Lean-Beweis fehlgeschlagen",
-                _ => "Lokale Aktion fehlgeschlagen",
-            };
-        }
-
-        return CodingToolSuccessTitle(toolName, completed);
-    }
-
-    internal static string CodingAgentPhaseTitle(CodingAgentPhase phase) => phase switch
-    {
-        CodingAgentPhase.Orienting => "Coding-Agent orientiert sich",
-        CodingAgentPhase.Editing => "Coding-Agent bearbeitet den Workspace",
-        CodingAgentPhase.Verifying => "Coding-Agent prüft Änderungen",
-        CodingAgentPhase.Finishing => "Coding-Agent gleicht die Abnahme ab",
-        CodingAgentPhase.Completed => "Coding-Agent abgeschlossen",
-        CodingAgentPhase.Blocked => "Coding-Agent blockiert",
-        _ => "Coding-Agent aktualisiert",
-    };
-
-    private static string CodingToolSuccessTitle(string toolName, bool completed) => toolName switch
-    {
-        ClientToolNames.DocumentRead => completed ? "Dokument gelesen" : "Dokument wird gelesen",
-        ClientToolNames.DocumentCreate => completed ? "Dokument aktualisiert" : "Dokument wird aktualisiert",
-        ClientToolNames.FileSystemList => completed ? "Ordner gelesen" : "Ordner wird gelesen",
-        ClientToolNames.FileSystemStat => completed ? "Dateistatus gelesen" : "Dateistatus wird gelesen",
-        ClientToolNames.FileSystemFindFiles => completed ? "Dateien gefunden" : "Dateien werden gesucht",
-        ClientToolNames.FileSystemReadText => completed ? "Datei gelesen" : "Datei wird gelesen",
-        ClientToolNames.FileSystemSearch => completed ? "Quelltext durchsucht" : "Quelltext wird durchsucht",
-        ClientToolNames.FileSystemWriteText => completed ? "Datei geschrieben" : "Datei wird geschrieben",
-        ClientToolNames.FileSystemReplaceText => completed ? "Datei ge\u00E4ndert" : "Datei wird ge\u00E4ndert",
-        ClientToolNames.FileSystemMove => completed ? "Datei verschoben" : "Datei wird verschoben",
-        ClientToolNames.FileSystemProposePatch => completed ? "Patch angewendet" : "Patch wird angewendet",
-        ClientToolNames.FileSystemProposeCreate => completed ? "Datei erstellt" : "Datei wird erstellt",
-        ClientToolNames.FileSystemProposeDelete => completed ? "Datei gel\u00F6scht" : "Datei wird gel\u00F6scht",
-        ClientToolNames.ProcessRunPreset or ClientToolNames.ProcessRun => completed ? "Pr\u00FCfung ausgef\u00FChrt" : "Pr\u00FCfung wird ausgef\u00FChrt",
-        ClientToolNames.LeanProof => completed ? "Lean-Beweis geprüft" : "Lean-Beweis wird geprüft",
-        _ => completed ? "Lokale Aktion abgeschlossen" : "Lokale Aktion wird ausgef\u00FChrt",
-    };
-
-    internal static string CodingServerToolFailureTitle(string? toolName) => toolName switch
-    {
-        "web.search" => "Websuche nicht verf\u00FCgbar",
-        "web.fetch" => "Webseite nicht verf\u00FCgbar",
-        "youtube.search" => "YouTube-Suche nicht verf\u00FCgbar",
-        _ => "Serverwerkzeug fehlgeschlagen",
-    };
-
-    internal static string CodingServerToolTitle(string? toolName, bool completed) => toolName switch
-    {
-        "web.search" => completed ? "Websuche abgeschlossen" : "Websuche wird ausgef\u00FChrt",
-        "web.fetch" => completed ? "Webseite gelesen" : "Webseite wird gelesen",
-        "youtube.search" => completed ? "YouTube-Suche abgeschlossen" : "YouTube wird durchsucht",
-        _ => completed ? "Serverwerkzeug abgeschlossen" : "Serverwerkzeug gestartet",
-    };
 
     private static string CombineSpeechDetail(string? sourceDetail, string detail) =>
         string.IsNullOrWhiteSpace(sourceDetail) ? detail : $"{sourceDetail} · {detail}";
@@ -2633,7 +1859,6 @@ public sealed class GoAiAssistantService(
         await chats.SetMessageContextSummaryAsync(assistant.Id, contextSummary, cancellationToken).ConfigureAwait(false);
         var final = await chats.GetMessageAsync(
             assistant.Id,
-            includeInternal: true,
             cancellationToken: cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Nachricht des abgeschlossenen Laufs fehlt.");
         var session = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
@@ -2655,74 +1880,57 @@ public sealed class GoAiAssistantService(
         CancellationToken cancellationToken)
     {
         _ = sessionAttachments;
-        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+        _ = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
         var action = trigger?.Trigger.Action;
-        var coding = action == PromptTriggerAction.Code;
         var audiobook = action == PromptTriggerAction.Audiobook;
-        var contextProfile = coding
-            ? SessionContextProfile.Code
-            : audiobook
-                ? SessionContextProfile.Audiobook
-                : SessionContextProfile.General;
-        var preferredGeneralModel = ResolvePreferredModel(settings.Current, coding: false);
-        if (string.IsNullOrWhiteSpace(preferredGeneralModel))
+        var contextProfile = audiobook
+            ? SessionContextProfile.Audiobook
+            : SessionContextProfile.General;
+        var selectedModel = settings.Current.SelectedModel?.Trim();
+        if (string.IsNullOrWhiteSpace(selectedModel))
         {
             throw new InvalidOperationException("In den Einstellungen ist kein General-AI-Modell ausgewählt.");
         }
-        var preferredCodeModel = ResolvePreferredModel(settings.Current, coding: true);
-        if (coding && string.IsNullOrWhiteSpace(preferredCodeModel))
-        {
-            throw new InvalidOperationException("In den Einstellungen ist kein Coding-Modell ausgewählt.");
-        }
-        var codingModelDisplayName = DescribeCodingModel(preferredCodeModel);
-        var codingContextLimit = modelCapabilities.ResolveContext(
-            preferredCodeModel,
-            "code",
-            ModelContextProfiles.ResolveMaximum(preferredCodeModel, "code"));
 
-        DocumentRunContext? documentContext = null;
-        if (!coding)
-        {
-            var minimumHistoryReserveTokens = CalculateDocumentHistoryReserveTokens(historyBeforePrompt, contextProfile);
-            documentContext = await documentContexts.PrepareAsync(
-                client,
-                sessionId,
-                assistant.Id,
-                originalPrompt,
-                preferredGeneralModel,
-                minimumHistoryReserveTokens,
-                async progress =>
-                {
-                    await update(new(
-                        GoAiAssistantUpdateKind.Status,
-                        assistant,
-                        Status: progress.Status,
-                        Detail: progress.Detail,
-                        Model: progress.Model)).ConfigureAwait(false);
-                    await update(new(GoAiAssistantUpdateKind.DocumentsChanged, assistant)).ConfigureAwait(false);
-                },
-                cancellationToken).ConfigureAwait(false);
-        }
+        var minimumHistoryReserveTokens = CalculateDocumentHistoryReserveTokens(
+            historyBeforePrompt,
+            contextProfile);
+        var documentContext = await documentContexts.PrepareAsync(
+            client,
+            sessionId,
+            assistant.Id,
+            originalPrompt,
+            selectedModel,
+            minimumHistoryReserveTokens,
+            async progress =>
+            {
+                await update(new(
+                    GoAiAssistantUpdateKind.Status,
+                    assistant,
+                    Status: progress.Status,
+                    Detail: progress.Detail,
+                    Model: progress.Model)).ConfigureAwait(false);
+                await update(new(GoAiAssistantUpdateKind.DocumentsChanged, assistant)).ConfigureAwait(false);
+            },
+            cancellationToken).ConfigureAwait(false);
 
-        var selectedContextModel = coding ? preferredCodeModel! : preferredGeneralModel;
         var sessionContext = await sessionContexts.PrepareAsync(
             client,
             sessionId,
             historyBeforePrompt,
             originalPrompt,
-            selectedContextModel,
-            coding,
+            selectedModel,
             contextProfile,
-            knownContextLength: coding ? codingContextLimit : documentContext?.ContextLength,
-            knownHistoryBudgetCharacters: coding ? null : documentContext?.HistoryBudgetCharacters,
+            knownContextLength: documentContext?.ContextLength,
+            knownHistoryBudgetCharacters: documentContext?.HistoryBudgetCharacters,
             async progress => await update(new(
                 GoAiAssistantUpdateKind.Status,
                 assistant,
                 Status: progress.Status,
                 Detail: progress.Detail,
-                Model: selectedContextModel,
-                ContextLimit: coding ? codingContextLimit : documentContext?.ContextLength,
+                Model: selectedModel,
+                ContextLimit: documentContext?.ContextLength,
                 ContextWasCompacted: true)).ConfigureAwait(false),
             cancellationToken).ConfigureAwait(false);
         var messages = sessionContext.Messages.ToList();
@@ -2735,7 +1943,7 @@ public sealed class GoAiAssistantService(
         var transformed = TransformPrompt(
             originalPrompt,
             trigger,
-            documentContext is not null,
+            hasDocumentContext: documentContext is not null,
             hasAudiobookHistory);
         var latestParts = new List<ContentPart> { new("text", Text: transformed) };
         foreach (var item in uploaded)
@@ -2750,96 +1958,56 @@ public sealed class GoAiAssistantService(
         {
             latestParts.AddRange(documentContext.ContentParts);
         }
-        WorkspaceDescriptor? workspaceDescriptor = null;
-        if (coding)
-        {
-            var workspacePath = session.WorkspacePath;
-            if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
-            {
-                throw new DirectoryNotFoundException("Der Coding-Workspace dieser Sitzung ist nicht verfügbar.");
-            }
-            await update(new(
-                GoAiAssistantUpdateKind.Status,
-                assistant,
-                Status: "Workspace wird gelesen",
-                Detail: Path.GetFileName(workspacePath),
-                ContextLimit: codingContextLimit)).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            var snapshot = WorkspaceFileSystemView.BuildTree(workspacePath);
-            var map = snapshot.Tree;
-            workspaceDescriptor = new WorkspaceDescriptor(
-                Path.GetFileName(snapshot.Root),
-                map,
-                snapshot.FileCount,
-                snapshot.IsTruncated);
-            await update(new(
-                GoAiAssistantUpdateKind.Status,
-                assistant,
-                Status: "Workspace bereit",
-                Detail: $"{snapshot.FileCount:N0} Dateien aufgelistet · {codingModelDisplayName}",
-                ContextUsed: EstimateRequestTokens(messages, latestParts, map),
-                ContextLimit: codingContextLimit,
-                LoadedFiles: 0)).ConfigureAwait(false);
-        }
         messages.Add(new RunMessage("user", latestParts));
 
-        var mode = coding ? RunMode.Code
-            : audiobook ? RunMode.General
-            : action is PromptTriggerAction.Translation
-                or PromptTriggerAction.BricsCad
-                or PromptTriggerAction.WebSearch
-                or PromptTriggerAction.YouTubeSearch
-                ? RunMode.General
-            : RunMode.Auto;
         if (action == PromptTriggerAction.BricsCad && !toolBroker.IsBricsCadAvailable)
         {
-            throw new InvalidOperationException("Das GO-BricsCAD-Plugin ist nicht verbunden. Öffne BricsCAD und stelle die GO-Bridge-Verbindung her.");
+            throw new InvalidOperationException(
+                "Das GO-BricsCAD-Plugin ist nicht verbunden. Öffne BricsCAD und stelle die GO-Bridge-Verbindung her.");
         }
         var capabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "documentIo",
         };
-        if (coding)
-        {
-            capabilities.UnionWith(toolBroker.GetAvailableCapabilities(session.WorkspacePath));
-        }
         if (action == PromptTriggerAction.BricsCad && toolBroker.IsBricsCadAvailable)
         {
             capabilities.Add("bricscad");
         }
-        if (documentContext is not null)
+        if (documentContext?.Descriptor.DocumentCount > 0)
         {
             capabilities.Add("documents");
         }
-        var clientCapabilities = capabilities
-            .OrderBy(static capability => capability, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+
+        var mode = action is PromptTriggerAction.Translation
+            or PromptTriggerAction.BricsCad
+            or PromptTriggerAction.WebSearch
+            or PromptTriggerAction.YouTubeSearch
+            or PromptTriggerAction.Audiobook
+                ? RunMode.General
+                : RunMode.Auto;
         return new RunRequest(
             GoAiProtocol.Version,
             mode,
             messages,
             uploaded.Select(item => item.Upload.UploadId).ToArray(),
-            ClientCapabilities: clientCapabilities,
+            ClientCapabilities: capabilities
+                .OrderBy(static capability => capability, StringComparer.OrdinalIgnoreCase)
+                .ToArray(),
             Limits: new RunLimits(
                 MaximumOutputTokens: 8_192,
                 MaximumContextTokens: Math.Clamp(sessionContext.ContextLength, 1_024, 262_144),
-                TimeoutSeconds: coding ? 14_400 : 3_600),
+                TimeoutSeconds: 3_600),
             SessionId: sessionId.ToString("D"),
             AllowedServerTools: GetAllowedServerTools(action, originalPrompt),
-            Workspace: workspaceDescriptor,
-            PreferredGeneralModelId: coding ? null : preferredGeneralModel,
-            PreferredCodeModelId: coding ? preferredCodeModel : null,
+            PreferredGeneralModelId: selectedModel,
             DocumentContext: documentContext?.Descriptor,
             SessionContext: sessionContext.Descriptor,
             ConversationProfile: audiobook ? ConversationProfile.Audiobook : ConversationProfile.General,
-            ReasoningEffort: null,
-            AgentProtocolVersion: 4);
+            ReasoningEffort: null);
     }
 
-    internal static string? ResolvePreferredModel(AppSettings current, bool coding) =>
-        coding
-            ? current.SelectedCodingModel?.Trim()
-            : current.SelectedModel?.Trim();
+    internal static string? ResolvePreferredModel(AppSettings current) =>
+        current.SelectedModel?.Trim();
 
     internal static int CalculateDocumentHistoryReserveTokens(
         IReadOnlyList<ChatMessage> history,
@@ -2908,12 +2076,9 @@ public sealed class GoAiAssistantService(
     {
         PromptTriggerAction.WebSearch => ["web.search", "web.fetch"],
         PromptTriggerAction.YouTubeSearch => ["youtube.search", "web.fetch"],
-        PromptTriggerAction.Code => ["web.search", "web.fetch", "math.evaluate"],
         PromptTriggerAction.Audiobook => [],
         _ => ["math.evaluate", "context.embed", "context.retrieve"],
     };
-
-    internal static string BuildCodingPrompt(string prompt) => prompt.Trim();
 
     internal static bool ContainsWebResearchDirective(string? prompt)
     {
@@ -3140,8 +2305,6 @@ public sealed class GoAiAssistantService(
                     : "Analysiere das bereitgestellte Bild vollständig.")
                 + " Nenne relevante Befunde, Unsicherheiten und erforderliche fachliche Prüfungen.\n\nAnalyseauftrag:\n"
                 + AnalysisRequest(trigger, original),
-            PromptTriggerAction.Code => BuildCodingPrompt(
-                RequireRemaining(trigger, "Beschreibe nach der Triggerphrase die Codeaufgabe.")),
             PromptTriggerAction.Audiobook => BuildAudiobookPrompt(trigger, original, hasAudiobookHistory),
             _ => original,
         };
@@ -3286,12 +2449,6 @@ public sealed class GoAiAssistantService(
             ? value.GetString() ?? string.Empty
             : string.Empty;
 
-    private static bool BooleanProperty(JsonElement data, string name, bool fallback) =>
-        data.TryGetProperty(name, out var value)
-        && value.ValueKind is JsonValueKind.True or JsonValueKind.False
-            ? value.GetBoolean()
-            : fallback;
-
     private static string RequireRemaining(PromptTriggerMatch trigger, string error)
     {
         if (string.IsNullOrWhiteSpace(trigger.RemainingPrompt))
@@ -3301,27 +2458,6 @@ public sealed class GoAiAssistantService(
         return trigger.RemainingPrompt;
     }
 
-    private static string BoundText(string value, int maximum) => value.Length <= maximum ? value : value[..maximum] + "\n[gekürzt]";
-
-    private static int EstimateRequestTokens(
-        IReadOnlyList<RunMessage> messages,
-        IReadOnlyList<ContentPart> latestParts,
-        string fileTree)
-    {
-        var characters = fileTree.Length
-            + messages.SelectMany(static message => message.Content).Sum(static part => part.Text?.Length ?? 0)
-            + latestParts.Sum(static part => part.Text?.Length ?? 0);
-        return Math.Max(1, (characters + 2) / 3);
-    }
-
-    private static string DescribeCodingModel(string? modelId) => modelId switch
-    {
-        "gpt-oss-120b" => "gpt-oss-120b",
-        "qwen3.8-27b" => "Qwen3.8 27B · Q4_K_M",
-        "qwen3-coder-next-q8_0" => "Qwen3-Coder-Next · Q8_0",
-        _ => string.IsNullOrWhiteSpace(modelId) ? "Coding-Agent" : modelId,
-    };
-
     private static string VisibleFailure(Exception exception) => exception switch
     {
         GoAiRunTerminalException => exception.Message,
@@ -3329,7 +2465,6 @@ public sealed class GoAiAssistantService(
         FileNotFoundException => exception.Message,
         InvalidDataException => exception.Message,
         InvalidOperationException => exception.Message,
-        TimeoutException => "Der Coding-Lauf hat sein Zeitlimit erreicht. Bereits gewonnene Ergebnisse wurden beibehalten.",
         _ => "Der GO-AI-Auftrag konnte nicht abgeschlossen werden.",
     };
 
@@ -3337,22 +2472,6 @@ public sealed class GoAiAssistantService(
     {
         var value = state.ToString();
         return $"{char.ToLowerInvariant(value[0])}{value[1..]}";
-    }
-
-    private static ChatMessagePhase ToChatMessagePhase(AgentMessagePhase phase) => phase switch
-    {
-        AgentMessagePhase.Commentary => ChatMessagePhase.Commentary,
-        AgentMessagePhase.FinalAnswer => ChatMessagePhase.FinalAnswer,
-        _ => throw new ArgumentOutOfRangeException(nameof(phase), phase, "Unbekannte Agentennachrichtenphase."),
-    };
-
-    private static void ValidateAgentMessageRun(string payloadRunId, string eventRunId)
-    {
-        if (!string.Equals(payloadRunId, eventRunId, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                $"Die Agentennachricht gehört zum Lauf '{payloadRunId}', wurde aber im Lauf '{eventRunId}' empfangen.");
-        }
     }
 
     public void Dispose()

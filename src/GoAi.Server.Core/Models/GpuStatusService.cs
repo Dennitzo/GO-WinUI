@@ -86,7 +86,6 @@ public sealed class GpuStatusService
     internal static (string DisplayName, string Runtime) DescribeWorkload(string workload) => workload switch
     {
         "llm-general" => ("gpt-oss-120b", "LM Studio"),
-        "llm-code" => ("Ausgewähltes Coding-Modell", "LM Studio"),
         "speech-to-text" => ("Audio wird transkribiert", "Docker · Whisper STT"),
         "live-caption" => ("Sprache wird live transkribiert", "Docker · Whisper STT"),
         "live-caption-warmup" => ("Sprachmodell wird vorbereitet", "Docker · Whisper STT"),

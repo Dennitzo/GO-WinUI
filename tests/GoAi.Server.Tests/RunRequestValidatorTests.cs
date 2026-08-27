@@ -1,5 +1,4 @@
 using GoAi.Contracts;
-using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Gateway;
 
 namespace GoAi.Server.Tests;
@@ -13,7 +12,7 @@ public sealed class RunRequestValidatorTests
             GoAiProtocol.Version,
             RunMode.Auto,
             [new RunMessage("user", [new ContentPart("text", "TGA-Frage")])],
-            ClientCapabilities: ["filesystem", "screenCapture"],
+            ClientCapabilities: ["documentIo", "screenCapture"],
             SessionId: "session-1");
 
         RunRequestValidator.Validate(request);
@@ -42,31 +41,27 @@ public sealed class RunRequestValidatorTests
             GoAiProtocol.Version,
             RunMode.General,
             [new RunMessage("user", [new ContentPart("text", "Test")])],
-            ClientCapabilities: ["shell"]);
+            ClientCapabilities: ["code"]);
         var invalidUpload = new RunRequest(
             GoAiProtocol.Version,
             RunMode.General,
             [new RunMessage("user", [new ContentPart("file", UploadId: "../../secret")])]);
 
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(systemRole));
-        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(unknownCapability));
+        var capabilityError = Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(unknownCapability));
+        Assert.Contains("code", capabilityError.Message, StringComparison.Ordinal);
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(invalidUpload));
     }
 
     [Fact]
-    public void PersistentCodingWorkspaceMayUse262KContextAndFourHourRepairWindow()
+    public void GeneralRunMayUseMaximumContextAndTimeoutLimits()
     {
         var request = new RunRequest(
             GoAiProtocol.Version,
-            RunMode.Code,
-            [new RunMessage("user", [new ContentPart("text", "Analysiere und behebe das Repository")])],
-            ClientCapabilities: ["filesystem", "code", "process", "pdf"],
-            Limits: new RunLimits(8_192, 262_144, 14_400),
-            Workspace: new WorkspaceDescriptor(
-                "GO-WinUI",
-                "[GO_REPOSITORY_MAP_V1]\n- windows/build.ps1",
-                42,
-                IsTruncated: false));
+            RunMode.General,
+            [new RunMessage("user", [new ContentPart("text", "Analysiere die Unterlagen")])],
+            ClientCapabilities: ["documentIo", "pdf"],
+            Limits: new RunLimits(8_192, 262_144, 14_400));
 
         RunRequestValidator.Validate(request);
 
@@ -75,18 +70,16 @@ public sealed class RunRequestValidatorTests
     }
 
     [Fact]
-    public void CodingRunAcceptsPreparedOrExactSessionHistoryDescriptor()
+    public void GeneralRunAcceptsPreparedOrExactSessionHistoryDescriptor()
     {
         var request = new RunRequest(
             GoAiProtocol.Version,
-            RunMode.Code,
+            RunMode.General,
             [
                 new RunMessage("user", [new ContentPart("text", "Vorheriger Auftrag")]),
                 new RunMessage("assistant", [new ContentPart("text", "Vorherige Antwort")]),
                 new RunMessage("user", [new ContentPart("text", "Aktueller Auftrag")]),
             ],
-            ClientCapabilities: ["code"],
-            Workspace: new WorkspaceDescriptor("Workspace", "- README.md", 1),
             SessionContext: new SessionContextDescriptor(
                 new string('a', 64),
                 OriginalMessageCount: 2,
@@ -102,77 +95,13 @@ public sealed class RunRequestValidatorTests
     }
 
     [Fact]
-    public void ConfiguredCodingModelIsAccepted()
-    {
-        var request = new RunRequest(
-            GoAiProtocol.Version,
-            RunMode.Code,
-            [new RunMessage("user", [new ContentPart("text", "Behebe den Fehler und pr\u00fcfe die \u00c4nderung.")])],
-            ClientCapabilities: ["filesystem", "code", "process"],
-            PreferredCodeModelId: CodingModelCatalog.GptOss120BId);
-
-        RunRequestValidator.Validate(request);
-        RunRequestValidator.Validate(request with
-        {
-            PreferredCodeModelId = CodingModelCatalog.Qwen3CoderNextQ8Id,
-        });
-    }
-
-    [Fact]
-    public void DynamicCodingModelIdIsAcceptedForRuntimeValidation()
-    {
-        var request = new RunRequest(
-            GoAiProtocol.Version,
-            RunMode.Code,
-            [new RunMessage("user", [new ContentPart("text", "Bearbeite das Projekt.")])],
-            PreferredCodeModelId: "unknown-coding-model");
-
-        RunRequestValidator.Validate(request);
-    }
-
-    [Fact]
-    public void ReasoningEffortMustMatchTheSelectedModelsRealProfile()
-    {
-        var gptOss = new RunRequest(
-            GoAiProtocol.Version,
-            RunMode.Code,
-            [new RunMessage("user", [new ContentPart("text", "Bearbeite das Projekt.")])],
-            PreferredCodeModelId: CodingModelCatalog.GptOss120BId,
-            ReasoningEffort: null);
-
-        RunRequestValidator.Validate(gptOss);
-
-        RunRequestValidator.Validate(gptOss with { ReasoningEffort = "high" });
-        RunRequestValidator.Validate(gptOss with { ReasoningEffort = "xhigh" });
-
-        var qwen = gptOss with
-        {
-            PreferredCodeModelId = CodingModelCatalog.Qwen3CoderNextQ8Id,
-            ReasoningEffort = null,
-        };
-        RunRequestValidator.Validate(qwen);
-        RunRequestValidator.Validate(qwen with { ReasoningEffort = "none" });
-        RunRequestValidator.Validate(qwen with { ReasoningEffort = "high" });
-
-        var qwen38 = gptOss with
-        {
-            PreferredCodeModelId = CodingModelCatalog.Qwen38Id,
-            ReasoningEffort = "xhigh",
-        };
-        RunRequestValidator.Validate(qwen38);
-        RunRequestValidator.Validate(qwen38 with { ReasoningEffort = "none" });
-        RunRequestValidator.Validate(qwen38 with { ReasoningEffort = "high" });
-    }
-
-    [Fact]
     public void GeneralReasoningRequiresAnExplicitCompatibleModel()
     {
         var request = new RunRequest(
             GoAiProtocol.Version,
             RunMode.General,
             [new RunMessage("user", [new ContentPart("text", "Erkläre das Ergebnis.")])],
-            PreferredGeneralModelId: "gpt-oss-120b",
-            ReasoningEffort: null);
+            PreferredGeneralModelId: "gpt-oss-120b");
 
         RunRequestValidator.Validate(request);
         RunRequestValidator.Validate(request with { ReasoningEffort = "medium" });
@@ -187,7 +116,7 @@ public sealed class RunRequestValidatorTests
             GoAiProtocol.Version,
             RunMode.General,
             [new RunMessage("user", [new ContentPart("document", "Dokument: Planung.pdf, Seite 1")])],
-            ClientCapabilities: ["documents", "documents"],
+            ClientCapabilities: ["documents"],
             DocumentContext: new DocumentContextDescriptor(
                 DocumentContextMode.Prepared,
                 new string('a', 64),
@@ -205,23 +134,9 @@ public sealed class RunRequestValidatorTests
 
         RunRequestValidator.Validate(request);
 
-        var missingCapability = request with { ClientCapabilities = [] };
-        var error = Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(missingCapability));
+        var error = Assert.Throws<ArgumentException>(() =>
+            RunRequestValidator.Validate(request with { ClientCapabilities = [] }));
         Assert.Contains("documents", error.Message, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void UnknownCapabilityErrorNamesTheRejectedCapability()
-    {
-        var request = new RunRequest(
-            GoAiProtocol.Version,
-            RunMode.General,
-            [new RunMessage("user", [new ContentPart("text", "Test")])],
-            ClientCapabilities: ["shell"]);
-
-        var error = Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request));
-
-        Assert.Contains("shell", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -239,27 +154,25 @@ public sealed class RunRequestValidatorTests
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
             request with { ConversationProfile = (ConversationProfile)999 }));
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
-            request with { Mode = RunMode.Code }));
-        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
             request with { AllowedServerTools = null }));
     }
 
     [Fact]
-    public void ContextPreparationCanUseTheSelectedCodingModelWithoutCodingTools()
+    public void ContextPreparationUsesGeneralWithoutTools()
     {
         var request = new RunRequest(
             GoAiProtocol.Version,
-            RunMode.Code,
+            RunMode.General,
             [new RunMessage("user", [new ContentPart("text", "Verdichte den Verlauf.")])],
             ClientCapabilities: [],
             AllowedServerTools: [],
-            PreferredCodeModelId: CodingModelCatalog.GptOss120BId,
+            PreferredGeneralModelId: "gpt-oss-120b",
             ConversationProfile: ConversationProfile.ContextPreparation);
 
         RunRequestValidator.Validate(request);
 
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
-            request with { ClientCapabilities = ["code"] }));
+            request with { ClientCapabilities = ["bricscad"] }));
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
             request with { AllowedServerTools = ["web.search"] }));
     }

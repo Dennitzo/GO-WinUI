@@ -6,7 +6,6 @@ public enum RunMode
 {
     Auto,
     General,
-    Code,
 }
 
 public enum ConversationProfile
@@ -51,14 +50,11 @@ public sealed record RunRequest(
     string? SessionId = null,
     RunWorkload? Workload = null,
     IReadOnlyList<string>? AllowedServerTools = null,
-    WorkspaceDescriptor? Workspace = null,
     string? PreferredGeneralModelId = null,
-    string? PreferredCodeModelId = null,
     DocumentContextDescriptor? DocumentContext = null,
     SessionContextDescriptor? SessionContext = null,
     ConversationProfile? ConversationProfile = null,
-    string? ReasoningEffort = null,
-    int AgentProtocolVersion = 4);
+    string? ReasoningEffort = null);
 
 public sealed record DocumentContextDescriptor(
     DocumentContextMode Mode,
@@ -75,12 +71,6 @@ public sealed record SessionContextDescriptor(
     int IncludedMessageCount,
     int EstimatedTokens,
     bool PreparedByAi = false);
-
-public sealed record WorkspaceDescriptor(
-    string Name,
-    string FileTree,
-    int FileCount,
-    bool IsTruncated = false);
 
 public sealed record RunWorkload(
     RunWorkloadKind Kind,
@@ -146,13 +136,6 @@ public static class RunEventTypes
     public const string ModelFallback = "model.fallback";
     public const string ProviderFallback = "provider.fallback";
     public const string ContextChanged = "context.changed";
-    public const string AgentPhaseChanged = "agent.phase_changed";
-    public const string AgentActionStarted = "agent.action_started";
-    public const string AgentObservationCommitted = "agent.observation_committed";
-    public const string AgentMessageStarted = "agent.message_started";
-    public const string AgentMessageDelta = "agent.message_delta";
-    public const string AgentMessageCompleted = "agent.message_completed";
-    public const string CodingStepChanged = "coding.step_changed";
     public const string TextDelta = "text.delta";
     public const string ServerToolStarted = "server_tool.started";
     public const string ServerToolCompleted = "server_tool.completed";

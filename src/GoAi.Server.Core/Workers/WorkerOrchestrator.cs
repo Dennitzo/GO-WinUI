@@ -488,7 +488,7 @@ public sealed class WorkerOrchestrator : IDisposable
         await _resourceTransitionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (CodingModelCatalog.TryGet(modelId, out _)
+            if (LmStudioModelCatalog.TryGet(modelId, out _)
                 || string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase))
             {

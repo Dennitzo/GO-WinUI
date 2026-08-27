@@ -3,7 +3,6 @@ using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Chat;
 using GoWinUI.Core.Models;
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -21,17 +20,11 @@ public sealed class AssistantCoordinator(
     GoAiAssistantService? goAi,
     SettingsCoordinator settings,
     RecentActivityService recentActivity,
-    MicrophoneTranscriptionService? microphone = null,
-    CodingCampaignService? campaigns = null) : IDisposable
+    MicrophoneTranscriptionService? microphone = null)
 {
     private const string DefaultSessionTitle = "Neue Sitzung";
     private const string DefaultSystemPrompt = "GO ist ein lokales Arbeitstool für TGA-Fachplanung. Unterstütze Fachplaner bei technischer Gebäudeausrüstung, Anlagenkonzepten, Berechnungen, Koordination und Dokumentation. GO ist hier ein Produktname und nicht die Programmiersprache Go. Weise auf Unsicherheit, fehlende Projektdaten und erforderliche fachliche Prüfungen hin; erfinde keine Norminhalte, Quellen oder Projektangaben.";
-    private static readonly JsonSerializerOptions PromptWorkflowContractJsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = true,
-    };
-    private static readonly string[] PromptWorkflowTags = ["Coding", "Prompt-Workflow"];
-    private int _startupCodingRunsHandled;
+    private int _startupRunsHandled;
 
     public Task SaveDraftAsync(Guid sessionId, string draft, CancellationToken cancellationToken = default)
     {
@@ -114,33 +107,8 @@ public sealed class AssistantCoordinator(
         _ => throw new ArgumentOutOfRangeException(nameof(action)),
     };
 
-    public async Task SetActiveWorkspaceAsync(string workspacePath, CancellationToken cancellationToken = default)
-    {
-        var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspacePath));
-        if (!Directory.Exists(normalized))
-        {
-            throw new DirectoryNotFoundException("Der ausgewählte Workspace wurde nicht gefunden.");
-        }
-        var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
-        await chats.SetAssistantContextAsync(
-            session.Id,
-            session.AssistantMode,
-            normalized,
-            WorkspaceFileSystemView.CreateWorkspaceIdentity(normalized),
-            cancellationToken).ConfigureAwait(false);
-        await settings.UpdateAsync(
-            current => current with { LocalToolWorkspacePath = normalized },
-            cancellationToken).ConfigureAwait(false);
-    }
-
     public async Task CancelCurrentAsync()
     {
-        if (campaigns is not null
-            && settings.Current.ActiveSessionId is { } campaignSessionId
-            && await campaigns.StopForNewPromptAsync(campaignSessionId, CancellationToken.None).ConfigureAwait(false))
-        {
-            return;
-        }
         if (goAi is not null)
         {
             await goAi.CancelCurrentAndWaitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -164,9 +132,7 @@ public sealed class AssistantCoordinator(
         {
             details += $"\n\n**Fehler:** {normalizedError}";
         }
-        var session = await EnsureSessionWorkspaceAsync(
-            await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false),
-            cancellationToken).ConfigureAwait(false);
+        var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         await chats.AddMessageAsync(
             session.Id,
             ChatRole.Assistant,
@@ -207,10 +173,6 @@ public sealed class AssistantCoordinator(
         var documentItems = await documents.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var attachmentItems = await attachments.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var documentGroupStatus = BuildDocumentGroupStatus(documentItems, attachmentItems.Count);
-        var campaignSnapshot = campaigns is null
-            ? new CodingCampaignUiSnapshot([], null)
-            : await campaigns.GetSnapshotAsync(session.Id, cancellationToken).ConfigureAwait(false);
-        var codingRun = conversation.CodingRun;
         var pages = new List<DocumentPage>();
         foreach (var document in documentItems)
         {
@@ -219,9 +181,7 @@ public sealed class AssistantCoordinator(
 
         // A snapshot is local UI state. Never make sidebar/session interaction wait for
         // LM Studio, which may take several seconds to time out when it is offline.
-        var contextLimit = session.PersistentToolAction == PersistentToolAction.Code
-            ? ModelContextProfiles.ResolveMaximum(settings.Current.SelectedCodingModel, "code")
-            : ModelContextProfiles.ResolveMaximum(settings.Current.SelectedModel, "general");
+        var contextLimit = ModelContextProfiles.ResolveMaximum(settings.Current.SelectedModel, "general");
         var context = contextAssembler.Build(new(
             DefaultSystemPrompt,
             string.IsNullOrWhiteSpace(session.Draft) ? "Nächste Benutzereingabe" : session.Draft,
@@ -236,10 +196,7 @@ public sealed class AssistantCoordinator(
                 message,
                 artifactItems.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
             workflows = workflowItems.Select(ToWorkflowDto),
-            codingCampaignDefinitions = campaignSnapshot.Definitions,
-            codingCampaign = campaignSnapshot.ActiveCampaign,
             conversationRevision = session.ConversationRevision,
-            codingRun = codingRun is null ? null : ToCodingRunDto(codingRun),
             documents = documentItems.Select(ToDocumentDto),
             attachments = attachmentItems.Select(ToAttachmentDto),
             documentGroupStatus,
@@ -254,13 +211,6 @@ public sealed class AssistantCoordinator(
             contextWasTruncated = context.WasTruncated,
             contextNotice = context.TruncationNotice,
             selectedToolAction = PersistentToolActionName(session.PersistentToolAction),
-            assistantMode = session.AssistantMode.ToString().ToLowerInvariant(),
-            workspacePath = session.WorkspacePath,
-            workspaceFingerprint = session.WorkspaceFingerprint,
-            workspaceAvailable = !string.IsNullOrWhiteSpace(session.WorkspacePath) && Directory.Exists(session.WorkspacePath),
-            workspaceName = string.IsNullOrWhiteSpace(session.WorkspacePath)
-                ? null
-                : Path.GetFileName(session.WorkspacePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
             isSessionPaneOpen = settings.Current.IsAssistantSessionPaneOpen,
         };
     }
@@ -278,7 +228,6 @@ public sealed class AssistantCoordinator(
             messages = conversation.Messages.Select(message => ToMessageDto(
                 message,
                 conversation.Artifacts.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
-            codingRun = conversation.CodingRun is null ? null : ToCodingRunDto(conversation.CodingRun),
         };
     }
 
@@ -289,7 +238,6 @@ public sealed class AssistantCoordinator(
     {
         var messageReference = await chats.GetMessageAsync(
             messageId,
-            includeInternal: true,
             cancellationToken: CancellationToken.None).ConfigureAwait(false);
         if (messageReference is null)
         {
@@ -313,24 +261,6 @@ public sealed class AssistantCoordinator(
         }, requestId).ConfigureAwait(false);
     }
 
-    private async Task EmitCodingSnapshotAsync(
-        Guid sessionId,
-        Func<string, object, string?, Task> emit,
-        string requestId)
-    {
-        var conversation = await conversationSnapshots.GetAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
-        if (conversation is null)
-        {
-            return;
-        }
-        await emit("coding.snapshotCommitted", new
-        {
-            sessionId,
-            conversationRevision = conversation.Session.ConversationRevision,
-            codingRun = conversation.CodingRun is null ? null : ToCodingRunDto(conversation.CodingRun),
-        }, requestId).ConfigureAwait(false);
-    }
-
     public async Task HandleAsync(
         WebBridgeEnvelope envelope,
         Func<string, object, string?, Task> emit,
@@ -340,18 +270,11 @@ public sealed class AssistantCoordinator(
         {
             case "app.ready":
             {
-                var isFirstReady = Interlocked.CompareExchange(ref _startupCodingRunsHandled, 1, 0) == 0;
-                if (isFirstReady && campaigns is not null)
-                {
-                    await campaigns.PrepareForClientStartAsync(cancellationToken).ConfigureAwait(false);
-                }
+                var isFirstReady = Interlocked.CompareExchange(ref _startupRunsHandled, 1, 0) == 0;
                 if (isFirstReady && goAi is not null)
                 {
                     await goAi.StopPersistedRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
                 }
-                campaigns?.AttachSinks(
-                    update => EmitGoAiUpdateAsync(update, emit, "campaign"),
-                    snapshot => emit("campaign.changed", snapshot, "campaign"));
                 await emit("state.snapshot", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
                 if (settings.Current.IsAiConnectionEnabled
                     && settings.Current.AiProvider == AiProviderKind.GoAiServer
@@ -415,13 +338,6 @@ public sealed class AssistantCoordinator(
                     envelope.RequestId,
                     cancellationToken).ConfigureAwait(false);
                 break;
-            case "session.mode":
-                await SetSessionModeAsync(
-                    GetRequiredString(envelope.Payload, "mode", 16),
-                    emit,
-                    envelope.RequestId,
-                    cancellationToken).ConfigureAwait(false);
-                break;
             case "session.tool":
                 await SetSessionToolAsync(
                     GetOptionalString(envelope.Payload, "action", 32),
@@ -467,52 +383,6 @@ public sealed class AssistantCoordinator(
             case "workflow.createFromMessage":
                 await CreateWorkflowFromMessageAsync(envelope, emit, cancellationToken);
                 break;
-            case "campaign.list":
-            {
-                var campaignService = campaigns ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
-                var active = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
-                await emit("campaign.snapshot", await campaignService.GetSnapshotAsync(active.Id, cancellationToken).ConfigureAwait(false), envelope.RequestId);
-                break;
-            }
-            case "campaign.select":
-            {
-                var campaignService = campaigns ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
-                var campaignSessionId = GetOptionalGuid(envelope.Payload, "sessionId")
-                    ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
-                var snapshot = await campaignService.SelectAsync(
-                    campaignSessionId,
-                    GetRequiredString(envelope.Payload, "definitionId", 100),
-                    cancellationToken).ConfigureAwait(false);
-                await emit("campaign.changed", snapshot, envelope.RequestId);
-                break;
-            }
-            case "campaign.loadWorkflow":
-                await LoadPromptWorkflowForCodingAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
-                break;
-            case "campaign.run":
-            {
-                var campaignService = campaigns ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
-                var campaignSessionId = GetOptionalGuid(envelope.Payload, "sessionId")
-                    ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
-                var instruction = GetOptionalString(envelope.Payload, "instruction", 100_000);
-                await chats.SaveDraftAsync(campaignSessionId, string.Empty, cancellationToken).ConfigureAwait(false);
-                await emit(
-                    "campaign.changed",
-                    await campaignService.RunAsync(campaignSessionId, instruction, cancellationToken).ConfigureAwait(false),
-                    envelope.RequestId).ConfigureAwait(false);
-                break;
-            }
-            case "campaign.stop":
-            {
-                var campaignService = campaigns ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
-                var campaignSessionId = GetOptionalGuid(envelope.Payload, "sessionId")
-                    ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
-                await emit(
-                    "campaign.changed",
-                    await campaignService.StopAsync(campaignSessionId, cancellationToken).ConfigureAwait(false),
-                    envelope.RequestId).ConfigureAwait(false);
-                break;
-            }
             case "ui.sessionPane":
                 await settings.UpdateAsync(current => current with
                 {
@@ -595,59 +465,17 @@ public sealed class AssistantCoordinator(
         return session;
     }
 
-    private async Task<ChatSession> EnsureSessionWorkspaceAsync(
-        ChatSession session,
-        CancellationToken cancellationToken)
-    {
-        if (!string.IsNullOrWhiteSpace(session.WorkspacePath)
-            || string.IsNullOrWhiteSpace(settings.Current.LocalToolWorkspacePath)
-            || !Directory.Exists(settings.Current.LocalToolWorkspacePath))
-        {
-            return session;
-        }
-        var workspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(settings.Current.LocalToolWorkspacePath));
-        await chats.SetAssistantContextAsync(
-            session.Id,
-            session.AssistantMode,
-            workspace,
-            WorkspaceFileSystemView.CreateWorkspaceIdentity(workspace),
-            cancellationToken).ConfigureAwait(false);
-        return (await chats.GetSessionAsync(session.Id, cancellationToken).ConfigureAwait(false))!;
-    }
-
     private async Task CreateSessionAsync(
         Func<string, object, string?, Task> emit,
         string requestId,
         CancellationToken cancellationToken)
     {
         var session = await chats.CreateSessionAsync(DefaultSessionTitle, cancellationToken).ConfigureAwait(false);
-        session = await EnsureSessionWorkspaceAsync(session, cancellationToken).ConfigureAwait(false);
         await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id }, cancellationToken).ConfigureAwait(false);
         await recentActivity.RecordAsync(
             $"AI-Sitzung „{session.Title}“ erstellt",
             CancellationToken.None).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
-    }
-
-    private async Task SetSessionModeAsync(
-        string requestedMode,
-        Func<string, object, string?, Task> emit,
-        string requestId,
-        CancellationToken cancellationToken)
-    {
-        var mode = requestedMode.Equals("code", StringComparison.OrdinalIgnoreCase)
-            ? AssistantMode.Code
-            : requestedMode.Equals("general", StringComparison.OrdinalIgnoreCase)
-                ? AssistantMode.General
-                : throw new InvalidOperationException("Der angeforderte AI-Modus ist unbekannt.");
-        var session = await EnsureSessionWorkspaceAsync(
-            await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false),
-            cancellationToken).ConfigureAwait(false);
-        await chats.SetPersistentToolActionAsync(
-            session.Id,
-            mode == AssistantMode.Code ? PersistentToolAction.Code : null,
-            cancellationToken).ConfigureAwait(false);
-        await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId).ConfigureAwait(false);
     }
 
     private async Task SetSessionToolAsync(
@@ -659,14 +487,11 @@ public sealed class AssistantCoordinator(
         var action = requestedAction?.Trim() switch
         {
             null or "" => (PersistentToolAction?)null,
-            "code" => PersistentToolAction.Code,
             "bricsCad" => PersistentToolAction.BricsCad,
             "audiobook" => PersistentToolAction.Audiobook,
             _ => throw new InvalidOperationException("Die angeforderte persistente Tool-Aktion ist unbekannt."),
         };
-        var session = await EnsureSessionWorkspaceAsync(
-            await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false),
-            cancellationToken).ConfigureAwait(false);
+        var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         await chats.SetPersistentToolActionAsync(session.Id, action, cancellationToken).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId).ConfigureAwait(false);
     }
@@ -727,16 +552,6 @@ public sealed class AssistantCoordinator(
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
 
-        if (campaigns is not null)
-        {
-            var campaign = (await campaigns.GetSnapshotAsync(sessionId, cancellationToken).ConfigureAwait(false))
-                .ActiveCampaign;
-            if (string.Equals(campaign?.Status, "running", StringComparison.OrdinalIgnoreCase))
-            {
-                _ = await campaigns.StopAsync(sessionId, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
         if (goAi?.ActiveSessionId == sessionId)
         {
             await goAi.CancelCurrentAndWaitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -765,17 +580,20 @@ public sealed class AssistantCoordinator(
             throw new InvalidOperationException("Die Sitzungen können während einer laufenden Antwort nicht gelöscht werden.");
         }
 
-        var sessions = await chats.ListSessionsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
-        foreach (var session in sessions)
-        {
-            await chats.DeleteSessionAsync(session.Id, cancellationToken).ConfigureAwait(false);
-        }
+        var activeSessionId = settings.Current.ActiveSessionId;
+        var deletedCount = await chats.DeleteUnpinnedSessionsAsync(cancellationToken).ConfigureAwait(false);
 
-        await settings.UpdateAsync(current => current with { ActiveSessionId = null }, cancellationToken).ConfigureAwait(false);
-        if (sessions.Count > 0)
+        if (activeSessionId is { } currentActiveSessionId
+            && await chats.GetSessionAsync(currentActiveSessionId, cancellationToken).ConfigureAwait(false) is null)
+        {
+            await settings.UpdateAsync(
+                current => current with { ActiveSessionId = null },
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (deletedCount > 0)
         {
             await recentActivity.RecordAsync(
-                "Alle AI-Sitzungen gelöscht",
+                "Alle nicht angepinnten AI-Sitzungen gelöscht",
                 CancellationToken.None).ConfigureAwait(false);
         }
 
@@ -826,7 +644,6 @@ public sealed class AssistantCoordinator(
             ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
-        session = await EnsureSessionWorkspaceAsync(session, cancellationToken).ConfigureAwait(false);
         await chats.SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
         var explicitTool = GetOptionalString(envelope.Payload, "toolAction", 40);
         var match = await ResolvePromptMatchAsync(
@@ -863,10 +680,6 @@ public sealed class AssistantCoordinator(
                     envelope.RequestId),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             return;
-        }
-        if (campaigns is not null)
-        {
-            _ = await campaigns.StopForNewPromptAsync(sessionId, cancellationToken).ConfigureAwait(false);
         }
         var requestedPersistentAction = PersistentToolActionFor(match?.Trigger.Action);
         if (requestedPersistentAction == PersistentToolAction.Audiobook
@@ -910,7 +723,6 @@ public sealed class AssistantCoordinator(
             "imageAnalysis" => PromptTriggerAction.ImageAnalysis,
             "imageGeneration" => PromptTriggerAction.ImageGeneration,
             "bricsCad" => PromptTriggerAction.BricsCad,
-            "code" => PromptTriggerAction.Code,
             "audiobook" => PromptTriggerAction.Audiobook,
             "textToSpeech" => PromptTriggerAction.TextToSpeech,
             "translation" => PromptTriggerAction.Translation,
@@ -943,11 +755,6 @@ public sealed class AssistantCoordinator(
         if (!string.IsNullOrWhiteSpace(explicitTool))
         {
             return CreateToolMatch(explicitTool, prompt);
-        }
-
-        if (session.PersistentToolAction == PersistentToolAction.Code)
-        {
-            return CreateToolMatch("code", prompt);
         }
 
         var databaseMatch = await promptTriggers.MatchAsync(prompt, cancellationToken).ConfigureAwait(false);
@@ -989,7 +796,6 @@ public sealed class AssistantCoordinator(
 
     private static PersistentToolAction? PersistentToolActionFor(PromptTriggerAction? action) => action switch
     {
-        PromptTriggerAction.Code => PersistentToolAction.Code,
         PromptTriggerAction.BricsCad => PersistentToolAction.BricsCad,
         PromptTriggerAction.Audiobook => PersistentToolAction.Audiobook,
         _ => null,
@@ -997,7 +803,6 @@ public sealed class AssistantCoordinator(
 
     private static string? PersistentToolActionName(PersistentToolAction? action) => action switch
     {
-        PersistentToolAction.Code => "code",
         PersistentToolAction.BricsCad => "bricsCad",
         PersistentToolAction.Audiobook => "audiobook",
         _ => null,
@@ -1012,19 +817,6 @@ public sealed class AssistantCoordinator(
             ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false);
         switch (update.Kind)
         {
-            case GoAiAssistantUpdateKind.MessageAdded:
-                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
-                break;
-            case GoAiAssistantUpdateKind.MessageRemoved:
-                await emit("conversation.messageRemoved", new
-                {
-                    messageId = update.Message.Id,
-                    sessionId = update.Message.SessionId,
-                    conversationRevision = await chats.GetConversationRevisionAsync(
-                        update.Message.SessionId,
-                        CancellationToken.None).ConfigureAwait(false),
-                }, requestId).ConfigureAwait(false);
-                break;
             case GoAiAssistantUpdateKind.Started:
                 var sessionMessages = await chats.ListMessagesAsync(
                     update.Message.SessionId,
@@ -1087,23 +879,6 @@ public sealed class AssistantCoordinator(
             case GoAiAssistantUpdateKind.DocumentsChanged:
                 await emit("session.changed", await BuildSnapshotAsync(CancellationToken.None), requestId).ConfigureAwait(false);
                 break;
-            case GoAiAssistantUpdateKind.CodeDiffChanged:
-                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
-                await EmitCodingSnapshotAsync(update.Message.SessionId, emit, requestId).ConfigureAwait(false);
-                await emit("chat.codeDiff", new
-                {
-                    messageId = update.Message.Id,
-                    sessionId = update.Message.SessionId,
-                    codeDiff = update.Message.CodeDiff,
-                    detail = update.Detail,
-                }, requestId).ConfigureAwait(false);
-                break;
-            case GoAiAssistantUpdateKind.CodingTraceChanged:
-                if (update.CodingTrace is not null)
-                {
-                    await EmitCodingSnapshotAsync(update.Message.SessionId, emit, requestId).ConfigureAwait(false);
-                }
-                break;
             case GoAiAssistantUpdateKind.Completed:
                 await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
                 await emit("chat.completed", new
@@ -1160,10 +935,6 @@ public sealed class AssistantCoordinator(
         var workflowId = GetRequiredGuid(envelope.Payload, "workflowId");
         var workflow = await workflows.GetAsync(workflowId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Der Workflow wurde nicht gefunden.");
-        if (IsPromptCodingWorkflow(workflow))
-        {
-            throw new InvalidOperationException("Coding-Workflows werden im Coding-Modus über Workflows geladen.");
-        }
         var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         await chats.SelectWorkflowAsync(session.Id, null, cancellationToken).ConfigureAwait(false);
         await chats.AddMessageAsync(
@@ -1238,23 +1009,10 @@ public sealed class AssistantCoordinator(
         CancellationToken cancellationToken)
     {
         var messageId = GetRequiredGuid(envelope.Payload, "messageId");
-        var session = await EnsureSessionWorkspaceAsync(
-            await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false),
-            cancellationToken).ConfigureAwait(false);
+        var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         var message = (await chats.ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false))
             .FirstOrDefault(item => item.Id == messageId)
             ?? throw new InvalidOperationException("Die Nachricht wurde nicht gefunden.");
-        if (IsCodingWorkflowSession(session))
-        {
-            await CreatePromptWorkflowFromCodingMessageAsync(
-                session,
-                message,
-                emit,
-                envelope.RequestId,
-                cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
         var title = GeneralAgentResponseParser.CreateWorkflowTitle(message.Content);
         var contextSummary = string.IsNullOrWhiteSpace(message.ContextSummary)
             ? GeneralAgentResponseParser.CreateContextSummary(null, message.Content)
@@ -1281,349 +1039,13 @@ public sealed class AssistantCoordinator(
         }, envelope.RequestId);
     }
 
-    private async Task LoadPromptWorkflowForCodingAsync(
-        WebBridgeEnvelope envelope,
-        Func<string, object, string?, Task> emit,
-        CancellationToken cancellationToken)
-    {
-        var workflow = await workflows.GetAsync(
-                GetRequiredGuid(envelope.Payload, "workflowId"),
-                cancellationToken)
-            .ConfigureAwait(false)
-            ?? throw new InvalidOperationException("Der Workflow wurde nicht gefunden.");
-        if (!IsPromptCodingWorkflow(workflow))
-        {
-            throw new InvalidOperationException("Der ausgewählte Eintrag ist kein Coding-Workflow.");
-        }
-
-        var session = await EnsureSessionWorkspaceAsync(
-            await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false),
-            cancellationToken).ConfigureAwait(false);
-        var campaignService = campaigns
-            ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfuegbar.");
-
-        if (string.IsNullOrWhiteSpace(session.WorkspacePath) || !Directory.Exists(session.WorkspacePath))
-        {
-            throw new DirectoryNotFoundException("Wähle zuerst einen verfügbaren Workspace für den Coding-Workflow aus.");
-        }
-
-        await chats.SetPersistentToolActionAsync(
-            session.Id,
-            PersistentToolAction.Code,
-            cancellationToken).ConfigureAwait(false);
-
-        var workspace = Path.GetFullPath(session.WorkspacePath);
-        var campaignDirectory = Path.Combine(workspace, ".go-campaign");
-        Directory.CreateDirectory(campaignDirectory);
-        await WriteAtomicUtf8Async(
-            Path.Combine(workspace, PromptDrivenCodingCampaignDefinition.ContractRelativePath.Replace('/', Path.DirectorySeparatorChar)),
-            workflow.ContentJson,
-            cancellationToken).ConfigureAwait(false);
-        var sourceRelativePath = GetPromptWorkflowSourceDocument(workflow.ContentJson)
-            ?? ".go-campaign/prompt-workflow-source.md";
-        var sourcePath = ResolveSafeWorkspaceRelativePath(workspace, sourceRelativePath)
-            ?? Path.Combine(campaignDirectory, "prompt-workflow-source.md");
-        await WriteAtomicUtf8Async(
-            sourcePath,
-            BuildSavedPromptWorkflowSourceMarkdown(workflow),
-            cancellationToken).ConfigureAwait(false);
-
-        var snapshot = await campaignService.SelectAsync(
-            session.Id,
-            PromptDrivenCodingCampaignDefinition.DescriptorId,
-            cancellationToken).ConfigureAwait(false);
-        await recentActivity.RecordAsync(
-            $"Coding-Workflow „{workflow.Title}“ geladen",
-            CancellationToken.None).ConfigureAwait(false);
-        await emit("campaign.changed", snapshot, envelope.RequestId).ConfigureAwait(false);
-        await emit("session.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
-    }
-
-    private async Task CreatePromptWorkflowFromCodingMessageAsync(
-        ChatSession session,
-        ChatMessage message,
-        Func<string, object, string?, Task> emit,
-        string requestId,
-        CancellationToken cancellationToken)
-    {
-        var campaignService = campaigns
-            ?? throw new InvalidOperationException("Coding-Workflows sind nicht verfügbar.");
-        if (message.Role != ChatRole.Assistant)
-        {
-            throw new InvalidOperationException("Nur AI-Nachrichten können als Coding-Workflow gespeichert werden.");
-        }
-
-        var content = (message.Content ?? string.Empty).Trim();
-        if (content.Length == 0)
-        {
-            throw new InvalidOperationException("Die AI-Nachricht enthält keinen Workflow-Inhalt.");
-        }
-
-        if (OpenCodingWorkflowSaveAsDraft())
-        {
-            var draftTitle = GeneralAgentResponseParser.CreateWorkflowTitle(content);
-            var draftWorkflowId = Guid.NewGuid();
-            var draftSourceRelativePath = ".go-campaign/prompt-workflow-source.md";
-            var draftContractJson = BuildPromptWorkflowContractJson(draftTitle, message, content, draftSourceRelativePath, draftWorkflowId);
-            await emit("workflow.draft", new
-            {
-                mode = "campaign",
-                workflow = new
-                {
-                    id = (Guid?)null,
-                    revision = 0,
-                    title = draftTitle,
-                    description = "Aus einer Coding-AI-Nachricht erstellt.",
-                    domain = "Coding",
-                    contextSummary = $"Prompt, Ausgangsnachricht und Ausfuehrungsauftrag fuer den Coding-Agenten. Quelle: AI-Nachricht {message.Id:D}.",
-                    contentJson = draftContractJson,
-                    isBuiltIn = false,
-                    tags = PromptWorkflowTags,
-                },
-            }, requestId).ConfigureAwait(false);
-        }
-        else
-        {
-        if (string.IsNullOrWhiteSpace(session.WorkspacePath) || !Directory.Exists(session.WorkspacePath))
-        {
-            throw new DirectoryNotFoundException("Wähle zuerst einen verfügbaren Workspace für die Coding-Sitzung aus.");
-        }
-
-        var workspace = Path.GetFullPath(session.WorkspacePath);
-        var campaignDirectory = Path.Combine(workspace, ".go-campaign");
-        Directory.CreateDirectory(campaignDirectory);
-        var title = GeneralAgentResponseParser.CreateWorkflowTitle(content);
-        var workflowId = Guid.NewGuid();
-        var sourceFileName = "prompt-workflow-source.md";
-        var sourceRelativePath = ".go-campaign/" + sourceFileName;
-        var contractJson = BuildPromptWorkflowContractJson(title, message, content, sourceRelativePath, workflowId);
-        var now = DateTimeOffset.UtcNow;
-        _ = await workflows.CreateAsync(
-            new WorkflowDefinition(
-                workflowId,
-                CreateUniqueWorkflowSlug(title, workflowId),
-                title,
-                "Aus einer Coding-AI-Nachricht gespeichert.",
-                "Coding",
-                $"Prompt, Ausgangsnachricht und Ausfuehrungsauftrag fuer den Coding-Agenten. Quelle: AI-Nachricht {message.Id:D}.",
-                contractJson,
-                false,
-                1,
-                now,
-                now,
-                PromptWorkflowTags),
-            cancellationToken).ConfigureAwait(false);
-        await WriteAtomicUtf8Async(
-            Path.Combine(campaignDirectory, sourceFileName),
-            BuildPromptWorkflowSourceMarkdown(title, message, content),
-            cancellationToken).ConfigureAwait(false);
-        await WriteAtomicUtf8Async(
-            Path.Combine(workspace, PromptDrivenCodingCampaignDefinition.ContractRelativePath.Replace('/', Path.DirectorySeparatorChar)),
-            contractJson,
-            cancellationToken).ConfigureAwait(false);
-
-        var snapshot = await campaignService.SelectAsync(
-            session.Id,
-            PromptDrivenCodingCampaignDefinition.DescriptorId,
-            cancellationToken).ConfigureAwait(false);
-        await recentActivity.RecordAsync(
-            $"Coding-Workflow „{title}“ aus AI-Nachricht gespeichert",
-            CancellationToken.None).ConfigureAwait(false);
-        await emit("campaign.changed", snapshot, requestId).ConfigureAwait(false);
-        await emit("workflow.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), requestId).ConfigureAwait(false);
-        await emit("session.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), requestId).ConfigureAwait(false);
-        }
-    }
-
-    private static bool IsCodingWorkflowSession(ChatSession session) =>
-        session.AssistantMode == AssistantMode.Code
-        || session.PersistentToolAction == PersistentToolAction.Code;
-
-    private static bool OpenCodingWorkflowSaveAsDraft() => true;
-
-    private static bool IsPromptCodingWorkflow(WorkflowDefinition workflow)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(workflow.ContentJson);
-            return document.RootElement.ValueKind == JsonValueKind.Object
-                && document.RootElement.TryGetProperty("schema", out var schema)
-                && schema.ValueKind == JsonValueKind.String
-                && string.Equals(schema.GetString(), "go.prompt-workflow.v1", StringComparison.Ordinal);
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
-
-    private static string? GetPromptWorkflowSourceDocument(string contentJson)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(contentJson);
-            if (document.RootElement.ValueKind == JsonValueKind.Object
-                && document.RootElement.TryGetProperty("scope", out var scope)
-                && scope.ValueKind == JsonValueKind.Object
-                && scope.TryGetProperty("sourceDocument", out var source)
-                && source.ValueKind == JsonValueKind.String)
-            {
-                var value = source.GetString();
-                return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-            }
-        }
-        catch (JsonException)
-        {
-        }
-
-        return null;
-    }
-
-    private static string? ResolveSafeWorkspaceRelativePath(string workspace, string relativePath)
-    {
-        if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath))
-        {
-            return null;
-        }
-
-        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspace));
-        var candidate = Path.GetFullPath(Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
-        return candidate.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-            ? candidate
-            : null;
-    }
-
-    private static string BuildSavedPromptWorkflowSourceMarkdown(WorkflowDefinition workflow) => $"""
-        # {workflow.Title}
-
-        Quelle: gespeicherter Coding-Workflow `{workflow.Id:D}` vom {workflow.UpdatedAt:O}
-
-        {TruncateForWorkflow(workflow.ContextSummary, 40_000)}
-
-        ## Workflow-Vertrag
-
-        ```json
-        {TruncateForWorkflow(workflow.ContentJson, 250_000)}
-        ```
-        """;
-
-    private static string BuildPromptWorkflowSourceMarkdown(
-        string title,
-        ChatMessage message,
-        string content) => $"""
-        # {title}
-
-        Quelle: AI-Nachricht `{message.Id:D}` vom {message.UpdatedAt:O}
-
-        {TruncateForWorkflow(content, 250_000)}
-        """;
-
-    private static string BuildPromptWorkflowContractJson(
-        string title,
-        ChatMessage message,
-        string content,
-        string sourceRelativePath,
-        Guid workflowId)
-    {
-        var excerpt = TruncateForWorkflow(content, 20_000);
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
-        var contract = new
-        {
-            schema = "go.prompt-workflow.v1",
-            title,
-            objective = $"Den aus der gespeicherten AI-Nachricht „{title}“ abgeleiteten Coding-Workflow reproduzierbar im Workspace umsetzen, prüfen und fortlaufend verbessern.",
-            iteration = 0,
-            scope = new
-            {
-                source = "ai-message-footer",
-                savedWorkflowId = workflowId,
-                sourceMessageId = message.Id,
-                sourceMessageUpdatedAt = message.UpdatedAt,
-                sourceMessageSha256 = hash,
-                sourceDocument = sourceRelativePath,
-                sourceExcerpt = excerpt,
-            },
-            assumptions = new[]
-            {
-                "Die ausgewählte AI-Nachricht ist der fachliche Ausgangspunkt des gespeicherten Coding-Workflows.",
-                "Alle Änderungen und Prüfungen bleiben auf den freigegebenen Workspace begrenzt.",
-            },
-            acceptanceCriteria = new[]
-            {
-                "Der Workflow-Vertrag bleibt unter .go-campaign/prompt-workflow.json aktuell und nachvollziehbar.",
-                "Relevante Code-, Test-, Dokumentations- oder Artefaktänderungen werden im Workspace erzeugt und geprüft.",
-                "Jeder ausgeführte Schritt dokumentiert reale Prüfungen, offene Punkte und die nächste sinnvolle Aktion.",
-            },
-            verificationCommands = new[]
-            {
-                new { purpose = "test", command = "Projektabhängige Tests durch den Coding-Agenten bestimmen und ausführen." },
-                new { purpose = "build", command = "Projektabhängigen Build oder Syntaxcheck ausführen, sofern vorhanden." },
-            },
-            artifacts = new object[]
-            {
-                new { path = sourceRelativePath, kind = "source-message", description = "Ursprüngliche AI-Nachricht als Workflow-Quelle." },
-            },
-            openQuestions = Array.Empty<string>(),
-            lastRun = new
-            {
-                status = "saved",
-                changedFiles = new[] { PromptDrivenCodingCampaignDefinition.ContractRelativePath, sourceRelativePath },
-                checks = Array.Empty<string>(),
-                nextAction = "Workflow über den Promptbutton starten; der Coding-Agent leitet den nächsten Schritt aus Vertrag und Workspace ab.",
-            },
-        };
-        return JsonSerializer.Serialize(contract, PromptWorkflowContractJsonOptions);
-    }
-
-    private static string TruncateForWorkflow(string value, int maximumLength)
-    {
-        var normalized = value.Replace("\r\n", "\n").Replace('\r', '\n').Trim();
-        if (normalized.Length <= maximumLength)
-        {
-            return normalized;
-        }
-
-        return normalized[..maximumLength].TrimEnd()
-            + "\n\n[Auszug gekürzt; vollständige Quelle bleibt in der ursprünglichen Chatnachricht erhalten.]";
-    }
-
-    private static async Task WriteAtomicUtf8Async(
-        string path,
-        string content,
-        CancellationToken cancellationToken)
-    {
-        var directory = Path.GetDirectoryName(path)
-            ?? throw new InvalidOperationException("Der Zielpfad ist ungültig.");
-        Directory.CreateDirectory(directory);
-        var temporaryPath = Path.Combine(directory, Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
-        try
-        {
-            await File.WriteAllTextAsync(
-                temporaryPath,
-                content,
-                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-                cancellationToken).ConfigureAwait(false);
-            File.Move(temporaryPath, path, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
-    }
-
     private static object ToSessionDto(ChatSession session) => new
     {
         id = session.Id,
         session.Title,
         session.CreatedAt,
         session.UpdatedAt,
-        assistantMode = session.AssistantMode.ToString().ToLowerInvariant(),
         persistentToolAction = PersistentToolActionName(session.PersistentToolAction),
-        session.WorkspacePath,
-        session.WorkspaceFingerprint,
         session.IsPinned,
         session.PinnedAt,
         session.ConversationRevision,
@@ -1643,36 +1065,11 @@ public sealed class AssistantCoordinator(
             message.Error,
             message.ContextSummary,
             contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
-            messagePhase = message.MessagePhase switch
-            {
-                ChatMessagePhase.Commentary => "commentary",
-                ChatMessagePhase.FinalAnswer => "final_answer",
-                _ => null,
-            },
-            sourceRunId = message.SourceRunId,
-            sourceItemId = message.SourceItemId,
-            sourceDeltaSequence = message.SourceDeltaSequence,
-            codeDiff = message.CodeDiff,
             message.Revision,
             tool = message.ToolExecution,
             artifacts = (messageArtifacts ?? []).Select(ToArtifactDto),
         };
     }
-
-    private static object ToCodingRunDto(CodingRunSnapshot run) => new
-    {
-        id = run.Id,
-        localRunId = run.LocalRunId,
-        run.ServerRunId,
-        run.SessionId,
-        run.MessageId,
-        run.Status,
-        codeDiff = run.CodeDiff,
-        run.StartedAt,
-        run.UpdatedAt,
-        run.Revision,
-        entries = run.Entries,
-    };
 
     private static object ToArtifactDto(ChatArtifact artifact) => new
     {
@@ -1757,14 +1154,6 @@ public sealed class AssistantCoordinator(
         attachment.CreatedAt,
     };
 
-    private static string EventTypeFor(MessageStatus status) => status switch
-    {
-        MessageStatus.Cancelled => "chat.cancelled",
-        MessageStatus.Failed => "chat.failed",
-        MessageStatus.Interrupted => "chat.failed",
-        _ => "chat.completed",
-    };
-
     private static string CreateSlug(string title)
     {
         var normalized = title.Normalize(NormalizationForm.FormD);
@@ -1791,18 +1180,6 @@ public sealed class AssistantCoordinator(
 
         var slug = builder.ToString().Trim('-');
         return string.IsNullOrWhiteSpace(slug) ? $"workflow-{Guid.NewGuid():N}" : slug;
-    }
-
-    private static string CreateUniqueWorkflowSlug(string title, Guid id)
-    {
-        var baseSlug = CreateSlug(title);
-        baseSlug = baseSlug[..Math.Min(baseSlug.Length, 70)].Trim('-');
-        if (baseSlug.Length == 0)
-        {
-            baseSlug = "workflow";
-        }
-
-        return $"{baseSlug}-{id:N}"[..Math.Min(baseSlug.Length + 33, 110)];
     }
 
     private static Guid GetRequiredGuid(JsonElement payload, string name)
@@ -1877,11 +1254,6 @@ public sealed class AssistantCoordinator(
             MaxDepth = 64,
         });
         return json;
-    }
-
-    public void Dispose()
-    {
-        campaigns?.DetachSinks();
     }
 
     private static string[] GetStringArray(

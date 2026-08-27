@@ -29,7 +29,7 @@ public sealed class GpuLeaseSchedulerTests
     }
 
     [Fact]
-    public async Task SpeechRemainsAvailableWhileCodingOwnsTheLlmLane()
+    public async Task SpeechRemainsAvailableWhileAnExclusiveWorkerOwnsTheGpuLane()
     {
         using var context = new TestServerContext();
         using var scheduler = new GpuLeaseScheduler(context.Database, new ServerRuntimeState());
@@ -44,19 +44,19 @@ public sealed class GpuLeaseSchedulerTests
                 activity => Assert.Equal("live-caption", activity.Workload),
                 activity => Assert.Equal("llm-general", activity.Workload));
 
-            var codingModelTask = scheduler.AcquireAsync("llm-code", "run-code", GpuLeaseMode.Exclusive);
+            var exclusiveWorkerTask = scheduler.AcquireAsync("image-generation", "run-image", GpuLeaseMode.Exclusive);
             await Task.Delay(100);
-            Assert.False(codingModelTask.IsCompleted);
+            Assert.False(exclusiveWorkerTask.IsCompleted);
             Assert.Equal(1, scheduler.QueueLength);
 
             await general.DisposeAsync();
-            await using var codingModel = await codingModelTask;
-            Assert.Contains(codingModel.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
+            await using var exclusiveWorker = await exclusiveWorkerTask;
+            Assert.Contains(exclusiveWorker.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
             Assert.Contains(speech.LeaseId, scheduler.ActiveLease, StringComparison.Ordinal);
             Assert.Collection(
                 scheduler.ActiveActivities.OrderBy(static activity => activity.Workload),
-                activity => Assert.Equal("live-caption", activity.Workload),
-                activity => Assert.Equal("llm-code", activity.Workload));
+                activity => Assert.Equal("image-generation", activity.Workload),
+                activity => Assert.Equal("live-caption", activity.Workload));
         }
         finally
         {
@@ -69,11 +69,11 @@ public sealed class GpuLeaseSchedulerTests
     [InlineData("Wie wurde die Titelleiste umgesetzt?", UtteranceIntent.Question)]
     [InlineData("Ändere die Titelleiste in Akzentfarbe", UtteranceIntent.Instruction)]
     [InlineData("hm", UtteranceIntent.Noise)]
-    public void VoiceIntentCanBeResolvedWithoutGeneralAiDuringCoding(
+    public void VoiceIntentCanBeResolvedLocally(
         string text,
         UtteranceIntent expected)
     {
-        var result = UtteranceIntentService.ClassifyLocallyDuringCoding(text);
+        var result = UtteranceIntentService.ClassifyLocally(text);
 
         Assert.Equal(expected, result.Intent);
         if (expected is UtteranceIntent.Question or UtteranceIntent.Instruction)
@@ -84,7 +84,6 @@ public sealed class GpuLeaseSchedulerTests
 
     [Theory]
     [InlineData("llm-general", "gpt-oss-120b", "LM Studio")]
-    [InlineData("llm-code", "Ausgewähltes Coding-Modell", "LM Studio")]
     [InlineData("live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT")]
     [InlineData("text-to-speech", "Antwort wird vorgelesen", "Docker · ausgewählte Sprachausgabe · GPU 1")]
     [InlineData("image-generation", "Bild wird erstellt", "Docker · Image")]

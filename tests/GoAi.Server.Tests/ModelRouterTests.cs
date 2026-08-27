@@ -1,73 +1,27 @@
 using GoAi.Contracts;
-using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Runs;
 
 namespace GoAi.Server.Tests;
 
 public sealed class ModelRouterTests
 {
-    [Fact]
-    public void ExplicitModesNeverFallback()
+    [Theory]
+    [InlineData(RunMode.Auto)]
+    [InlineData(RunMode.General)]
+    public void EveryConversationModeRoutesToGeneral(RunMode mode)
     {
         using var context = new TestServerContext();
         var router = new ModelRouter(context.WrappedOptions);
 
-        var general = router.Select(CreateRequest(RunMode.General, "Code debuggen"));
-        var code = router.Select(CreateRequest(RunMode.Code, "TGA erklären"));
+        var selection = router.Select(CreateRequest(mode, "Projektdatei analysieren und Fehler beheben"));
 
-        Assert.Equal(context.Options.GeneralModelId, general.ModelId);
-        Assert.Equal(CodingModelCatalog.DefaultModelId, context.Options.CodeModelId);
-        Assert.Equal(context.Options.CodeModelId, code.ModelId);
+        Assert.Equal("general", selection.Role);
+        Assert.Equal(context.Options.GeneralModelId, selection.ModelId);
+        Assert.Equal(context.Options.GeneralContextLength, selection.ContextLength);
     }
 
     [Fact]
-    public void ExplicitCodeModeUsesTheOnlyConfiguredModel()
-    {
-        using var context = new TestServerContext();
-        var router = new ModelRouter(context.WrappedOptions);
-        var request = CreateRequest(RunMode.Code, "Projekt analysieren") with
-        {
-            PreferredCodeModelId = "gpt-oss-120b",
-        };
-
-        var selection = router.Select(request);
-
-        Assert.Equal("code", selection.Role);
-        Assert.Equal("gpt-oss-120b", selection.ModelId);
-    }
-
-    [Fact]
-    public void DefaultCodeModeUsesQwenAtItsNativeMaximumContext()
-    {
-        using var context = new TestServerContext();
-        var router = new ModelRouter(context.WrappedOptions);
-
-        var selection = router.Select(CreateRequest(RunMode.Code, "Projekt analysieren"));
-
-        Assert.Equal("code", selection.Role);
-        Assert.Equal(CodingModelCatalog.DefaultModelId, selection.ModelId);
-        Assert.Equal(262_144, selection.ContextLength);
-    }
-
-    [Fact]
-    public void GeneralAndCodeShareGptOssWithoutChangingRoles()
-    {
-        using var context = new TestServerContext();
-        var router = new ModelRouter(context.WrappedOptions);
-        var request = CreateRequest(RunMode.Code, "Behebe den Fehler im Projekt.") with
-        {
-            PreferredCodeModelId = "gpt-oss-120b",
-        };
-
-        var selection = router.Select(request);
-
-        Assert.Equal("code", selection.Role);
-        Assert.Equal("gpt-oss-120b", selection.ModelId);
-        Assert.Equal(131_072, selection.ContextLength);
-    }
-
-    [Fact]
-    public void AutoRoutesCodeAttachmentToSharedCodingModel()
+    public void AutoDoesNotInferAnotherRoleFromCodeLikeAttachmentsOrCapabilities()
     {
         using var context = new TestServerContext();
         var router = new ModelRouter(context.WrappedOptions);
@@ -75,16 +29,16 @@ public sealed class ModelRouterTests
             GoAiProtocol.Version,
             RunMode.Auto,
             [new RunMessage("user", [new ContentPart("file", FileName: "MainWindow.xaml")])],
-            ClientCapabilities: ["code"]);
+            ClientCapabilities: ["documentIo"]);
 
         var selection = router.Select(request);
 
-        Assert.Equal("code", selection.Role);
-        Assert.Equal(context.Options.CodeModelId, selection.ModelId);
+        Assert.Equal("general", selection.Role);
+        Assert.Equal(context.Options.GeneralModelId, selection.ModelId);
     }
 
     [Fact]
-    public void ExplicitGeneralModeHonorsThePersistedClientSelection()
+    public void GeneralModeHonorsThePersistedClientSelection()
     {
         using var context = new TestServerContext();
         var router = new ModelRouter(context.WrappedOptions);

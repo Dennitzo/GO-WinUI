@@ -172,14 +172,6 @@ paths:
             text/event-stream:
               schema:
                 type: string
-              x-go-event-payloads:
-                agent.phase_changed: { $ref: "#/components/schemas/AgentPhaseChangedEvent" }
-                agent.action_started: { $ref: "#/components/schemas/AgentActionStartedEvent" }
-                agent.observation_committed: { $ref: "#/components/schemas/AgentObservationCommittedEvent" }
-                agent.message_started: { $ref: "#/components/schemas/AgentMessageStartedEvent" }
-                agent.message_delta: { $ref: "#/components/schemas/AgentMessageDeltaEvent" }
-                agent.message_completed: { $ref: "#/components/schemas/AgentMessageCompletedEvent" }
-                coding.step_changed: { $ref: "#/components/schemas/CodingStepChangedEvent" }
   /v1/runs/{runId}/client-tool-results:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -829,7 +821,7 @@ components:
         protocolVersion:
           const: "1.0"
         mode:
-          enum: [auto, general, code]
+          enum: [auto, general]
         messages:
           type: array
           minItems: 1
@@ -852,7 +844,7 @@ components:
           type: array
           maxItems: 16
           items:
-            enum: [filesystem, code, process, bricscad, screenCapture, documents, documentIo]
+            enum: [bricscad, screenCapture, documents, documentIo]
         allowedServerTools:
           type: array
           maxItems: 32
@@ -863,23 +855,13 @@ components:
         sessionId:
           type: string
           maxLength: 128
-        workspace:
-          $ref: "#/components/schemas/WorkspaceDescriptor"
         preferredGeneralModelId:
           type: string
           minLength: 1
           maxLength: 512
-        preferredCodeModelId:
-          type: string
-          enum: [qwen3.8-27b, qwen3-coder-next-q8_0, gpt-oss-120b]
         reasoningEffort:
           description: Vom ausgewählten Modell tatsächlich unterstützte Reasoning-Stufe.
           enum: [none, minimal, low, medium, high, xhigh]
-        agentProtocolVersion:
-          description: Version des deterministischen Coding-Agent-Protokolls.
-          type: integer
-          enum: [4]
-          default: 4
         documentContext:
           $ref: "#/components/schemas/DocumentContextDescriptor"
         sessionContext:
@@ -992,25 +974,6 @@ components:
           minItems: 1
           items:
             type: number
-    WorkspaceDescriptor:
-      type: object
-      additionalProperties: false
-      required: [name, fileTree, fileCount]
-      properties:
-        name:
-          type: string
-          minLength: 1
-          maxLength: 256
-        fileTree:
-          type: string
-          minLength: 1
-          maxLength: 256000
-        fileCount:
-          type: integer
-          minimum: 0
-          maximum: 100000
-        isTruncated:
-          type: boolean
     RunMessage:
       type: object
       additionalProperties: false
@@ -1830,108 +1793,6 @@ components:
           enum: [question, instruction, cancel, noise]
         normalizedText:
           type: string
-    AgentPhaseChangedEvent:
-      type: object
-      additionalProperties: false
-      required: [phase, detail, sequence]
-      properties:
-        phase:
-          enum: [orienting, editing, verifying, finishing, blocked, completed]
-        detail: { type: string }
-        sequence: { type: integer, minimum: 0 }
-    AgentActionStartedEvent:
-      type: object
-      additionalProperties: false
-      required: [actionId, sequence, tool, operation]
-      properties:
-        actionId: { type: string }
-        sequence: { type: integer, minimum: 1 }
-        tool: { type: string }
-        operation: { type: string }
-        target: { type: [string, "null"] }
-    AgentObservationCommittedEvent:
-      type: object
-      additionalProperties: false
-      required: [actionId, succeeded]
-      properties:
-        actionId: { type: string }
-        succeeded: { type: boolean }
-        errorCode: { type: [string, "null"] }
-        message: { type: [string, "null"] }
-    AgentMessageStartedEvent:
-      type: object
-      additionalProperties: false
-      required: [itemId, runId, sequence, phase, origin, milestoneFingerprint]
-      properties:
-        itemId: { type: string }
-        runId: { type: string }
-        sequence: { type: integer, minimum: 0 }
-        phase: { enum: [commentary, final_answer] }
-        origin: { enum: [model, host] }
-        milestoneFingerprint: { type: string }
-    AgentMessageDeltaEvent:
-      type: object
-      additionalProperties: false
-      required: [itemId, runId, sequence, deltaIndex, delta, phase, origin, milestoneFingerprint]
-      properties:
-        itemId: { type: string }
-        runId: { type: string }
-        sequence: { type: integer, minimum: 0 }
-        deltaIndex: { type: integer, minimum: 0 }
-        delta: { type: string }
-        phase: { enum: [commentary, final_answer] }
-        origin: { enum: [model, host] }
-        milestoneFingerprint: { type: string }
-    AgentMessageCompletedEvent:
-      type: object
-      additionalProperties: false
-      required: [itemId, runId, sequence, phase, origin, text, milestoneFingerprint, deltaCount]
-      properties:
-        itemId: { type: string }
-        runId: { type: string }
-        sequence: { type: integer, minimum: 0 }
-        phase: { enum: [commentary, final_answer] }
-        origin: { enum: [model, host] }
-        text: { type: string }
-        milestoneFingerprint: { type: string }
-        deltaCount: { type: integer, minimum: 0 }
-    StepContextMetrics:
-      type: object
-      additionalProperties: false
-      required: [estimatedInputTokens, maximumInputTokens, outputTokens, maximumOutputTokens]
-      properties:
-        estimatedInputTokens: { type: integer, minimum: 0 }
-        maximumInputTokens: { type: integer, minimum: 1 }
-        outputTokens: { type: integer, minimum: 0 }
-        maximumOutputTokens: { type: integer, minimum: 1 }
-    CodingStepSnapshot:
-      type: object
-      additionalProperties: false
-      required: [stepId, sequence, kind, status, goal]
-      properties:
-        stepId: { type: string }
-        sequence: { type: integer, minimum: 1 }
-        kind:
-          enum: [capture, researchSearch, researchFetch, researchSummarize, workspaceInspect, mutation, verification, finish]
-        status:
-          enum: [pending, running, waitingForClient, completed, failed, blocked]
-        goal: { type: string }
-        tool: { type: [string, "null"] }
-        target: { type: [string, "null"] }
-        attempt: { type: integer, minimum: 0 }
-        context:
-          oneOf:
-            - $ref: "#/components/schemas/StepContextMetrics"
-            - type: "null"
-        detail: { type: [string, "null"] }
-    CodingStepChangedEvent:
-      type: object
-      additionalProperties: false
-      required: [step]
-      properties:
-        step:
-          $ref: "#/components/schemas/CodingStepSnapshot"
-        transition: { type: [string, "null"] }
     Problem:
       type: object
       required: [type, title, status, detail]

@@ -8,7 +8,6 @@ namespace GoWinUI.App.ViewModels;
 public sealed partial class ShellViewModel : ObservableObject
 {
     private const string GeneralService = "general";
-    private const string CodingService = "coding";
     private const string SpeechToTextService = "speech-to-text";
     private const string TextToSpeechService = "text-to-speech";
     private const string VisionMediaService = "vision-media";
@@ -23,7 +22,6 @@ public sealed partial class ShellViewModel : ObservableObject
     public ShellViewModel()
     {
         AiServices.Add(new(GeneralService, "General AI", "gpt-oss-120b · LM Studio", "\uE950", "General AI - gpt-oss-120b", false, false, "Wird geprüft"));
-        AiServices.Add(new(CodingService, "Coding", "Qwen3.8 27B · Q4_K_M · LM Studio", "\uE943", "Coding-Agent - Qwen3.8 27B", false, false, "Wird geprüft"));
         AiServices.Add(new(SpeechToTextService, "Spracherkennung", "Whisper large-v3 · Docker", "\uE720", "Spracherkennung - Whisper large-v3", false, false, "Wird geprüft"));
         AiServices.Add(new(TextToSpeechService, "Sprachausgabe", "Ausgewählter Provider · GPU 1", "\uE767", "Sprachausgabe - ausgewählter Provider", false, false, "Wird geprüft"));
         AiServices.Add(new(VisionMediaService, "Vision / Medien", "Qwen3-VL + Media Worker", "\uE722", "Vision / Medien - Qwen3-VL", false, false, "Wird geprüft"));
@@ -191,7 +189,6 @@ public sealed partial class ShellViewModel : ObservableObject
     private bool IsServiceReachable(string serviceKey) => serviceKey switch
     {
         GeneralService => IsModelReady("general"),
-        CodingService => IsModelReady("code"),
         SpeechToTextService or TextToSpeechService => IsWorkerReady("Speech"),
         VisionMediaService => IsModelReady("vision") && IsWorkerReady("Media Worker"),
         ImageService => IsWorkerReady("Image Worker"),
@@ -226,7 +223,6 @@ public sealed partial class ShellViewModel : ObservableObject
     private static string? MapWorkload(string workload) => workload switch
     {
         "llm-general" or "caption-translation" => GeneralService,
-        "llm-code" => CodingService,
         "speech-to-text" or "live-caption" or "live-caption-warmup" => SpeechToTextService,
         "text-to-speech" => TextToSpeechService,
         "vision" or "media-analysis" or "audio-analysis" or "video-audio-fusion" => VisionMediaService,

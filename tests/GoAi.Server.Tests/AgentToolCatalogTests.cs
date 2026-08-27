@@ -45,8 +45,8 @@ public sealed class AgentToolCatalogTests
     public void ModelReceivesNamesFirstAndOnlyTheSelectedFullSchemaAfterward()
     {
         var catalog = new AgentToolCatalog();
-        var available = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var selected = catalog.Resolve(ClientToolNames.FileSystemReadText, available);
+        var available = catalog.GetAvailableTools(CreateRequest(["documentIo"]));
+        var selected = catalog.Resolve(ClientToolNames.DocumentRead, available);
 
         var firstStage = Assert.Single(RunProcessor.CreateModelToolDefinitions(available, selectedToolName: null));
         var secondStage = Assert.Single(RunProcessor.CreateModelToolDefinitions(available, selected.Name));
@@ -58,33 +58,26 @@ public sealed class AgentToolCatalogTests
         Assert.Equal(selected.Schema.GetRawText(), secondStage.Parameters.GetRawText());
     }
 
-    private static readonly string[] LeanMainArguments = ["Main.lean"];
-
     [Fact]
     public void ClientToolsAreOnlyAdvertisedForReportedCapabilities()
     {
         var catalog = new AgentToolCatalog();
         var withoutClient = catalog.GetAvailableTools(CreateRequest(null));
-        var withCode = catalog.GetAvailableTools(CreateRequest(["code"]));
+        var withBricsCad = catalog.GetAvailableTools(CreateRequest(["bricscad"]));
 
         Assert.DoesNotContain(withoutClient, static tool => !tool.ServerSide);
-        Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.FileSystemReadText);
-        Assert.DoesNotContain(withCode, static tool => tool.Name == "fs.readMany");
-        Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.FileSystemReplaceText);
-        Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.ProcessRunPreset);
-        Assert.Contains(withCode, static tool => tool.Name == ClientToolNames.LeanProof);
-        Assert.DoesNotContain(withCode, static tool => tool.Name == ClientToolNames.BricsCadMove);
+        Assert.Contains(withBricsCad, static tool => tool.Name == ClientToolNames.BricsCadMove);
+        Assert.DoesNotContain(withBricsCad, static tool => tool.Name == ClientToolNames.DocumentRead);
 
         var withDocuments = catalog.GetAvailableTools(CreateRequest(["documents"]));
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsList);
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsSearch);
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsReadPages);
-        Assert.DoesNotContain(withDocuments, static tool => tool.Name == ClientToolNames.FileSystemWriteText);
+        Assert.DoesNotContain(withDocuments, static tool => tool.Name == ClientToolNames.DocumentCreate);
 
         var withDocumentIo = catalog.GetAvailableTools(CreateRequest(["documentIo"]));
         Assert.Contains(withDocumentIo, static tool => tool.Name == ClientToolNames.DocumentRead);
         Assert.Contains(withDocumentIo, static tool => tool.Name == ClientToolNames.DocumentCreate);
-        Assert.DoesNotContain(withDocumentIo, static tool => tool.Name == ClientToolNames.FileSystemWriteText);
     }
 
     [Fact]
@@ -98,119 +91,13 @@ public sealed class AgentToolCatalogTests
         using var append = JsonDocument.Parse("""{"operation":"appendSection","reference":"00000000-0000-0000-0000-000000000001","format":"pdf","sectionId":"kapitel-2","heading":"Kapitel 2","content":"Text","expectedSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}""");
         using var unbounded = JsonDocument.Parse("""{"scope":"session","mode":"read","reference":"00000000-0000-0000-0000-000000000001","maximumCharacters":40001}""");
         using var staleEdit = JsonDocument.Parse("""{"operation":"replaceSection","reference":"00000000-0000-0000-0000-000000000001","format":"pdf","sectionId":"kapitel-2","content":"Text"}""");
+        using var workspaceRead = JsonDocument.Parse("""{"scope":"workspace","mode":"read","reference":"notes.txt"}""");
 
         catalog.Validate(read, readWindow.RootElement);
         catalog.Validate(create, append.RootElement);
         Assert.Throws<ArgumentException>(() => catalog.Validate(read, unbounded.RootElement));
         Assert.Throws<ArgumentException>(() => catalog.Validate(create, staleEdit.RootElement));
-    }
-
-    [Fact]
-    public void LeanProofSchemaRequiresOperationSpecificFields()
-    {
-        var catalog = new AgentToolCatalog();
-        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var lean = catalog.Resolve(ClientToolNames.LeanProof, tools);
-        using var valid = JsonDocument.Parse("""{"operation":"verify","path":"proofs/Main.lean","theoremName":"Main.result","timeoutSeconds":120}""");
-        using var missingTheorem = JsonDocument.Parse("""{"operation":"verify","path":"proofs/Main.lean"}""");
-        using var freeShell = JsonDocument.Parse("""{"operation":"check","path":"proofs/Main.lean","command":"cmd.exe"}""");
-
-        catalog.Validate(lean, valid.RootElement);
-        Assert.Throws<ArgumentException>(() => catalog.Validate(lean, missingTheorem.RootElement));
-        Assert.Throws<ArgumentException>(() => catalog.Validate(lean, freeShell.RootElement));
-    }
-
-    [Theory]
-    [InlineData("lean")]
-    [InlineData("lean.exe")]
-    [InlineData("C:\\Tools\\lake.exe")]
-    public void GenericProcessRunCannotBypassLeanProofContract(string executable)
-    {
-        var catalog = new AgentToolCatalog();
-        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var process = catalog.Resolve(ClientToolNames.ProcessRun, tools);
-        using var arguments = JsonDocument.Parse(JsonSerializer.Serialize(new
-        {
-            executable,
-            arguments = LeanMainArguments,
-            purpose = "test",
-        }));
-
-        var exception = Assert.Throws<ArgumentException>(() => catalog.Validate(process, arguments.RootElement));
-        Assert.Contains(ClientToolNames.LeanProof, exception.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ReplaceTextRequiresExactBlocksAndRejectsUnknownProperties()
-    {
-        var catalog = new AgentToolCatalog();
-        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var replace = catalog.Resolve(ClientToolNames.FileSystemReplaceText, tools);
-        using var valid = JsonDocument.Parse("""{"path":"ViewModels/ShellViewModel.cs","oldText":"public string Name","newText":"public string DisplayName","expectedContent":"public string Name","expectedContentMode":"fragment"}""");
-        using var invalid = JsonDocument.Parse("""{"path":"ViewModels/ShellViewModel.cs","oldText":"","newText":"x","expectedContent":"","shell":true}""");
-
-        catalog.Validate(replace, valid.RootElement);
-        Assert.Throws<ArgumentException>(() => catalog.Validate(replace, invalid.RootElement));
-
-        using var legacyReplaceAll = JsonDocument.Parse("""{"path":"ViewModels/ShellViewModel.cs","oldText":"Name","newText":"DisplayName","expectedContent":"Name","expectedContentMode":"fragment","replaceAll":true}""");
-        Assert.Throws<ArgumentException>(() => catalog.Validate(replace, legacyReplaceAll.RootElement));
-    }
-
-    [Fact]
-    public void MoveUsesOnlyPathsAndDoesNotRepeatTheWholeFileContent()
-    {
-        var catalog = new AgentToolCatalog();
-        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var move = catalog.Resolve(ClientToolNames.FileSystemMove, tools);
-        using var valid = JsonDocument.Parse("""{"source":"Physik.py","destination":"Archiv/Physik.py"}""");
-        using var legacy = JsonDocument.Parse("""{"source":"Physik.py","destination":"Archiv/Physik.py","expectedContent":"very large source"}""");
-
-        catalog.Validate(move, valid.RootElement);
-        Assert.Throws<ArgumentException>(() => catalog.Validate(move, legacy.RootElement));
-        Assert.DoesNotContain("expectedContent", move.Schema.GetRawText(), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void CreateFileRequiresACompactCompleteToolArgument()
-    {
-        var catalog = new AgentToolCatalog();
-        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var create = catalog.Resolve(ClientToolNames.FileSystemProposeCreate, tools);
-        using var valid = JsonDocument.Parse(JsonSerializer.Serialize(new
-        {
-            path = "Physik.py",
-            content = new string('x', 12_000),
-        }));
-        using var oversized = JsonDocument.Parse(JsonSerializer.Serialize(new
-        {
-            path = "Physik.py",
-            content = new string('x', 12_001),
-        }));
-
-        catalog.Validate(create, valid.RootElement);
-        Assert.Throws<ArgumentException>(() => catalog.Validate(create, oversized.RootElement));
-        Assert.Equal(
-            12_000,
-            create.Schema.GetProperty("properties").GetProperty("content").GetProperty("maxLength").GetInt32());
-    }
-
-    [Fact]
-    public void SourceToolsExposeTargetedReadAndExplicitMissingSearchSemantics()
-    {
-        var catalog = new AgentToolCatalog();
-        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var read = catalog.Resolve(ClientToolNames.FileSystemReadText, tools);
-        var search = catalog.Resolve(ClientToolNames.FileSystemSearch, tools);
-
-        Assert.Equal(
-            12_000,
-            read.Schema.GetProperty("properties").GetProperty("maximumCharacters").GetProperty("maximum").GetInt32());
-        Assert.Contains(ClientToolNames.FileSystemSearch, read.Description, StringComparison.Ordinal);
-        Assert.Equal(
-            100,
-            search.Schema.GetProperty("properties").GetProperty("maximumResults").GetProperty("maximum").GetInt32());
-        Assert.Contains("not_present", search.Description, StringComparison.Ordinal);
-        Assert.Contains("wiederhole", search.Description, StringComparison.OrdinalIgnoreCase);
+        Assert.Throws<ArgumentException>(() => catalog.Validate(read, workspaceRead.RootElement));
     }
 
     [Fact]
@@ -236,95 +123,10 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
-    public void ProcessRunAcceptsWorkspaceFrameworkSetupPurpose()
+    public void LegacyPdfRenderToolIsNotAdvertised()
     {
         var catalog = new AgentToolCatalog();
-        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var process = catalog.Resolve(ClientToolNames.ProcessRun, tools);
-        using var setup = JsonDocument.Parse("""
-            {
-              "executable": "npm.cmd",
-              "arguments": ["install"],
-              "workingDirectory": ".",
-              "purpose": "setup",
-              "startMode": "wait"
-            }
-            """);
-
-        catalog.Validate(process, setup.RootElement);
-    }
-
-    [Fact]
-    public void ProcessPresetDoesNotExposePdfAsAModelTool()
-    {
-        var catalog = new AgentToolCatalog();
-        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var preset = catalog.Resolve(ClientToolNames.ProcessRunPreset, tools);
-        Assert.DoesNotContain("document.renderPdf", preset.Description, StringComparison.Ordinal);
-        Assert.DoesNotContain("document.renderPdf", preset.Schema.GetRawText(), StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData("Erzeuge eine PDF aus dem Lehrbuch.")]
-    [InlineData("Aktualisiere die vorhandene pdf-Datei.")]
-    [InlineData("Render both PDFs with KaTeX.")]
-    [InlineData("Erzeuge eine PDF-Datei.")]
-    public void PdfCodingPromptsDoNotAdvertiseAModelPdfTool(string prompt)
-    {
-        var catalog = new AgentToolCatalog();
-        var request = CreateRequest(["code", "process", "pdf"]) with
-        {
-            Mode = RunMode.Code,
-            Messages = [new RunMessage("user", [new ContentPart("text", prompt)])],
-        };
-
-        var tools = catalog.GetAvailableTools(request);
-
-        Assert.DoesNotContain(tools, static tool => tool.Name == "document.renderPdf");
-    }
-
-    [Fact]
-    public void DedicatedPdfToolDoesNotLeakIntoUnrelatedOrLegacyCodingRuns()
-    {
-        var catalog = new AgentToolCatalog();
-        var unrelated = CreateRequest(["code", "process", "pdf"]) with
-        {
-            Mode = RunMode.Code,
-            Messages =
-            [
-                new RunMessage("user", [new ContentPart("text", "Erzeuge zuerst eine PDF.")]),
-                new RunMessage("assistant", [new ContentPart("text", "Erledigt.")]),
-                new RunMessage(
-                    "user",
-                    [
-                        new ContentPart("text", "Analysiere jetzt nur den C#-Parser."),
-                        new ContentPart("text", "[GO_WORKSPACE]\nWorkspace: PDF-Projekt"),
-                    ]),
-            ],
-        };
-        var legacyClient = unrelated with
-        {
-            Messages = [new RunMessage("user", [new ContentPart("text", "Erzeuge eine PDF.")])],
-            ClientCapabilities = ["code", "process"],
-        };
-
-        Assert.DoesNotContain(
-            catalog.GetAvailableTools(unrelated),
-            static tool => tool.Name == "document.renderPdf");
-        Assert.DoesNotContain(
-            catalog.GetAvailableTools(legacyClient),
-            static tool => tool.Name == "document.renderPdf");
-    }
-
-    [Fact]
-    public void PdfToolIsNotAvailableToCodingRuns()
-    {
-        var catalog = new AgentToolCatalog();
-        var request = CreateRequest(["code", "process", "pdf"]) with
-        {
-            Mode = RunMode.Code,
-            Messages = [new RunMessage("user", [new ContentPart("text", "Erzeuge eine PDF.")])],
-        };
+        var request = CreateRequest(["pdf"]);
         Assert.Throws<InvalidOperationException>(() => catalog.Resolve(
             "document.renderPdf",
             catalog.GetAvailableTools(request)));
@@ -340,22 +142,6 @@ public sealed class AgentToolCatalogTests
 
         Assert.Throws<ArgumentException>(() => catalog.Validate(search, arguments.RootElement));
         Assert.Throws<InvalidOperationException>(() => catalog.Resolve("shell.execute", tools));
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData(".")]
-    public void WorkspaceRootCanBeAddressedConsistently(string path)
-    {
-        var catalog = new AgentToolCatalog();
-        var tools = catalog.GetAvailableTools(CreateRequest(["code"]));
-        var list = catalog.Resolve(ClientToolNames.FileSystemList, tools);
-        var search = catalog.Resolve(ClientToolNames.FileSystemSearch, tools);
-        using var listArguments = JsonDocument.Parse(JsonSerializer.Serialize(new { path }));
-        using var searchArguments = JsonDocument.Parse(JsonSerializer.Serialize(new { path, query = "test" }));
-
-        catalog.Validate(list, listArguments.RootElement);
-        catalog.Validate(search, searchArguments.RootElement);
     }
 
     [Fact]
@@ -388,12 +174,11 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
-    public void CodingRunsExcludeWebResearchFromTheNativeToolCatalog()
+    public void EmptyServerToolAllowListExcludesWebResearch()
     {
         var catalog = new AgentToolCatalog();
-        var request = CreateRequest(["code"]) with
+        var request = CreateRequest([]) with
         {
-            Mode = RunMode.Code,
             AllowedServerTools = [],
         };
 
@@ -406,12 +191,11 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
-    public void CodingRunsAcceptExplicitStagedWebResearchTools()
+    public void GeneralRunsAcceptExplicitStagedWebResearchTools()
     {
         var catalog = new AgentToolCatalog();
-        var request = CreateRequest(["code"]) with
+        var request = CreateRequest([]) with
         {
-            Mode = RunMode.Code,
             AllowedServerTools = ["web.search", "web.fetch", "math.evaluate"],
         };
 
@@ -430,13 +214,12 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
-    public void CodingContextPreparationAdvertisesNoTools()
+    public void ContextPreparationAdvertisesNoTools()
     {
         var request = CreateRequest([]) with
         {
-            Mode = RunMode.Code,
             AllowedServerTools = [],
-            PreferredCodeModelId = GoAi.Server.Core.Configuration.CodingModelCatalog.GptOss120BId,
+            PreferredGeneralModelId = "gpt-oss-120b",
             ConversationProfile = ConversationProfile.ContextPreparation,
         };
 

@@ -28,7 +28,6 @@ public sealed class SettingsLoggingAndBackupTests
 
         var restored = await settings.LoadAsync();
         Assert.Equal(AppSettings.DefaultSelectedModel, restored.SelectedModel);
-        Assert.Equal(AppSettings.DefaultSelectedCodingModel, restored.SelectedCodingModel);
         Assert.Equal("#F4B860", restored.AccentColor);
         Assert.Equal("#34313B", restored.BackgroundColor);
         Assert.Equal(520, restored.NavigationPaneWidth);
@@ -108,68 +107,39 @@ public sealed class SettingsLoggingAndBackupTests
     }
 
     [Fact]
-    public async Task VersionNineSettingsMigrateCodingModelToSharedDockerDefault()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var settings = environment.Get<ISettingsStore>();
-
-        await settings.SaveAsync(new AppSettings { Version = 9, SelectedCodingModel = "legacy-coding-model" });
-
-        var restored = await settings.LoadAsync();
-        Assert.Equal(AppSettings.CurrentVersion, restored.Version);
-        Assert.Equal(AppSettings.DefaultSelectedCodingModel, restored.SelectedCodingModel);
-    }
-
-    [Fact]
-    public async Task LegacySettingsMigrateToQwen38AndCurrentCodingSelectionsPersist()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var settings = environment.Get<ISettingsStore>();
-
-        await settings.SaveAsync(new AppSettings
-        {
-            Version = 13,
-            SelectedCodingModel = "gpt-oss-120b",
-        });
-        Assert.Equal(AppSettings.DefaultSelectedCodingModel, (await settings.LoadAsync()).SelectedCodingModel);
-
-        await settings.SaveAsync(new AppSettings
-        {
-            Version = AppSettings.CurrentVersion,
-            SelectedCodingModel = "gpt-oss-120b",
-        });
-        Assert.Equal("gpt-oss-120b", (await settings.LoadAsync()).SelectedCodingModel);
-
-        await settings.SaveAsync(new AppSettings
-        {
-            Version = AppSettings.CurrentVersion,
-            SelectedCodingModel = "qwen3-coder-next-q8_0",
-        });
-        Assert.Equal("qwen3-coder-next-q8_0", (await settings.LoadAsync()).SelectedCodingModel);
-    }
-
-    [Fact]
     public async Task CurrentSettingsPreserveDynamicallyDiscoveredModelIds()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var settings = environment.Get<ISettingsStore>();
         const string dynamicGeneralModel = "vendor/new-general-model:q8_0";
-        const string dynamicCodingModel = "vendor/new-coding-model:q6_k";
 
         await settings.SaveAsync(new AppSettings
         {
             Version = AppSettings.CurrentVersion,
             SelectedModel = dynamicGeneralModel,
-            SelectedCodingModel = dynamicCodingModel,
         });
 
         var restored = await settings.LoadAsync();
         Assert.Equal(dynamicGeneralModel, restored.SelectedModel);
-        Assert.Equal(dynamicCodingModel, restored.SelectedCodingModel);
     }
 
     [Fact]
-    public async Task GeneralAndCodingModelSelectionsSurviveCoordinatorRestart()
+    public async Task TerminalOnlyModelIsNotRestoredAsTheGeneralUiModel()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+
+        await settings.SaveAsync(new AppSettings
+        {
+            Version = AppSettings.CurrentVersion,
+            SelectedModel = "qwen3-coder-next",
+        });
+
+        Assert.Equal(AppSettings.DefaultSelectedModel, (await settings.LoadAsync()).SelectedModel);
+    }
+
+    [Fact]
+    public async Task GeneralModelSelectionSurvivesCoordinatorRestart()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var store = environment.Get<ISettingsStore>();
@@ -180,14 +150,12 @@ public sealed class SettingsLoggingAndBackupTests
             await first.UpdateAsync(current => current with
             {
                 SelectedModel = "general-after-restart",
-                SelectedCodingModel = "coding-after-restart",
             });
         }
 
         using var second = new SettingsCoordinator(store);
         await second.InitializeAsync();
         Assert.Equal("general-after-restart", second.Current.SelectedModel);
-        Assert.Equal("coding-after-restart", second.Current.SelectedCodingModel);
     }
 
     [Fact]

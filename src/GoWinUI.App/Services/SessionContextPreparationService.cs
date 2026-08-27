@@ -30,7 +30,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         IReadOnlyList<ChatMessage> history,
         string currentPrompt,
         string selectedModelId,
-        bool coding,
         SessionContextProfile profile,
         int? knownContextLength,
         int? knownHistoryBudgetCharacters,
@@ -42,7 +41,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         ArgumentNullException.ThrowIfNull(currentPrompt);
         ArgumentNullException.ThrowIfNull(progress);
 
-        profile = coding ? SessionContextProfile.Code : profile;
         ArgumentException.ThrowIfNullOrWhiteSpace(currentPrompt);
 
         var eligible = SelectEligibleHistory(history, profile);
@@ -50,7 +48,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         var (modelId, contextLength) = await ResolveModelAsync(
             client,
             selectedModelId,
-            coding,
             knownContextLength,
             cancellationToken).ConfigureAwait(false);
         var historyBudget = knownHistoryBudgetCharacters
@@ -179,7 +176,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                             reusable.PreparedText,
                             additional,
                             modelId,
-                            coding,
                             profile,
                             contextLength,
                             summaryBudget,
@@ -197,7 +193,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                         sessionId,
                         older,
                         modelId,
-                        coding,
                         profile,
                         contextLength,
                         summaryBudget,
@@ -267,7 +262,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                 sessionId,
                 SplitText(combinedHistory.ToString(), CalculatePreparationInputCharacters(contextLength)),
                 modelId,
-                coding: false,
                 profile,
                 contextLength,
                 finalTarget,
@@ -292,7 +286,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                     sessionId,
                     SplitText(preparedText, CalculatePreparationInputCharacters(contextLength)),
                     modelId,
-                    coding: false,
                     profile,
                     contextLength,
                     Math.Max(256, historyBudget - 768),
@@ -388,7 +381,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         Guid sessionId,
         ChatMessage[] messages,
         string modelId,
-        bool coding,
         SessionContextProfile profile,
         int contextLength,
         int targetCharacters,
@@ -402,7 +394,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             sessionId,
             blocks,
             modelId,
-            coding,
             profile,
             contextLength,
             targetCharacters,
@@ -416,7 +407,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         string preparedHistory,
         ChatMessage[] additionalMessages,
         string modelId,
-        bool coding,
         SessionContextProfile profile,
         int contextLength,
         int targetCharacters,
@@ -440,7 +430,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             sessionId,
             blocks,
             modelId,
-            coding,
             profile,
             contextLength,
             targetCharacters,
@@ -453,7 +442,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         Guid sessionId,
         List<string> blocks,
         string modelId,
-        bool coding,
         SessionContextProfile profile,
         int contextLength,
         int targetCharacters,
@@ -481,7 +469,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                 sessionId,
                 blocks[index],
                 modelId,
-                coding,
                 profile,
                 contextLength,
                 initialBlockTarget,
@@ -510,7 +497,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                     sessionId,
                     reductionBlocks[index],
                     modelId,
-                    coding,
                     profile,
                     contextLength,
                     reductionTarget,
@@ -535,7 +521,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         Guid sessionId,
         string historyBlock,
         string modelId,
-        bool coding,
         SessionContextProfile profile,
         int contextLength,
         int targetCharacters,
@@ -575,7 +560,6 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             sessionId,
             parts,
             modelId,
-            coding,
             contextLength,
             targetCharacters);
         var accepted = await client.CreateRunAsync(
@@ -631,11 +615,10 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         Guid sessionId,
         IReadOnlyList<ContentPart> parts,
         string modelId,
-        bool coding,
         int contextLength,
         int targetCharacters) => new(
             GoAiProtocol.Version,
-            coding ? RunMode.Code : RunMode.General,
+            RunMode.General,
             [new RunMessage("user", parts)],
             ClientCapabilities: [],
             Limits: new RunLimits(
@@ -644,15 +627,13 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                 TimeoutSeconds: 3_600),
             SessionId: sessionId.ToString("D"),
             AllowedServerTools: [],
-            PreferredGeneralModelId: coding ? null : modelId,
-            PreferredCodeModelId: coding ? modelId : null,
+            PreferredGeneralModelId: modelId,
             ConversationProfile: ConversationProfile.ContextPreparation,
             ReasoningEffort: null);
 
     private static async Task<(string ModelId, int ContextLength)> ResolveModelAsync(
         GoAiClient client,
         string selectedModelId,
-        bool coding,
         int? knownContextLength,
         CancellationToken cancellationToken)
     {
@@ -665,17 +646,12 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         {
             throw new InvalidOperationException("Die Modellkontextlänge für den Sitzungsverlauf konnte nicht ermittelt werden.");
         }
-        var model = coding
-            ? status.Models.FirstOrDefault(item => item.Downloaded
-                && item.Role == "code"
-                && string.Equals(item.Id, selectedModelId, StringComparison.OrdinalIgnoreCase))
-            : status.Models.FirstOrDefault(item => item.Downloaded
-                && string.Equals(item.Id, selectedModelId, StringComparison.OrdinalIgnoreCase));
+        var model = status.Models.FirstOrDefault(item => item.Downloaded
+            && string.Equals(item.Id, selectedModelId, StringComparison.OrdinalIgnoreCase));
         if (model is null)
         {
-            throw new InvalidOperationException(coding
-                ? $"Das ausgewählte Codingmodell '{selectedModelId}' ist nicht verfügbar."
-                : $"Das ausgewählte General-AI-Modell '{selectedModelId}' ist nicht verfügbar.");
+            throw new InvalidOperationException(
+                $"Das ausgewählte General-AI-Modell '{selectedModelId}' ist nicht verfügbar.");
         }
         return (model.Id, Math.Max(2_048, knownContextLength ?? model.ContextTokens));
     }

@@ -98,9 +98,7 @@ public static class TgaAgentPolicies
           Der Sitzungstitel wird unabhängig von der sichtbaren Modellantwort erzeugt und übertragen.
         """;
 
-    public static string ForRole(string role) => string.Equals(role, "code", StringComparison.Ordinal)
-        ? string.Empty
-        : GeneralCoordinator;
+    public static string ForRole(string role) => GeneralCoordinator;
 
     public static string ForConversation(
         string role,
@@ -115,9 +113,7 @@ public static class TgaAgentPolicies
         var envelope = new
         {
             schema = "go.ai.agent.envelope.v1",
-            route = isAudiobook
-                ? "audiobook"
-                : string.Equals(role, "code", StringComparison.Ordinal) ? "code" : "general",
+            route = isAudiobook ? "audiobook" : "general",
             conversationProfile = request.ConversationProfile?.ToString().ToLowerInvariant() ?? "general",
             expectedResponse = "go.ai.agent.message.v1",
             toolSelection = effectiveTools.Count == 0 ? "none" : "names_then_selected_schema",
@@ -133,9 +129,8 @@ public static class TgaAgentPolicies
             execution = new
             {
                 serverToolsOnlyOnServer = true,
-                clientMutationsRequireConfirmation = !string.Equals(role, "code", StringComparison.Ordinal),
-                workspaceBoundedAutonomy = string.Equals(role, "code", StringComparison.Ordinal),
-                directProcessArgumentsAllowed = string.Equals(role, "code", StringComparison.Ordinal),
+                clientMutationsRequireConfirmation = true,
+                directProcessArgumentsAllowed = false,
                 privilegeElevationAllowed = false,
                 rawChainOfThoughtAllowed = false,
             },
@@ -161,7 +156,7 @@ public static class TgaAgentPolicies
 
     private static string WebResearchPolicy(string role, IReadOnlyList<string> effectiveTools)
     {
-        if (role is not ("general" or "code")
+        if (role != "general"
             || !effectiveTools.Contains("web.search", StringComparer.Ordinal)
             || !effectiveTools.Contains("web.fetch", StringComparer.Ordinal))
         {

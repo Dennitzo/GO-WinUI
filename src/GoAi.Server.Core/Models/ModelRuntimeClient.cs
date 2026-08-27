@@ -266,9 +266,7 @@ public sealed class ModelRuntimeClient : IDisposable
         var modelContext = TryGetRuntimeModel(modelId, out var catalogModel)
             && catalogModel.MaximumContextLength > 0
                 ? catalogModel.MaximumContextLength
-                : string.Equals(modelRole, "code", StringComparison.OrdinalIgnoreCase)
-                    ? ModelContextProfiles.ResolveMaximum(modelId, modelRole)
-                    : _options.GeneralContextLength;
+                : ModelContextProfiles.ResolveMaximum(modelId, modelRole);
         var context = requiredContextLength is { } requested
             ? Math.Clamp(requested, 1, modelContext)
             : modelContext;
@@ -1503,7 +1501,7 @@ public sealed class ModelRuntimeClient : IDisposable
 
     private static void ApplyModelSampling(Dictionary<string, object?> body, string modelId)
     {
-        if (!CodingModelCatalog.TryGet(modelId, out var profile)
+        if (!LmStudioModelCatalog.TryGet(modelId, out var profile)
             || !string.Equals(profile.SamplingProfile, "qwen3-coder-next", StringComparison.Ordinal))
         {
             return;
@@ -1618,9 +1616,9 @@ public sealed class ModelRuntimeClient : IDisposable
 
     private static string ResolveKnownRuntimeModelId(string modelId) => modelId.ToLowerInvariant() switch
     {
-        CodingModelCatalog.GptOss120BId => CodingModelCatalog.GptOss120BRuntimeId,
-        CodingModelCatalog.Qwen38Id => CodingModelCatalog.Qwen38RuntimeId,
-        CodingModelCatalog.Qwen3CoderNextQ8Id => CodingModelCatalog.Qwen3CoderNextRuntimeId,
+        LmStudioModelCatalog.GptOss120BId => LmStudioModelCatalog.GptOss120BRuntimeId,
+        LmStudioModelCatalog.Qwen38Id => LmStudioModelCatalog.Qwen38RuntimeId,
+        LmStudioModelCatalog.Qwen3CoderNextQ8Id => LmStudioModelCatalog.Qwen3CoderNextRuntimeId,
         "qwen3-vl-30b-a3b-instruct" => "qwen3-vl-30b-a3b-instruct",
         "text-embedding-bge-m3" => "text-embedding-bge-m3",
         _ => modelId,
@@ -1769,7 +1767,6 @@ public sealed class ModelRuntimeClient : IDisposable
             }
 
             statuses.Add(CreateRuntimeStatus(model, "general", context, displayName, loaded));
-            statuses.Add(CreateRuntimeStatus(model, "code", context, displayName, loaded));
             if (model.SupportsVision)
             {
                 statuses.Add(CreateRuntimeStatus(model, "vision", context, displayName, loaded));

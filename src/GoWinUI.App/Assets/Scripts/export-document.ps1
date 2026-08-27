@@ -80,9 +80,9 @@ $title = [IO.Path]::GetFileNameWithoutExtension($source)
 $sourceBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sourceText))
 $titleBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($title))
 
-$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('GO-SolutionPdf-' + [Guid]::NewGuid().ToString('N'))
+$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('GO-DocumentPdf-' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
-$htmlPath = Join-Path $temporaryRoot 'solution.html'
+$htmlPath = Join-Path $temporaryRoot 'document.html'
 $validationProfilePath = Join-Path $temporaryRoot 'edge-profile-validation'
 $printProfilePath = Join-Path $temporaryRoot 'edge-profile-print'
 [IO.Directory]::CreateDirectory($validationProfilePath) | Out-Null
@@ -109,14 +109,14 @@ $html = @"
 <body class="pdf-exporting">
   <article class="pdf-book pdf-book--message">
     <header class="pdf-book__header">
-      <div class="pdf-book__eyebrow">GO · CODING WORKFLOW</div>
-      <h1 id="solution-title"></h1>
-      <p>Verifizierte Lösung · A4-Buchformat</p>
+      <div class="pdf-book__eyebrow">GO · DOKUMENT</div>
+      <h1 id="document-title"></h1>
+      <p>Erzeugtes Dokument · A4-Buchformat</p>
     </header>
     <section class="pdf-book__content">
       <article class="message assistant">
         <div class="message-body">
-          <div id="solution-content" class="message-content"></div>
+          <div id="document-content" class="message-content"></div>
         </div>
       </article>
     </section>
@@ -124,12 +124,12 @@ $html = @"
   </article>
   <script>
     const decodeUtf8 = value => new TextDecoder().decode(Uint8Array.from(atob(value), character => character.charCodeAt(0)));
-    document.getElementById('solution-title').textContent = decodeUtf8('$titleBase64');
-    const solutionContent = document.getElementById('solution-content');
-    solutionContent.append(globalThis.goMarkdown.render(decodeUtf8('$sourceBase64')));
+    document.getElementById('document-title').textContent = decodeUtf8('$titleBase64');
+    const documentContent = document.getElementById('document-content');
+    documentContent.append(globalThis.goMarkdown.render(decodeUtf8('$sourceBase64')));
     document.body.dataset.goPdfReady = 'true';
-    document.body.dataset.goKatexInvalid = String(solutionContent.querySelectorAll('.math-selectable.invalid').length);
-    document.body.dataset.goKatexRendered = String(solutionContent.querySelectorAll('.math-render[data-math-typeset="true"] .katex').length);
+    document.body.dataset.goKatexInvalid = String(documentContent.querySelectorAll('.math-selectable.invalid').length);
+    document.body.dataset.goKatexRendered = String(documentContent.querySelectorAll('.math-render[data-math-typeset="true"] .katex').length);
   </script>
 </body>
 </html>
@@ -206,3 +206,4 @@ finally {
         Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+

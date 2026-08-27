@@ -109,7 +109,6 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             GoAiProtocolVersion = string.IsNullOrWhiteSpace(settings.GoAiProtocolVersion)
                 ? "1.0"
                 : settings.GoAiProtocolVersion.Trim(),
-            LocalToolWorkspacePath = NormalizeWorkspace(settings.LocalToolWorkspacePath),
             LiveCaptionLanguage = settings.Version < 5
                 && string.Equals(settings.LiveCaptionLanguage, "de", StringComparison.OrdinalIgnoreCase)
                     ? "auto"
@@ -117,7 +116,6 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
                         ? "auto"
                         : settings.LiveCaptionLanguage.Trim(),
             SelectedModel = NormalizeGeneralModel(settings.SelectedModel),
-            SelectedCodingModel = NormalizeCodingModel(settings.Version, settings.SelectedCodingModel),
             ReasoningEffort = NormalizeReasoningEffort(settings.Version, settings.ReasoningEffort),
             AccentColor = accentColor,
             BackgroundColor = backgroundColor,
@@ -130,27 +128,21 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         };
     }
 
-    private static string NormalizeCodingModel(int settingsVersion, string? value)
-    {
-        if (settingsVersion < 15)
-        {
-            return AppSettings.DefaultSelectedCodingModel;
-        }
-
-        return NormalizeModelId(value, AppSettings.DefaultSelectedCodingModel);
-    }
-
     private static string NormalizeGeneralModel(string? value)
     {
         var normalized = value?.Trim();
         if (string.IsNullOrWhiteSpace(normalized)
-            || normalized.Contains("gpt-oss-120b", StringComparison.OrdinalIgnoreCase))
+            || normalized.Contains("gpt-oss-120b", StringComparison.OrdinalIgnoreCase)
+            || IsTerminalOnlyModel(normalized))
         {
             return AppSettings.DefaultSelectedModel;
         }
 
         return NormalizeModelId(normalized, AppSettings.DefaultSelectedModel);
     }
+
+    private static bool IsTerminalOnlyModel(string value) =>
+        value.Contains("qwen3-coder-next", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeModelId(string? value, string fallback)
     {
@@ -167,22 +159,6 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         _ = settingsVersion;
         _ = value;
         return "auto";
-    }
-
-    private static string? NormalizeWorkspace(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-        try
-        {
-            return Path.GetFullPath(value.Trim());
-        }
-        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
-        {
-            return null;
-        }
     }
 
     private static string NormalizePaletteColor(string? value, string fallback)

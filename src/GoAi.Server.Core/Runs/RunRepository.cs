@@ -3,6 +3,8 @@ using GoAi.Server.Core.Data;
 using Microsoft.Data.Sqlite;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace GoAi.Server.Core.Runs;
 
@@ -10,11 +12,16 @@ public sealed class RunRepository
 {
     private readonly GoAiDatabase _database;
     private readonly RunEventNotifier _notifier;
+    private readonly JsonSerializerOptions _checkpointJsonOptions;
 
     public RunRepository(GoAiDatabase database, RunEventNotifier notifier)
     {
         _database = database;
         _notifier = notifier;
+        _checkpointJsonOptions = new JsonSerializerOptions(database.JsonOptions)
+        {
+            UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
+        };
     }
 
     public async Task<(RunSnapshot Snapshot, bool Created)> CreateAsync(
@@ -118,7 +125,7 @@ public sealed class RunRepository
         command.CommandText = "SELECT request_json FROM runs WHERE run_id = $id;";
         command.Parameters.AddWithValue("$id", runId);
         var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
-        return json is null ? null : JsonSerializer.Deserialize<RunRequest>(json, _database.JsonOptions);
+        return json is null ? null : DeserializeRequest(json, _database.JsonOptions);
     }
 
     public async Task<RunSnapshot?> GetAsync(string runId, CancellationToken cancellationToken = default)
@@ -241,6 +248,23 @@ public sealed class RunRepository
             interrupt.Parameters.AddWithValue("$running", RunState.Running.ToString());
             interrupt.Parameters.AddWithValue("$now", GoAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
             _ = await interrupt.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var retireRemovedModes = connection.CreateCommand())
+        {
+            retireRemovedModes.Transaction = (SqliteTransaction)transaction;
+            retireRemovedModes.CommandText = """
+                UPDATE runs
+                SET state = $failed, error_code = 'run.mode_removed', updated_at = $now
+                WHERE mode = 'Code' AND state IN ($queued, $running, $waiting, $interrupted);
+                """;
+            retireRemovedModes.Parameters.AddWithValue("$failed", RunState.Failed.ToString());
+            retireRemovedModes.Parameters.AddWithValue("$queued", RunState.Queued.ToString());
+            retireRemovedModes.Parameters.AddWithValue("$running", RunState.Running.ToString());
+            retireRemovedModes.Parameters.AddWithValue("$waiting", RunState.WaitingForClient.ToString());
+            retireRemovedModes.Parameters.AddWithValue("$interrupted", RunState.Interrupted.ToString());
+            retireRemovedModes.Parameters.AddWithValue("$now", GoAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
+            _ = await retireRemovedModes.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         var queued = new List<string>();
@@ -436,7 +460,9 @@ public sealed class RunRepository
         command.CommandText = "SELECT checkpoint_json FROM run_checkpoints WHERE run_id = $run;";
         command.Parameters.AddWithValue("$run", runId);
         var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
-        return json is null ? null : JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _database.JsonOptions);
+        return json is null
+            ? null
+            : JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
     }
 
     public async Task DeleteCheckpointAsync(string runId, CancellationToken cancellationToken = default)
@@ -472,11 +498,39 @@ public sealed class RunRepository
     private static RunSnapshot ReadSnapshot(SqliteDataReader reader) => new(
         reader.GetString(0),
         Enum.Parse<RunState>(reader.GetString(1), ignoreCase: false),
-        Enum.Parse<RunMode>(reader.GetString(2), ignoreCase: false),
+        ReadRunMode(reader.GetString(2)),
         reader.IsDBNull(3) ? null : reader.GetString(3),
         reader.IsDBNull(4) ? null : reader.GetString(4),
         reader.GetInt64(5),
         GoAiDatabase.ParseTimestamp(reader.GetString(6)),
         GoAiDatabase.ParseTimestamp(reader.GetString(7)),
         reader.IsDBNull(8) ? null : reader.GetString(8));
+
+    private static RunMode ReadRunMode(string value) =>
+        string.Equals(value, "Code", StringComparison.OrdinalIgnoreCase)
+            ? RunMode.General
+            : Enum.Parse<RunMode>(value, ignoreCase: false);
+
+    private static RunRequest? DeserializeRequest(string json, JsonSerializerOptions options)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<RunRequest>(json, options);
+        }
+        catch (JsonException)
+        {
+            var root = JsonNode.Parse(json)?.AsObject();
+            if (root is null
+                || !string.Equals(root["mode"]?.GetValue<string>(), "code", StringComparison.OrdinalIgnoreCase))
+            {
+                throw;
+            }
+
+            root["mode"] = "general";
+            // Legacy coding payloads may still contain this field; normalize it away while recovering stored runs.
+            _ = root.Remove("preferredCodeModelId");
+            return JsonSerializer.Deserialize<RunRequest>(root.ToJsonString(), options);
+        }
+    }
+
 }

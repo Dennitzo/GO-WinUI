@@ -98,68 +98,18 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void CodingContextTraceIgnoresTokenOnlyRetryChanges()
+    public void PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts()
     {
-        var first = new ContextChangedEvent(
-            51_226,
-            262_144,
-            26,
-            false,
-            ContextMode: "none");
-        var retry = first with { EstimatedInputTokens = 51_337 };
-        var additionalFiles = retry with { LoadedFiles = 27 };
-
-        Assert.Equal(
-            GoAiAssistantService.CodingContextTraceFingerprint(first),
-            GoAiAssistantService.CodingContextTraceFingerprint(retry));
-        Assert.NotEqual(
-            GoAiAssistantService.CodingContextTraceFingerprint(first),
-            GoAiAssistantService.CodingContextTraceFingerprint(additionalFiles));
-    }
-
-    [Fact]
-    public void WorkspacePickerIsAcceptedByNativeAndWebBridgeContracts()
-    {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("workspace.pick"));
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        Assert.Contains("\"workspace.pick\"", bridge, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void PersistentSessionToolIsAcceptedAndLegacySessionModeRemainsCompatible()
-    {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.mode"));
         Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.tool"));
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("campaign.loadWorkflow"));
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        Assert.Contains("\"session.mode\"", bridge, StringComparison.Ordinal);
         Assert.Contains("\"session.tool\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"campaign.loadWorkflow\"", bridge, StringComparison.Ordinal);
 
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
         Assert.Contains("bridge.js?v=20260821-2", html, StringComparison.Ordinal);
 
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         Assert.Contains("post(\"session.tool\"", app, StringComparison.Ordinal);
-        Assert.Contains("campaign.loadWorkflow", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void CodingWorkflowOverlayUsesTheSameEditAndDeleteFooterAsChatWorkflows()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-
-        Assert.Contains("function preferredCampaignWorkflow()", app, StringComparison.Ordinal);
-        Assert.Contains("const workflow = preferredCampaignWorkflow();", app, StringComparison.Ordinal);
-        Assert.Contains("setWorkflowFooterMode(\"preview\", selectedWorkflow);", app, StringComparison.Ordinal);
-        Assert.Contains("if (workflow && !workflow.isBuiltIn) showWorkflowEditor(workflow);", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"workflow.delete\", { workflowId: workflow.id", app, StringComparison.Ordinal);
-        Assert.Contains("id=\"delete-workflow\"", html, StringComparison.Ordinal);
-        Assert.Contains("id=\"edit-workflow\"", html, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -177,6 +127,9 @@ public sealed class AssistantWorkflowTests
         Assert.DoesNotContain("className = `session-pin", app, StringComparison.Ordinal);
         Assert.Contains("item.append(open, remove)", app, StringComparison.Ordinal);
         Assert.Contains("session.isPinned ? \" pinned\"", app, StringComparison.Ordinal);
+        Assert.Contains("state.sessions.some(session => !session.isPinned)", app, StringComparison.Ordinal);
+        Assert.Contains("Angepinnte Sitzungen bleiben erhalten", app, StringComparison.Ordinal);
+        Assert.Contains("Alle nicht angepinnten Sitzungen löschen", html, StringComparison.Ordinal);
         Assert.Contains("class=\"pdf-chip\"", html, StringComparison.Ordinal);
     }
 
@@ -287,7 +240,6 @@ public sealed class AssistantWorkflowTests
         Assert.DoesNotContain("id=\"capture-clip\"", html, StringComparison.Ordinal);
         Assert.Contains("data-tool-action=\"webSearch\"", html, StringComparison.Ordinal);
         Assert.Contains("data-tool-action=\"imageGeneration\"", html, StringComparison.Ordinal);
-        Assert.Contains("data-tool-action=\"code\"", html, StringComparison.Ordinal);
         Assert.Contains("Vorlesen", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.speak\", {", app, StringComparison.Ordinal);
         Assert.Contains("messageId: String(message.id)", app, StringComparison.Ordinal);
@@ -315,7 +267,6 @@ public sealed class AssistantWorkflowTests
     [InlineData("imageGeneration", PromptTriggerAction.ImageGeneration)]
     [InlineData("youTubeSearch", PromptTriggerAction.YouTubeSearch)]
     [InlineData("bricsCad", PromptTriggerAction.BricsCad)]
-    [InlineData("code", PromptTriggerAction.Code)]
     [InlineData("audiobook", PromptTriggerAction.Audiobook)]
     [InlineData("textToSpeech", PromptTriggerAction.TextToSpeech)]
     public void ExplicitComposerToolCreatesOneShotTrigger(string tool, PromptTriggerAction expected)
@@ -331,7 +282,7 @@ public sealed class AssistantWorkflowTests
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
-        using var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
         var session = await environment.Get<IChatRepository>().CreateSessionAsync("Parallel vorlesen");
 
         using var speechPayload = JsonDocument.Parse(JsonSerializer.Serialize(new
@@ -351,7 +302,7 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void PersistedCodingProcessReportCanAlwaysBeReadAloud()
+    public void PersistedProcessReportCanAlwaysBeReadAloud()
     {
         var now = DateTimeOffset.UtcNow;
         var message = new ChatMessage(
@@ -475,7 +426,6 @@ public sealed class AssistantWorkflowTests
         Assert.DoesNotContain("remove.disabled = state.isRunning", app, StringComparison.Ordinal);
         Assert.DoesNotContain(".session-delete:disabled", styles, StringComparison.Ordinal);
         Assert.Contains(".session-item:hover .session-delete", styles, StringComparison.Ordinal);
-        Assert.Contains("elements.workspaceButton.classList.remove(\"active\")", app, StringComparison.Ordinal);
         Assert.Contains("post(\"audioCapture.start\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
         Assert.Contains("Systemaudio aufnehmen", app, StringComparison.Ordinal);
         Assert.DoesNotContain("goAnalysisAudioCapture", voice, StringComparison.Ordinal);
@@ -502,7 +452,7 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void SettingsExposeIndependentGeneralAndCodingModelSelectors()
+    public void SettingsExposeOnlyTheGeneralModelSelector()
     {
         var settingsPage = File.ReadAllText(Path.Combine(
             FindRepositoryRoot(),
@@ -520,28 +470,21 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("Header=\"General AI Modell\"", settingsPage, StringComparison.Ordinal);
         Assert.Contains("ViewModel.Models", settingsPage, StringComparison.Ordinal);
         Assert.Contains("ViewModel.SelectedGeneralModelItem", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("Header=\"Coding AI Modell\"", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("ViewModel.CodingModels", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("ViewModel.SelectedCodingModelItem", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("settings.Current.SelectedCodingModel", settingsViewModel, StringComparison.Ordinal);
-        Assert.Contains("SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);", settingsViewModel, StringComparison.Ordinal);
-        Assert.Contains("SelectedCodingModel = PreferCurrentSelection(", settingsViewModel, StringComparison.Ordinal);
-        Assert.Contains("SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);", settingsViewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("Coding AI Modell", settingsPage, StringComparison.Ordinal);
+        Assert.DoesNotContain("SelectedCodingModel", settingsViewModel, StringComparison.Ordinal);
+        Assert.True(SettingsViewModel.IsTerminalOnlyModel("qwen3-coder-next"));
         Assert.DoesNotContain("status = await SaveAsync(cancellationToken);", settingsViewModel, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void GeneralCodingGeneralModeSwitchAlwaysUsesThePersistedRoleSelection()
+    public void GeneralModelSelectionUsesThePersistedValue()
     {
         var settings = new AppSettings
         {
             SelectedModel = "general-model",
-            SelectedCodingModel = "coding-model",
         };
 
-        Assert.Equal("general-model", GoAiAssistantService.ResolvePreferredModel(settings, coding: false));
-        Assert.Equal("coding-model", GoAiAssistantService.ResolvePreferredModel(settings, coding: true));
-        Assert.Equal("general-model", GoAiAssistantService.ResolvePreferredModel(settings, coding: false));
+        Assert.Equal("general-model", GoAiAssistantService.ResolvePreferredModel(settings));
     }
 
     [Fact]
@@ -1126,7 +1069,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("background-color: Highlight", styles, StringComparison.Ordinal);
         Assert.Contains("\"speech.progress\"", bridge, StringComparison.Ordinal);
         Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("speech.progress"));
-        Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("chat.removed"));
+        Assert.False(AssistantWebBridge.IsOutgoingTypeAllowed("chat.removed"));
     }
 
     [Fact]
@@ -1164,7 +1107,7 @@ public sealed class AssistantWorkflowTests
             "image/png",
             sha256,
             png.Length,
-            "coding-campaign",
+            "go-ai",
             null,
             source);
         var cacheRoot = Path.Combine(environment.Directory, "preview-cache");
@@ -1238,32 +1181,7 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void CodingAgentAlwaysReceivesSafeWebResearchOperations()
-    {
-        var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.Code);
-
-        Assert.Contains("web.search", tools);
-        Assert.Contains("web.fetch", tools);
-        Assert.Contains("math.evaluate", tools);
-        Assert.DoesNotContain("youtube.search", tools);
-    }
-
-    [Theory]
-    [InlineData("Nutze Websuche für die aktuelle WinUI API.")]
-    [InlineData("Recherchiere im Web und implementiere danach die Änderung.")]
-    [InlineData("Suche im Web nach der offiziellen Spezifikation.")]
-    public void ExplicitCodingWebResearchEnablesOnlyTheStagedResearchTools(string prompt)
-    {
-        var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.Code, prompt);
-
-        Assert.Contains("web.search", tools);
-        Assert.Contains("web.fetch", tools);
-        Assert.Contains("math.evaluate", tools);
-        Assert.DoesNotContain("youtube.search", tools);
-    }
-
-    [Fact]
-    public void GeneralWebSearchActionReceivesSearchAndSafePageFetchTools()
+    public void YouTubeSearchActionReceivesYouTubeAndFetchTools()
     {
         var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.WebSearch);
 
@@ -1284,73 +1202,6 @@ public sealed class AssistantWorkflowTests
         Assert.DoesNotContain("web.search", transformed, StringComparison.Ordinal);
         Assert.DoesNotContain("web.fetch", transformed, StringComparison.Ordinal);
         Assert.EndsWith(prompt, transformed, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void OrdinaryCodingPromptIsNotForcedThroughWebResearch()
-    {
-        const string prompt = "Behebe den NullReferenceException-Test im vorhandenen Projekt.";
-
-        Assert.Equal(prompt, GoAiAssistantService.BuildCodingPrompt(prompt));
-    }
-
-    [Theory]
-    [InlineData("Erstelle aus dem Manuskript eine PDF.")]
-    [InlineData("Render the PDFs again.")]
-    [InlineData("Behebe den PDF-Export.")]
-    public void CodingPromptsArePassedThroughWithoutInjectedInstructions(string prompt)
-    {
-        var transformed = GoAiAssistantService.BuildCodingPrompt(prompt);
-
-        Assert.Equal(prompt, transformed);
-    }
-
-    [Theory]
-    [InlineData("web.search", false, "Websuche wird ausgef\u00FChrt")]
-    [InlineData("web.search", true, "Websuche abgeschlossen")]
-    [InlineData("web.fetch", false, "Webseite wird gelesen")]
-    [InlineData("web.fetch", true, "Webseite gelesen")]
-    public void CodingTraceNamesWebResearchStepsClearly(string tool, bool completed, string expected)
-    {
-        Assert.Equal(expected, GoAiAssistantService.CodingServerToolTitle(tool, completed));
-    }
-
-    [Theory]
-    [InlineData(CodingAgentPhase.Orienting, "Coding-Agent orientiert sich")]
-    [InlineData(CodingAgentPhase.Editing, "Coding-Agent bearbeitet den Workspace")]
-    [InlineData(CodingAgentPhase.Verifying, "Coding-Agent prüft Änderungen")]
-    [InlineData(CodingAgentPhase.Finishing, "Coding-Agent gleicht die Abnahme ab")]
-    [InlineData(CodingAgentPhase.Blocked, "Coding-Agent blockiert")]
-    [InlineData(CodingAgentPhase.Completed, "Coding-Agent abgeschlossen")]
-    public void CodingTraceNamesV2PhasesClearly(CodingAgentPhase phase, string expected)
-    {
-        Assert.Equal(expected, GoAiAssistantService.CodingAgentPhaseTitle(phase));
-    }
-
-    [Theory]
-    [InlineData("web.search", "Websuche nicht verf\u00FCgbar")]
-    [InlineData("web.fetch", "Webseite nicht verf\u00FCgbar")]
-    [InlineData("youtube.search", "YouTube-Suche nicht verf\u00FCgbar")]
-    public void CodingTraceNamesRecoverableResearchFailuresClearly(string tool, string expected)
-    {
-        Assert.Equal(expected, GoAiAssistantService.CodingServerToolFailureTitle(tool));
-    }
-
-    [Fact]
-    public void FailedReadIsNotDisplayedAsSuccessfullyRead()
-    {
-        Assert.Equal(
-            "Datei konnte nicht gelesen werden",
-            GoAiAssistantService.CodingToolTitle(
-                ClientToolNames.FileSystemReadText,
-                completed: true,
-                succeeded: false));
-        Assert.Equal(
-            "Datei gelesen",
-            GoAiAssistantService.CodingToolTitle(
-                ClientToolNames.FileSystemReadText,
-                completed: true,
-                succeeded: true));
     }
 
     [Fact]
@@ -1403,7 +1254,7 @@ public sealed class AssistantWorkflowTests
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("new Set([\"code\", \"bricsCad\", \"audiobook\"])", app, StringComparison.Ordinal);
+        Assert.Contains("new Set([\"bricsCad\", \"audiobook\"])", app, StringComparison.Ordinal);
         Assert.Contains("!persistentToolActions.has(state.selectedToolAction)", app, StringComparison.Ordinal);
         Assert.Contains("clearCompletedOneShotToolAction();", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.completed\":", app, StringComparison.Ordinal);
@@ -1425,6 +1276,8 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("Alle Dateianhänge entfernen", app, StringComparison.Ordinal);
         Assert.Contains("document-preparation-status", app, StringComparison.Ordinal);
         Assert.Contains("document.import.started", app, StringComparison.Ordinal);
+        Assert.Contains("\"document.import.started\"", File.ReadAllText(Path.Combine(webRoot, "bridge.js")), StringComparison.Ordinal);
+        Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("document.import.started"));
         Assert.Contains("wird verarbeitet", app, StringComparison.Ordinal);
         Assert.Contains("@keyframes document-status-spin", css, StringComparison.Ordinal);
         Assert.Contains("bottom: calc(100% + 8px)", css, StringComparison.Ordinal);
@@ -1480,7 +1333,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("post(\"microphone.toggleSpeechPause\"", app, StringComparison.Ordinal);
         Assert.Contains("elements.composerSpeechStop.addEventListener", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.stopSpeech\", {});", app, StringComparison.Ordinal);
-        Assert.Contains("const canStop = state.isRunning || campaignRunning;", app, StringComparison.Ordinal);
+        Assert.Contains("const canStop = state.isRunning;", app, StringComparison.Ordinal);
         var promptStop = app.IndexOf("elements.stop.addEventListener", StringComparison.Ordinal);
         var speechStop = app.IndexOf("elements.composerSpeechStop.addEventListener", StringComparison.Ordinal);
         Assert.True(promptStop >= 0 && speechStop > promptStop);
@@ -1488,7 +1341,7 @@ public sealed class AssistantWorkflowTests
             "microphone.stopSpeech",
             app[promptStop..speechStop],
             StringComparison.Ordinal);
-        Assert.Contains("\"chat.removed\"", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"chat.removed\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.previousSpeechParagraph", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.skipSpeechParagraph", app, StringComparison.Ordinal);
         Assert.Contains("isPaused ? \"Fortsetzen\" : \"Pausieren\"", app, StringComparison.Ordinal);
@@ -1507,7 +1360,7 @@ public sealed class AssistantWorkflowTests
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("const canStop = state.isRunning || campaignRunning;", app, StringComparison.Ordinal);
+        Assert.Contains("const canStop = state.isRunning;", app, StringComparison.Ordinal);
         Assert.Contains("if (sessionChanged && previousSessionId) persistSessionScrollPosition(previousSessionId);", app, StringComparison.Ordinal);
         Assert.Contains("if (sessionChanged) restoreSessionScrollPosition(state.activeSessionId);", app, StringComparison.Ordinal);
         Assert.Contains("sessionScrollStoragePrefix", app, StringComparison.Ordinal);
@@ -1604,7 +1457,7 @@ public sealed class AssistantWorkflowTests
                 Guid.NewGuid(),
                 Guid.NewGuid(),
                 ChatRole.Assistant,
-                "Der Coding-Workflow ist geladen und startet gestoppt. Senden startet ihn erneut.",
+                "Der vorherige AI-Lauf wurde beim Clientstart gestoppt.",
                 status,
                 now,
                 now);
@@ -1646,22 +1499,6 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("globalThis.goGetReadFromContextTarget", app, StringComparison.Ordinal);
         Assert.Contains("data-speech-block-kind", app, StringComparison.Ordinal);
         Assert.Contains("messageUpdatedAt", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void WebViewRendersAuthoritativeCodingDiffsWithoutHtmlInjection()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
-
-        Assert.Contains("case \"chat.codeDiff\"", app, StringComparison.Ordinal);
-        Assert.Contains("function createCodeDiff(message, force = false)", app, StringComparison.Ordinal);
-        Assert.Contains("row.textContent", app, StringComparison.Ordinal);
-        Assert.Contains("Git-Diff kopieren", app, StringComparison.Ordinal);
-        Assert.Contains(".message-code-diff", styles, StringComparison.Ordinal);
-        Assert.Contains(".diff-line--added", styles, StringComparison.Ordinal);
-        Assert.Contains(".diff-line--deleted", styles, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1804,98 +1641,10 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void CodingSessionContextSelectsTheSameCompletedHistoryAsGeneralChat()
-    {
-        var sessionId = Guid.NewGuid();
-        var now = DateTimeOffset.UtcNow;
-        var history = new[]
-        {
-            new ChatMessage(
-                Guid.NewGuid(), sessionId, ChatRole.User, "Vorherige Frage",
-                MessageStatus.Completed, now, now),
-            new ChatMessage(
-                Guid.NewGuid(), sessionId, ChatRole.Assistant, "Vorherige Antwort",
-                MessageStatus.Completed, now.AddSeconds(1), now.AddSeconds(1)),
-        };
-
-        var general = SessionContextPreparationService.SelectEligibleHistory(
-            history,
-            SessionContextProfile.General);
-        var coding = SessionContextPreparationService.SelectEligibleHistory(
-            history,
-            SessionContextProfile.Code);
-
-        Assert.Equal(general.Select(static item => item.Id), coding.Select(static item => item.Id));
-        Assert.Equal(2, coding.Length);
-    }
-
-    [Fact]
-    public async Task CodingSessionContextSendsExactHistoryWhenItFits()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var sessionId = Guid.NewGuid();
-        var now = DateTimeOffset.UtcNow;
-        var history = new[]
-        {
-            new ChatMessage(
-                Guid.NewGuid(), sessionId, ChatRole.User, "Vorherige Frage",
-                MessageStatus.Completed, now, now),
-            new ChatMessage(
-                Guid.NewGuid(), sessionId, ChatRole.Assistant, "Vorherige Antwort",
-                MessageStatus.Completed, now.AddSeconds(1), now.AddSeconds(1)),
-        };
-        using var http = new HttpClient { BaseAddress = new Uri("http://127.0.0.1/") };
-        using var client = new GoAi.Client.GoAiClient(http);
-        var service = new SessionContextPreparationService(environment.Get<IChatRepository>());
-
-        var context = await service.PrepareAsync(
-            client,
-            sessionId,
-            history,
-            "Aktueller Auftrag",
-            "qwen3-coder-next",
-            coding: true,
-            SessionContextProfile.Code,
-            knownContextLength: 262_144,
-            knownHistoryBudgetCharacters: null,
-            static _ => Task.CompletedTask);
-
-        Assert.Equal(["user", "assistant"], context.Messages.Select(static message => message.Role));
-        Assert.Equal("Vorherige Frage", context.Messages[0].Content[0].Text);
-        Assert.Equal("Vorherige Antwort", context.Messages[1].Content[0].Text);
-        Assert.Equal(2, context.Descriptor.OriginalMessageCount);
-        Assert.Equal(2, context.Descriptor.IncludedMessageCount);
-        Assert.False(context.Descriptor.PreparedByAi);
-    }
-
-    [Fact]
     public void SseReconnectBudgetResetsAfterPersistedEventProgress()
     {
         Assert.Equal(4, GoAiAssistantService.ReconnectAttemptsAfterProgress(4, 120, 120));
         Assert.Equal(0, GoAiAssistantService.ReconnectAttemptsAfterProgress(4, 120, 121));
-    }
-
-    [Fact]
-    public void CodingPromptDoesNotRetryNonRetryableTerminalFailures()
-    {
-        var terminal = new GoAiRunTerminalException(
-            "coding.verification_failed",
-            "Der Prozess wurde vor dem erfolgreichen Abschluss beendet.",
-            retryable: false);
-
-        Assert.False(GoAiAssistantService.ShouldRetryCurrentPrompt(
-            PromptTriggerAction.Code,
-            terminal));
-        Assert.False(GoAiAssistantService.ShouldRetryCurrentPrompt(
-            PromptTriggerAction.Code,
-            new OperationCanceledException()));
-
-        using var stopped = new CancellationTokenSource();
-        stopped.Cancel();
-        Assert.False(GoAiAssistantService.ShouldRetryCurrentPrompt(
-            PromptTriggerAction.Code,
-            terminal,
-            stopped.Token));
     }
 
     [Fact]
@@ -1908,8 +1657,6 @@ public sealed class AssistantWorkflowTests
             action: null,
             new GoAiRunTerminalException("run.invalid_operation", "Ungültiger Auftrag", retryable: false)));
         Assert.True(GoAiAssistantService.IsRetryableServerErrorCode("provider.generation_terminated"));
-        Assert.False(GoAiAssistantService.IsRetryableServerErrorCode("coding.empty_response"));
-        Assert.False(GoAiAssistantService.IsRetryableServerErrorCode("coding.verification_failed"));
     }
 
     [Fact]
@@ -1939,7 +1686,7 @@ public sealed class AssistantWorkflowTests
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
-        using var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
 
         await coordinator.AddLiveCaptionResultAsync(transcript, error);
 
@@ -1957,7 +1704,7 @@ public sealed class AssistantWorkflowTests
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
-        using var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
 
         var snapshot = await coordinator.BuildSnapshotAsync();
 
@@ -1971,7 +1718,7 @@ public sealed class AssistantWorkflowTests
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
         var recentActivity = CreateRecentActivity(settings);
-        using var coordinator = CreateCoordinator(environment, settings, recentActivity);
+        var coordinator = CreateCoordinator(environment, settings, recentActivity);
         var workflows = await environment.Get<IWorkflowRepository>().ListAsync();
         var workflow = workflows[0];
         using var payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(new { workflowId = workflow.Id }));
@@ -2004,77 +1751,6 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public async Task SavingWorkflowFromMessageInCodingModeCreatesPromptDrivenCodingWorkflow()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
-        await settings.InitializeAsync();
-        var chats = environment.Get<IChatRepository>();
-        var workspace = Path.Combine(environment.Directory, "coding-workspace");
-        Directory.CreateDirectory(workspace);
-        var session = await chats.CreateSessionAsync("Coding");
-        await chats.SetAssistantContextAsync(session.Id, AssistantMode.Code, workspace, "fingerprint");
-        await chats.SetPersistentToolActionAsync(session.Id, PersistentToolAction.Code);
-        await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id });
-        var message = await chats.AddMessageAsync(
-            session.Id,
-            ChatRole.Assistant,
-            """
-            ### Analyse
-
-            Erstelle einen reproduzierbaren Testworkflow, der Projektdateien liest, kleine Änderungen prüft und
-            die Verifikation nachvollziehbar dokumentiert.
-            """,
-            MessageStatus.Completed);
-        using var campaignService = CreatePromptCampaignService(environment, chats, settings);
-        using var coordinator = CreateCoordinator(
-            environment,
-            settings,
-            CreateRecentActivity(settings),
-            campaigns: campaignService);
-        var emittedTypes = new List<string>();
-        object? draftPayload = null;
-        using var payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(new { messageId = message.Id }));
-        var envelope = new WebBridgeEnvelope(
-            AssistantWebBridge.ProtocolVersion,
-            "workflow.createFromMessage",
-            Guid.NewGuid().ToString("D"),
-            payloadDocument.RootElement.Clone());
-
-        await coordinator.HandleAsync(
-            envelope,
-            (type, payload, _) =>
-            {
-                emittedTypes.Add(type);
-                if (type == "workflow.draft") draftPayload = payload;
-                return Task.CompletedTask;
-            });
-
-        var contractPath = Path.Combine(workspace, ".go-campaign", "prompt-workflow.json");
-        var sourcePath = Path.Combine(workspace, ".go-campaign", "prompt-workflow-source.md");
-        Assert.False(File.Exists(contractPath));
-        Assert.False(File.Exists(sourcePath));
-        Assert.Contains("workflow.draft", emittedTypes);
-        Assert.DoesNotContain("campaign.changed", emittedTypes);
-        Assert.DoesNotContain("workflow.changed", emittedTypes);
-        Assert.DoesNotContain("session.changed", emittedTypes);
-        Assert.DoesNotContain(await environment.Get<IWorkflowRepository>().ListAsync(), static item => item.Domain == "Coding" && !item.IsBuiltIn);
-        Assert.Null(await environment.Get<ICodingCampaignRepository>().GetForSessionAsync(session.Id));
-
-        using var draft = JsonDocument.Parse(JsonSerializer.Serialize(draftPayload));
-        Assert.Equal("campaign", draft.RootElement.GetProperty("mode").GetString());
-        var workflow = draft.RootElement.GetProperty("workflow");
-        Assert.Null(workflow.GetProperty("id").GetString());
-        Assert.Equal("Coding", workflow.GetProperty("domain").GetString());
-        Assert.Contains("Prompt-Workflow", workflow.GetProperty("tags").EnumerateArray().Select(static item => item.GetString()));
-        using var contract = JsonDocument.Parse(workflow.GetProperty("contentJson").GetString()!);
-        Assert.Equal("go.prompt-workflow.v1", contract.RootElement.GetProperty("schema").GetString());
-        Assert.Equal("ai-message-footer", contract.RootElement.GetProperty("scope").GetProperty("source").GetString());
-        Assert.Equal(message.Id, contract.RootElement.GetProperty("scope").GetProperty("sourceMessageId").GetGuid());
-        Assert.Contains("Erstelle einen reproduzierbaren Testworkflow", workflow.GetProperty("contentJson").GetString(), StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task OpeningSessionsAlwaysEmitsTheExactVisibleDatabaseRowsForThatSession()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -2088,7 +1764,7 @@ public sealed class AssistantWorkflowTests
         var secondTurn = await chats.AddTurnAsync(second.Id, "Zweite Frage");
         await chats.UpdateMessageAsync(secondTurn.AssistantMessage.Id, "Zweite Antwort", MessageStatus.Completed);
         await settings.UpdateAsync(current => current with { ActiveSessionId = first.Id });
-        using var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
 
         var secondSnapshot = await OpenAndCaptureSnapshotAsync(coordinator, second.Id);
         var firstSnapshot = await OpenAndCaptureSnapshotAsync(coordinator, first.Id);
@@ -2111,7 +1787,7 @@ public sealed class AssistantWorkflowTests
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
         var recentActivity = CreateRecentActivity(settings);
-        using var coordinator = CreateCoordinator(environment, settings, recentActivity);
+        var coordinator = CreateCoordinator(environment, settings, recentActivity);
 
         await HandleAsync(coordinator, "session.create", new { });
 
@@ -2133,6 +1809,54 @@ public sealed class AssistantWorkflowTests
         var replacement = await environment.Get<IChatRepository>().GetSessionAsync(replacementId);
         Assert.NotNull(replacement);
         Assert.Equal("Neue Sitzung", replacement.Title);
+    }
+
+    [Fact]
+    public async Task BulkSessionDeletionPreservesPinnedSessionsUntilExplicitlyDeleted()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var pinned = await chats.CreateSessionAsync("Angepinnte Sitzung");
+        await chats.SetPinnedAsync(pinned.Id, true);
+        var pinnedMessage = await chats.AddMessageAsync(
+            pinned.Id,
+            ChatRole.Assistant,
+            "Dieser Inhalt muss erhalten bleiben.",
+            MessageStatus.Completed);
+        var unpinned = await chats.CreateSessionAsync("Normale Sitzung");
+        await chats.AddMessageAsync(
+            unpinned.Id,
+            ChatRole.Assistant,
+            "Dieser Inhalt darf gesammelt gelöscht werden.",
+            MessageStatus.Completed);
+        await settings.UpdateAsync(current => current with { ActiveSessionId = unpinned.Id });
+        var coordinator = CreateCoordinator(
+            environment,
+            settings,
+            CreateRecentActivity(settings));
+
+        await HandleAsync(coordinator, "session.clear", new { });
+
+        var remaining = Assert.Single(await chats.ListSessionsAsync());
+        Assert.Equal(pinned.Id, remaining.Id);
+        Assert.True(remaining.IsPinned);
+        Assert.Equal(pinned.Id, settings.Current.ActiveSessionId);
+        Assert.NotNull(await chats.GetMessageAsync(pinnedMessage.Id));
+        Assert.Null(await chats.GetSessionAsync(unpinned.Id));
+        Assert.Equal(
+            "Alle nicht angepinnten AI-Sitzungen gelöscht",
+            settings.Current.LastActivityText);
+
+        await HandleAsync(coordinator, "session.clear", new { });
+        Assert.Equal(pinned.Id, Assert.Single(await chats.ListSessionsAsync()).Id);
+        Assert.Equal(pinned.Id, settings.Current.ActiveSessionId);
+
+        await HandleAsync(coordinator, "session.delete", new { sessionId = pinned.Id });
+        Assert.Null(await chats.GetSessionAsync(pinned.Id));
+        Assert.NotEqual(pinned.Id, settings.Current.ActiveSessionId);
+        Assert.NotNull(await chats.GetSessionAsync(Assert.IsType<Guid>(settings.Current.ActiveSessionId)));
     }
 
     private static RecentActivityService CreateRecentActivity(SettingsCoordinator settings)
@@ -2161,8 +1885,7 @@ public sealed class AssistantWorkflowTests
     private static AssistantCoordinator CreateCoordinator(
         TestEnvironment environment,
         SettingsCoordinator settings,
-        RecentActivityService recentActivity,
-        CodingCampaignService? campaigns = null) => new(
+        RecentActivityService recentActivity) => new(
             environment.Get<IChatRepository>(),
             environment.Get<IWorkflowRepository>(),
             environment.Get<IDocumentIngestor>(),
@@ -2173,20 +1896,7 @@ public sealed class AssistantWorkflowTests
             environment.Get<IConversationSnapshotRepository>(),
             null,
             settings,
-            recentActivity,
-            campaigns: campaigns);
-
-    private static CodingCampaignService CreatePromptCampaignService(
-        TestEnvironment environment,
-        IChatRepository chats,
-        SettingsCoordinator settings) => new(
-            environment.Get<ICodingCampaignRepository>(),
-            chats,
-            environment.Get<IChatArtifactRepository>(),
-            new CodingCampaignCatalog([new PromptDrivenCodingCampaignDefinition()]),
-            new UnexpectedCampaignAgent(),
-            settings,
-            NullLogger<CodingCampaignService>.Instance);
+            recentActivity);
 
     private static async Task HandleAsync(
         AssistantCoordinator coordinator,
@@ -2224,28 +1934,5 @@ public sealed class AssistantWorkflowTests
                 return Task.CompletedTask;
             });
         return snapshot ?? throw new InvalidOperationException("Der Sitzungs-Snapshot wurde nicht emittiert.");
-    }
-
-    private sealed class UnexpectedCampaignAgent : ICodingCampaignAgent
-    {
-        public bool IsRunning => false;
-
-        public Task<ChatMessage> SendAsync(
-            Guid sessionId,
-            string prompt,
-            PromptTriggerMatch? trigger,
-            Func<GoAiAssistantUpdate, Task> update,
-            CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("Der Footer darf beim Speichern keinen Coding-Lauf starten.");
-
-        public Task<ChatMessage> SendWorkflowStepAsync(
-            Guid sessionId,
-            string prompt,
-            PromptTriggerMatch? trigger,
-            Func<GoAiAssistantUpdate, Task> update,
-            CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("Der Footer darf beim Speichern keinen Coding-Lauf starten.");
-
-        public Task CancelCurrentAndWaitAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 }

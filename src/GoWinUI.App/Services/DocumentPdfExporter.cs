@@ -4,10 +4,10 @@ using Microsoft.Extensions.Logging;
 namespace GoWinUI.App.Services;
 
 /// <summary>
-/// Creates an A4 book-layout PDF next to a coding-workflow solution by using the
+/// Creates an A4 book-layout PDF for a generated session document by using the
 /// same Markdown, KaTeX and print styles as the assistant WebView.
 /// </summary>
-public sealed partial class CodingSolutionPdfExporter(ILogger<CodingSolutionPdfExporter> logger) : IDisposable
+public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> logger) : IDisposable
 {
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -41,11 +41,11 @@ public sealed partial class CodingSolutionPdfExporter(ILogger<CodingSolutionPdfE
                 return output;
             }
 
-            var script = ApplicationAssets.ResolvePath("Assets", "Scripts", "export-coding-solution.ps1");
+            var script = ApplicationAssets.ResolvePath("Assets", "Scripts", "export-document.ps1");
             var webAssets = ApplicationAssets.ResolvePath("Assets", "Web");
             if (!File.Exists(script) || !Directory.Exists(webAssets))
             {
-                throw new FileNotFoundException("Die lokalen GO-Ressourcen für den Lösungs-PDF-Export fehlen.", script);
+                throw new FileNotFoundException("Die lokalen GO-Ressourcen für den Dokument-PDF-Export fehlen.", script);
             }
 
             var startInfo = new ProcessStartInfo
@@ -72,7 +72,7 @@ public sealed partial class CodingSolutionPdfExporter(ILogger<CodingSolutionPdfE
             using var process = new Process { StartInfo = startInfo };
             if (!process.Start())
             {
-                throw new InvalidOperationException("Der Lösungs-PDF-Export konnte nicht gestartet werden.");
+                throw new InvalidOperationException("Der Dokument-PDF-Export konnte nicht gestartet werden.");
             }
 
             var standardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
@@ -99,10 +99,10 @@ public sealed partial class CodingSolutionPdfExporter(ILogger<CodingSolutionPdfE
                 {
                     detail += " KaTeX-Pruefung oder mathematisches Rendering wurde nicht erfolgreich abgeschlossen.";
                 }
-                throw new InvalidOperationException($"Die Lösungs-PDF konnte nicht erzeugt werden: {detail}");
+                throw new InvalidOperationException($"Die Dokument-PDF konnte nicht erzeugt werden: {detail}");
             }
 
-            LogSolutionPdfCreated(output);
+            LogDocumentPdfCreated(output);
             return output;
         }
         finally
@@ -143,6 +143,6 @@ public sealed partial class CodingSolutionPdfExporter(ILogger<CodingSolutionPdfE
 
     public void Dispose() => _exportGate.Dispose();
 
-    [LoggerMessage(EventId = 5820, Level = LogLevel.Information, Message = "Coding solution PDF created at {Path}.")]
-    private partial void LogSolutionPdfCreated(string path);
+    [LoggerMessage(EventId = 5820, Level = LogLevel.Information, Message = "Document PDF created at {Path}.")]
+    private partial void LogDocumentPdfCreated(string path);
 }

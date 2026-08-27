@@ -27,7 +27,6 @@ public sealed partial class SettingsViewModel(
     private readonly List<(Guid Id, long Revision)> _deletedTriggers = [];
 
     public ObservableCollection<LmModel> Models { get; } = [];
-    public ObservableCollection<LmModel> CodingModels { get; } = [];
     public ObservableCollection<PromptTriggerEditorItem> PromptTriggers { get; } = [];
     public IReadOnlyList<PromptTriggerActionOption> TriggerActions { get; } =
         PromptTriggerEditorItem.AvailableActions;
@@ -55,22 +54,13 @@ public sealed partial class SettingsViewModel(
     public partial bool IsAiConnectionEnabled { get; set; }
 
     [ObservableProperty]
-    public partial string LocalToolWorkspacePath { get; set; } = string.Empty;
-
-    [ObservableProperty]
     public partial string LiveCaptionLanguage { get; set; } = "auto";
 
     [ObservableProperty]
     public partial string? SelectedModel { get; set; }
 
     [ObservableProperty]
-    public partial string SelectedCodingModel { get; set; } = AppSettings.DefaultSelectedCodingModel;
-
-    [ObservableProperty]
     public partial LmModel? SelectedGeneralModelItem { get; set; }
-
-    [ObservableProperty]
-    public partial LmModel? SelectedCodingModelItem { get; set; }
 
     [ObservableProperty]
     public partial string TriggerSearchText { get; set; } = string.Empty;
@@ -109,12 +99,9 @@ public sealed partial class SettingsViewModel(
         var current = settings.Current;
         IsAiConnectionEnabled = current.IsAiConnectionEnabled;
         GoAiServerUrl = current.GoAiServerUrl;
-        LocalToolWorkspacePath = current.LocalToolWorkspacePath ?? string.Empty;
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel ?? AppSettings.DefaultSelectedModel;
-        SelectedCodingModel = current.SelectedCodingModel;
         SelectedGeneralModelItem = EnsureModelItem(Models, SelectedModel);
-        SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);
         Theme = current.Theme;
         AccentColor = current.AccentColor;
         BackgroundColor = current.BackgroundColor;
@@ -159,7 +146,6 @@ public sealed partial class SettingsViewModel(
         }
 
         Models.Clear();
-        CodingModels.Clear();
         IsServerReady = false;
         ConnectionStatus = "Offline · keine Serververbindungen";
     }
@@ -172,25 +158,16 @@ public sealed partial class SettingsViewModel(
             throw new InvalidOperationException("GO benötigt eine gültige HTTP- oder HTTPS-Adresse zum Docker-Gateway.");
         }
 
-        var workspace = string.IsNullOrWhiteSpace(LocalToolWorkspacePath)
-            ? null
-            : Path.GetFullPath(LocalToolWorkspacePath.Trim());
         var generalModel = PreferCurrentSelection(
             SelectedGeneralModelItem?.Id,
             SelectedModel,
             AppSettings.DefaultSelectedModel);
-        var codingModel = PreferCurrentSelection(
-            SelectedCodingModelItem?.Id,
-            SelectedCodingModel,
-            AppSettings.DefaultSelectedCodingModel);
         await settings.UpdateAsync(current => current with
         {
             IsAiConnectionEnabled = IsAiConnectionEnabled,
             GoAiServerUrl = goAiUri.ToString().TrimEnd('/'),
-            LocalToolWorkspacePath = workspace,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
             SelectedModel = generalModel,
-            SelectedCodingModel = codingModel,
             ReasoningEffort = "auto",
             Theme = Theme,
             AccentColor = AccentColor,
@@ -198,7 +175,6 @@ public sealed partial class SettingsViewModel(
             Language = Language,
         }, cancellationToken);
         SelectedModel = settings.Current.SelectedModel;
-        SelectedCodingModel = settings.Current.SelectedCodingModel;
         await App.Current.ApplyAiConnectionModeAsync(IsAiConnectionEnabled);
         await SaveTriggersAsync(cancellationToken);
         App.Current.ApplyTheme(Theme);
@@ -231,12 +207,7 @@ public sealed partial class SettingsViewModel(
                 SelectedModel,
                 settings.Current.SelectedModel,
                 AppSettings.DefaultSelectedModel);
-            var requestedCodingModel = PreferCurrentSelection(
-                SelectedCodingModel,
-                settings.Current.SelectedCodingModel,
-                AppSettings.DefaultSelectedCodingModel);
             SelectedModel = requestedGeneralModel;
-            SelectedCodingModel = requestedCodingModel;
             // Reading the remote catalog must never persist the transient UI
             // state. In particular, an asynchronous startup refresh must not
             // overwrite the model IDs restored from settings.json.
@@ -244,7 +215,6 @@ public sealed partial class SettingsViewModel(
             if (status is null)
             {
                 Models.Clear();
-                CodingModels.Clear();
                 return null;
             }
             IReadOnlyList<LmModel> items;
@@ -261,22 +231,9 @@ public sealed partial class SettingsViewModel(
             }
             modelCapabilities.Update(modelStatus);
             items = modelStatus.Models
-                .Where(model => model.Downloaded && model.Role == "general")
-                .Select(model => new LmModel(
-                    model.Id,
-                    string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.DisplayName ?? model.Id, model.ContextTokens),
-                    model.ContextTokens,
-                    model.SupportsTools,
-                    model.SupportsVision,
-                    model.ReasoningEfforts,
-                    model.DefaultReasoningEffort))
-                .ToArray();
-            var codingItems = modelStatus.Models
-                .Where(model => model.Downloaded && model.Role == "code")
-                .OrderByDescending(model => string.Equals(
-                    model.Id,
-                    AppSettings.DefaultSelectedCodingModel,
-                    StringComparison.OrdinalIgnoreCase))
+                .Where(model => model.Downloaded
+                    && model.Role == "general"
+                    && !IsTerminalOnlyModel(model.Id))
                 .Select(model => new LmModel(
                     model.Id,
                     string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.DisplayName ?? model.Id, model.ContextTokens),
@@ -293,11 +250,6 @@ public sealed partial class SettingsViewModel(
             {
                 Models.Add(item);
             }
-            CodingModels.Clear();
-            foreach (var item in codingItems)
-            {
-                CodingModels.Add(item);
-            }
             // The selection may have changed while the asynchronous catalog
             // request was running. Re-read the current properties and keep
             // them authoritative. A temporarily incomplete LM Studio catalog
@@ -306,15 +258,10 @@ public sealed partial class SettingsViewModel(
                 SelectedModel,
                 settings.Current.SelectedModel,
                 requestedGeneralModel);
-            SelectedCodingModel = PreferCurrentSelection(
-                SelectedCodingModel,
-                settings.Current.SelectedCodingModel,
-                requestedCodingModel);
             // Bind the ComboBoxes to the actual catalog objects. SelectedValue
             // can remain visually empty when its value was assigned before an
             // asynchronously populated ItemsSource existed.
             SelectedGeneralModelItem = EnsureModelItem(Models, SelectedModel);
-            SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);
             IsServerReady = status.IsReady;
             shell.ApplyAiConnectionState(true, status.IsReady);
             return status;
@@ -341,6 +288,10 @@ public sealed partial class SettingsViewModel(
             IsBusy = false;
         }
     }
+
+    internal static bool IsTerminalOnlyModel(string? modelId) =>
+        !string.IsNullOrWhiteSpace(modelId)
+        && modelId.Contains("qwen3-coder-next", StringComparison.OrdinalIgnoreCase);
 
     internal static string PreferCurrentSelection(string? current, string? persisted, string fallback) =>
         !string.IsNullOrWhiteSpace(current)
@@ -482,14 +433,6 @@ public sealed partial class SettingsViewModel(
         if (value is not null)
         {
             SelectedModel = value.Id;
-        }
-    }
-
-    partial void OnSelectedCodingModelItemChanged(LmModel? value)
-    {
-        if (value is not null)
-        {
-            SelectedCodingModel = value.Id;
         }
     }
 

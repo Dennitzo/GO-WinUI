@@ -85,45 +85,21 @@
               Style="{StaticResource GoPrimaryButtonStyle}" />
           </Grid>
 
-          <Grid ColumnSpacing="12">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*" />
-              <ColumnDefinition Width="Auto" />
-              <ColumnDefinition Width="220" />
-            </Grid.ColumnDefinitions>
-            <TextBox
-              Header="Freigegebener lokaler Tool-Workspace"
-              PlaceholderText="Optional · z. B. C:\Projekte\TGA"
-              Text="{x:Bind ViewModel.LocalToolWorkspacePath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <Button Grid.Column="1" Margin="0,24,0,0" Click="OnSelectWorkspace" Content="Ordner wählen" />
-            <ComboBox x:Name="CaptionLanguageBox" Grid.Column="2" Header="Sprache für Untertitel" SelectionChanged="OnCaptionLanguageChanged">
-              <ComboBoxItem Content="Deutsch" Tag="de" />
-              <ComboBoxItem Content="Englisch" Tag="en" />
-              <ComboBoxItem Content="Automatisch" Tag="auto" />
-            </ComboBox>
-          </Grid>
+          <ComboBox x:Name="CaptionLanguageBox" Header="Sprache für Untertitel" SelectionChanged="OnCaptionLanguageChanged">
+            <ComboBoxItem Content="Deutsch" Tag="de" />
+            <ComboBoxItem Content="Englisch" Tag="en" />
+            <ComboBoxItem Content="Automatisch" Tag="auto" />
+          </ComboBox>
 
-          <Grid ColumnSpacing="12">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*" />
-              <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
-            <ComboBox
-              Header="General AI Modell"
-              ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
-              DisplayMemberPath="DisplayName"
-              SelectedItem="{x:Bind ViewModel.SelectedGeneralModelItem, Mode=TwoWay}" />
-            <ComboBox
-              Grid.Column="1"
-              Header="Coding AI Modell"
-              ItemsSource="{x:Bind ViewModel.CodingModels, Mode=OneWay}"
-              DisplayMemberPath="DisplayName"
-              SelectedItem="{x:Bind ViewModel.SelectedCodingModelItem, Mode=TwoWay}" />
-          </Grid>
+          <ComboBox
+            Header="General AI Modell"
+            ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
+            DisplayMemberPath="DisplayName"
+            SelectedItem="{x:Bind ViewModel.SelectedGeneralModelItem, Mode=TwoWay}" />
           <TextBlock
             Margin="0,-6,0,0"
             Foreground="{ThemeResource GoMutedTextBrush}"
-            Text="Modellliste und Kontextgrenzen werden automatisch aus LM Studio geladen. Reasoning verwendet unverändert den in LM Studio konfigurierten Modellstandard. Auch neue lokale Modelle erscheinen ohne App-Neubau in beiden Auswahllisten."
+            Text="Modellliste und Kontextgrenzen werden automatisch aus LM Studio geladen. Reasoning verwendet unverändert den in LM Studio konfigurierten Modellstandard. Auch neue lokale Modelle erscheinen ohne App-Neubau in der Auswahlliste."
             TextWrapping="Wrap" />
 
         </StackPanel>

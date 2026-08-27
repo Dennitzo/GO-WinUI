@@ -146,13 +146,13 @@ async Task<object> RunLiveSmokeAsync()
         "Dies ist ein strukturierter Smoke-Test. Rufe zwingend genau einmal math.evaluate mit operation add, left [2] und right [3] auf. Antworte danach kurz mit dem Ergebnis.");
     EnsureToolEvent(math, "math.evaluate");
 
-    var code = await CreateAndCompleteRunAsync(
-        RunMode.Code,
-        "Dies ist ein strukturierter Code-Smoke-Test. Rufe zwingend genau einmal fs.readText für path README.md auf und fasse das simulierte Ergebnis in einem Satz zusammen.",
-        ["filesystem", "code"],
+    var document = await CreateAndCompleteRunAsync(
+        RunMode.General,
+        "Dies ist ein strukturierter Dokument-Smoke-Test. Rufe zwingend genau einmal document.read mit scope session und mode list auf und fasse das simulierte Ergebnis in einem Satz zusammen.",
+        ["documentIo"],
         respondToClientTools: true);
-    EnsureToolEvent(code, ClientToolNames.FileSystemReadText, clientSide: true);
-    EnsureCompletedWithModel(code, "qwen3.8-27b");
+    EnsureToolEvent(document, ClientToolNames.DocumentRead, clientSide: true);
+    EnsureCompletedWithModel(document, "gpt-oss-120b");
 
     var embedding = await CreateAndCompleteRunAsync(
         RunMode.General,
@@ -236,7 +236,7 @@ async Task<object> RunLiveSmokeAsync()
         {
             general = general.Snapshot.RunId,
             math = math.Snapshot.RunId,
-            code = code.Snapshot.RunId,
+            document = document.Snapshot.RunId,
             embedding = embedding.Snapshot.RunId,
             vision = visionRun.Snapshot.RunId,
             video = videoRun.Snapshot.RunId,
