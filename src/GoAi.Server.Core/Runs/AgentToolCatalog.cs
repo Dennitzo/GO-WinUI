@@ -42,6 +42,7 @@ public sealed class AgentToolCatalog
             names.UnionWith(
             [
                 ClientToolNames.WorkspaceMap,
+                ClientToolNames.WorkspaceIndexQuery,
                 ClientToolNames.FileSystemList,
                 ClientToolNames.FileSystemStat,
                 ClientToolNames.FileSystemFindFiles,
@@ -75,6 +76,23 @@ public sealed class AgentToolCatalog
         }
 
         return names.Select(name => _tools[name]).ToArray();
+    }
+
+    /// <summary>
+    /// Returns the granular implementation tools available to Coding Agent V2.
+    /// fs.readMany remains an internal bounded transport for workspace.inspect;
+    /// it is never advertised directly to the model.
+    /// </summary>
+    public IReadOnlyList<AgentToolSpec> GetCodingV2ImplementationTools(RunRequest request)
+    {
+        var tools = GetAvailableTools(request).ToList();
+        var capabilities = request.ClientCapabilities ?? [];
+        if ((HasCapability(capabilities, "filesystem") || HasCapability(capabilities, "code"))
+            && tools.All(static tool => tool.Name != ClientToolNames.FileSystemReadMany))
+        {
+            tools.Add(_tools[ClientToolNames.FileSystemReadMany]);
+        }
+        return tools;
     }
 
     public AgentToolSpec Resolve(string name, IReadOnlyList<AgentToolSpec> available)
@@ -273,6 +291,12 @@ public sealed class AgentToolCatalog
                 OptionalInteger(value, "maximumDepth", 1, 32);
                 OptionalInteger(value, "maximumEntries", 1, 5000);
                 break;
+            case ClientToolNames.WorkspaceIndexQuery:
+                OptionalEnum(value, "operation", ["symbols", "references"]);
+                OptionalString(value, "path", 0, 1024);
+                RequireString(value, "query", 1, 1024);
+                OptionalInteger(value, "maximumResults", 1, 500);
+                break;
             case ClientToolNames.FileSystemList:
             case ClientToolNames.FileSystemStat:
                 RequireString(value, "path", 0, 1024);
@@ -322,11 +346,13 @@ public sealed class AgentToolCatalog
             case ClientToolNames.FileSystemMove:
                 RequireString(value, "source", 1, 1024);
                 RequireString(value, "destination", 1, 1024);
+                OptionalString(value, "expectedSha256", 64, 64);
                 OptionalBoolean(value, "overwrite");
                 break;
             case ClientToolNames.FileSystemProposePatch:
                 RequireString(value, "path", 1, 1024);
                 RequireString(value, "patch", 1, 4 * 1024 * 1024);
+                OptionalString(value, "expectedSha256", 64, 64);
                 break;
             case ClientToolNames.FileSystemProposeCreate:
                 RequireString(value, "path", 1, 1024);
@@ -334,6 +360,7 @@ public sealed class AgentToolCatalog
                 break;
             case ClientToolNames.FileSystemProposeDelete:
                 RequireString(value, "path", 1, 1024);
+                OptionalString(value, "expectedSha256", 64, 64);
                 break;
             case ClientToolNames.ProcessRunPreset:
                 RequireString(value, "preset", 1, 64);
@@ -396,6 +423,7 @@ public sealed class AgentToolCatalog
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
             Server("context.retrieve", "Ordne Dokumenttexte über BGE-M3 semantisch zu einer Anfrage.", ToolRiskClass.ReadOnly, RetrieveSchema()),
             Client(ClientToolNames.WorkspaceMap, "Erzeuge eine kompakte Karte des freigegebenen Repositorys mit Projekten, Sprachen und relativen Dateipfaden.", ToolRiskClass.ReadOnly, WorkspaceMapSchema()),
+            Client(ClientToolNames.WorkspaceIndexQuery, "Durchsuche den lokalen Workspaceindex nach Symbolen oder Referenzen und liefere versionierte Belege.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"operation":{"type":"string","enum":["symbols","references"]},"path":{"type":"string"},"query":{"type":"string"},"maximumResults":{"type":"integer","minimum":1,"maximum":500}},"required":["operation","query"],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentRead, "Lese Dokumente tokeneffizient: zuerst Sitzungsdokumente auflisten oder eine Gliederung abrufen, danach nur benötigte Abschnitte, Fortsetzungen oder Suchtreffer. Unterstützt Sitzungsartefakte sowie Workspace-Dokumente.", ToolRiskClass.ReadOnly, DocumentReadSchema()),
             Client(ClientToolNames.DocumentCreate, "Erstelle oder bearbeite ein Dokument abschnittsweise über stabile sectionId-Werte. General AI erzeugt ein versioniertes Chat-Artefakt; Coding schreibt eine kanonische Workspace-Quelle. PDF wird deterministisch mit GO und KaTeX gerendert.", ToolRiskClass.LocalMutation, DocumentCreateSchema()),
             Client(ClientToolNames.DocumentsList, "Liste alle fertig aufbereiteten Dokumente der aktuellen GO-Sitzung mit Dateiname und Seitenzahl.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{},"required":[],"additionalProperties":false}""")),
@@ -410,9 +438,9 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.FileSystemWriteText, "Schreibe oder überschreibe eine Textdatei atomar im freigegebenen Workspace.", ToolRiskClass.LocalMutation, WriteTextSchema()),
             Client(ClientToolNames.FileSystemReplaceText, "Ersetze einen exakt gelesenen Textblock atomar in einer vorhandenen Workspace-Datei. Verwende oldText/newText mit unveränderten Zeichen statt HTML-Entities; standardmäßig muss oldText genau einmal vorkommen.", ToolRiskClass.LocalMutation, ReplaceTextSchema()),
             Client(ClientToolNames.FileSystemMove, "Verschiebe eine Datei oder einen Ordner innerhalb des freigegebenen Workspace.", ToolRiskClass.LocalMutation, MoveSchema()),
-            Client(ClientToolNames.FileSystemProposePatch, "Schlage einen Patch für eine vorhandene Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "patch"], ("path", "string"), ("patch", "string"))),
+            Client(ClientToolNames.FileSystemProposePatch, "Schlage einen Patch für eine vorhandene Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "patch"], ("path", "string"), ("patch", "string"), ("expectedSha256", "string"))),
             Client(ClientToolNames.FileSystemProposeCreate, "Schlage das Erstellen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema(["path", "content"], ("path", "string"), ("content", "string"))),
-            Client(ClientToolNames.FileSystemProposeDelete, "Schlage das Löschen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema("path", ("path", "string"))),
+            Client(ClientToolNames.FileSystemProposeDelete, "Schlage das Löschen einer Clientdatei vor; GO bestätigt lokal.", ToolRiskClass.LocalMutation, Schema("path", ("path", "string"), ("expectedSha256", "string"))),
             Client(ClientToolNames.ProcessRunPreset, "Führe ein versioniertes Build-, Test-, Start- oder Git-Preset im freigegebenen Workspace aus. PDF-Artefakte werden von GO deterministisch nach einer Quellenänderung erzeugt.", ToolRiskClass.Process, ProcessSchema()),
             Client(ClientToolNames.ProcessRun, "Führe ein direktes Programm mit getrennter Argumentliste und Workspace-Arbeitsverzeichnis für Analyse, Setup, Test, Build oder Smoke-Start aus.", ToolRiskClass.Process, ProcessRunSchema()),
             Client(ClientToolNames.LeanProof, "Prüfe freiwillig einen mathematischen oder algorithmischen Beweis mit der gepinnten lokalen Lean-/Lake-Toolchain. Verwende niemals process.run für lean oder lake. check kompiliert eine Datei; verify kompiliert und prüft die Axiomabhängigkeiten des exakt deklarierten Theorems. Ein Dateiname erzeugt keinen Lean-Namespace.", ToolRiskClass.Process, LeanProofSchema()),
@@ -478,7 +506,7 @@ public sealed class AgentToolCatalog
         """);
 
     private static JsonElement MoveSchema() => Parse("""
-        {"type":"object","properties":{"source":{"type":"string"},"destination":{"type":"string"},"overwrite":{"type":"boolean"}},"required":["source","destination"],"additionalProperties":false}
+        {"type":"object","properties":{"source":{"type":"string"},"destination":{"type":"string"},"expectedSha256":{"type":"string"},"overwrite":{"type":"boolean"}},"required":["source","destination"],"additionalProperties":false}
         """);
 
     private static JsonElement ImageSchema() => Parse("""

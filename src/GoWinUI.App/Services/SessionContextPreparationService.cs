@@ -669,9 +669,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             PreferredGeneralModelId: coding ? null : modelId,
             PreferredCodeModelId: coding ? modelId : null,
             ConversationProfile: ConversationProfile.ContextPreparation,
-            ReasoningEffort: ModelReasoningProfiles.Resolve(modelId, coding ? "code" : "general").Supports("off")
-                ? "off"
-                : null);
+            ReasoningEffort: null);
 
     private static async Task<(string ModelId, int ContextLength)> ResolveModelAsync(
         GoAiClient client,

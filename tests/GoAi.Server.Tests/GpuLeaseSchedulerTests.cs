@@ -83,8 +83,8 @@ public sealed class GpuLeaseSchedulerTests
     }
 
     [Theory]
-    [InlineData("llm-general", "gpt-oss-120b", "Docker · llama.cpp")]
-    [InlineData("llm-code", "Ausgewähltes Coding-Modell", "Docker · llama.cpp")]
+    [InlineData("llm-general", "gpt-oss-120b", "LM Studio")]
+    [InlineData("llm-code", "Ausgewähltes Coding-Modell", "LM Studio")]
     [InlineData("live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT")]
     [InlineData("text-to-speech", "Antwort wird vorgelesen", "Docker · ausgewählte Sprachausgabe · GPU 1")]
     [InlineData("image-generation", "Bild wird erstellt", "Docker · Image")]

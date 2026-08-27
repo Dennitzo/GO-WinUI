@@ -225,6 +225,124 @@ public sealed class DatabaseAndWorkflowTests
     }
 
     [Fact]
+    public async Task CodingAgentMessagesAreIdempotentDatabaseAuthoritativeAndChronological()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Agentenstream");
+        var turn = await chats.AddCodingTurnAsync(session.Id, "Bearbeite das Projekt.");
+
+        Assert.Equal(ChatMessageVisibility.Visible, turn.AssistantMessage.Visibility);
+        Assert.Equal(MessageStatus.Streaming, turn.AssistantMessage.Status);
+        Assert.Equal(
+            [turn.UserMessage.Id, turn.AssistantMessage.Id],
+            (await chats.ListMessagesAsync(session.Id)).Select(static item => item.Id));
+
+        var commentary = await chats.CommitAgentMessageAsync(
+            session.Id,
+            turn.AssistantMessage.Id,
+            "run-agent-test",
+            "commentary-1",
+            ChatMessagePhase.Commentary,
+            "Ich prüfe den Workspace.",
+            MessageStatus.Streaming,
+            1);
+        commentary = await chats.CommitAgentMessageAsync(
+            session.Id,
+            turn.AssistantMessage.Id,
+            "run-agent-test",
+            "commentary-1",
+            ChatMessagePhase.Commentary,
+            "Ich prüfe den Workspace. Danach ändere ich die relevante Datei.",
+            MessageStatus.Streaming,
+            2);
+        var revisionBeforeReplay = await chats.GetConversationRevisionAsync(session.Id);
+        var replay = await chats.CommitAgentMessageAsync(
+            session.Id,
+            turn.AssistantMessage.Id,
+            "run-agent-test",
+            "commentary-1",
+            ChatMessagePhase.Commentary,
+            "Dieser verspätete Stand darf nicht gewinnen.",
+            MessageStatus.Streaming,
+            1);
+
+        Assert.Equal(commentary.Id, replay.Id);
+        Assert.Equal(commentary.Content, replay.Content);
+        Assert.Equal(revisionBeforeReplay, await chats.GetConversationRevisionAsync(session.Id));
+
+        var final = await chats.CommitAgentMessageAsync(
+            session.Id,
+            turn.AssistantMessage.Id,
+            "run-agent-test",
+            "commentary-1",
+            ChatMessagePhase.FinalAnswer,
+            "Ich prüfe den Workspace. Danach ändere ich die relevante Datei.\n\nDie Änderung ist geprüft abgeschlossen.",
+            MessageStatus.Completed,
+            3);
+        var visible = await chats.ListMessagesAsync(session.Id);
+
+        Assert.Equal(
+            [turn.UserMessage.Id, turn.AssistantMessage.Id],
+            visible.Select(static item => item.Id));
+        Assert.Equal(final.Id, turn.AssistantMessage.Id);
+        Assert.Equal(commentary.Id, final.Id);
+        Assert.Equal(ChatMessagePhase.FinalAnswer, visible[1].MessagePhase);
+        Assert.Equal("run-agent-test", visible[1].SourceRunId);
+        Assert.Equal("commentary-1", visible[1].SourceItemId);
+
+        var snapshot = await snapshots.GetAsync(session.Id);
+        Assert.NotNull(snapshot);
+        Assert.Equal(visible.Select(static item => item.Id), snapshot.Messages.Select(static item => item.Id));
+        Assert.Equal(visible.Select(static item => item.Content), snapshot.Messages.Select(static item => item.Content));
+    }
+
+    [Fact]
+    public async Task CodingAgentMessageAnchorCanBeReboundAfterAutomaticRetry()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Agentenstream mit Retry");
+        var turn = await chats.AddCodingTurnAsync(session.Id, "Bearbeite das Projekt.");
+
+        _ = await chats.CommitAgentMessageAsync(
+            session.Id,
+            turn.AssistantMessage.Id,
+            "run-old",
+            "coding-run-old",
+            ChatMessagePhase.Commentary,
+            "Alter Zwischenstand.",
+            MessageStatus.Streaming,
+            2);
+
+        await chats.ResetAgentMessageForRetryAsync(turn.AssistantMessage.Id);
+        var reset = await chats.GetMessageAsync(turn.AssistantMessage.Id, includeInternal: true);
+        Assert.NotNull(reset);
+        Assert.Equal(string.Empty, reset.Content);
+        Assert.Equal(MessageStatus.Streaming, reset.Status);
+        Assert.Null(reset.SourceRunId);
+        Assert.Null(reset.SourceItemId);
+        Assert.Equal(0, reset.SourceDeltaSequence);
+
+        var rebound = await chats.CommitAgentMessageAsync(
+            session.Id,
+            turn.AssistantMessage.Id,
+            "run-new",
+            "coding-run-new",
+            ChatMessagePhase.Commentary,
+            "Neuer Zwischenstand.",
+            MessageStatus.Streaming,
+            1);
+
+        Assert.Equal(turn.AssistantMessage.Id, rebound.Id);
+        Assert.Equal("run-new", rebound.SourceRunId);
+        Assert.Equal("coding-run-new", rebound.SourceItemId);
+        Assert.Equal(1, rebound.SourceDeltaSequence);
+        Assert.Equal("Neuer Zwischenstand.", rebound.Content);
+    }
+
+    [Fact]
     public async Task CurrentSchemaPersistsAudiobookStateCodeDiffAndRemovesLegacySpeechCache()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -253,7 +371,7 @@ public sealed class DatabaseAndWorkflowTests
 
         await chats.SetCodeDiffAsync(message.Id, "diff --git a/demo.cs b/demo.cs\n+added\n");
 
-        Assert.Equal(26, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
+        Assert.Equal(27, GoWinUI.Infrastructure.Storage.SqliteDatabase.CurrentSchemaVersion);
         await using (var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
         {
             await connection.OpenAsync();

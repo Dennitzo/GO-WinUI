@@ -42,7 +42,39 @@ public sealed class ProtocolTests
         Assert.Contains("\"protocolVersion\":\"1.0\"", json, StringComparison.Ordinal);
         Assert.Contains("\"mode\":\"code\"", json, StringComparison.Ordinal);
         Assert.Contains("\"conversationProfile\":\"general\"", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("ProtocolVersion", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"ProtocolVersion\"", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AgentMessageEventsSerializeAsDistinctCommentaryAndFinalPhases()
+    {
+        var commentary = new AgentMessageDeltaEvent(
+            "item-1",
+            "run-1",
+            2,
+            0,
+            "Die Ursache ist eingegrenzt.",
+            AgentMessagePhase.Commentary,
+            AgentMessageOrigin.Model,
+            "fingerprint-1");
+        var final = new AgentMessageCompletedEvent(
+            "item-2",
+            "run-1",
+            3,
+            AgentMessagePhase.FinalAnswer,
+            AgentMessageOrigin.Host,
+            "Die Prüfung ist abgeschlossen.",
+            "fingerprint-2",
+            1);
+
+        var commentaryJson = JsonSerializer.Serialize(commentary, GoAiProtocol.CreateJsonOptions());
+        var finalJson = JsonSerializer.Serialize(final, GoAiProtocol.CreateJsonOptions());
+
+        Assert.Contains("\"phase\":\"commentary\"", commentaryJson, StringComparison.Ordinal);
+        Assert.Contains("\"runId\":\"run-1\"", commentaryJson, StringComparison.Ordinal);
+        Assert.Contains("\"origin\":\"model\"", commentaryJson, StringComparison.Ordinal);
+        Assert.Contains("\"phase\":\"final_answer\"", finalJson, StringComparison.Ordinal);
+        Assert.Contains("\"origin\":\"host\"", finalJson, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -74,14 +106,17 @@ public sealed class ProtocolTests
         Assert.Equal("medium", general.DefaultReasoningEffort);
 
         var coding = snapshot.Models.Where(static model => model.Role == "code").ToArray();
-        Assert.Equal(2, coding.Length);
+        Assert.Equal(3, coding.Length);
+        var qwen38 = Assert.Single(coding, static model => model.Id == CodingModelCatalog.Qwen38Id);
+        Assert.Equal(["none", "low", "medium", "xhigh"], qwen38.ReasoningEfforts);
+        Assert.Equal("xhigh", qwen38.DefaultReasoningEffort);
         var gptCoding = Assert.Single(coding, static model => model.Id == CodingModelCatalog.GptOss120BId);
         Assert.Equal(["low", "medium", "high"], gptCoding.ReasoningEfforts);
         Assert.Equal("high", gptCoding.DefaultReasoningEffort);
         var qwenCoding = Assert.Single(coding, static model => model.Id == CodingModelCatalog.Qwen3CoderNextQ8Id);
         Assert.Equal(262_144, qwenCoding.ContextTokens);
-        Assert.Empty(qwenCoding.ReasoningEfforts ?? []);
-        Assert.Null(qwenCoding.DefaultReasoningEffort);
+        Assert.Equal(["none"], qwenCoding.ReasoningEfforts);
+        Assert.Equal("none", qwenCoding.DefaultReasoningEffort);
 
         var vision = Assert.Single(snapshot.Models, static model => model.Role == "vision");
         Assert.Equal(262_144, vision.ContextTokens);

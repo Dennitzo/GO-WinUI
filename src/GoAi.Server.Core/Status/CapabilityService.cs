@@ -1,5 +1,6 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
+using GoAi.Server.Core.Models;
 using Microsoft.Extensions.Options;
 
 namespace GoAi.Server.Core.Status;
@@ -7,16 +8,47 @@ namespace GoAi.Server.Core.Status;
 public sealed class CapabilityService
 {
     private readonly GoAiServerOptions _options;
+    private readonly ModelRuntimeClient? _modelRuntime;
 
     public CapabilityService(IOptions<GoAiServerOptions> options)
     {
         _options = options.Value;
     }
 
-    public CapabilitySnapshot GetSnapshot() => new(
+    public CapabilityService(IOptions<GoAiServerOptions> options, ModelRuntimeClient modelRuntime)
+        : this(options)
+    {
+        _modelRuntime = modelRuntime;
+    }
+
+    public async Task<CapabilitySnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        if (_modelRuntime is null)
+        {
+            return GetSnapshot();
+        }
+
+        var status = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var dynamicModels = status.Models.Count > 0
+            ? status.Models.Select(static model => new ModelCapability(
+                model.Id,
+                model.Role,
+                model.ContextTokens,
+                model.SupportsTools,
+                model.SupportsVision,
+                false,
+                model.ReasoningEfforts,
+                model.DefaultReasoningEffort)).ToArray()
+            : null;
+        return CreateSnapshot(dynamicModels);
+    }
+
+    public CapabilitySnapshot GetSnapshot() => CreateSnapshot(null);
+
+    private CapabilitySnapshot CreateSnapshot(IReadOnlyList<ModelCapability>? dynamicModels) => new(
         GoAiProtocol.Version,
         typeof(CapabilityService).Assembly.GetName().Version?.ToString() ?? "1.0.0",
-        [
+        dynamicModels ?? [
             CreateModelCapability(_options.GeneralModelId, "general", _options.GeneralContextLength, true, false),
             .. CodingModelCatalog.Models.Select(static profile =>
                 CreateModelCapability(profile.Id, "code", profile.ContextLength, true, false)),

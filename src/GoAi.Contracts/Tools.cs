@@ -42,6 +42,7 @@ public static class ClientToolNames
     public const string DocumentsSearch = "documents.search";
     public const string DocumentsReadPages = "documents.readPages";
     public const string WorkspaceMap = "workspace.map";
+    public const string WorkspaceIndexQuery = "workspace.index.query";
     public const string FileSystemList = "fs.list";
     public const string FileSystemStat = "fs.stat";
     public const string FileSystemFindFiles = "fs.findFiles";

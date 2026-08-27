@@ -23,4 +23,4 @@ Invoke-GoAiCompose -Paths $paths -Arguments @('config', '--quiet')
 $arguments = @('build')
 if ($Pull) { $arguments += '--pull' }
 Invoke-GoAiCompose -Paths $paths -Arguments $arguments
-Write-Host 'GO AI Docker images were built successfully.' -ForegroundColor Green
+Write-Host 'GO AI Docker gateway and worker images were built successfully. Model images are managed by LM Studio.' -ForegroundColor Green

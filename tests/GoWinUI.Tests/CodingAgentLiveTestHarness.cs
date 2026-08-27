@@ -16,6 +16,10 @@ internal sealed record CodingAgentLiveRunObservation(
     RunSnapshot Run,
     RunFailedEvent? Failure,
     IReadOnlyList<string> ToolNames,
+    IReadOnlyList<AgentActionStartedEvent> AgentActions,
+    IReadOnlyList<AgentObservationCommittedEvent> AgentObservations,
+    IReadOnlyList<AgentCacheChangedEvent> CacheEvents,
+    IReadOnlyList<AgentMessageCompletedEvent> AgentMessages,
     IReadOnlyList<string> MutationTools,
     IReadOnlySet<string> VerificationPurposes,
     string VisibleText,
@@ -53,10 +57,7 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
         this.scenario = scenario;
         this.workspace = workspace;
         this.modelId = modelId;
-        modelDisplayName = modelId.ToLowerInvariant() switch
-        {
-            _ => "gpt-oss-120b",
-        };
+        modelDisplayName = modelId;
 
         var gatewayUrl = Environment.GetEnvironmentVariable("GO_AI_SERVER_URL")
             ?? "http://127.0.0.1:8080/";
@@ -143,12 +144,6 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
         Func<string, JsonElement, bool>? stopAfterServerTool = null)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        await CodingWorkflowMessageJournal.AppendAsync(
-            workspace,
-            "task",
-            $"Coding-Workflow · {scenario} · Aufgabe",
-            prompt,
-            cancellationToken).ConfigureAwait(false);
         var index = await repositoryIndex.GetSnapshotAsync(workspace, cancellationToken).ConfigureAwait(false);
         var descriptor = new WorkspaceDescriptor(
             Path.GetFileName(index.Root),
@@ -193,6 +188,12 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
         log.Write("run.accepted", new { accepted.RunId }, accepted.RunId);
 
         var toolNames = new List<string>();
+        var agentActions = new List<AgentActionStartedEvent>();
+        var agentObservations = new List<AgentObservationCommittedEvent>();
+        var cacheEvents = new List<AgentCacheChangedEvent>();
+        var agentMessages = new List<AgentMessageCompletedEvent>();
+        var agentMessageBuffers = new Dictionary<string, StringBuilder>(StringComparer.Ordinal);
+        var agentMessageNextDelta = new Dictionary<string, int>(StringComparer.Ordinal);
         var mutationTools = new List<string>();
         var verificationPurposes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var visibleText = new StringBuilder();
@@ -203,6 +204,121 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
         {
             switch (item.Type)
             {
+                case RunEventTypes.AgentMessageStarted:
+                {
+                    var started = item.Data.Deserialize<AgentMessageStartedEvent>(ProtocolJson)
+                        ?? throw new InvalidDataException("Der Server lieferte einen ungültigen Agentennachrichtenstart.");
+                    Assert.Equal(accepted.RunId, started.RunId);
+                    Assert.False(agentMessageBuffers.ContainsKey(started.ItemId), $"Doppelter Agentenstart: {started.ItemId}");
+                    agentMessageBuffers[started.ItemId] = new StringBuilder();
+                    agentMessageNextDelta[started.ItemId] = 0;
+                    log.Write("agent.message.started", new
+                    {
+                        item.Id,
+                        started.ItemId,
+                        started.Sequence,
+                        started.Phase,
+                        started.Origin,
+                        started.MilestoneFingerprint,
+                    }, accepted.RunId);
+                    break;
+                }
+                case RunEventTypes.AgentMessageDelta:
+                {
+                    var delta = item.Data.Deserialize<AgentMessageDeltaEvent>(ProtocolJson)
+                        ?? throw new InvalidDataException("Der Server lieferte ein ungültiges Agentennachrichten-Delta.");
+                    Assert.Equal(accepted.RunId, delta.RunId);
+                    Assert.True(agentMessageBuffers.TryGetValue(delta.ItemId, out var buffer), $"Delta ohne Start: {delta.ItemId}");
+                    Assert.Equal(agentMessageNextDelta[delta.ItemId], delta.DeltaIndex);
+                    buffer!.Append(delta.Delta);
+                    agentMessageNextDelta[delta.ItemId] = delta.DeltaIndex + 1;
+                    log.Write("agent.message.delta", new
+                    {
+                        item.Id,
+                        delta.ItemId,
+                        delta.DeltaIndex,
+                        deltaLength = delta.Delta.Length,
+                        cumulativeLength = buffer.Length,
+                    }, accepted.RunId);
+                    break;
+                }
+                case RunEventTypes.AgentMessageCompleted:
+                {
+                    var completedMessage = item.Data.Deserialize<AgentMessageCompletedEvent>(ProtocolJson)
+                        ?? throw new InvalidDataException("Der Server lieferte einen ungültigen Agentennachrichtenabschluss.");
+                    Assert.Equal(accepted.RunId, completedMessage.RunId);
+                    Assert.True(agentMessageBuffers.TryGetValue(completedMessage.ItemId, out var buffer), $"Abschluss ohne Start: {completedMessage.ItemId}");
+                    Assert.Equal(completedMessage.DeltaCount, agentMessageNextDelta[completedMessage.ItemId]);
+                    Assert.Equal(completedMessage.Text, buffer!.ToString());
+                    agentMessages.Add(completedMessage);
+                    if (completedMessage.Phase == AgentMessagePhase.FinalAnswer)
+                    {
+                        visibleText.Clear();
+                        visibleText.Append(completedMessage.Text);
+                    }
+                    log.Write("agent.message.completed", new
+                    {
+                        item.Id,
+                        completedMessage.ItemId,
+                        completedMessage.Sequence,
+                        completedMessage.Phase,
+                        completedMessage.Origin,
+                        completedMessage.DeltaCount,
+                        textLength = completedMessage.Text.Length,
+                        completedMessage.MilestoneFingerprint,
+                    }, accepted.RunId);
+                    break;
+                }
+                case RunEventTypes.AgentActionStarted:
+                {
+                    var action = item.Data.Deserialize<AgentActionStartedEvent>(ProtocolJson)
+                        ?? throw new InvalidDataException("Der Server lieferte eine ungültige V2-Agentenaktion.");
+                    agentActions.Add(action);
+                    Console.WriteLine($"{modelDisplayName} => {action.Tool}/{action.Operation} [{action.ActionId}]");
+                    log.Write("agent.action", new
+                    {
+                        item.Id,
+                        action.ActionId,
+                        action.Sequence,
+                        action.Tool,
+                        action.Operation,
+                        action.Target,
+                        action.WorkspaceRevision,
+                    }, accepted.RunId);
+                    break;
+                }
+                case RunEventTypes.AgentObservationCommitted:
+                {
+                    var observation = item.Data.Deserialize<AgentObservationCommittedEvent>(ProtocolJson)
+                        ?? throw new InvalidDataException("Der Server lieferte eine ungültige V2-Agentenbeobachtung.");
+                    agentObservations.Add(observation);
+                    log.Write("agent.observation", new
+                    {
+                        item.Id,
+                        observation.ActionId,
+                        observation.Succeeded,
+                        observation.ErrorCode,
+                        observation.EvidenceId,
+                        observation.CacheHit,
+                        observation.WorkspaceRevision,
+                    }, accepted.RunId);
+                    break;
+                }
+                case RunEventTypes.AgentCacheChanged:
+                {
+                    var cache = item.Data.Deserialize<AgentCacheChangedEvent>(ProtocolJson)
+                        ?? throw new InvalidDataException("Der Server lieferte ein ungültiges V2-Cacheereignis.");
+                    cacheEvents.Add(cache);
+                    log.Write("agent.cache", new
+                    {
+                        item.Id,
+                        cache.Cache,
+                        cache.Hit,
+                        cache.Key,
+                        cache.WorkspaceRevision,
+                    }, accepted.RunId);
+                    break;
+                }
                 case RunEventTypes.ClientToolProposed:
                 {
                     var proposal = item.Data.Deserialize<ToolProposal>(ProtocolJson)
@@ -336,21 +452,14 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
             assistantTextSha256 = ComputeSha256(output),
             workspaceRevision = finalIndex.RevisionFingerprint,
         }, accepted.RunId);
-        var journalResult = !string.IsNullOrWhiteSpace(output)
-            ? output
-            : failure is not null
-                ? $"Der Coding-Lauf ist fehlgeschlagen: {failure.ErrorCode} · {failure.Message}"
-                : $"Der Coding-Lauf endete mit Status {completed.State}.";
-        await CodingWorkflowMessageJournal.AppendAsync(
-            workspace,
-            completed.State == RunState.Completed ? "result" : "error",
-            $"Coding-Workflow · {scenario} · Ergebnis",
-            journalResult,
-            CancellationToken.None).ConfigureAwait(false);
         return new CodingAgentLiveRunObservation(
             completed,
             failure,
             toolNames,
+            agentActions,
+            agentObservations,
+            cacheEvents,
+            agentMessages,
             mutationTools,
             verificationPurposes,
             output,
@@ -399,6 +508,18 @@ internal sealed class CodingAgentLiveTestHarness : IAsyncDisposable
             Assert.Contains("review", observation.VerificationPurposes);
         }
         Assert.False(string.IsNullOrWhiteSpace(observation.VisibleText));
+        var finalMessage = Assert.Single(
+            observation.AgentMessages,
+            static message => message.Phase == AgentMessagePhase.FinalAnswer);
+        Assert.Equal(observation.VisibleText, finalMessage.Text);
+        var streamedStates = observation.AgentMessages
+            .Where(static message => message.Phase == AgentMessagePhase.Commentary)
+            .ToArray();
+        Assert.All(streamedStates, message => Assert.Equal(finalMessage.ItemId, message.ItemId));
+        for (var index = 1; index < streamedStates.Length; index++)
+        {
+            Assert.StartsWith(streamedStates[index - 1].Text, streamedStates[index].Text, StringComparison.Ordinal);
+        }
         Assert.DoesNotContain("<tool_call", observation.VisibleText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("<function=", observation.VisibleText, StringComparison.OrdinalIgnoreCase);
     }

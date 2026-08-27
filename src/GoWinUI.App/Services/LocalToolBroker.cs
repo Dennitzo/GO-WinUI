@@ -113,6 +113,7 @@ public sealed class LocalToolBroker(
                 ClientToolNames.DocumentsSearch => await SearchDocumentsAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.DocumentsReadPages => await ReadDocumentPagesAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.WorkspaceMap => await MapWorkspaceAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
+                ClientToolNames.WorkspaceIndexQuery => await QueryWorkspaceIndexAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemList => await ListAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemStat => await StatAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 ClientToolNames.FileSystemFindFiles => await FindFilesAsync(proposal.Arguments, cancellationToken).ConfigureAwait(false),
@@ -133,6 +134,14 @@ public sealed class LocalToolBroker(
                     await RunBricsCadAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 _ => throw new InvalidOperationException($"Das Clientwerkzeug '{proposal.Name}' ist nicht implementiert."),
             };
+            if (_executionWorkspace.Value is { Length: > 0 } workspace
+                && IsWorkspaceMutation(proposal.Name))
+            {
+                // FileSystemWatcher is the low-latency path, but it is asynchronous
+                // and may coalesce events. Mark the local index dirty before the
+                // next agent action can read a stale cached file version.
+                repositoryIndex.Invalidate(workspace);
+            }
             return Result(proposal, "completed", payload);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -146,6 +155,26 @@ public sealed class LocalToolBroker(
                 "failed",
                 exception.Recovery,
                 "client.workspace_path_not_found",
+                exception.Message);
+        }
+        catch (WorkspaceMutationRecoveryException exception)
+        {
+            return Result(
+                proposal,
+                "failed",
+                exception.Recovery,
+                exception.ErrorCode,
+                exception.Message);
+        }
+        catch (Exception exception) when (
+            exception is not OutOfMemoryException
+            && IsWorkspaceMutation(proposal.Name))
+        {
+            return Result(
+                proposal,
+                "failed",
+                CreateGenericMutationRecovery(proposal, exception),
+                "client.workspace_mutation_failed",
                 exception.Message);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -163,6 +192,93 @@ public sealed class LocalToolBroker(
             _executionSession.Value = null;
         }
     }
+
+    private static bool IsWorkspaceMutation(string toolName) => toolName is
+        ClientToolNames.DocumentCreate
+        or ClientToolNames.FileSystemWriteText
+        or ClientToolNames.FileSystemReplaceText
+        or ClientToolNames.FileSystemMove
+        or ClientToolNames.FileSystemProposePatch
+        or ClientToolNames.FileSystemProposeCreate
+        or ClientToolNames.FileSystemProposeDelete;
+
+    private static object CreateGenericMutationRecovery(ToolProposal proposal, Exception exception)
+    {
+        var path = proposal.Arguments.ValueKind == JsonValueKind.Object
+            && proposal.Arguments.TryGetProperty("path", out var pathValue)
+            && pathValue.ValueKind == JsonValueKind.String
+                ? pathValue.GetString()
+                : null;
+        var expectedSha256 = proposal.Arguments.ValueKind == JsonValueKind.Object
+            && proposal.Arguments.TryGetProperty("expectedSha256", out var expectedValue)
+            && expectedValue.ValueKind == JsonValueKind.String
+                ? expectedValue.GetString()
+                : null;
+        return new
+        {
+            failed = true,
+            reason = "mutation_rejected",
+            path,
+            tool = proposal.Name,
+            expectedSha256,
+            authoritativeReadRequired = !string.IsNullOrWhiteSpace(path),
+            requiredAgentTool = !string.IsNullOrWhiteSpace(path) ? "workspace.inspect" : null,
+            requiredOperation = !string.IsNullOrWhiteSpace(path) ? "read" : null,
+            retryAgentTool = "workspace.change",
+            diagnostic = exception.Message,
+        };
+    }
+
+    private static WorkspaceMutationRecoveryException CreateVersionConflict(
+        string tool,
+        string path,
+        string? expectedSha256,
+        string actualSha256)
+    {
+        const string message = "Die Zieldatei wurde zwischenzeitlich geändert; die Mutation wurde nicht ausgeführt. Lies die Datei autoritativ erneut und verwende danach ausschließlich deren aktuelle SHA-256-Version.";
+        return new WorkspaceMutationRecoveryException(
+            "client.workspace_version_conflict",
+            message,
+            new
+            {
+                failed = true,
+                reason = "stale_file_version",
+                path,
+                tool,
+                expectedSha256,
+                actualSha256,
+                authoritativeReadRequired = true,
+                requiredAgentTool = "workspace.inspect",
+                requiredOperation = "read",
+                retryAgentTool = "workspace.change",
+            });
+    }
+
+    private static WorkspaceMutationRecoveryException CreateReplaceRecovery(
+        string errorCode,
+        string reason,
+        string message,
+        string path,
+        string actualSha256,
+        string requestedOldText,
+        int occurrences) => new(
+            errorCode,
+            message,
+            new
+            {
+                failed = true,
+                reason,
+                path,
+                tool = ClientToolNames.FileSystemReplaceText,
+                actualSha256,
+                requestedOldTextSha256 = Convert.ToHexString(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(requestedOldText))).ToLowerInvariant(),
+                occurrences,
+                authoritativeReadRequired = true,
+                requiredAgentTool = "workspace.inspect",
+                requiredOperation = "read",
+                retryAgentTool = "workspace.change",
+            });
 
     internal static void ValidateProposal(ToolProposal proposal, DateTimeOffset? currentTime = null)
     {
@@ -189,7 +305,7 @@ public sealed class LocalToolBroker(
         {
             ClientToolNames.DocumentRead
                 or ClientToolNames.DocumentsList or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages
-                or ClientToolNames.WorkspaceMap or ClientToolNames.FileSystemList or ClientToolNames.FileSystemStat
+                or ClientToolNames.WorkspaceMap or ClientToolNames.WorkspaceIndexQuery or ClientToolNames.FileSystemList or ClientToolNames.FileSystemStat
                 or ClientToolNames.FileSystemFindFiles or ClientToolNames.FileSystemReadText
                 or ClientToolNames.FileSystemReadMany or ClientToolNames.FileSystemSearch
                 or ClientToolNames.BricsCadGeometryQuery or ClientToolNames.BricsCadMeasure => ToolRiskClass.ReadOnly,
@@ -281,20 +397,29 @@ public sealed class LocalToolBroker(
                 ValidateOptionalInteger(arguments, "maximumDepth", 1, 32);
                 ValidateOptionalInteger(arguments, "maximumEntries", 1, 5_000);
                 break;
+            case ClientToolNames.WorkspaceIndexQuery:
+                ValidateProperties(arguments, ["operation", "query"], ["operation", "path", "query", "maximumResults"]);
+                ValidateOptionalEnum(arguments, "operation", ["symbols", "references"]);
+                ValidateOptionalString(arguments, "path", 0, 1_024);
+                ValidateString(arguments, "query", 1, 1_024);
+                ValidateOptionalInteger(arguments, "maximumResults", 1, 500);
+                break;
             case ClientToolNames.FileSystemList:
             case ClientToolNames.FileSystemStat:
                 ValidateProperties(arguments, ["path"], ["path"]);
                 ValidateString(arguments, "path", 0, 1_024);
                 break;
             case ClientToolNames.FileSystemProposeDelete:
-                ValidateProperties(arguments, ["path"], ["path"]);
+                ValidateProperties(arguments, ["path"], ["path", "expectedSha256"]);
                 ValidateString(arguments, "path", 1, 1_024);
+                ValidateOptionalString(arguments, "expectedSha256", 64, 64);
                 break;
             case ClientToolNames.FileSystemReadText:
-                ValidateProperties(arguments, ["path"], ["path", "startLine", "endLine"]);
+                ValidateProperties(arguments, ["path"], ["path", "startLine", "endLine", "knownEvidenceIds"]);
                 ValidateString(arguments, "path", 1, 1_024);
                 ValidateOptionalInteger(arguments, "startLine", 1, 10_000_000);
                 ValidateOptionalInteger(arguments, "endLine", 1, 10_000_000);
+                ValidateOptionalStringArray(arguments, "knownEvidenceIds", 128, 128);
                 break;
             case ClientToolNames.FileSystemFindFiles:
                 ValidateProperties(arguments, ["patterns"], ["path", "patterns", "maximumResults"]);
@@ -303,9 +428,10 @@ public sealed class LocalToolBroker(
                 ValidateOptionalInteger(arguments, "maximumResults", 1, 5_000);
                 break;
             case ClientToolNames.FileSystemReadMany:
-                ValidateProperties(arguments, ["items"], ["items", "maximumCharacters"]);
+                ValidateProperties(arguments, ["items"], ["items", "maximumCharacters", "knownEvidenceIds"]);
                 ValidateReadManyItems(arguments);
                 ValidateOptionalInteger(arguments, "maximumCharacters", 1_024, MaximumResultCharacters);
+                ValidateOptionalStringArray(arguments, "knownEvidenceIds", 128, 128);
                 break;
             case ClientToolNames.FileSystemSearch:
                 ValidateProperties(
@@ -342,15 +468,17 @@ public sealed class LocalToolBroker(
                 ValidateOptionalBoolean(arguments, "replaceAll");
                 break;
             case ClientToolNames.FileSystemMove:
-                ValidateProperties(arguments, ["source", "destination"], ["source", "destination", "overwrite"]);
+                ValidateProperties(arguments, ["source", "destination"], ["source", "destination", "expectedSha256", "overwrite"]);
                 ValidateString(arguments, "source", 1, 1_024);
                 ValidateString(arguments, "destination", 1, 1_024);
+                ValidateOptionalString(arguments, "expectedSha256", 64, 64);
                 ValidateOptionalBoolean(arguments, "overwrite");
                 break;
             case ClientToolNames.FileSystemProposePatch:
-                ValidateProperties(arguments, ["path", "patch"], ["path", "patch"]);
+                ValidateProperties(arguments, ["path", "patch"], ["path", "patch", "expectedSha256"]);
                 ValidateString(arguments, "path", 1, 1_024);
                 ValidateString(arguments, "patch", 1, MaximumResultCharacters);
+                ValidateOptionalString(arguments, "expectedSha256", 64, 64);
                 break;
             case ClientToolNames.FileSystemProposeCreate:
                 ValidateProperties(arguments, ["path", "content"], ["path", "content"]);
@@ -583,6 +711,23 @@ public sealed class LocalToolBroker(
         });
     }
 
+    private async Task<object> QueryWorkspaceIndexAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var operation = RequiredString(arguments, "operation");
+        var query = RequiredString(arguments, "query");
+        var path = arguments.TryGetProperty("path", out var pathValue) && pathValue.ValueKind == JsonValueKind.String
+            ? pathValue.GetString()
+            : null;
+        var maximumResults = OptionalInteger(arguments, "maximumResults") ?? 50;
+        return Bounded(await repositoryIndex.QueryCodeIndexAsync(
+            Workspace(),
+            operation,
+            query,
+            path,
+            maximumResults,
+            cancellationToken).ConfigureAwait(false));
+    }
+
     private Task<object> ListAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -691,10 +836,23 @@ public sealed class LocalToolBroker(
                     repositoryRevision = snapshot.RevisionFingerprint,
                 });
         }
+        var startLine = OptionalInteger(arguments, "startLine") ?? 1;
+        var endLine = OptionalInteger(arguments, "endLine");
+        var cached = await repositoryIndex.ReadCachedAsync(
+            Workspace(),
+            Relative(path),
+            startLine,
+            endLine,
+            MaximumResultCharacters,
+            cancellationToken).ConfigureAwait(false);
+        if (cached is not null)
+        {
+            return Bounded(ReadForEvidenceState(cached, ReadKnownEvidenceIds(arguments)));
+        }
         return Bounded(await ReadTextRangeAsync(
             path,
-            OptionalInteger(arguments, "startLine") ?? 1,
-            OptionalInteger(arguments, "endLine"),
+            startLine,
+            endLine,
             MaximumResultCharacters,
             cancellationToken).ConfigureAwait(false));
     }
@@ -828,7 +986,9 @@ public sealed class LocalToolBroker(
     {
         var maximumCharacters = OptionalInteger(arguments, "maximumCharacters") ?? 3_500_000;
         var remaining = maximumCharacters;
-        var files = new List<TextReadResult>();
+        var files = new List<object>();
+        var anyTruncated = false;
+        var knownEvidenceIds = ReadKnownEvidenceIds(arguments);
         foreach (var item in arguments.GetProperty("items").EnumerateArray())
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -836,19 +996,62 @@ public sealed class LocalToolBroker(
             {
                 break;
             }
-            var path = ResolvePath(RequiredString(item, "path"), requireExisting: true);
+            var requestedPath = RequiredString(item, "path");
+            var path = ResolvePath(requestedPath, requireExisting: false);
             if (!File.Exists(path))
             {
-                throw new FileNotFoundException("Ein angeforderter fs.readMany-Pfad ist keine Datei.", path);
+                var pathIsDirectory = Directory.Exists(path);
+                var snapshot = await repositoryIndex.GetSnapshotAsync(Workspace(), cancellationToken).ConfigureAwait(false);
+                var suggestedPaths = FindWorkspacePathSuggestions(requestedPath, snapshot.Entries)
+                    .Where(candidate => File.Exists(ResolvePath(candidate, requireExisting: false)))
+                    .ToArray();
+                throw new WorkspacePathNotFoundException(
+                    pathIsDirectory
+                        ? "Ein angeforderter workspace.inspect-read-Pfad ist ein Ordner. Liste ihn zuerst auf und lies danach eine vorhandene Datei."
+                        : "Ein angeforderter workspace.inspect-read-Pfad wurde nicht gefunden. Verwende einen Pfad aus suggestedPaths oder ermittle ihn mit find beziehungsweise list.",
+                    new
+                    {
+                        failed = true,
+                        reason = pathIsDirectory ? "path_is_directory" : "path_not_found",
+                        requestedPath = NormalizeWorkspaceAlias(requestedPath)?.Replace('\\', '/') ?? requestedPath.Replace('\\', '/'),
+                        suggestedPaths,
+                        recoveryTool = pathIsDirectory
+                            ? ClientToolNames.FileSystemList
+                            : suggestedPaths.Length == 0 ? ClientToolNames.FileSystemFindFiles : null,
+                        repositoryRevision = snapshot.RevisionFingerprint,
+                    });
             }
-            var result = await ReadTextRangeAsync(
-                path,
-                OptionalInteger(item, "startLine") ?? 1,
-                OptionalInteger(item, "endLine"),
+            var startLine = OptionalInteger(item, "startLine") ?? 1;
+            var endLine = OptionalInteger(item, "endLine");
+            var cached = await repositoryIndex.ReadCachedAsync(
+                Workspace(),
+                Relative(path),
+                startLine,
+                endLine,
                 remaining,
                 cancellationToken).ConfigureAwait(false);
-            files.Add(result);
-            remaining -= result.Text.Length;
+            if (cached is not null)
+            {
+                var reused = knownEvidenceIds.Contains(cached.EvidenceId);
+                files.Add(ReadForEvidenceState(cached, knownEvidenceIds));
+                if (!reused)
+                {
+                    remaining -= cached.Text.Length;
+                }
+                anyTruncated |= cached.Truncated;
+            }
+            else
+            {
+                var result = await ReadTextRangeAsync(
+                    path,
+                    startLine,
+                    endLine,
+                    remaining,
+                    cancellationToken).ConfigureAwait(false);
+                files.Add(result);
+                remaining -= result.Text.Length;
+                anyTruncated |= result.Truncated;
+            }
         }
         return Bounded(new
         {
@@ -856,8 +1059,36 @@ public sealed class LocalToolBroker(
             characters = maximumCharacters - remaining,
             maximumCharacters,
             truncated = files.Count < arguments.GetProperty("items").GetArrayLength()
-                || files.Any(static file => file.Truncated),
+                || anyTruncated,
         });
+    }
+
+    private static HashSet<string> ReadKnownEvidenceIds(JsonElement arguments) =>
+        ReadOptionalStringArray(arguments, "knownEvidenceIds")
+            .ToHashSet(StringComparer.Ordinal);
+
+    private static JsonElement ReadForEvidenceState(
+        WorkspaceCachedRead read,
+        HashSet<string> knownEvidenceIds)
+    {
+        object value = knownEvidenceIds.Contains(read.EvidenceId)
+            ? new
+            {
+                read.FileId,
+                read.EvidenceId,
+                read.Path,
+                read.Sha256,
+                read.WorkspaceRevision,
+                read.StartLine,
+                read.EndLine,
+                read.TotalLines,
+                read.Truncated,
+                cacheHit = true,
+                contentReused = true,
+                textOmitted = true,
+            }
+            : read;
+        return JsonSerializer.SerializeToElement(value, JsonOptions);
     }
 
     private async Task<object> SearchAsync(JsonElement arguments, CancellationToken cancellationToken)
@@ -881,28 +1112,10 @@ public sealed class LocalToolBroker(
             : Array.Empty<Regex>();
         var snapshot = await repositoryIndex.GetSnapshotAsync(Workspace(), cancellationToken).ConfigureAwait(false);
         var relativeRoot = Relative(root).TrimEnd('/');
-        var candidates = snapshot.Entries.Where(entry =>
-            !entry.IsBinary
-            && entry.Length <= WorkspaceRepositoryIndex.MaximumSearchableFileLength
-            && (File.Exists(root)
-                ? entry.Path.Equals(relativeRoot, StringComparison.OrdinalIgnoreCase)
-                : relativeRoot is "." or ""
-                    || entry.Path.StartsWith(relativeRoot + "/", StringComparison.OrdinalIgnoreCase))
-            && WorkspaceRepositoryIndex.MatchesGlobs(entry.Path, includeGlobs, excludeGlobs));
         var matches = new List<object>();
-        foreach (var entry in candidates)
+
+        void CollectMatches(string relativePath, string[] lines)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var file = ResolvePath(entry.Path, requireExisting: true);
-            string[] lines;
-            try
-            {
-                lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or DecoderFallbackException)
-            {
-                continue;
-            }
             for (var index = 0; index < lines.Length && matches.Count < maximum; index++)
             {
                 for (var queryIndex = 0; queryIndex < queries.Length && matches.Count < maximum; queryIndex++)
@@ -919,7 +1132,7 @@ public sealed class LocalToolBroker(
                     matches.Add(new
                     {
                         query = queries[queryIndex],
-                        path = entry.Path,
+                        path = relativePath,
                         line = index + 1,
                         text = lines[index].Trim(),
                         contextStartLine = firstContextLine + 1,
@@ -929,9 +1142,58 @@ public sealed class LocalToolBroker(
                     });
                 }
             }
-            if (matches.Count >= maximum)
+        }
+
+        if (mode == "literal")
+        {
+            var documents = await repositoryIndex.FindCachedSearchDocumentsAsync(
+                Workspace(),
+                queries,
+                relativeRoot,
+                Math.Clamp(Math.Max(128, maximum * 8), 128, 2_000),
+                cancellationToken).ConfigureAwait(false);
+            foreach (var document in documents.Where(document =>
+                         WorkspaceRepositoryIndex.MatchesGlobs(document.Path, includeGlobs, excludeGlobs)))
             {
-                break;
+                cancellationToken.ThrowIfCancellationRequested();
+                CollectMatches(document.Path, document.Text
+                    .Replace("\r\n", "\n", StringComparison.Ordinal)
+                    .Replace('\r', '\n')
+                    .Split('\n'));
+                if (matches.Count >= maximum)
+                {
+                    break;
+                }
+            }
+        }
+        else
+        {
+            var candidates = snapshot.Entries.Where(entry =>
+                !entry.IsBinary
+                && entry.Length <= WorkspaceRepositoryIndex.MaximumSearchableFileLength
+                && (File.Exists(root)
+                    ? entry.Path.Equals(relativeRoot, StringComparison.OrdinalIgnoreCase)
+                    : relativeRoot is "." or ""
+                        || entry.Path.StartsWith(relativeRoot + "/", StringComparison.OrdinalIgnoreCase))
+                && WorkspaceRepositoryIndex.MatchesGlobs(entry.Path, includeGlobs, excludeGlobs));
+            foreach (var entry in candidates)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var file = ResolvePath(entry.Path, requireExisting: true);
+                string[] lines;
+                try
+                {
+                    lines = await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or DecoderFallbackException)
+                {
+                    continue;
+                }
+                CollectMatches(entry.Path, lines);
+                if (matches.Count >= maximum)
+                {
+                    break;
+                }
             }
         }
         return Bounded(new
@@ -949,6 +1211,9 @@ public sealed class LocalToolBroker(
     {
         var path = ResolvePath(RequiredString(arguments, "path"), requireExisting: false);
         var targetExisted = File.Exists(path);
+        var beforeSha256 = targetExisted
+            ? await ComputeFileHashAsync(path, cancellationToken).ConfigureAwait(false)
+            : null;
         var existingContent = targetExisted
             ? await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false)
             : null;
@@ -975,11 +1240,13 @@ public sealed class LocalToolBroker(
             }
             else
             {
-                await using var existing = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 81_920, true);
-                var actual = Convert.ToHexString(await SHA256.HashDataAsync(existing, cancellationToken).ConfigureAwait(false)).ToLowerInvariant();
-                if (!actual.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+                if (!beforeSha256!.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
                 {
-                    throw new IOException("Die Zieldatei wurde zwischenzeitlich geändert; fs.writeText wurde nicht ausgeführt.");
+                    throw CreateVersionConflict(
+                        ClientToolNames.FileSystemWriteText,
+                        Relative(path),
+                        expectedSha256,
+                        beforeSha256);
                 }
             }
         }
@@ -1002,7 +1269,8 @@ public sealed class LocalToolBroker(
             written = true,
             path = Relative(path),
             length = Encoding.UTF8.GetByteCount(content),
-            sha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant(),
+            beforeSha256,
+            afterSha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant(),
         };
     }
 
@@ -1023,6 +1291,7 @@ public sealed class LocalToolBroker(
         }
 
         var original = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+        var beforeSha256 = await ComputeFileHashAsync(path, cancellationToken).ConfigureAwait(false);
         if (original.Contains('\0'))
         {
             throw new InvalidDataException("fs.replaceText kann keine Binärdatei bearbeiten.");
@@ -1030,10 +1299,13 @@ public sealed class LocalToolBroker(
         if (arguments.TryGetProperty("expectedSha256", out var expectedValue)
             && expectedValue.ValueKind == JsonValueKind.String)
         {
-            var actual = await ComputeFileHashAsync(path, cancellationToken).ConfigureAwait(false);
-            if (!actual.Equals(expectedValue.GetString(), StringComparison.OrdinalIgnoreCase))
+            if (!beforeSha256.Equals(expectedValue.GetString(), StringComparison.OrdinalIgnoreCase))
             {
-                throw new IOException("Die Zieldatei wurde zwischenzeitlich geändert; fs.replaceText wurde nicht ausgeführt.");
+                throw CreateVersionConflict(
+                    ClientToolNames.FileSystemReplaceText,
+                    Relative(path),
+                    expectedValue.GetString(),
+                    beforeSha256);
             }
         }
 
@@ -1099,7 +1371,15 @@ public sealed class LocalToolBroker(
         }
         if (occurrences == 0 && whitespaceMatch is null)
         {
-            throw new InvalidDataException("Der exakt angegebene oldText wurde nicht gefunden. Lies den aktuellen Dateibereich erneut und verwende dessen unveränderten Wortlaut.");
+            const string message = "Der exakt angegebene oldText wurde nicht gefunden. Lies den aktuellen Dateibereich erneut und verwende dessen unveränderten Wortlaut.";
+            throw CreateReplaceRecovery(
+                "client.replace_text_not_found",
+                "old_text_not_found",
+                message,
+                Relative(path),
+                beforeSha256,
+                requestedOldText,
+                occurrences: 0);
         }
         if (whitespaceMatch is not null)
         {
@@ -1111,7 +1391,15 @@ public sealed class LocalToolBroker(
             && replaceAllValue.ValueKind == JsonValueKind.True;
         if (!replaceAll && occurrences != 1)
         {
-            throw new InvalidDataException($"oldText kommt {occurrences} Mal vor. Gib mehr eindeutigen Kontext an oder setze replaceAll ausdrücklich auf true.");
+            var message = $"oldText kommt {occurrences} Mal vor. Gib mehr eindeutigen Kontext an oder setze replaceAll ausdrücklich auf true.";
+            throw CreateReplaceRecovery(
+                "client.replace_text_ambiguous",
+                "old_text_ambiguous",
+                message,
+                Relative(path),
+                beforeSha256,
+                requestedOldText,
+                occurrences);
         }
 
         var firstOccurrence = original.IndexOf(oldText, StringComparison.Ordinal);
@@ -1141,7 +1429,8 @@ public sealed class LocalToolBroker(
             whitespaceNormalized,
             copiedJsonUnicodeEscapesNormalized,
             length = Encoding.UTF8.GetByteCount(updated),
-            sha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(updated))).ToLowerInvariant(),
+            beforeSha256,
+            afterSha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(updated))).ToLowerInvariant(),
         };
     }
 
@@ -1262,7 +1551,7 @@ public sealed class LocalToolBroker(
         // git diff plus mandatory verification expose unintended broad changes to the agent.
     }
 
-    private Task<object> MoveAsync(JsonElement arguments, CancellationToken cancellationToken)
+    private async Task<object> MoveAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var source = ResolvePath(RequiredString(arguments, "source"), requireExisting: true);
@@ -1270,6 +1559,9 @@ public sealed class LocalToolBroker(
         ValidateVerificationAssetMove(Relative(source), Relative(destination));
         var overwrite = arguments.TryGetProperty("overwrite", out var overwriteValue)
             && overwriteValue.ValueKind == JsonValueKind.True;
+        var sourceSha256 = File.Exists(source)
+            ? await ValidateExpectedFileVersionAsync(source, arguments, requiredForFile: true, cancellationToken).ConfigureAwait(false)
+            : null;
         Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
         if (File.Exists(source))
         {
@@ -1287,7 +1579,14 @@ public sealed class LocalToolBroker(
         {
             throw new FileNotFoundException("Die zu verschiebende Workspace-Datei wurde nicht gefunden.", source);
         }
-        return Task.FromResult<object>(new { moved = true, source = Relative(source), destination = Relative(destination) });
+        return new
+        {
+            moved = true,
+            source = Relative(source),
+            destination = Relative(destination),
+            beforeSha256 = sourceSha256,
+            afterSha256 = sourceSha256,
+        };
     }
 
     private async Task<object> CreateFileAsync(JsonElement arguments, CancellationToken cancellationToken)
@@ -1301,13 +1600,23 @@ public sealed class LocalToolBroker(
         ValidateSourceMutation(path, null, content, isFullWrite: false);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path, content, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
-        return new { created = true, path = Relative(path), length = Encoding.UTF8.GetByteCount(content) };
+        return new
+        {
+            created = true,
+            path = Relative(path),
+            length = Encoding.UTF8.GetByteCount(content),
+            beforeSha256 = (string?)null,
+            afterSha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant(),
+        };
     }
 
-    private Task<object> DeleteFileAsync(JsonElement arguments, CancellationToken cancellationToken)
+    private async Task<object> DeleteFileAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var path = ResolvePath(RequiredString(arguments, "path"), requireExisting: true);
+        var beforeSha256 = File.Exists(path)
+            ? await ValidateExpectedFileVersionAsync(path, arguments, requiredForFile: true, cancellationToken).ConfigureAwait(false)
+            : null;
         if (File.Exists(path))
         {
             FileSystem.DeleteFile(path, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
@@ -1328,7 +1637,7 @@ public sealed class LocalToolBroker(
         {
             throw new FileNotFoundException("Das zu löschende Workspace-Element wurde nicht gefunden.", path);
         }
-        return Task.FromResult<object>(new { deleted = true, path = Relative(path), recoverable = true });
+        return new { deleted = true, path = Relative(path), recoverable = true, beforeSha256 };
     }
 
     private async Task<object> ApplyPatchAsync(JsonElement arguments, CancellationToken cancellationToken)
@@ -1339,6 +1648,11 @@ public sealed class LocalToolBroker(
             throw new FileNotFoundException("Das Patchziel wurde nicht gefunden.", target);
         }
         var original = await File.ReadAllTextAsync(target, cancellationToken).ConfigureAwait(false);
+        var beforeSha256 = await ValidateExpectedFileVersionAsync(
+            target,
+            arguments,
+            requiredForFile: true,
+            cancellationToken).ConfigureAwait(false);
         var patch = NormalizeSingleFilePatch(
             RequiredString(arguments, "patch"),
             Relative(target));
@@ -1376,7 +1690,32 @@ public sealed class LocalToolBroker(
             }
             throw;
         }
-        return new { patched = true, path = Relative(target), result.ExitCode, result.StandardOutput };
+        var afterSha256 = await ComputeFileHashAsync(target, cancellationToken).ConfigureAwait(false);
+        return new { patched = true, path = Relative(target), beforeSha256, afterSha256, result.ExitCode, result.StandardOutput };
+    }
+
+    private static async Task<string> ValidateExpectedFileVersionAsync(
+        string path,
+        JsonElement arguments,
+        bool requiredForFile,
+        CancellationToken cancellationToken)
+    {
+        var actual = await ComputeFileHashAsync(path, cancellationToken).ConfigureAwait(false);
+        if (!arguments.TryGetProperty("expectedSha256", out var expectedValue)
+            || expectedValue.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(expectedValue.GetString()))
+        {
+            if (requiredForFile)
+            {
+                throw new IOException("Die Dateiversion fehlt. Lies die aktuelle Datei und verwende deren expectedSha256.");
+            }
+            return actual;
+        }
+        if (!actual.Equals(expectedValue.GetString(), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new IOException("Die Datei wurde zwischenzeitlich geändert; die Aktion wurde nicht ausgeführt.");
+        }
+        return actual;
     }
 
     internal static string NormalizeSingleFilePatch(string patch, string relativeTarget)
@@ -1756,9 +2095,7 @@ public sealed class LocalToolBroker(
         var requestedTarget = arguments.TryGetProperty("target", out var targetValue)
             && targetValue.ValueKind == JsonValueKind.String
             && !string.IsNullOrWhiteSpace(targetValue.GetString());
-        var (testExecutable, testArguments) = requestedTarget
-            ? ResolveCodeCommand(workspace, arguments, test: true)
-            : ("dotnet", (IReadOnlyList<string>)["test", "--nologo"]);
+        var (testExecutable, testArguments) = ResolveCodeCommand(workspace, arguments, test: true);
         var test = await RunProcessAsync(
             testExecutable,
             testArguments,
@@ -1777,10 +2114,26 @@ public sealed class LocalToolBroker(
             });
         }
 
-        var buildScript = ResolveRepositoryBuildScript(workspace);
+        var buildScript = new[]
+            {
+                Path.Combine(workspace, "windows", "build.ps1"),
+                Path.Combine(workspace, "windows", "Build-Portable.ps1"),
+            }
+            .FirstOrDefault(File.Exists);
+        if (buildScript is null)
+        {
+            return Bounded(new
+            {
+                preset,
+                test.ExitCode,
+                StandardOutput = "[Tests]\n" + test.StandardOutput,
+                StandardError = "[Tests]\n" + test.StandardError,
+            });
+        }
+
         var build = await RunProcessAsync(
             "powershell.exe",
-            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", buildScript],
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", ResolvePath(buildScript, requireExisting: true)],
             workspace,
             null,
             TimeSpan.FromMinutes(45),
@@ -1889,6 +2242,7 @@ public sealed class LocalToolBroker(
             Workspace());
         requestedExecutable = normalizedPython.Executable;
         processArguments = normalizedPython.Arguments;
+        requestedExecutable = NormalizeSystemRuntimeAlias(requestedExecutable);
         var executable = ResolveProcessExecutable(requestedExecutable);
         var workingDirectory = arguments.TryGetProperty("workingDirectory", out var workingValue)
             && workingValue.ValueKind == JsonValueKind.String
@@ -2118,6 +2472,13 @@ public sealed class LocalToolBroker(
         var isPytest = requestedName.Equals("pytest", StringComparison.OrdinalIgnoreCase)
             || requestedName.Equals("pytest.exe", StringComparison.OrdinalIgnoreCase);
 
+        if ((isPython || isLauncher)
+            && IsBareUnittestInvocation(arguments)
+            && TryFindPythonTestRoot(workspace, out var testRoot))
+        {
+            arguments = BuildPythonUnittestDiscoveryArguments(arguments, testRoot);
+        }
+
         if (workspaceEnvironmentExists)
         {
             if (isPip)
@@ -2139,6 +2500,21 @@ public sealed class LocalToolBroker(
             return (requestedExecutable, arguments);
         }
 
+        if (isPip)
+        {
+            return ("python", ["-m", "pip", .. RemovePipPythonSelector(arguments)]);
+        }
+        if (isPytest)
+        {
+            return ("python", ["-m", "pytest", .. arguments]);
+        }
+        if (isPython
+            && (requestedName.Equals("python3", StringComparison.OrdinalIgnoreCase)
+                || requestedName.Equals("python3.exe", StringComparison.OrdinalIgnoreCase)))
+        {
+            return ("python", arguments);
+        }
+
         if (!InvokesVenv(arguments))
         {
             return (requestedExecutable, arguments);
@@ -2154,6 +2530,71 @@ public sealed class LocalToolBroker(
 
         var selector = InferPythonLauncherSelector(requestedExecutable) ?? "-3.11";
         return ("py", [selector, .. arguments]);
+    }
+
+    internal static bool IsBareUnittestInvocation(IReadOnlyList<string> arguments)
+    {
+        var moduleIndex = -1;
+        for (var index = 0; index < arguments.Count; index++)
+        {
+            if (arguments[index].Equals("-m", StringComparison.OrdinalIgnoreCase))
+            {
+                moduleIndex = index;
+                break;
+            }
+        }
+        if (moduleIndex < 0
+            || moduleIndex + 1 >= arguments.Count
+            || !arguments[moduleIndex + 1].Equals("unittest", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return arguments
+            .Skip(moduleIndex + 2)
+            .All(static argument => argument is "-v" or "--verbose" or "-q" or "--quiet" or "-f" or "--failfast" or "-b" or "--buffer" or "-c" or "--catch");
+    }
+
+    internal static string[] BuildPythonUnittestDiscoveryArguments(
+        IReadOnlyList<string> originalArguments,
+        string relativeTestRoot)
+    {
+        var moduleIndex = -1;
+        for (var index = 0; index < originalArguments.Count; index++)
+        {
+            if (originalArguments[index].Equals("-m", StringComparison.OrdinalIgnoreCase))
+            {
+                moduleIndex = index;
+                break;
+            }
+        }
+        if (moduleIndex < 0 || moduleIndex + 1 >= originalArguments.Count)
+        {
+            throw new ArgumentException("The Python unittest module selector is missing.", nameof(originalArguments));
+        }
+
+        var prefix = originalArguments.Take(moduleIndex + 2).ToArray();
+        var options = originalArguments.Skip(moduleIndex + 2).ToArray();
+        return [.. prefix, "discover", "-s", relativeTestRoot, .. options];
+    }
+
+    private static bool TryFindPythonTestRoot(string workspace, out string relativeTestRoot)
+    {
+        var testsDirectory = Path.Combine(workspace, "tests");
+        if (Directory.Exists(testsDirectory)
+            && Directory.EnumerateFiles(testsDirectory, "test*.py", System.IO.SearchOption.AllDirectories).Any())
+        {
+            relativeTestRoot = "tests";
+            return true;
+        }
+        if (Directory.EnumerateFiles(workspace, "test*.py", System.IO.SearchOption.TopDirectoryOnly).Any())
+        {
+            relativeTestRoot = ".";
+            return true;
+        }
+
+        relativeTestRoot = string.Empty;
+        return false;
     }
 
     internal static void ValidatePythonProcessHasEntryPoint(
@@ -2432,6 +2873,21 @@ public sealed class LocalToolBroker(
                 return ResolvePath(candidate, requireExisting: true);
             }
         }
+        if (test)
+        {
+            foreach (var pattern in new[] { "test_*.py", "*_test.py" })
+            {
+                var candidate = EnumerateFilesSafe(workspace)
+                    .FirstOrDefault(path => System.IO.Enumeration.FileSystemName.MatchesSimpleExpression(
+                        pattern,
+                        Path.GetFileName(path),
+                        ignoreCase: true));
+                if (candidate is not null)
+                {
+                    return ResolvePath(candidate, requireExisting: true);
+                }
+            }
+        }
         throw new FileNotFoundException("Im Workspace wurde kein automatischer Start- oder Test-Einstiegspunkt gefunden. Verwende process.run mit dem Repositorykommando.");
     }
 
@@ -2442,7 +2898,8 @@ public sealed class LocalToolBroker(
             return null;
         }
         var normalized = target.Trim().Replace('\\', '/');
-        if (string.Equals(normalized, "/workspace", StringComparison.OrdinalIgnoreCase)
+        if (normalized is "/" or "." or "./"
+            || string.Equals(normalized, "/workspace", StringComparison.OrdinalIgnoreCase)
             || string.Equals(normalized, "workspace", StringComparison.OrdinalIgnoreCase))
         {
             return ".";
@@ -2888,6 +3345,46 @@ public sealed class LocalToolBroker(
         startInfo.Environment["MSBUILDDISABLENODEREUSE"] = "1";
         startInfo.Environment["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1";
         startInfo.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+
+        var pathEntries = (startInfo.Environment.TryGetValue("PATH", out var currentPath)
+                ? currentPath
+                : Environment.GetEnvironmentVariable("PATH"))
+            ?.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList()
+            ?? [];
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        foreach (var directory in new[]
+        {
+            Path.Combine(userProfile, ".cargo", "bin"),
+            Path.Combine(userProfile, ".elan", "bin"),
+            Path.Combine(programFiles, "nodejs"),
+            Path.Combine(programFiles, "Go", "bin"),
+            Path.Combine(programFiles, "dotnet"),
+        })
+        {
+            if (Directory.Exists(directory)
+                && !pathEntries.Contains(directory, StringComparer.OrdinalIgnoreCase))
+            {
+                pathEntries.Insert(0, directory);
+            }
+        }
+        startInfo.Environment["PATH"] = string.Join(Path.PathSeparator, pathEntries);
+    }
+
+    internal static string NormalizeSystemRuntimeAlias(string requestedExecutable)
+    {
+        var name = Path.GetFileName(requestedExecutable);
+        if (!string.Equals(name, requestedExecutable, StringComparison.OrdinalIgnoreCase))
+        {
+            return requestedExecutable;
+        }
+
+        return name.ToLowerInvariant() switch
+        {
+            "nodejs" or "nodejs.exe" => "node",
+            _ => requestedExecutable,
+        };
     }
 
     private static async Task<(string StandardOutput, string StandardError)> DrainProcessStreamsAsync(
@@ -2925,11 +3422,66 @@ public sealed class LocalToolBroker(
     private string ResolveProcessExecutable(string requested)
     {
         var normalized = NormalizeWorkspaceAlias(requested) ?? requested;
+        if (!Path.IsPathFullyQualified(normalized)
+            && !normalized.Contains(Path.DirectorySeparatorChar)
+            && !normalized.Contains(Path.AltDirectorySeparatorChar)
+            && TryResolveSystemExecutable(normalized, out var systemExecutable))
+        {
+            return systemExecutable;
+        }
+
         return Path.IsPathFullyQualified(normalized)
             || normalized.Contains(Path.DirectorySeparatorChar)
             || normalized.Contains(Path.AltDirectorySeparatorChar)
                 ? ResolvePath(normalized, requireExisting: true)
                 : normalized;
+    }
+
+    internal static bool TryResolveSystemExecutable(string executable, out string resolved)
+    {
+        var candidates = new List<string>();
+        var extension = Path.GetExtension(executable);
+        if (extension.Length > 0)
+        {
+            candidates.Add(executable);
+        }
+        else
+        {
+            candidates.Add(executable + ".exe");
+            candidates.Add(executable + ".cmd");
+            candidates.Add(executable + ".bat");
+            candidates.Add(executable);
+        }
+
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var searchDirectories = new List<string>
+        {
+            Path.Combine(userProfile, ".cargo", "bin"),
+            Path.Combine(userProfile, ".elan", "bin"),
+            Path.Combine(programFiles, "nodejs"),
+            Path.Combine(programFiles, "Go", "bin"),
+            Path.Combine(programFiles, "dotnet"),
+        };
+        searchDirectories.AddRange(
+            (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
+        foreach (var directory in searchDirectories.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var candidate in candidates)
+            {
+                var path = Path.Combine(directory, candidate);
+                if (File.Exists(path))
+                {
+                    resolved = Path.GetFullPath(path);
+                    return true;
+                }
+            }
+        }
+
+        resolved = executable;
+        return false;
     }
 
     internal static (string Executable, string[] Arguments, bool Isolated) ResolveWorkspacePythonCommand(
@@ -3332,6 +3884,15 @@ public sealed class LocalToolBroker(
 
     private sealed class WorkspacePathNotFoundException(string message, object recovery) : FileNotFoundException(message)
     {
+        public object Recovery { get; } = recovery;
+    }
+
+    private sealed class WorkspaceMutationRecoveryException(
+        string errorCode,
+        string message,
+        object recovery) : IOException(message)
+    {
+        public string ErrorCode { get; } = errorCode;
         public object Recovery { get; } = recovery;
     }
 }

@@ -132,15 +132,12 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
 
     private static string NormalizeCodingModel(int settingsVersion, string? value)
     {
-        if (settingsVersion < 14)
+        if (settingsVersion < 15)
         {
             return AppSettings.DefaultSelectedCodingModel;
         }
 
-        var normalized = value?.Trim();
-        return normalized is "gpt-oss-120b" or "qwen3-coder-next-q8_0"
-            ? normalized
-            : AppSettings.DefaultSelectedCodingModel;
+        return NormalizeModelId(value, AppSettings.DefaultSelectedCodingModel);
     }
 
     private static string NormalizeGeneralModel(string? value)
@@ -152,20 +149,24 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             return AppSettings.DefaultSelectedModel;
         }
 
-        return normalized;
+        return NormalizeModelId(normalized, AppSettings.DefaultSelectedModel);
+    }
+
+    private static string NormalizeModelId(string? value, string fallback)
+    {
+        var normalized = value?.Trim();
+        return string.IsNullOrWhiteSpace(normalized)
+               || normalized.Length > 512
+               || normalized.Any(char.IsControl)
+            ? fallback
+            : normalized;
     }
 
     private static string NormalizeReasoningEffort(int settingsVersion, string? value)
     {
-        if (settingsVersion < 11)
-        {
-            return "auto";
-        }
-
-        var normalized = value?.Trim().ToLowerInvariant();
-        return normalized is "off" or "on" or "low" or "medium" or "high"
-            ? normalized
-            : "auto";
+        _ = settingsVersion;
+        _ = value;
+        return "auto";
     }
 
     private static string? NormalizeWorkspace(string? value)

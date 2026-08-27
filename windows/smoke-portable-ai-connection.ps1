@@ -56,7 +56,7 @@ try {
     while ([DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) {
         if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
             $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-            if ($settings.version -eq 14 -and $settings.isAiConnectionEnabled -eq $true) {
+            if ($settings.version -eq 15 -and $settings.isAiConnectionEnabled -eq $true) {
                 break
             }
         }
@@ -69,7 +69,7 @@ try {
     if ($null -eq $settings) {
         throw 'Portable GO did not persist its initial settings.'
     }
-    if ($settings.version -ne 14 -or $settings.isAiConnectionEnabled -ne $true) {
+    if ($settings.version -ne 15 -or $settings.isAiConnectionEnabled -ne $true) {
         throw 'Portable GO did not start in online connection mode.'
     }
     if (-not [string]::Equals($settings.goAiServerUrl, $serverUri.ToString().TrimEnd('/'), [StringComparison]::OrdinalIgnoreCase)) {

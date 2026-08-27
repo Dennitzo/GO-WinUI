@@ -5,6 +5,7 @@ namespace GoWinUI.Core.Models;
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
 public enum ChatMessageVisibility { Visible, Internal }
+public enum ChatMessagePhase { Commentary, FinalAnswer }
 public enum AssistantMode { General, Code }
 public enum PersistentToolAction { Code, BricsCad, Audiobook }
 public enum MessageContentProfile { General, Audiobook }
@@ -45,7 +46,11 @@ public sealed record ChatMessage(
     MessageContentProfile ContentProfile = MessageContentProfile.General,
     string? CodeDiff = null,
     ChatMessageVisibility Visibility = ChatMessageVisibility.Visible,
-    long Revision = 1);
+    long Revision = 1,
+    ChatMessagePhase? MessagePhase = null,
+    string? SourceRunId = null,
+    string? SourceItemId = null,
+    long SourceDeltaSequence = 0);
 
 public sealed record ChatTurn(ChatMessage UserMessage, ChatMessage AssistantMessage);
 
@@ -276,7 +281,14 @@ public sealed record DocumentIngestResult(
     string? Error,
     bool HasExtractableText);
 
-public sealed record LmModel(string Id, string? DisplayName = null, int? ContextLength = null);
+public sealed record LmModel(
+    string Id,
+    string? DisplayName = null,
+    int? ContextLength = null,
+    bool SupportsTools = false,
+    bool SupportsVision = false,
+    IReadOnlyList<string>? ReasoningEfforts = null,
+    string? DefaultReasoningEffort = null);
 
 public sealed record LmChatMessage(ChatRole Role, string Content);
 
@@ -308,9 +320,9 @@ public sealed record WindowPlacement(
 
 public sealed record AppSettings
 {
-    public const int CurrentVersion = 14;
+    public const int CurrentVersion = 16;
     public const string DefaultSelectedModel = "gpt-oss-120b";
-    public const string DefaultSelectedCodingModel = "qwen3-coder-next-q8_0";
+    public const string DefaultSelectedCodingModel = "qwen3-coder-next";
     public const string DefaultAccentColor = "#A970FF";
     public const string DefaultBackgroundColor = "#6B6872";
     public const int MaximumRecentActivityTextLength = 180;
@@ -324,6 +336,8 @@ public sealed record AppSettings
     public string LiveCaptionLanguage { get; init; } = "auto";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
     public string SelectedCodingModel { get; init; } = DefaultSelectedCodingModel;
+    // Legacy JSON field retained for backward-compatible deserialization. GO no
+    // longer controls reasoning and always normalizes this value to "auto".
     public string ReasoningEffort { get; init; } = "auto";
     public AppTheme Theme { get; init; } = AppTheme.System;
     public string AccentColor { get; init; } = DefaultAccentColor;

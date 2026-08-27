@@ -250,6 +250,7 @@ body.coding-panel-maximized { overflow: hidden; }
 .message-body { display: flex; flex-direction: column; align-items: flex-start; width: fit-content; min-width: 0; max-width: min(900px, 86%); }
 .message.assistant .message-body { width: fit-content; max-width: 100%; }
 .message-meta { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.message-phase--commentary { color: var(--accent); font-weight: 650; }
 .message-content { min-width: 0; max-width: 100%; overflow-wrap: anywhere; line-height: inherit; }
 .message.assistant .message-content { width: fit-content; max-width: 100%; padding: 0; border-radius: 0; background: transparent; }
 .message-content p { margin: 0 0 12px; }
@@ -456,10 +457,8 @@ body.coding-workspace-maximized { overflow: hidden; }
 .tools-menu-anchor { position: relative; }
 .tools-menu { position: absolute; left: 0; bottom: calc(100% + 10px); z-index: 20; width: min(430px, calc(100vw - 44px)); padding: 9px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface-solid); box-shadow: var(--shadow); }
 .tools-menu__title { padding: 7px 9px 8px; color: var(--muted); font-size: 12px; font-weight: 700; }
-.reasoning-model { padding: 0 9px 6px; color: var(--muted); font-size: 11px; line-height: 1.35; }
-.reasoning-options:empty::before { display: block; padding: 7px 9px 9px; color: var(--muted); content: "Dieses Modell besitzt keine steuerbare Reasoning-Stufe."; font-size: 12px; }
-.reasoning-option, .service-option { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 36px; padding: 7px 9px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
-.reasoning-option:hover, .service-option:hover { background: var(--surface-hover); }
+.service-option { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 36px; padding: 7px 9px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
+.service-option:hover { background: var(--surface-hover); }
 .service-option.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
 .service-option span:last-child { color: var(--accent); font-size: 10px; font-weight: 750; }
 .tools-menu__actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 2px 3px 4px; }
@@ -467,9 +466,6 @@ body.coding-workspace-maximized { overflow: hidden; }
 .tools-menu__actions .service-option svg { width: 18px; height: 18px; color: var(--accent); }
 .tools-menu__actions .service-option:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
 .tools-menu__section { margin-top: 5px; padding-top: 10px; border-top: 1px solid var(--border); }
-.reasoning-option .option-check { visibility: hidden; color: var(--accent); font-weight: 800; }
-.reasoning-option.active { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.reasoning-option.active .option-check { visibility: visible; }
 .context-meter { --context-fill: 0deg; min-width: 70px; color: var(--muted); cursor: default; }
 .context-ring { position: relative; width: 22px; height: 22px; border-radius: 50%; background: conic-gradient(var(--text) var(--context-fill), color-mix(in srgb, var(--muted) 25%, transparent) 0deg); }
 .context-ring::after { position: absolute; inset: 4px; border-radius: 50%; background: var(--composer); content: ""; }

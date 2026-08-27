@@ -79,10 +79,12 @@ internal static class GatewayEndpoints
         await WriteJsonAsync(context, result).ConfigureAwait(false);
     }
 
-    private static Task WriteCapabilitiesAsync(HttpContext context)
+    private static async Task WriteCapabilitiesAsync(HttpContext context)
     {
         var capabilities = context.RequestServices.GetRequiredService<CapabilityService>();
-        return WriteJsonAsync(context, capabilities.GetSnapshot());
+        await WriteJsonAsync(
+            context,
+            await capabilities.GetSnapshotAsync(context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     private static async Task WriteModelStatusAsync(HttpContext context)

@@ -56,6 +56,7 @@ public sealed class RunProcessor : BackgroundService
     private readonly WorkerOrchestrator _workers;
     private readonly AgentToolCatalog _toolCatalog;
     private readonly AgentToolExecutor _toolExecutor;
+    private readonly CodingAgentOrchestrator _codingAgentV2;
     private readonly GoAiServerOptions _options;
     private readonly ServerRuntimeState _runtime;
     private readonly Dictionary<string, CancellationTokenSource> _activeRuns = new(StringComparer.Ordinal);
@@ -70,6 +71,7 @@ public sealed class RunProcessor : BackgroundService
         WorkerOrchestrator workers,
         AgentToolCatalog toolCatalog,
         AgentToolExecutor toolExecutor,
+        CodingAgentOrchestrator codingAgentV2,
         IOptions<GoAiServerOptions> options,
         ServerRuntimeState runtime)
     {
@@ -81,6 +83,7 @@ public sealed class RunProcessor : BackgroundService
         _workers = workers;
         _toolCatalog = toolCatalog;
         _toolExecutor = toolExecutor;
+        _codingAgentV2 = codingAgentV2;
         _options = options.Value;
         _runtime = runtime;
     }
@@ -180,6 +183,12 @@ public sealed class RunProcessor : BackgroundService
         CancellationToken cancellationToken)
     {
         var selection = await _router.SelectAsync(request, cancellationToken).ConfigureAwait(false);
+        if (IsCodingAgentRun(selection.Role, request.ConversationProfile)
+            && request.AgentProtocolVersion >= 2)
+        {
+            await _codingAgentV2.ProcessAsync(runId, request, selection, cancellationToken).ConfigureAwait(false);
+            return;
+        }
         var contextLength = Math.Min(
             selection.ContextLength,
             request.Limits?.MaximumContextTokens ?? selection.ContextLength);
@@ -924,21 +933,45 @@ public sealed class RunProcessor : BackgroundService
                 .Where(tool => !IsToolSuppressedAfterRepeatedFailure(tool.Name, failedPatchAttemptCount))
                 .ToArray();
             var modelTools = CreateModelToolDefinitions(selectableTools, selectedToolName);
+            var liveTextGate = new IncrementalVisibleTextGate(enabled: !codingRun);
             Func<ModelRuntimeProgress, CancellationToken, ValueTask> nativeProgress =
-                (progress, token) => new ValueTask(_repository.AppendEventAsync(
-                    runId,
-                    RunEventTypes.ModelGeneration,
-                    new ModelGenerationEvent(
-                        progress.State,
-                        progress.ToolName,
-                        progress.ArgumentCharacters,
-                        progress.PromptProgress,
-                        progress.PromptTokens,
-                        progress.ProcessedPromptTokens,
-                        progress.GeneratedTokens,
-                        progress.TokensPerSecond,
-                        progress.CurrentTokens),
-                    token));
+                async (progress, token) =>
+                {
+                    if (string.Equals(progress.State, "contentDelta", StringComparison.Ordinal)
+                        && !string.IsNullOrEmpty(progress.ContentDelta))
+                    {
+                        var visibleDelta = liveTextGate.Push(progress.ContentDelta);
+                        if (!string.IsNullOrEmpty(visibleDelta))
+                        {
+                            await _repository.AppendEventAsync(
+                                runId,
+                                RunEventTypes.TextDelta,
+                                new TextDeltaEvent(visibleDelta),
+                                token).ConfigureAwait(false);
+                        }
+                        return;
+                    }
+
+                    await _repository.AppendEventAsync(
+                        runId,
+                        RunEventTypes.ModelGeneration,
+                        new ModelGenerationEvent(
+                            progress.State,
+                            progress.ToolName,
+                            progress.ArgumentCharacters,
+                            progress.PromptProgress,
+                            progress.PromptTokens,
+                            progress.ProcessedPromptTokens,
+                            progress.GeneratedTokens,
+                            progress.TokensPerSecond,
+                            progress.CurrentTokens,
+                            progress.Attempt,
+                            progress.FailureKind,
+                            progress.ToolArgumentsJsonComplete,
+                            progress.ContentCharacters,
+                            progress.FinishObserved),
+                        token).ConfigureAwait(false);
+                };
             LmChatResult response;
             var leaseMode = string.Equals(selection.Role, "general", StringComparison.Ordinal)
                 ? GpuLeaseMode.Shared
@@ -1014,6 +1047,16 @@ public sealed class RunProcessor : BackgroundService
                     Math.Min(10_000, 500 * (1 << Math.Min(4, consecutiveModelTurnFailures - 1))));
                 await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
                 continue;
+            }
+
+            var remainingLiveDelta = liveTextGate.Flush();
+            if (!string.IsNullOrEmpty(remainingLiveDelta))
+            {
+                await _repository.AppendEventAsync(
+                    runId,
+                    RunEventTypes.TextDelta,
+                    new TextDeltaEvent(remainingLiveDelta),
+                    cancellationToken).ConfigureAwait(false);
             }
 
             consecutiveModelTurnFailures = 0;
@@ -1261,7 +1304,7 @@ public sealed class RunProcessor : BackgroundService
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     continue;
                 }
-                await CompleteRunAsync(response.Content).ConfigureAwait(false);
+                await CompleteRunAsync(response.Content, liveTextGate.HasStreamed).ConfigureAwait(false);
                 return;
             }
 
@@ -1286,16 +1329,19 @@ public sealed class RunProcessor : BackgroundService
         bool VerificationComplete() => CoreVerificationComplete()
             && (!verificationRequired || verificationStages.Contains("review"));
 
-        async Task CompleteRunAsync(string content)
+        async Task CompleteRunAsync(string content, bool textWasStreamed = false)
         {
             var finalResponse = ParseFinalResponse(content, request);
-            foreach (var delta in SplitDeltas(finalResponse.Message))
+            if (!textWasStreamed)
             {
-                await _repository.AppendEventAsync(
-                    runId,
-                    RunEventTypes.TextDelta,
-                    new TextDeltaEvent(delta),
-                    cancellationToken).ConfigureAwait(false);
+                foreach (var delta in SplitDeltas(finalResponse.Message))
+                {
+                    await _repository.AppendEventAsync(
+                        runId,
+                        RunEventTypes.TextDelta,
+                        new TextDeltaEvent(delta),
+                        cancellationToken).ConfigureAwait(false);
+                }
             }
 
             var title = finalResponse.SessionTitle;
@@ -1790,7 +1836,12 @@ public sealed class RunProcessor : BackgroundService
                     value.ProcessedPromptTokens,
                     value.GeneratedTokens,
                     value.TokensPerSecond,
-                    value.CurrentTokens),
+                    value.CurrentTokens,
+                    value.Attempt,
+                    value.FailureKind,
+                    value.ToolArgumentsJsonComplete,
+                    value.ContentCharacters,
+                    value.FinishObserved),
                 token));
         return await _modelRuntime.CompleteChatAsync(
             request.ModelId,
@@ -2721,8 +2772,10 @@ public sealed class RunProcessor : BackgroundService
         string role,
         string? requestedEffort)
     {
-        var profile = ModelReasoningProfiles.Resolve(modelId, role);
-        return profile.Resolve(requestedEffort);
+        _ = modelId;
+        _ = role;
+        _ = requestedEffort;
+        return null;
     }
 
     internal static bool ShouldBlockRepeatedReplaceText(
@@ -3136,9 +3189,13 @@ public sealed class RunProcessor : BackgroundService
                 Code: "coding.run_limit",
                 Message: limit.Message,
                 Retryable: false),
+            CodingAgentProtocolException protocol => (
+                Code: "coding.protocol",
+                Message: protocol.Message,
+                Retryable: true),
             ModelGenerationTerminatedException => (
                 Code: "provider.generation_terminated",
-                Message: "llama.cpp hat die Coding-Modellgenerierung wiederholt vor einem vollständigen Tool-Call beendet. Der Lauf kann mit unverändertem Workspace erneut gestartet werden.",
+                Message: "LM Studio hat die Coding-Modellgenerierung wiederholt vor einem vollständigen Tool-Call beendet. Der Lauf kann mit unverändertem Workspace erneut gestartet werden.",
                 Retryable: true),
             HttpRequestException => (
                 Code: "provider.http_failed",
@@ -3169,7 +3226,10 @@ public sealed class RunProcessor : BackgroundService
                 failure.Message,
                 failure.Retryable)).ConfigureAwait(false);
         await _repository.UpdateStateAsync(runId, RunState.Failed, errorCode: failure.Code).ConfigureAwait(false);
-        _runtime.WriteLog("Error", failure.Code, $"Run {runId} fehlgeschlagen ({exception.GetType().Name}).");
+        _runtime.WriteLog(
+            "Error",
+            failure.Code,
+            $"Run {runId} fehlgeschlagen ({exception.GetType().Name}): {failure.Message}");
     }
 
     private static AgentFinalResponse ParseFinalResponse(string generated, RunRequest request)
@@ -3268,6 +3328,69 @@ public sealed class RunProcessor : BackgroundService
     {
         cancellation.Cancel();
         return true;
+    }
+}
+
+internal sealed class IncrementalVisibleTextGate(bool enabled)
+{
+    private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(160);
+    private const int FlushCharacterThreshold = 96;
+    private readonly StringBuilder _pending = new();
+    private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+    private StreamDecision _decision = enabled ? StreamDecision.Undecided : StreamDecision.Suppressed;
+
+    public bool HasStreamed { get; private set; }
+
+    public string? Push(string delta)
+    {
+        if (_decision == StreamDecision.Suppressed || string.IsNullOrEmpty(delta))
+        {
+            return null;
+        }
+
+        _pending.Append(delta);
+        if (_decision == StreamDecision.Undecided)
+        {
+            var firstVisible = _pending.ToString().FirstOrDefault(static character => !char.IsWhiteSpace(character));
+            if (firstVisible == default)
+            {
+                return null;
+            }
+
+            // Structured response envelopes and pseudo-tool syntax are parsed
+            // only after completion; they must never flash as visible chat text.
+            if (firstVisible is '{' or '[' or '`' or '<')
+            {
+                _decision = StreamDecision.Suppressed;
+                _pending.Clear();
+                return null;
+            }
+            _decision = StreamDecision.Visible;
+        }
+
+        return _pending.Length >= FlushCharacterThreshold || _clock.Elapsed >= FlushInterval
+            ? Flush()
+            : null;
+    }
+
+    public string? Flush()
+    {
+        if (_decision != StreamDecision.Visible || _pending.Length == 0)
+        {
+            return null;
+        }
+        var value = _pending.ToString();
+        _pending.Clear();
+        _clock.Restart();
+        HasStreamed = true;
+        return value;
+    }
+
+    private enum StreamDecision
+    {
+        Undecided,
+        Visible,
+        Suppressed,
     }
 }
 

@@ -14,7 +14,7 @@ public sealed class GoAiServerOptions
 
     public int GatewayPort { get; set; } = 8080;
 
-    public Uri ModelRuntimeUri { get; set; } = new("http://llm:8080", UriKind.Absolute);
+    public Uri ModelRuntimeUri { get; set; } = new("http://host.docker.internal:1234", UriKind.Absolute);
 
     public Uri SearxngUri { get; set; } = new("http://searxng:8080", UriKind.Absolute);
 
@@ -30,7 +30,7 @@ public sealed class GoAiServerOptions
 
     public string CodeModelId { get; set; } = CodingModelCatalog.DefaultModelId;
 
-    public int CodeContextLength { get; set; } = ModelContextProfiles.Qwen3CoderNextMaximum;
+    public int CodeContextLength { get; set; } = ModelContextProfiles.Qwen38Maximum;
 
     public string VisionModelId { get; set; } = "qwen3-vl-30b-a3b-instruct";
 

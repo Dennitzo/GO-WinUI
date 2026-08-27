@@ -8,6 +8,7 @@ namespace GoAi.Contracts;
 public static class ModelContextProfiles
 {
     public const int GptOss120BMaximum = 131_072;
+    public const int Qwen38Maximum = 262_144;
     public const int Qwen3CoderNextMaximum = 262_144;
     public const int Qwen3VlMaximum = 262_144;
     public const int BgeM3Maximum = 8_192;
@@ -15,6 +16,10 @@ public static class ModelContextProfiles
     public static int ResolveMaximum(string? modelId, string? role)
     {
         var normalized = modelId?.Trim() ?? string.Empty;
+        if (normalized.Contains("qwen3.8-27b", StringComparison.OrdinalIgnoreCase))
+        {
+            return Qwen38Maximum;
+        }
         if (normalized.Contains("qwen3-coder-next", StringComparison.OrdinalIgnoreCase))
         {
             return Qwen3CoderNextMaximum;
@@ -33,7 +38,7 @@ public static class ModelContextProfiles
         }
 
         return string.Equals(role?.Trim(), "code", StringComparison.OrdinalIgnoreCase)
-            ? Qwen3CoderNextMaximum
+            ? Qwen38Maximum
             : GptOss120BMaximum;
     }
 }

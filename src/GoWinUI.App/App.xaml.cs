@@ -82,6 +82,7 @@ public partial class App : Application
                 services.AddHostedService(static provider => provider.GetRequiredService<BricsCadBridgeLifecycle>());
                 services.AddSingleton<SettingsCoordinator>();
                 services.AddSingleton<GoAiConnectionService>();
+                services.AddSingleton<ModelCapabilityRegistry>();
                 services.AddSingleton<SystemAudioCaptionService>();
                 services.AddSingleton<MicrophoneTranscriptionService>();
                 services.AddSingleton<SystemAudioAnalysisCaptureService>();
@@ -371,6 +372,7 @@ public partial class App : Application
             // therefore proves that this client can use the gateway.
             var health = await healthTask.ConfigureAwait(false);
             var capabilities = await capabilitiesTask.ConfigureAwait(false);
+            GetService<ModelCapabilityRegistry>().Update(capabilities);
             connected = string.Equals(
                 health.ProtocolVersion,
                 currentSettings.GoAiProtocolVersion,

@@ -192,10 +192,10 @@ public sealed class AssistantWorkflowTests
         Assert.InRange(AssistantPage.PdfA4HeightInches, 11.692, 11.693);
         Assert.InRange(AssistantPage.PdfBookMarginLeftInches, .944, .946);
         Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
-        Assert.Contains("styles.css?v=20260823-1", html, StringComparison.Ordinal);
+        Assert.Contains("styles.css?v=20260826-1", html, StringComparison.Ordinal);
         Assert.Contains("markdown.js?v=20260821-1", html, StringComparison.Ordinal);
         Assert.Contains("voice.js?v=20260822-2", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260823-1", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260826-1", html, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
@@ -486,22 +486,19 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void ToolsMenuRendersOnlyTheActiveModelsSupportedReasoningLevels()
+    public void ToolsMenuLeavesReasoningAtTheLmStudioModelDefault()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("id=\"reasoning-model\"", html, StringComparison.Ordinal);
-        Assert.Contains("id=\"reasoning-options\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("data-reasoning=\"low\"", html, StringComparison.Ordinal);
-        Assert.Contains("reasoningProfiles: { general: null, code: null }", app, StringComparison.Ordinal);
-        Assert.Contains("off: \"Aus\"", app, StringComparison.Ordinal);
-        Assert.Contains("on: \"An\"", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("xhigh: \"Sehr hoch\"", app, StringComparison.Ordinal);
-        Assert.Contains("profile.supportedEfforts", app, StringComparison.Ordinal);
-        Assert.Contains("reasoningEffort: elements.reasoning.value", app, StringComparison.Ordinal);
-        Assert.Contains("Aktives Modell:", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("id=\"reasoning-model\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("id=\"reasoning-options\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("id=\"reasoning\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-reasoning=", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("reasoningProfiles", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("reasoningEffort:", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("settings.reasoning", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -513,12 +510,67 @@ public sealed class AssistantWorkflowTests
             "GoWinUI.App",
             "Pages",
             "SettingsPage.xaml"));
+        var settingsViewModel = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "GoWinUI.App",
+            "ViewModels",
+            "SettingsViewModel.cs"));
 
         Assert.Contains("Header=\"General AI Modell\"", settingsPage, StringComparison.Ordinal);
         Assert.Contains("ViewModel.Models", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.SelectedGeneralModelItem", settingsPage, StringComparison.Ordinal);
         Assert.Contains("Header=\"Coding AI Modell\"", settingsPage, StringComparison.Ordinal);
         Assert.Contains("ViewModel.CodingModels", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("ViewModel.SelectedCodingModel", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.SelectedCodingModelItem", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("settings.Current.SelectedCodingModel", settingsViewModel, StringComparison.Ordinal);
+        Assert.Contains("SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);", settingsViewModel, StringComparison.Ordinal);
+        Assert.Contains("SelectedCodingModel = PreferCurrentSelection(", settingsViewModel, StringComparison.Ordinal);
+        Assert.Contains("SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);", settingsViewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("status = await SaveAsync(cancellationToken);", settingsViewModel, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GeneralCodingGeneralModeSwitchAlwaysUsesThePersistedRoleSelection()
+    {
+        var settings = new AppSettings
+        {
+            SelectedModel = "general-model",
+            SelectedCodingModel = "coding-model",
+        };
+
+        Assert.Equal("general-model", GoAiAssistantService.ResolvePreferredModel(settings, coding: false));
+        Assert.Equal("coding-model", GoAiAssistantService.ResolvePreferredModel(settings, coding: true));
+        Assert.Equal("general-model", GoAiAssistantService.ResolvePreferredModel(settings, coding: false));
+    }
+
+    [Fact]
+    public void ModelCatalogRefreshKeepsCurrentOrPersistedSelectionInsteadOfFallingBack()
+    {
+        Assert.Equal("changed-during-refresh", SettingsViewModel.PreferCurrentSelection(
+            "changed-during-refresh",
+            "persisted-model",
+            "fallback-model"));
+        Assert.Equal("persisted-model", SettingsViewModel.PreferCurrentSelection(
+            null,
+            "persisted-model",
+            "fallback-model"));
+        Assert.Equal("fallback-model", SettingsViewModel.PreferCurrentSelection(
+            null,
+            null,
+            "fallback-model"));
+    }
+
+    [Fact]
+    public void ToolsReasoningSelectionAndBridgeHandlerAreRemoved()
+    {
+        var root = FindRepositoryRoot();
+        var app = File.ReadAllText(Path.Combine(root, "src", "GoWinUI.App", "Assets", "Web", "app.js"));
+        var coordinator = File.ReadAllText(Path.Combine(root, "src", "GoWinUI.App", "Services", "AssistantCoordinator.cs"));
+
+        Assert.DoesNotContain("settings.reasoning", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("settings.reasoning", coordinator, StringComparison.Ordinal);
+        Assert.DoesNotContain("reasoning.changed", app, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -1186,12 +1238,12 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void CodingAgentKeepsWebResearchOutOfTheNativeToolChannel()
+    public void CodingAgentAlwaysReceivesSafeWebResearchOperations()
     {
         var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.Code);
 
-        Assert.DoesNotContain("web.search", tools);
-        Assert.DoesNotContain("web.fetch", tools);
+        Assert.Contains("web.search", tools);
+        Assert.Contains("web.fetch", tools);
         Assert.Contains("math.evaluate", tools);
         Assert.DoesNotContain("youtube.search", tools);
     }
@@ -1279,6 +1331,28 @@ public sealed class AssistantWorkflowTests
     public void CodingTraceNamesWebResearchStepsClearly(string tool, bool completed, string expected)
     {
         Assert.Equal(expected, GoAiAssistantService.CodingServerToolTitle(tool, completed));
+    }
+
+    [Theory]
+    [InlineData(CodingAgentPhase.Orienting, "Coding-Agent orientiert sich")]
+    [InlineData(CodingAgentPhase.Editing, "Coding-Agent bearbeitet den Workspace")]
+    [InlineData(CodingAgentPhase.Verifying, "Coding-Agent prüft Änderungen")]
+    [InlineData(CodingAgentPhase.Finishing, "Coding-Agent gleicht die Abnahme ab")]
+    [InlineData(CodingAgentPhase.Blocked, "Coding-Agent blockiert")]
+    [InlineData(CodingAgentPhase.Completed, "Coding-Agent abgeschlossen")]
+    public void CodingTraceNamesV2PhasesClearly(CodingAgentPhase phase, string expected)
+    {
+        Assert.Equal(expected, GoAiAssistantService.CodingAgentPhaseTitle(phase));
+    }
+
+    [Theory]
+    [InlineData("workspace", true, "Workspacecache verwendet")]
+    [InlineData("workspace", false, "Workspacecache aktualisiert")]
+    [InlineData("research", true, "Recherchecache verwendet")]
+    [InlineData("artifact", false, "Artefaktcache aktualisiert")]
+    public void CodingTraceNamesV2CachesClearly(string cache, bool hit, string expected)
+    {
+        Assert.Equal(expected, GoAiAssistantService.CodingAgentCacheTitle(cache, hit));
     }
 
     [Theory]
@@ -1393,6 +1467,12 @@ public sealed class AssistantWorkflowTests
 
         Assert.Contains("runStatusText(liveStatus)", app, StringComparison.Ordinal);
         Assert.Contains("uniqueStatusParts(status, model ? `Modell: ${model}` : null, detail)", app, StringComparison.Ordinal);
+        var startedBlock = app[
+            app.IndexOf("case \"chat.started\":", StringComparison.Ordinal)..
+            app.IndexOf("case \"chat.delta\":", StringComparison.Ordinal)];
+        Assert.Contains("if (payload.message?.id) state.messageRunStatus.set(String(payload.message.id)", startedBlock, StringComparison.Ordinal);
+        Assert.Contains("model: payload.model || state.model || null", startedBlock, StringComparison.Ordinal);
+        Assert.Contains("renderMessages(true);", startedBlock, StringComparison.Ordinal);
         Assert.Contains("cleanStatusMetadata", app, StringComparison.Ordinal);
         Assert.DoesNotContain("Kontexttoken", app, StringComparison.Ordinal);
         Assert.Contains("if (Number.isFinite(payload.contextUsed))", app, StringComparison.Ordinal);

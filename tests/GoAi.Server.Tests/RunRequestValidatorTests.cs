@@ -96,7 +96,7 @@ public sealed class RunRequestValidatorTests
     }
 
     [Fact]
-    public void UnknownCodingModelIsRejected()
+    public void DynamicCodingModelIdIsAcceptedForRuntimeValidation()
     {
         var request = new RunRequest(
             GoAiProtocol.Version,
@@ -104,9 +104,7 @@ public sealed class RunRequestValidatorTests
             [new RunMessage("user", [new ContentPart("text", "Bearbeite das Projekt.")])],
             PreferredCodeModelId: "unknown-coding-model");
 
-        var error = Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request));
-
-        Assert.Contains("supported coding model", error.Message, StringComparison.OrdinalIgnoreCase);
+        RunRequestValidator.Validate(request);
     }
 
     [Fact]
@@ -117,20 +115,12 @@ public sealed class RunRequestValidatorTests
             RunMode.Code,
             [new RunMessage("user", [new ContentPart("text", "Bearbeite das Projekt.")])],
             PreferredCodeModelId: CodingModelCatalog.GptOss120BId,
-            ReasoningEffort: "high");
+            ReasoningEffort: null);
 
         RunRequestValidator.Validate(gptOss);
 
-        var unsupportedQwenEffort = Assert.Throws<ArgumentException>(() =>
-            RunRequestValidator.Validate(gptOss with { ReasoningEffort = "on" }));
-        Assert.Contains("nicht unterstützt", unsupportedQwenEffort.Message, StringComparison.OrdinalIgnoreCase);
-
-        var fixedCoderEffort = Assert.Throws<ArgumentException>(() =>
-            RunRequestValidator.Validate(gptOss with
-            {
-                ReasoningEffort = "off",
-            }));
-        Assert.Contains("reasoningEffort", fixedCoderEffort.Message, StringComparison.OrdinalIgnoreCase);
+        RunRequestValidator.Validate(gptOss with { ReasoningEffort = "high" });
+        RunRequestValidator.Validate(gptOss with { ReasoningEffort = "xhigh" });
 
         var qwen = gptOss with
         {
@@ -138,9 +128,17 @@ public sealed class RunRequestValidatorTests
             ReasoningEffort = null,
         };
         RunRequestValidator.Validate(qwen);
-        var qwenReasoning = Assert.Throws<ArgumentException>(() =>
-            RunRequestValidator.Validate(qwen with { ReasoningEffort = "high" }));
-        Assert.Contains("keine steuerbare Stufe", qwenReasoning.Message, StringComparison.OrdinalIgnoreCase);
+        RunRequestValidator.Validate(qwen with { ReasoningEffort = "none" });
+        RunRequestValidator.Validate(qwen with { ReasoningEffort = "high" });
+
+        var qwen38 = gptOss with
+        {
+            PreferredCodeModelId = CodingModelCatalog.Qwen38Id,
+            ReasoningEffort = "xhigh",
+        };
+        RunRequestValidator.Validate(qwen38);
+        RunRequestValidator.Validate(qwen38 with { ReasoningEffort = "none" });
+        RunRequestValidator.Validate(qwen38 with { ReasoningEffort = "high" });
     }
 
     [Fact]
@@ -150,12 +148,13 @@ public sealed class RunRequestValidatorTests
             GoAiProtocol.Version,
             RunMode.General,
             [new RunMessage("user", [new ContentPart("text", "Erkläre das Ergebnis.")])],
-            PreferredGeneralModelId: "openai/gpt-oss-120b",
-            ReasoningEffort: "medium");
+            PreferredGeneralModelId: "gpt-oss-120b",
+            ReasoningEffort: null);
 
         RunRequestValidator.Validate(request);
-        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
-            request with { PreferredGeneralModelId = "unknown/model" }));
+        RunRequestValidator.Validate(request with { ReasoningEffort = "medium" });
+        RunRequestValidator.Validate(
+            request with { PreferredGeneralModelId = "unknown/model", ReasoningEffort = "medium" });
     }
 
     [Fact]

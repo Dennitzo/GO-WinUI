@@ -36,8 +36,8 @@ public sealed class ReadinessService
         if (!modelStatus.ProviderReachable)
         {
             return NotReady(
-                $"Der private Modellrouter ist über {_options.ModelRuntimeUri} nicht erreichbar.",
-                "Den Docker-Container 'llm' und dessen Logs prüfen.");
+                $"LM Studio ist über {_options.ModelRuntimeUri} nicht erreichbar.",
+                "LM Studio starten und den lokalen Server auf 0.0.0.0:1234 freigeben.");
         }
 
         var requiredModelIds = new HashSet<string>(
@@ -53,14 +53,11 @@ public sealed class ReadinessService
         {
             return NotReady(
                 "Erforderliche Modelle fehlen: " + string.Join(", ", missingRequired),
-                "Das gepinnte Modellverzeichnis /models und models.ini prüfen.");
+                "Den LM-Studio-Modellkatalog unter .lmstudio\\models prüfen.");
         }
 
-        var selectableModelIds = new HashSet<string>(
-            [_options.GeneralModelId, .. CodingModelCatalog.Models.Select(static model => model.Id)],
-            StringComparer.OrdinalIgnoreCase);
         var selectableModels = modelStatus.Models
-            .Where(model => selectableModelIds.Contains(model.Id))
+            .Where(static model => model.Role is "general" or "code")
             .ToArray();
         var loading = selectableModels.FirstOrDefault(model =>
             !model.Loaded && string.Equals(model.State, "loading", StringComparison.OrdinalIgnoreCase));

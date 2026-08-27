@@ -10,7 +10,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 26;
+    public const int CurrentSchemaVersion = 27;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -75,6 +75,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationTwentyFourAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentySixAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentySevenAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -1021,6 +1022,52 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
                 CREATE INDEX idx_generated_documents_session_updated
                     ON generated_documents(session_id,updated_at,id);
                 INSERT INTO schema_migrations(version,applied_at) VALUES(26,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentySevenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=27;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_messages
+                    ADD COLUMN message_phase TEXT NULL
+                    CHECK(message_phase IS NULL OR message_phase IN ('commentary','finalanswer'));
+                ALTER TABLE chat_messages ADD COLUMN source_run_id TEXT NULL;
+                ALTER TABLE chat_messages ADD COLUMN source_item_id TEXT NULL;
+                ALTER TABLE chat_messages
+                    ADD COLUMN source_delta_sequence INTEGER NOT NULL DEFAULT 0
+                    CHECK(source_delta_sequence>=0);
+                ALTER TABLE go_ai_runs
+                    ADD COLUMN final_message_id TEXT NULL REFERENCES chat_messages(id) ON DELETE SET NULL;
+
+                UPDATE chat_messages
+                SET message_phase='finalanswer'
+                WHERE role='assistant' AND message_phase IS NULL;
+
+                CREATE UNIQUE INDEX idx_chat_messages_agent_item
+                    ON chat_messages(source_run_id,source_item_id)
+                    WHERE source_run_id IS NOT NULL AND source_item_id IS NOT NULL;
+                CREATE INDEX idx_chat_messages_source_run
+                    ON chat_messages(source_run_id,created_at)
+                    WHERE source_run_id IS NOT NULL;
+
+                UPDATE go_ai_runs
+                SET state='interrupted',error_code='client.agent_protocol_upgraded',updated_at=$now
+                WHERE action='code' AND state IN ('queued','running','waitingForClient');
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(27,$now);
                 """;
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);

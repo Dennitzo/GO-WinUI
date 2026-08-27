@@ -63,7 +63,7 @@ async Task<object> RunBasicSmokeAsync()
     Ensure(ready.Status is "ready" or "modelNotLoaded" or "modelLoading", $"Readiness failed: {ready.Reason}");
     Ensure(capabilities.ProtocolVersion == GoAiProtocol.Version, "Protocol version mismatch.");
     Ensure(capabilities.LiveCaptions?.Available == true, "Live system-audio captions are not advertised.");
-    Ensure(models.ProviderReachable, "The private llama.cpp model router is not reachable.");
+    Ensure(models.ProviderReachable, "The LM Studio model server is not reachable.");
     Ensure(gpu.Available && gpu.Devices.Count > 0, "No GPU was detected.");
     return new
     {
@@ -152,7 +152,7 @@ async Task<object> RunLiveSmokeAsync()
         ["filesystem", "code"],
         respondToClientTools: true);
     EnsureToolEvent(code, ClientToolNames.FileSystemReadText, clientSide: true);
-    EnsureCompletedWithModel(code, "qwen3-coder-next-q8_0");
+    EnsureCompletedWithModel(code, "qwen3.8-27b");
 
     var embedding = await CreateAndCompleteRunAsync(
         RunMode.General,

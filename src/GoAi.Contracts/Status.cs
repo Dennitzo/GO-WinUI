@@ -52,7 +52,13 @@ public sealed record ModelRuntimeStatus(
     bool Loaded,
     string State,
     int ContextTokens,
-    string? DisplayName = null);
+    string? DisplayName = null,
+    bool SupportsTools = false,
+    bool SupportsVision = false,
+    IReadOnlyList<string>? ReasoningEfforts = null,
+    string? DefaultReasoningEffort = null,
+    string? Architecture = null,
+    string? Quantization = null);
 
 public sealed record GpuStatusSnapshot(
     bool Available,

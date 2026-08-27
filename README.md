@@ -1,6 +1,6 @@
 # GO
 
-GO ist eine lokale WinUI-3-Anwendung mit AI-Chat, Dokumentkontext, SQLite-Workflows und Projektverwaltung. Der Client verbindet sich direkt mit einem vollständig Docker-basierten AI-Stack im privaten LAN. Cloud-Anbieter und LM Studio gehören nicht zur Laufzeitarchitektur.
+GO ist eine lokale WinUI-3-Anwendung mit AI-Chat, Dokumentkontext, SQLite-Workflows und Projektverwaltung. Der Client verbindet sich mit dem Docker-Gateway im privaten LAN; LLM-, Vision- und Embeddingmodelle werden auf dem GPU-Host von LM Studio verwaltet. Cloud-Anbieter gehören nicht zur Laufzeitarchitektur.
 
 ## Funktionen
 
@@ -32,7 +32,8 @@ Die lokale Client-SQLite ist die einzige Wahrheit für Chats, Dokumente, Workflo
 
 - Windows 10 Version 2004 (Build 19041) oder neuer, x64
 - WebView2 Evergreen Runtime
-- erreichbarer GO-AI-Docker-Stack im privaten LAN; Standardadresse `http://192.168.0.67:8080`
+- erreichbarer GO-AI-Hybrid-Stack im privaten LAN; Standardadresse `http://192.168.0.67:8080`
+- auf dem GPU-Server LM Studio samt lokalem Modellkatalog und Server auf Port `1234`
 - .NET SDK 10.0.302 nur zum Bauen
 - optional BricsCAD V26 samt Managed SDK zum Bauen und Laden des Plugins
 
@@ -56,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1 -Include
 
 Alternativ kann `windows\build-bricscad-plugin.ps1` direkt verwendet werden. Das Ergebnis ist ein eigenes NETLOAD-ZIP unter `artifacts\windows\bricscad-v26`; `GOBricsCad.dll` wird nicht in `GO.exe` eingebettet. Weitere Build-Schalter und Artefakte sind in [windows/README.md](windows/README.md) beschrieben.
 
-Der AI-Stack besitzt einen vollständig getrennten Docker-Build:
+Gateway und Worker besitzen einen vollständig getrennten Docker-Build; die Modelle selbst werden dabei nicht in Images eingebettet:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build-ai-stack.ps1

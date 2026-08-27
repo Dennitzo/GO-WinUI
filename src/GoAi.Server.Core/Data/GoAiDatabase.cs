@@ -163,6 +163,27 @@ public sealed class GoAiDatabase : IDisposable
             updated_at TEXT NOT NULL,
             FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS agent_actions (
+            action_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            action_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(run_id, sequence),
+            UNIQUE(run_id, idempotency_key),
+            FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS ix_agent_actions_run_sequence ON agent_actions(run_id, sequence);
+        CREATE TABLE IF NOT EXISTS agent_observations (
+            action_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            observation_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(action_id) REFERENCES agent_actions(action_id) ON DELETE CASCADE,
+            FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS ix_agent_observations_run ON agent_observations(run_id, created_at);
         CREATE TABLE IF NOT EXISTS uploads (
             upload_id TEXT PRIMARY KEY,
             file_name TEXT NOT NULL,
@@ -207,6 +228,8 @@ public sealed class GoAiDatabase : IDisposable
         );
         INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES(1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-        PRAGMA user_version = 1;
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES(2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+        PRAGMA user_version = 2;
         """;
 }

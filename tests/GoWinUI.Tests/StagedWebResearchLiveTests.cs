@@ -40,7 +40,7 @@ public sealed class StagedWebResearchLiveTests
                 timeout.Token);
             var observation = await harness.ExecuteAsync(
                 sessionId,
-                "Führe eine Websuche in der offiziellen llama.cpp-Dokumentation zum nativen Tool-Calling durch. "
+                "Führe eine Websuche in der offiziellen LM-Studio-Dokumentation zum nativen Tool-Calling durch. "
                     + "Lies die relevanten Seiten und fasse zwei belegte Hinweise mit Titel und URL zusammen. "
                     + "Analysiere danach kurz, wie sie für diesen leeren Workspace gelten. Verändere keine Dateien.",
                 "live-web-research",

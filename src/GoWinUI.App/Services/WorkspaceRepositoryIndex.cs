@@ -22,7 +22,8 @@ public sealed record WorkspaceIndexSnapshot(
     string RevisionFingerprint,
     DateTimeOffset IndexedAt,
     IReadOnlyList<WorkspaceIndexEntry> Entries,
-    bool IsTruncated)
+    bool IsTruncated,
+    IReadOnlyList<string>? ChangedPaths = null)
 {
     public int TextFileCount => Entries.Count(static entry => !entry.IsBinary);
 
@@ -70,6 +71,7 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
     };
 
     private readonly string _cacheDirectory;
+    private readonly WorkspaceContentCache _contentCache;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private WorkspaceIndexSnapshot? _snapshot;
     private FileSystemWatcher? _watcher;
@@ -79,6 +81,7 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
     public WorkspaceRepositoryIndex(GoInfrastructureOptions options)
     {
         _cacheDirectory = Path.Combine(options.DataDirectory, "WorkspaceIndex");
+        _contentCache = new WorkspaceContentCache(_cacheDirectory);
     }
 
     public static string CreateWorkspaceFingerprint(string workspace)
@@ -111,11 +114,37 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
             _dirty = false;
             EnsureWatcher(root);
             await SaveAsync(_snapshot, cancellationToken).ConfigureAwait(false);
+            await _contentCache.SynchronizeAsync(_snapshot, cancellationToken).ConfigureAwait(false);
             return _snapshot;
         }
         finally
         {
             _gate.Release();
+        }
+    }
+
+    public Task<WorkspaceIndexSnapshot> GetSnapshotForRunAsync(
+        string workspace,
+        CancellationToken cancellationToken = default)
+    {
+        // FileSystemWatcher is the low-latency path. The forced metadata pass is
+        // the deterministic safety net for missed/coalesced watcher events and
+        // process restarts.
+        _dirty = true;
+        return GetSnapshotAsync(workspace, cancellationToken);
+    }
+
+    internal void Invalidate(string workspace)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        var root = NormalizeRoot(workspace);
+        if (_snapshot is null
+            || string.Equals(_snapshot.Root, root, StringComparison.OrdinalIgnoreCase))
+        {
+            _dirty = true;
         }
     }
 
@@ -164,6 +193,40 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
         return builder.ToString();
     }
 
+    public static string BuildRepositoryContextV2(
+        WorkspaceIndexSnapshot snapshot,
+        WorkspaceOrientationContext orientation)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(orientation);
+        var builder = new StringBuilder(12_000);
+        builder.AppendLine("[GO_REPOSITORY_CONTEXT_V2]");
+        builder.Append("Workspace: ").AppendLine(Path.GetFileName(snapshot.Root));
+        builder.Append("RepositoryRevision: ").AppendLine(snapshot.RevisionFingerprint);
+        builder.Append("WorkspaceRevision: ").AppendLine(orientation.WorkspaceRevision.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        builder.Append("RetrievalCache: ").AppendLine(orientation.CacheHit ? "hit" : "miss");
+        builder.Append("Dateien: ").Append(snapshot.Entries.Count)
+            .Append(" (Text: ").Append(snapshot.TextFileCount).AppendLine(")");
+        builder.Append("Projektprofile: ").AppendLine(
+            orientation.ProjectProfiles.Count == 0
+                ? "nicht eindeutig"
+                : string.Join(", ", orientation.ProjectProfiles));
+        builder.AppendLine(orientation.IsEmpty
+            ? "Der Workspace ist leer."
+            : "Die folgenden Ausschnitte sind promptrelevante, versionierte Startbelege. Weitere Fakten müssen über workspace.inspect belegt werden.");
+        foreach (var evidence in orientation.Evidence)
+        {
+            builder.Append("\n[EVIDENCE ").Append(evidence.EvidenceId)
+                .Append(" | ").Append(evidence.Path)
+                .Append(" | sha256=").Append(evidence.Sha256)
+                .Append(" | Zeilen ").Append(evidence.StartLine)
+                .Append('-').Append(evidence.EndLine)
+                .AppendLine("]");
+            builder.AppendLine(evidence.Text);
+        }
+        return builder.ToString();
+    }
+
     public static IReadOnlyList<WorkspaceIndexEntry> FindFiles(
         WorkspaceIndexSnapshot snapshot,
         IReadOnlyList<string> patterns,
@@ -179,6 +242,92 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
             .Where(entry => effectivePatterns.Any(pattern => MatchesGlob(entry.Path, pattern)))
             .Take(Math.Clamp(maximumResults, 1, 5_000))
             .ToArray();
+    }
+
+    public async Task<object> QueryCodeIndexAsync(
+        string workspace,
+        string operation,
+        string query,
+        string? path,
+        int maximumResults,
+        CancellationToken cancellationToken = default)
+    {
+        var snapshot = await GetSnapshotAsync(workspace, cancellationToken).ConfigureAwait(false);
+        var matches = await _contentCache.QueryAsync(
+            snapshot,
+            operation,
+            query,
+            path,
+            maximumResults,
+            cancellationToken).ConfigureAwait(false);
+        return new
+        {
+            operation,
+            query,
+            path,
+            matches,
+            repositoryRevision = snapshot.RevisionFingerprint,
+            workspaceRevision = matches.Count > 0 ? matches[0].WorkspaceRevision : 1,
+            cacheHit = true,
+        };
+    }
+
+    public async Task<WorkspaceCachedRead?> ReadCachedAsync(
+        string workspace,
+        string relativePath,
+        int startLine,
+        int? endLine,
+        int maximumCharacters,
+        CancellationToken cancellationToken = default)
+    {
+        var snapshot = await GetSnapshotAsync(workspace, cancellationToken).ConfigureAwait(false);
+        return await _contentCache.ReadAsync(
+            snapshot,
+            relativePath,
+            startLine,
+            endLine,
+            maximumCharacters,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<WorkspaceOrientationContext> BuildOrientationContextAsync(
+        string workspace,
+        string prompt,
+        int maximumCharacters = 9_000,
+        CancellationToken cancellationToken = default)
+    {
+        var snapshot = await GetSnapshotAsync(workspace, cancellationToken).ConfigureAwait(false);
+        return await _contentCache.BuildOrientationAsync(
+            snapshot,
+            prompt,
+            maximumCharacters,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<WorkspaceOrientationContext> BuildOrientationContextAsync(
+        WorkspaceIndexSnapshot snapshot,
+        string prompt,
+        int maximumCharacters = 9_000,
+        CancellationToken cancellationToken = default) => _contentCache.BuildOrientationAsync(
+            snapshot,
+            prompt,
+            maximumCharacters,
+            cancellationToken);
+
+    public async Task<IReadOnlyList<WorkspaceSearchDocument>> FindCachedSearchDocumentsAsync(
+        string workspace,
+        IReadOnlyList<string> queries,
+        string? relativeRoot,
+        int maximumDocuments,
+        CancellationToken cancellationToken = default)
+    {
+        var snapshot = await GetSnapshotAsync(workspace, cancellationToken).ConfigureAwait(false);
+        return await _contentCache.FindSearchDocumentsAsync(
+            snapshot,
+            queries,
+            relativeRoot,
+            maximumDocuments,
+            cancellationToken).ConfigureAwait(false);
     }
 
     public static bool MatchesGlobs(
@@ -256,6 +405,7 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
         }
         _disposed = true;
         _watcher?.Dispose();
+        _contentCache.Dispose();
         _gate.Dispose();
     }
 
@@ -330,13 +480,26 @@ public sealed class WorkspaceRepositoryIndex : IDisposable
         }
         truncated |= queue.Count > 0;
         var ordered = entries.OrderBy(static entry => entry.Path, StringComparer.OrdinalIgnoreCase).ToArray();
+        var currentPathSet = ordered.Select(static entry => entry.Path)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var changedPaths = cached is null
+            ? Array.Empty<string>()
+            : ordered
+                .Where(entry => !cachedEntries.TryGetValue(entry.Path, out var previous)
+                    || !string.Equals(previous.Sha256, entry.Sha256, StringComparison.OrdinalIgnoreCase))
+                .Select(static entry => entry.Path)
+                .Concat(cachedEntries.Keys.Where(path => !currentPathSet.Contains(path)))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Order(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
         return new WorkspaceIndexSnapshot(
             root,
             CreateWorkspaceFingerprint(root),
             CreateRevisionFingerprint(ordered),
             DateTimeOffset.UtcNow,
             ordered,
-            truncated);
+            truncated,
+            changedPaths);
     }
 
     private static async Task<WorkspaceIndexEntry> CreateEntryAsync(

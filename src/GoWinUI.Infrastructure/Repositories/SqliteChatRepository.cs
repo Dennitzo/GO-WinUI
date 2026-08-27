@@ -141,7 +141,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,code_diff,visibility,revision
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,code_diff,visibility,revision,message_phase,source_run_id,source_item_id,source_delta_sequence
             FROM chat_messages WHERE session_id=$id AND visibility='visible' ORDER BY created_at,id;
             """;
         command.Parameters.AddWithValue("$id", sessionId.ToString("D"));
@@ -190,14 +190,15 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         var message = new ChatMessage(
             Guid.NewGuid(), sessionId, role, ChatContentSanitizer.Sanitize(content), status, now, now,
             ContentProfile: contentProfile,
-            Visibility: visibility);
+            Visibility: visibility,
+            MessagePhase: role == ChatRole.Assistant ? ChatMessagePhase.FinalAnswer : null);
         await database.WriteAsync(async (connection, transaction, token) =>
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = """
-                INSERT INTO chat_messages(id,session_id,role,content,status,created_at,updated_at,content_profile,visibility,revision)
-                VALUES($id,$session,$role,$content,$status,$now,$now,$profile,$visibility,1);
+                INSERT INTO chat_messages(id,session_id,role,content,status,created_at,updated_at,content_profile,visibility,revision,message_phase)
+                VALUES($id,$session,$role,$content,$status,$now,$now,$profile,$visibility,1,$phase);
                 UPDATE chat_sessions
                 SET updated_at=$now,conversation_revision=conversation_revision+1
                 WHERE id=$session;
@@ -209,6 +210,9 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             command.Parameters.AddWithValue("$status", SqliteMapping.EnumName(status));
             command.Parameters.AddWithValue("$profile", SqliteMapping.EnumName(contentProfile));
             command.Parameters.AddWithValue("$visibility", SqliteMapping.EnumName(visibility));
+            command.Parameters.AddWithValue("$phase", role == ChatRole.Assistant
+                ? SqliteMapping.EnumName(ChatMessagePhase.FinalAnswer)
+                : DBNull.Value);
             command.Parameters.AddWithValue("$now", now.ToDb());
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
@@ -386,6 +390,37 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken);
 
+    public Task ResetAgentMessageForRetryAsync(
+        Guid messageId,
+        CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                UPDATE chat_messages
+                SET content='',
+                    status='streaming',
+                    error=NULL,
+                    message_phase='finalanswer',
+                    source_run_id=NULL,
+                    source_item_id=NULL,
+                    source_delta_sequence=0,
+                    revision=revision+1,
+                    updated_at=$now
+                WHERE id=$id AND role='assistant';
+                UPDATE chat_sessions
+                SET updated_at=$now,conversation_revision=conversation_revision+1
+                WHERE id=(SELECT session_id FROM chat_messages WHERE id=$id);
+                """;
+            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            if (await command.ExecuteNonQueryAsync(token).ConfigureAwait(false) == 0)
+            {
+                throw new InvalidOperationException("Der Coding-Laufanker wurde nicht gefunden.");
+            }
+        }, cancellationToken);
+
     public Task SetCodeDiffAsync(Guid messageId, string? codeDiff, CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
         {
@@ -518,7 +553,32 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         Guid sessionId,
         string userContent,
         MessageContentProfile assistantContentProfile = MessageContentProfile.General,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        await AddTurnCoreAsync(
+            sessionId,
+            userContent,
+            assistantContentProfile,
+            ChatMessageVisibility.Visible,
+            cancellationToken).ConfigureAwait(false);
+
+    public async Task<ChatTurn> AddCodingTurnAsync(
+        Guid sessionId,
+        string userContent,
+        MessageContentProfile assistantContentProfile = MessageContentProfile.General,
+        CancellationToken cancellationToken = default) =>
+        await AddTurnCoreAsync(
+            sessionId,
+            userContent,
+            assistantContentProfile,
+            ChatMessageVisibility.Visible,
+            cancellationToken).ConfigureAwait(false);
+
+    private async Task<ChatTurn> AddTurnCoreAsync(
+        Guid sessionId,
+        string userContent,
+        MessageContentProfile assistantContentProfile,
+        ChatMessageVisibility assistantVisibility,
+        CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
         var assistantNow = now.AddTicks(1);
@@ -528,7 +588,9 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         var assistant = new ChatMessage(
             Guid.NewGuid(), sessionId, ChatRole.Assistant, string.Empty,
             MessageStatus.Streaming, assistantNow, assistantNow,
-            ContentProfile: assistantContentProfile);
+            ContentProfile: assistantContentProfile,
+            Visibility: assistantVisibility,
+            MessagePhase: ChatMessagePhase.FinalAnswer);
         await database.WriteAsync(async (connection, transaction, token) =>
         {
             await using var command = connection.CreateCommand();
@@ -536,8 +598,8 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             command.CommandText = """
                 INSERT INTO chat_messages(id,session_id,role,content,status,created_at,updated_at,content_profile,visibility,revision)
                 VALUES($user,$session,'user',$userContent,'completed',$now,$now,'general','visible',1);
-                INSERT INTO chat_messages(id,session_id,role,content,status,created_at,updated_at,content_profile,visibility,revision)
-                VALUES($assistant,$session,'assistant','',$assistantStatus,$assistantNow,$assistantNow,$profile,'visible',1);
+                INSERT INTO chat_messages(id,session_id,role,content,status,created_at,updated_at,content_profile,visibility,revision,message_phase)
+                VALUES($assistant,$session,'assistant','',$assistantStatus,$assistantNow,$assistantNow,$profile,$assistantVisibility,1,'finalanswer');
                 UPDATE chat_sessions
                 SET updated_at=$assistantNow,conversation_revision=conversation_revision+1
                 WHERE id=$session;
@@ -548,11 +610,148 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             command.Parameters.AddWithValue("$userContent", user.Content);
             command.Parameters.AddWithValue("$assistantStatus", SqliteMapping.EnumName(MessageStatus.Streaming));
             command.Parameters.AddWithValue("$profile", SqliteMapping.EnumName(assistantContentProfile));
+            command.Parameters.AddWithValue("$assistantVisibility", SqliteMapping.EnumName(assistantVisibility));
             command.Parameters.AddWithValue("$now", now.ToDb());
             command.Parameters.AddWithValue("$assistantNow", assistantNow.ToDb());
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
         return new ChatTurn(user, assistant);
+    }
+
+    public Task<ChatMessage> CommitAgentMessageAsync(
+        Guid sessionId,
+        Guid finalAnchorMessageId,
+        string sourceRunId,
+        string sourceItemId,
+        ChatMessagePhase phase,
+        string content,
+        MessageStatus status,
+        long sourceDeltaSequence,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceRunId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceItemId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sourceDeltaSequence);
+        if (status is not (MessageStatus.Streaming or MessageStatus.Completed))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status));
+        }
+
+        return database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT id FROM chat_messages
+                WHERE source_run_id=$run AND source_item_id=$item;
+                """;
+            command.Parameters.AddWithValue("$run", sourceRunId.Trim());
+            command.Parameters.AddWithValue("$item", sourceItemId.Trim());
+            var existingId = await command.ExecuteScalarAsync(token).ConfigureAwait(false);
+            Guid messageId;
+            var inserted = false;
+            if (existingId is not null and not DBNull)
+            {
+                messageId = Guid.Parse(Convert.ToString(existingId, System.Globalization.CultureInfo.InvariantCulture)!);
+            }
+            else
+            {
+                command.Parameters.Clear();
+                command.CommandText = """
+                    SELECT id FROM chat_messages
+                    WHERE id=$id AND session_id=$session AND role='assistant';
+                    """;
+                command.Parameters.AddWithValue("$id", finalAnchorMessageId.ToString("D"));
+                command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+                var anchor = await command.ExecuteScalarAsync(token).ConfigureAwait(false);
+                if (anchor is null or DBNull)
+                {
+                    throw new InvalidOperationException("Der Coding-Laufanker wurde nicht gefunden.");
+                }
+                messageId = finalAnchorMessageId;
+            }
+
+            var changed = inserted;
+            if (!inserted)
+            {
+                var now = DateTimeOffset.UtcNow;
+                command.Parameters.Clear();
+                command.CommandText = """
+                    UPDATE chat_messages
+                    SET content=$content,
+                        status=$status,
+                        error=NULL,
+                        created_at=CASE WHEN source_item_id IS NULL THEN $now ELSE created_at END,
+                        updated_at=$now,
+                        visibility='visible',
+                        revision=revision+1,
+                        message_phase=$phase,
+                        source_run_id=$run,
+                        source_item_id=$item,
+                        source_delta_sequence=$deltaSequence
+                    WHERE id=$id
+                      AND (source_run_id IS NULL
+                           OR source_item_id IS NULL
+                           OR source_run_id<>$run
+                           OR source_item_id<>$item
+                           OR source_delta_sequence<$deltaSequence
+                           OR (source_delta_sequence=$deltaSequence
+                               AND status='streaming' AND $status='completed'))
+                      AND NOT(status='completed' AND $status='streaming');
+                    """;
+                command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+                command.Parameters.AddWithValue("$content", ChatContentSanitizer.Sanitize(content));
+                command.Parameters.AddWithValue("$status", SqliteMapping.EnumName(status));
+                command.Parameters.AddWithValue("$now", now.ToDb());
+                command.Parameters.AddWithValue("$phase", SqliteMapping.EnumName(phase));
+                command.Parameters.AddWithValue("$run", sourceRunId.Trim());
+                command.Parameters.AddWithValue("$item", sourceItemId.Trim());
+                command.Parameters.AddWithValue("$deltaSequence", sourceDeltaSequence);
+                changed = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false) > 0;
+            }
+
+            if (phase == ChatMessagePhase.FinalAnswer)
+            {
+                command.Parameters.Clear();
+                command.CommandText = """
+                    UPDATE go_ai_runs SET final_message_id=$message,updated_at=$now
+                    WHERE server_run_id=$run;
+                    """;
+                command.Parameters.AddWithValue("$message", messageId.ToString("D"));
+                command.Parameters.AddWithValue("$run", sourceRunId.Trim());
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+                await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            }
+
+            if (changed)
+            {
+                command.Parameters.Clear();
+                command.CommandText = """
+                    UPDATE chat_sessions
+                    SET updated_at=$now,conversation_revision=conversation_revision+1
+                    WHERE id=$session;
+                    """;
+                command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+                await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            }
+
+            command.Parameters.Clear();
+            command.CommandText = """
+                SELECT id,session_id,role,content,status,created_at,updated_at,error,
+                       tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,
+                       content_profile,code_diff,visibility,revision,message_phase,source_run_id,
+                       source_item_id,source_delta_sequence
+                FROM chat_messages WHERE id=$id;
+                """;
+            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+            await using var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+            if (!await reader.ReadAsync(token).ConfigureAwait(false))
+            {
+                throw new InvalidOperationException("Die committed Agentennachricht wurde nicht gefunden.");
+            }
+            return ReadMessage(reader);
+        }, cancellationToken);
     }
 
     public async Task<ChatMessage?> GetMessageAsync(
@@ -563,12 +762,35 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,code_diff,visibility,revision
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,code_diff,visibility,revision,message_phase,source_run_id,source_item_id,source_delta_sequence
             FROM chat_messages
             WHERE id=$id AND ($includeInternal=1 OR visibility='visible');
             """;
         command.Parameters.AddWithValue("$id", messageId.ToString("D"));
         command.Parameters.AddWithValue("$includeInternal", includeInternal ? 1 : 0);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadMessage(reader) : null;
+    }
+
+    public async Task<ChatMessage?> GetAgentMessageAsync(
+        string sourceRunId,
+        string sourceItemId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceRunId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceItemId);
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,
+                   tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,
+                   content_profile,code_diff,visibility,revision,message_phase,source_run_id,
+                   source_item_id,source_delta_sequence
+            FROM chat_messages
+            WHERE source_run_id=$run AND source_item_id=$item;
+            """;
+        command.Parameters.AddWithValue("$run", sourceRunId.Trim());
+        command.Parameters.AddWithValue("$item", sourceItemId.Trim());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadMessage(reader) : null;
     }
@@ -676,5 +898,9 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         reader.IsDBNull(14) ? MessageContentProfile.General : reader.ReadEnum<MessageContentProfile>(14),
         reader.IsDBNull(15) ? null : reader.GetString(15),
         reader.IsDBNull(16) ? ChatMessageVisibility.Visible : reader.ReadEnum<ChatMessageVisibility>(16),
-        reader.IsDBNull(17) ? 1 : reader.GetInt64(17));
+        reader.IsDBNull(17) ? 1 : reader.GetInt64(17),
+        reader.IsDBNull(18) ? null : reader.ReadEnum<ChatMessagePhase>(18),
+        reader.IsDBNull(19) ? null : reader.GetString(19),
+        reader.IsDBNull(20) ? null : reader.GetString(20),
+        reader.IsDBNull(21) ? 0 : reader.GetInt64(21));
 }

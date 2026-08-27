@@ -94,7 +94,8 @@ public sealed record GoAiRunRecord(
     string? SelectedModel,
     string? ErrorCode,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    Guid? FinalMessageId = null);
 
 public sealed record ClientToolExecutionRecord(
     string ProposalId,

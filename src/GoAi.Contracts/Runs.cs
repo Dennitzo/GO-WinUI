@@ -57,7 +57,8 @@ public sealed record RunRequest(
     DocumentContextDescriptor? DocumentContext = null,
     SessionContextDescriptor? SessionContext = null,
     ConversationProfile? ConversationProfile = null,
-    string? ReasoningEffort = null);
+    string? ReasoningEffort = null,
+    int AgentProtocolVersion = 2);
 
 public sealed record DocumentContextDescriptor(
     DocumentContextMode Mode,
@@ -150,6 +151,14 @@ public static class RunEventTypes
     public const string ModelFallback = "model.fallback";
     public const string ProviderFallback = "provider.fallback";
     public const string ContextChanged = "context.changed";
+    public const string AgentPhaseChanged = "agent.phase_changed";
+    public const string AgentActionStarted = "agent.action_started";
+    public const string AgentObservationCommitted = "agent.observation_committed";
+    public const string AgentVerificationChanged = "agent.verification_changed";
+    public const string AgentCacheChanged = "agent.cache_changed";
+    public const string AgentMessageStarted = "agent.message_started";
+    public const string AgentMessageDelta = "agent.message_delta";
+    public const string AgentMessageCompleted = "agent.message_completed";
     public const string TextDelta = "text.delta";
     public const string ServerToolStarted = "server_tool.started";
     public const string ServerToolCompleted = "server_tool.completed";
@@ -180,7 +189,12 @@ public sealed record ModelGenerationEvent(
     int? ProcessedPromptTokens = null,
     int? GeneratedTokens = null,
     double? TokensPerSecond = null,
-    int? CurrentTokens = null);
+    int? CurrentTokens = null,
+    int? Attempt = null,
+    string? FailureKind = null,
+    bool? ToolArgumentsJsonComplete = null,
+    int? ContentCharacters = null,
+    bool? FinishObserved = null);
 
 public sealed record ContextChangedEvent(
     int EstimatedInputTokens,

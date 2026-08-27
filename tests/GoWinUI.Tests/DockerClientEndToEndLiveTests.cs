@@ -18,6 +18,149 @@ public sealed class DockerClientEndToEndLiveTests
 
     [Fact]
     [Trait("Category", "Live")]
+    public async Task PersistedRoleModelsSurviveGeneralCodingGeneralClientSwitch()
+    {
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable("GO_AI_RUN_MODEL_SWITCH_LIVE"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var workspaceRoot = Environment.GetEnvironmentVariable("GO_AI_LIVE_WORKSPACE")?.Trim();
+        if (string.IsNullOrWhiteSpace(workspaceRoot) || !Directory.Exists(workspaceRoot))
+        {
+            throw new DirectoryNotFoundException("GO_AI_LIVE_WORKSPACE muss auf einen vorhandenen Testordner zeigen.");
+        }
+
+        const string generalModel = "gpt-oss-120b";
+        const string codingModel = "qwen3-coder-next";
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(60));
+
+        var firstGeneral = await ExecuteGeneralMathRunAsync(
+            generalModel,
+            "Antworte exakt mit: General eins bereit.",
+            timeout.Token,
+            requireMathTool: false);
+        Assert.Equal(generalModel, firstGeneral.Snapshot.SelectedModel, ignoreCase: true);
+
+        var workspace = Path.Combine(
+            Path.GetFullPath(workspaceRoot),
+            $"go-model-switch-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workspace);
+        await File.WriteAllTextAsync(
+            Path.Combine(workspace, "README.md"),
+            "# Modellwechsel-Smoke\n\nDieser Workspace darf nur analysiert werden.\n",
+            new UTF8Encoding(false),
+            timeout.Token);
+        var sessionId = $"go-model-switch-{Guid.NewGuid():N}";
+        await using (var harness = await CodingAgentLiveTestHarness.CreateAsync(
+                         "model-switch",
+                         workspace,
+                         codingModel,
+                         sessionId,
+                         timeout.Token))
+        {
+            var coding = await harness.ExecuteAsync(
+                sessionId,
+                "Analysiere ausschließlich den vorhandenen Workspace und schließe ohne Dateiänderung mit einer kurzen Bestandsbeschreibung ab.",
+                "model-switch",
+                timeout.Token);
+            Assert.Equal(codingModel, coding.Run.SelectedModel, ignoreCase: true);
+            Assert.Equal(RunState.Completed, coding.Run.State);
+        }
+
+        var secondGeneral = await ExecuteGeneralMathRunAsync(
+            generalModel,
+            "Antworte exakt mit: General zwei bereit.",
+            timeout.Token,
+            requireMathTool: false);
+        Assert.Equal(generalModel, secondGeneral.Snapshot.SelectedModel, ignoreCase: true);
+    }
+
+    [Fact]
+    [Trait("Category", "Live")]
+    public async Task GeneralChatEmitsSeveralVisibleDeltasBeforeCompletion()
+    {
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable("GO_AI_RUN_STREAMING_LIVE"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(40));
+        using var http = new HttpClient
+        {
+            BaseAddress = ResolveServerUrl(),
+            Timeout = Timeout.InfiniteTimeSpan,
+        };
+        using var client = new GoAiClient(http, $"go-streaming-live-{Guid.NewGuid():N}");
+        var modelId = Environment.GetEnvironmentVariable("GO_AI_LIVE_GENERAL_MODEL")?.Trim();
+        if (string.IsNullOrWhiteSpace(modelId))
+        {
+            modelId = "gpt-oss-120b";
+        }
+
+        var accepted = await client.CreateRunAsync(
+            new RunRequest(
+                GoAiProtocol.Version,
+                RunMode.General,
+                [new RunMessage("user", [new ContentPart(
+                    "text",
+                    "Erkläre in zwölf kurzen, nummerierten Absätzen auf Deutsch, wie ein zuverlässiger Softwaretest aufgebaut wird. "
+                    + "Schreibe normalen Markdown-Fließtext ohne Werkzeuge, JSON oder technische Metadaten.")])],
+                Limits: new RunLimits(2_048, 131_072, 2_400),
+                SessionId: $"go-streaming-live-{Guid.NewGuid():N}",
+                PreferredGeneralModelId: modelId,
+                ConversationProfile: ConversationProfile.General),
+            $"go-streaming-live-{Guid.NewGuid():N}",
+            timeout.Token);
+
+        var deltas = new List<(long EventId, DateTimeOffset SeenAt, string Text)>();
+        long? completedEventId = null;
+        DateTimeOffset? completedAt = null;
+        RunFailedEvent? failure = null;
+        await foreach (var item in client.StreamRunEventsAsync(
+            accepted.RunId,
+            cancellationToken: timeout.Token))
+        {
+            if (item.Type == RunEventTypes.TextDelta)
+            {
+                deltas.Add((
+                    item.Id,
+                    DateTimeOffset.UtcNow,
+                    item.Data.Deserialize<TextDeltaEvent>(ProtocolJson)?.Delta ?? string.Empty));
+            }
+            else if (item.Type == RunEventTypes.RunCompleted)
+            {
+                completedEventId = item.Id;
+                completedAt = DateTimeOffset.UtcNow;
+            }
+            else if (item.Type == RunEventTypes.RunFailed)
+            {
+                failure = item.Data.Deserialize<RunFailedEvent>(ProtocolJson);
+            }
+        }
+
+        var snapshot = await client.GetRunAsync(accepted.RunId, timeout.Token);
+        Assert.True(
+            snapshot.State == RunState.Completed,
+            $"Streaming-Lauf endete als {snapshot.State}: {failure?.ErrorCode ?? snapshot.ErrorCode} · {failure?.Message}");
+        Assert.NotNull(completedEventId);
+        Assert.NotNull(completedAt);
+        Assert.True(deltas.Count >= 2, $"Erwartet wurden mehrere Live-Deltas, tatsächlich empfangen: {deltas.Count}.");
+        Assert.All(deltas, delta => Assert.True(delta.EventId < completedEventId));
+        Assert.True(
+            completedAt - deltas[0].SeenAt >= TimeSpan.FromMilliseconds(250),
+            "Das erste Textdelta traf erst gemeinsam mit dem Abschlussereignis ein.");
+        Assert.False(string.IsNullOrWhiteSpace(string.Concat(deltas.Select(static delta => delta.Text))));
+    }
+
+    [Fact]
+    [Trait("Category", "Live")]
     public async Task GeneralToolsCodingWebResearchAndModeSwitchUseRealClientPipeline()
     {
         if (!string.Equals(
@@ -125,7 +268,8 @@ public sealed class DockerClientEndToEndLiveTests
     private static async Task<GeneralRunObservation> ExecuteGeneralMathRunAsync(
         string modelId,
         string prompt,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireMathTool = true)
     {
         using var http = new HttpClient
         {
@@ -140,7 +284,7 @@ public sealed class DockerClientEndToEndLiveTests
                 [new RunMessage("user", [new ContentPart("text", prompt)])],
                 Limits: new RunLimits(4_096, 131_072, 3_600),
                 SessionId: $"docker-client-e2e-general-{Guid.NewGuid():N}",
-                AllowedServerTools: ["math.evaluate"],
+                AllowedServerTools: requireMathTool ? ["math.evaluate"] : [],
                 PreferredGeneralModelId: modelId,
                 ConversationProfile: ConversationProfile.General),
             $"docker-client-e2e-general-{Guid.NewGuid():N}",

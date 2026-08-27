@@ -13,7 +13,13 @@ public sealed record ModelRuntimeProgress(
     int? ProcessedPromptTokens = null,
     int? GeneratedTokens = null,
     double? TokensPerSecond = null,
-    int? CurrentTokens = null);
+    int? CurrentTokens = null,
+    int? Attempt = null,
+    string? FailureKind = null,
+    bool? ToolArgumentsJsonComplete = null,
+    int? ContentCharacters = null,
+    bool? FinishObserved = null,
+    string? ContentDelta = null);
 
 public sealed record LmChatMessage(
     string Role,

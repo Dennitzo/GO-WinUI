@@ -51,7 +51,8 @@ public sealed class SqliteConversationSnapshotRepository(SqliteDatabase database
             command.CommandText = """
                 SELECT id,session_id,role,content,status,created_at,updated_at,error,
                        tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,
-                       content_profile,code_diff,visibility,revision
+                       content_profile,code_diff,visibility,revision,message_phase,source_run_id,
+                       source_item_id,source_delta_sequence
                 FROM chat_messages
                 WHERE session_id=$session AND visibility='visible'
                 ORDER BY created_at,id;

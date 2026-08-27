@@ -53,10 +53,25 @@ function Resolve-GoDockerCommand {
     throw 'Docker Desktop command was not found. Install or start Docker Desktop.'
 }
 
+function Resolve-GoLmStudioCommand {
+    $command = Get-Command lms -ErrorAction SilentlyContinue
+    if ($null -ne $command) {
+        return $command.Source
+    }
+
+    $candidate = Join-Path $env:USERPROFILE '.lmstudio\bin\lms.exe'
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        return $candidate
+    }
+
+    throw 'LM Studio CLI was not found. Install LM Studio and initialize its CLI once.'
+}
+
 function Get-GoAiStackDefaults {
     param(
         [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'GO-AI-Stack'),
-        [string] $ModelRoot
+        [string] $ModelRoot,
+        [string] $LmStudioModelRoot
     )
 
     $resolvedDataRoot = [IO.Path]::GetFullPath($DataRoot)
@@ -66,9 +81,16 @@ function Get-GoAiStackDefaults {
     else {
         [IO.Path]::GetFullPath($ModelRoot)
     }
+    $resolvedLmStudioModelRoot = if ([string]::IsNullOrWhiteSpace($LmStudioModelRoot)) {
+        Join-Path $env:USERPROFILE '.lmstudio\models'
+    }
+    else {
+        [IO.Path]::GetFullPath($LmStudioModelRoot)
+    }
     return [pscustomobject]@{
         DataRoot = $resolvedDataRoot
         ModelRoot = $resolvedModelRoot
+        LmStudioModelRoot = [IO.Path]::GetFullPath($resolvedLmStudioModelRoot)
         ComposeFile = Resolve-GoRepositoryPath -RelativePath 'deploy\go-ai\compose.yaml'
         EnvironmentFile = Join-Path $resolvedDataRoot 'stack.env'
     }

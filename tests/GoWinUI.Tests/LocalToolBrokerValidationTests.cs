@@ -8,6 +8,17 @@ namespace GoWinUI.Tests;
 
 public sealed class LocalToolBrokerValidationTests
 {
+    [Theory]
+    [InlineData("/")]
+    [InlineData(".")]
+    [InlineData("./")]
+    [InlineData("workspace")]
+    [InlineData("/workspace")]
+    public void WorkspaceRootAliasesNormalizeToDot(string value)
+    {
+        Assert.Equal(".", LocalToolBroker.NormalizeWorkspaceAlias(value));
+    }
+
     private static readonly string[] VersionArguments = ["--version"];
     private static readonly string[] LeanMainArguments = ["Main.lean"];
     private static readonly string[] VoiceSearchTerms = ["voice", "speech", "SpeechRecognition"];
@@ -388,6 +399,40 @@ public sealed class LocalToolBrokerValidationTests
     }
 
     [Theory]
+    [InlineData("python3", "python")]
+    [InlineData("python3.exe", "python")]
+    public void Python3AliasesUseTheInstalledWindowsPythonWhenNoVenvExists(
+        string requested,
+        string expected)
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "go-system-python-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+        try
+        {
+            var normalized = LocalToolBroker.NormalizePythonProcessRequest(
+                requested,
+                ["--version"],
+                workspace);
+
+            Assert.Equal(expected, normalized.Executable);
+            Assert.Equal(["--version"], normalized.Arguments);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SystemRuntimeAliasesRemainPlatformAppropriate()
+    {
+        Assert.Equal("node", LocalToolBroker.NormalizeSystemRuntimeAlias("nodejs"));
+        Assert.Equal("node", LocalToolBroker.NormalizeSystemRuntimeAlias("nodejs.exe"));
+        Assert.Equal("cargo", LocalToolBroker.NormalizeSystemRuntimeAlias("cargo"));
+        Assert.Equal(@"tools\nodejs.exe", LocalToolBroker.NormalizeSystemRuntimeAlias(@"tools\nodejs.exe"));
+    }
+
+    [Theory]
     [InlineData(@"C:\Users\AMD\AppData\Local\Programs\Python\Python311\python.exe")]
     [InlineData("python311")]
     public void PythonBootstrapPathsAndInventedAliasesUseTheVersionedLauncher(string executable)
@@ -598,7 +643,271 @@ public sealed class LocalToolBrokerValidationTests
             index.Dispose();
             confirmation.Dispose();
             await bricsCad.DisposeAsync();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task MissingBoundedMultiReadReturnsStructuredExistingCandidatesToTheAgent()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "missing-multi-path-test", Guid.NewGuid().ToString("N"));
+        var sourceDirectory = Path.Combine(root, "src");
+        Directory.CreateDirectory(sourceDirectory);
+        await File.WriteAllTextAsync(Path.Combine(sourceDirectory, "TemperatureController.cs"), "internal sealed class TemperatureController {}\n");
+        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions
+        {
+            DataDirectory = Path.Combine(root, ".go-test-cache"),
+        });
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            var broker = new LocalToolBroker(
+                connection: null!,
+                settings: null!,
+                confirmation,
+                bricsCad,
+                index,
+                documents: null!);
+            var proposal = Create(
+                ClientToolNames.FileSystemReadMany,
+                ToolRiskClass.ReadOnly,
+                new
+                {
+                    items = new[]
+                    {
+                        new { path = "src/TempratureController.cs", startLine = 1, endLine = 20 },
+                    },
+                    maximumCharacters = 12_000,
+                },
+                DateTimeOffset.UtcNow);
+
+            var result = await broker.ExecuteAsync(proposal, root);
+
+            Assert.Equal("failed", result.Status);
+            Assert.Equal("client.workspace_path_not_found", result.ErrorCode);
+            Assert.Equal("path_not_found", result.Result.GetProperty("reason").GetString());
+            Assert.Contains(
+                "src/TemperatureController.cs",
+                result.Result.GetProperty("suggestedPaths").EnumerateArray().Select(static item => item.GetString()));
+        }
+        finally
+        {
+            index.Dispose();
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task WorkspaceWriteReturnsVersionEvidenceAndInvalidatesTheReadCache()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "write-version-test", Guid.NewGuid().ToString("N"));
+        var cacheRoot = root + "-cache";
+        Directory.CreateDirectory(root);
+        var file = Path.Combine(root, "Program.cs");
+        const string original = "internal static class Program { }\n";
+        const string updated = "internal static class Program { public static int Value => 1; }\n";
+        await File.WriteAllTextAsync(file, original, new System.Text.UTF8Encoding(false));
+        var beforeSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(original))).ToLowerInvariant();
+        var afterSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(updated))).ToLowerInvariant();
+        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions
+        {
+            DataDirectory = cacheRoot,
+        });
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            _ = await index.GetSnapshotForRunAsync(root);
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, index, null!);
+            var write = Create(
+                ClientToolNames.FileSystemWriteText,
+                ToolRiskClass.LocalMutation,
+                new { path = "Program.cs", content = updated, expectedSha256 = beforeSha },
+                DateTimeOffset.UtcNow);
+
+            var writeResult = await broker.ExecuteAsync(write, root);
+
+            Assert.Equal("completed", writeResult.Status);
+            Assert.Equal(beforeSha, writeResult.Result.GetProperty("beforeSha256").GetString());
+            Assert.Equal(afterSha, writeResult.Result.GetProperty("afterSha256").GetString());
+
+            var read = Create(
+                ClientToolNames.FileSystemReadText,
+                ToolRiskClass.ReadOnly,
+                new { path = "Program.cs", startLine = 1, endLine = 20 },
+                DateTimeOffset.UtcNow);
+            var readResult = await broker.ExecuteAsync(read, root);
+            Assert.Equal("completed", readResult.Status);
+            Assert.Equal(afterSha, readResult.Result.GetProperty("sha256").GetString());
+            Assert.Contains("Value", readResult.Result.GetProperty("text").GetString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            index.Dispose();
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+            if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ReplaceVersionConflictReturnsStructuredAuthoritativeReadRecovery()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "replace-version-recovery", Guid.NewGuid().ToString("N"));
+        var cacheRoot = root + "-cache";
+        Directory.CreateDirectory(root);
+        const string current = "alpha\nbeta\n";
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "notes.txt"),
+            current,
+            new System.Text.UTF8Encoding(false));
+        var actualSha = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(current))).ToLowerInvariant();
+        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = cacheRoot });
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, index, null!);
+            var replace = Create(
+                ClientToolNames.FileSystemReplaceText,
+                ToolRiskClass.LocalMutation,
+                new
+                {
+                    path = "notes.txt",
+                    oldText = "beta",
+                    newText = "gamma",
+                    expectedSha256 = new string('a', 64),
+                    replaceAll = false,
+                },
+                DateTimeOffset.UtcNow);
+
+            var result = await broker.ExecuteAsync(replace, root);
+
+            Assert.Equal("failed", result.Status);
+            Assert.Equal("client.workspace_version_conflict", result.ErrorCode);
+            Assert.Equal("stale_file_version", result.Result.GetProperty("reason").GetString());
+            Assert.Equal(actualSha, result.Result.GetProperty("actualSha256").GetString());
+            Assert.Equal("workspace.inspect", result.Result.GetProperty("requiredAgentTool").GetString());
+            Assert.Equal("read", result.Result.GetProperty("requiredOperation").GetString());
+            Assert.Equal(current, await File.ReadAllTextAsync(Path.Combine(root, "notes.txt")));
+        }
+        finally
+        {
+            index.Dispose();
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+            if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task MissingReplaceTextReturnsStructuredRecoveryInsteadOfGenericToolFailure()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "replace-text-recovery", Guid.NewGuid().ToString("N"));
+        var cacheRoot = root + "-cache";
+        Directory.CreateDirectory(root);
+        const string current = "alpha\nbeta\n";
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "notes.txt"),
+            current,
+            new System.Text.UTF8Encoding(false));
+        var actualSha = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(current))).ToLowerInvariant();
+        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = cacheRoot });
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, index, null!);
+            var replace = Create(
+                ClientToolNames.FileSystemReplaceText,
+                ToolRiskClass.LocalMutation,
+                new
+                {
+                    path = "notes.txt",
+                    oldText = "nicht vorhanden",
+                    newText = "gamma",
+                    expectedSha256 = actualSha,
+                    replaceAll = false,
+                },
+                DateTimeOffset.UtcNow);
+
+            var result = await broker.ExecuteAsync(replace, root);
+
+            Assert.Equal("failed", result.Status);
+            Assert.Equal("client.replace_text_not_found", result.ErrorCode);
+            Assert.Equal("old_text_not_found", result.Result.GetProperty("reason").GetString());
+            Assert.Equal(actualSha, result.Result.GetProperty("actualSha256").GetString());
+            Assert.True(result.Result.GetProperty("authoritativeReadRequired").GetBoolean());
+            Assert.False(result.Result.TryGetProperty("text", out _));
+            Assert.Equal(current, await File.ReadAllTextAsync(Path.Combine(root, "notes.txt")));
+        }
+        finally
+        {
+            index.Dispose();
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+            if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RepeatedVersionedReadReturnsEvidenceMetadataWithoutSourceText()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GO", "read-evidence-cache-test", Guid.NewGuid().ToString("N"));
+        var cacheRoot = root + "-cache";
+        Directory.CreateDirectory(root);
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "Program.cs"),
+            "internal static class Program { public static int Value => 1; }\n",
+            new System.Text.UTF8Encoding(false));
+        var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = cacheRoot });
+        var confirmation = new ToolConfirmationService(null!);
+        var bricsCad = new BricsCadBridgeHost();
+        try
+        {
+            var broker = new LocalToolBroker(null!, null!, confirmation, bricsCad, index, null!);
+            var first = Create(
+                ClientToolNames.FileSystemReadText,
+                ToolRiskClass.ReadOnly,
+                new { path = "Program.cs", startLine = 1, endLine = 20 },
+                DateTimeOffset.UtcNow);
+            var firstResult = await broker.ExecuteAsync(first, root);
+            var evidenceId = firstResult.Result.GetProperty("evidenceId").GetString();
+
+            var repeated = Create(
+                ClientToolNames.FileSystemReadText,
+                ToolRiskClass.ReadOnly,
+                new { path = "Program.cs", startLine = 1, endLine = 20, knownEvidenceIds = new[] { evidenceId } },
+                DateTimeOffset.UtcNow);
+            var repeatedResult = await broker.ExecuteAsync(repeated, root);
+
+            Assert.Equal("completed", repeatedResult.Status);
+            Assert.Equal(evidenceId, repeatedResult.Result.GetProperty("evidenceId").GetString());
+            Assert.True(repeatedResult.Result.GetProperty("contentReused").GetBoolean());
+            Assert.True(repeatedResult.Result.GetProperty("textOmitted").GetBoolean());
+            Assert.False(repeatedResult.Result.TryGetProperty("text", out _));
+        }
+        finally
+        {
+            index.Dispose();
+            confirmation.Dispose();
+            await bricsCad.DisposeAsync();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+            if (Directory.Exists(cacheRoot)) Directory.Delete(cacheRoot, recursive: true);
         }
     }
 
@@ -829,6 +1138,43 @@ public sealed class LocalToolBrokerValidationTests
         {
             File.Delete(path);
         }
+    }
+
+    [Fact]
+    public void BarePythonUnittestInvocationUsesWorkspaceDiscovery()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), $"go-unittest-discovery-{Guid.NewGuid():N}");
+        var tests = Path.Combine(workspace, "tests");
+        Directory.CreateDirectory(tests);
+        File.WriteAllText(Path.Combine(tests, "test_solver.py"), "import unittest\n");
+        try
+        {
+            var normalized = LocalToolBroker.NormalizePythonProcessRequest(
+                "python",
+                ["-m", "unittest", "-v"],
+                workspace);
+
+            Assert.Equal("python", normalized.Executable);
+            Assert.Equal(["-m", "unittest", "discover", "-s", "tests", "-v"], normalized.Arguments);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ExplicitPythonUnittestTargetIsNotRewritten()
+    {
+        Assert.False(LocalToolBroker.IsBareUnittestInvocation(
+            ["-m", "unittest", "tests/test_solver.py", "-v"]));
+        Assert.False(LocalToolBroker.IsBareUnittestInvocation(
+            ["unittest", "-v"]));
+        Assert.Equal(
+            ["-3.11", "-m", "unittest", "discover", "-s", "tests", "-v"],
+            LocalToolBroker.BuildPythonUnittestDiscoveryArguments(
+                ["-3.11", "-m", "unittest", "-v"],
+                "tests"));
     }
 
     [Fact]

@@ -1,5 +1,6 @@
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Models;
+using GoAi.Server.Core.Runs;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using System.Net;
@@ -11,13 +12,34 @@ namespace GoAi.Server.Tests;
 public sealed class ModelRuntimeClientTests
 {
     private static readonly string[] RequiredPath = ["path"];
+    private static readonly string[] RequiredName = ["name"];
+    private static readonly string[] RequiredOperation = ["operation"];
 
     [Fact]
-    public async Task CodingTurnUsesNonStreamingSingleToolLlamaRequest()
+    public async Task InstalledLmStudioCatalogIsMappedToGoRoles()
     {
-        var handler = new RouterHandler();
-        using var http = new HttpClient(handler);
-        using var client = CreateClient(http);
+        var handler = new LmStudioHandler();
+        using var client = CreateClient(new HttpClient(handler));
+
+        var status = await client.GetStatusAsync();
+
+        Assert.True(status.ProviderReachable);
+        Assert.Contains(status.Models, model =>
+            model.Id == CodingModelCatalog.Qwen38Id
+            && model.Role == "code"
+            && model.Downloaded
+            && model.ContextTokens == 262_144);
+        Assert.Contains(status.Models, model =>
+            model.Id == "gpt-oss-120b"
+            && model.Role == "general"
+            && model.Loaded);
+    }
+
+    [Fact]
+    public async Task AlreadyLoadedModelUsesInstanceIdWithoutReload()
+    {
+        var handler = new LmStudioHandler(returnToolCall: true);
+        using var client = CreateClient(new HttpClient(handler));
         var schema = JsonSerializer.SerializeToElement(new
         {
             type = "object",
@@ -29,139 +51,240 @@ public sealed class ModelRuntimeClientTests
             "gpt-oss-120b",
             [new LmChatMessage("user", "Lies README.md")],
             [new LmToolDefinition("fs.readText", "Datei lesen", schema)],
-            modelRole: "code",
+            modelRole: "general",
             reasoningEffort: "high",
             requireToolCall: true,
             requiredToolName: "fs.readText");
 
-        var call = Assert.Single(result.ToolCalls);
-        Assert.Equal("fs.readText", call.Name);
-        Assert.Equal("README.md", call.Arguments.GetProperty("path").GetString());
+        Assert.Equal("fs.readText", Assert.Single(result.ToolCalls).Name);
+        Assert.Empty(handler.ModelOperations);
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
-        Assert.False(body.RootElement.GetProperty("stream").GetBoolean());
+        Assert.Equal("general-instance", body.RootElement.GetProperty("model").GetString());
+        Assert.True(body.RootElement.GetProperty("stream").GetBoolean());
+        Assert.True(body.RootElement.GetProperty("stream_options").GetProperty("include_usage").GetBoolean());
         Assert.False(body.RootElement.GetProperty("parallel_tool_calls").GetBoolean());
         Assert.Equal("high", body.RootElement.GetProperty("reasoning_effort").GetString());
         Assert.Equal("required", body.RootElement.GetProperty("tool_choice").GetString());
-        Assert.Empty(handler.ModelOperations);
+        var transportName = body.RootElement.GetProperty("tools")[0]
+            .GetProperty("function").GetProperty("name").GetString();
+        Assert.NotNull(transportName);
+        Assert.DoesNotContain('.', transportName);
+        Assert.StartsWith("go_fs_readtext_", transportName, StringComparison.Ordinal);
+        Assert.Equal(transportName, ModelRuntimeClient.ToTransportToolName("fs.readText"));
     }
 
     [Fact]
-    public async Task GeneralAndCodingRolesReuseTheSameLoadedModel()
+    public void TransportToolNamesStayReadableBoundedAndCollisionSafe()
     {
-        var handler = new RouterHandler(returnToolCall: false);
-        using var http = new HttpClient(handler);
-        using var client = CreateClient(http);
+        var dotted = ModelRuntimeClient.ToTransportToolName("workspace.inspect");
+        var underscored = ModelRuntimeClient.ToTransportToolName("workspace_inspect");
+        var longName = ModelRuntimeClient.ToTransportToolName(new string('a', 100));
 
-        _ = await client.CompleteChatAsync(
-            "gpt-oss-120b",
-            [new LmChatMessage("user", "Erkläre kurz.")],
-            [],
-            modelRole: "general");
-        _ = await client.CompleteChatAsync(
-            "gpt-oss-120b",
-            [new LmChatMessage("user", "Prüfe Code.")],
-            [],
-            modelRole: "code");
-
-        Assert.Equal(2, handler.ChatBodies.Count);
-        Assert.Empty(handler.ModelOperations);
+        Assert.StartsWith("go_workspace_inspect_", dotted, StringComparison.Ordinal);
+        Assert.NotEqual(dotted, underscored);
+        Assert.True(longName.Length <= 63);
+        Assert.Matches("^[a-zA-Z0-9_-]+$", longName);
     }
 
     [Fact]
-    public async Task QwenCodingTurnSwitchesModelsAndNeverSendsReasoningEffort()
+    public void NativeLmStudioCatalogParsesCapabilitiesWithoutKnownModelIds()
     {
-        var handler = new RouterHandler(returnToolCall: false);
-        using var http = new HttpClient(handler);
-        using var client = CreateClient(http);
+        using var document = JsonDocument.Parse("""
+            {"models":[{"key":"publisher/future-model","type":"llm","display_name":"Future Model","architecture":"future","quantization":{"name":"Q8_0"},"max_context_length":196608,"capabilities":{"vision":true,"trained_for_tool_use":true,"reasoning":{"allowed_options":["off","low","high"],"default":"high"}},"loaded_instances":[]}]}
+            """);
+
+        var model = Assert.Single(ModelRuntimeClient.ReadRuntimeModels(document.RootElement));
+
+        Assert.Equal("publisher/future-model", model.Id);
+        Assert.Equal(196_608, model.MaximumContextLength);
+        Assert.True(model.SupportsTools);
+        Assert.True(model.SupportsVision);
+        Assert.Equal(["none", "low", "high"], model.ReasoningEfforts);
+        Assert.Equal("high", model.DefaultReasoningEffort);
+        Assert.Equal("Q8_0", model.Quantization);
+    }
+
+    [Fact]
+    public async Task Qwen38SwitchUsesDynamicLmStudioKeyWithoutInventingReasoningSupport()
+    {
+        var handler = new LmStudioHandler(returnToolCall: false);
+        using var client = CreateClient(new HttpClient(handler));
 
         _ = await client.CompleteChatAsync(
-            CodingModelCatalog.Qwen3CoderNextQ8Id,
-            [new LmChatMessage("user", "PrÃ¼fe das Projekt.")],
+            CodingModelCatalog.Qwen38Id,
+            [new LmChatMessage("user", "Prüfe das Projekt.")],
             [],
             modelRole: "code",
-            reasoningEffort: "high");
+            reasoningEffort: "none");
 
         Assert.Equal(2, handler.ModelOperations.Count);
-        Assert.StartsWith("/models/unload:", handler.ModelOperations[0], StringComparison.Ordinal);
-        Assert.Contains("gpt-oss-120b", handler.ModelOperations[0], StringComparison.Ordinal);
-        Assert.StartsWith("/models/load:", handler.ModelOperations[1], StringComparison.Ordinal);
-        Assert.Contains(CodingModelCatalog.Qwen3CoderNextQ8Id, handler.ModelOperations[1], StringComparison.Ordinal);
+        Assert.Equal("unload:general-instance", handler.ModelOperations[0]);
+        Assert.Equal("load:qwen3.8-27b:262144", handler.ModelOperations[1]);
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
-        Assert.Equal(CodingModelCatalog.Qwen3CoderNextQ8Id, body.RootElement.GetProperty("model").GetString());
+        Assert.Equal("qwen-instance", body.RootElement.GetProperty("model").GetString());
         Assert.False(body.RootElement.TryGetProperty("reasoning_effort", out _));
-        Assert.Equal(1.0, body.RootElement.GetProperty("temperature").GetDouble());
-        Assert.Equal(0.95, body.RootElement.GetProperty("top_p").GetDouble());
-        Assert.Equal(40, body.RootElement.GetProperty("top_k").GetInt32());
-        Assert.Equal(0.0, body.RootElement.GetProperty("min_p").GetDouble());
+        Assert.False(body.RootElement.TryGetProperty("chat_template_kwargs", out _));
     }
 
     [Fact]
-    public async Task QwenSwitchCancelsAStillLoadingGeneralModelBeforeClaimingTheOnlyRouterSlot()
+    public async Task CompletedModelLoadIsRecoveredAfterTransientLoadChannelFailure()
     {
-        var handler = new LoadingModelSwitchHandler();
-        using var http = new HttpClient(handler);
-        using var client = CreateClient(http);
+        var handler = new LmStudioHandler(transientLoadChannelFailure: true);
+        using var client = CreateClient(new HttpClient(handler));
 
-        var result = await client.CompleteChatAsync(
+        var instance = await client.EnsureModelLoadedAsync(
             CodingModelCatalog.Qwen3CoderNextQ8Id,
-            [new LmChatMessage("user", "Pruefe das Projekt.")],
-            [],
-            modelRole: "code");
+            262_144);
 
-        Assert.Equal("Fertig", result.Content);
-        Assert.Equal(
-            ["/models/unload:gpt-oss-120b", "/models/load:qwen3-coder-next-q8_0"],
-            handler.ModelOperations);
-        Assert.True(handler.ModelStatusRequests >= 5);
+        Assert.Equal("coder-instance", instance);
+        Assert.Equal(1, handler.ModelOperations.Count(operation =>
+            operation == "load:qwen3-coder-next:262144"));
     }
 
     [Fact]
-    public async Task StartupPreloadIsAwaitedWithoutIssuingASecondLoadRequest()
+    public async Task Qwen38RequiredToolTurnUsesConservativeCatalogFallback()
     {
-        var handler = new RouterHandler(
-            returnToolCall: false,
-            modelStates: ["loading", "loaded"]);
-        using var http = new HttpClient(handler);
-        using var client = CreateClient(http);
-        var loadingWasReported = false;
+        var handler = new LmStudioHandler(returnToolCall: true);
+        using var client = CreateClient(new HttpClient(handler));
+        var schema = JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            properties = new { name = new { type = "string" } },
+            required = RequiredName,
+        });
 
-        var preparation = await client.EnsureModelPreparedAsync(
-            "gpt-oss-120b",
-            131_072,
-            _ =>
-            {
-                loadingWasReported = true;
-                return Task.CompletedTask;
-            });
+        _ = await client.CompleteChatAsync(
+            CodingModelCatalog.Qwen38Id,
+            [new LmChatMessage("user", "Wähle das Werkzeug.")],
+            [new LmToolDefinition("go.selectTool", "Werkzeug wählen", schema)],
+            modelRole: "code",
+            reasoningEffort: "none",
+            requireToolCall: true,
+            requiredToolName: "go.selectTool");
 
-        Assert.False(preparation.WasAlreadyLoaded);
-        Assert.True(loadingWasReported);
-        Assert.Empty(handler.ModelOperations);
-        Assert.True(handler.ModelStatusRequests >= 2);
+        using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
+        Assert.False(body.RootElement.TryGetProperty("reasoning_effort", out _));
+        Assert.False(body.RootElement.TryGetProperty("chat_template_kwargs", out _));
     }
 
     [Fact]
-    public async Task TransientInferenceFailureIsRetriedExactlyOnce()
+    public async Task CompleteReasoningToolEnvelopeIsConvertedToValidatedNativeCall()
     {
-        var handler = new RouterHandler(returnToolCall: false, transientChatFailures: 1);
-        using var http = new HttpClient(handler);
-        using var client = CreateClient(http);
+        var handler = new LmStudioHandler(reasoningToolCall: true);
+        using var client = CreateClient(new HttpClient(handler));
+        var schema = JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            properties = new { operation = new { type = "string" } },
+            required = RequiredOperation,
+        });
 
         var result = await client.CompleteChatAsync(
+            CodingModelCatalog.Qwen38Id,
+            [new LmChatMessage("user", "Untersuche den Workspace.")],
+            [new LmToolDefinition("workspace.inspect", "Workspace untersuchen", schema)],
+            modelRole: "code",
+            reasoningEffort: "none",
+            requireToolCall: true);
+
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("workspace.inspect", call.Name);
+        Assert.Equal("map", call.Arguments.GetProperty("operation").GetString());
+        Assert.StartsWith("call-reasoning-", call.Id, StringComparison.Ordinal);
+        Assert.True(result.HadReasoning);
+    }
+
+    [Fact]
+    public void ReasoningToolEnvelopeRejectsUnknownOrMultipleTools()
+    {
+        var tools = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [ModelRuntimeClient.ToTransportToolName("workspace.inspect")] = "workspace.inspect",
+        };
+
+        Assert.False(ModelRuntimeClient.TryParseReasoningToolCall(
+            "<tool_call><function=workspace.change></function></tool_call>",
+            tools,
+            out _));
+        Assert.False(ModelRuntimeClient.TryParseReasoningToolCall(
+            "<tool_call><function=workspace.inspect></function></tool_call>" +
+            "<tool_call><function=workspace.inspect></function></tool_call>",
+            tools,
+            out _));
+    }
+
+    [Fact]
+    public async Task LmStudioMessageOrderCoalescesInitialSystemAndConvertsLateSystemGuidance()
+    {
+        var handler = new LmStudioHandler(returnToolCall: false);
+        using var client = CreateClient(new HttpClient(handler));
+
+        _ = await client.CompleteChatAsync(
             "gpt-oss-120b",
-            [new LmChatMessage("user", "Test")],
+            [
+                new LmChatMessage("system", "Policy"),
+                new LmChatMessage("system", "Repositorykarte"),
+                new LmChatMessage("user", "Bearbeite den Auftrag."),
+                new LmChatMessage("system", "Erzeuge jetzt den erforderlichen Tool-Call."),
+            ],
             []);
 
-        Assert.Equal("Fertig", result.Content);
-        Assert.Equal(2, handler.ChatAttempts);
+        using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
+        var messages = body.RootElement.GetProperty("messages");
+        Assert.Equal(3, messages.GetArrayLength());
+        Assert.Equal("system", messages[0].GetProperty("role").GetString());
+        Assert.Equal("Policy\n\nRepositorykarte", messages[0].GetProperty("content").GetString());
+        Assert.Equal("user", messages[1].GetProperty("role").GetString());
+        Assert.Equal("Bearbeite den Auftrag.", messages[1].GetProperty("content").GetString());
+        Assert.Equal("user", messages[2].GetProperty("role").GetString());
+        Assert.StartsWith("GO-Laufanweisung:\n", messages[2].GetProperty("content").GetString());
+        Assert.DoesNotContain(
+            messages.EnumerateArray().Skip(1),
+            message => string.Equals(
+                message.GetProperty("role").GetString(),
+                "system",
+                StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
-    public async Task NonStreamingTurnReportsLiveLlamaSlotTokenProgress()
+    public async Task QwenCoderNextRejectsUnsupportedReasoningEffort()
     {
-        var handler = new RouterHandler(returnToolCall: false, chatDelayMilliseconds: 1_500);
-        using var http = new HttpClient(handler);
-        using var client = CreateClient(http);
+        var handler = new LmStudioHandler(returnToolCall: false);
+        using var client = CreateClient(new HttpClient(handler));
+
+        _ = await Assert.ThrowsAsync<InvalidOperationException>(() => client.CompleteChatAsync(
+            CodingModelCatalog.Qwen3CoderNextQ8Id,
+            [new LmChatMessage("user", "Prüfe das Projekt.")],
+            [],
+            modelRole: "code",
+            reasoningEffort: "high"));
+
+        Assert.Empty(handler.ChatBodies);
+    }
+
+    [Fact]
+    public async Task Qwen38CanDisableThinkingWithoutSendingAnInvalidEffort()
+    {
+        var handler = new LmStudioHandler(returnToolCall: false);
+        using var client = CreateClient(new HttpClient(handler));
+
+        _ = await client.CompleteChatAsync(
+            CodingModelCatalog.Qwen38Id,
+            [new LmChatMessage("user", "Antworte direkt.")],
+            [],
+            modelRole: "code",
+            reasoningEffort: "none");
+
+        using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
+        Assert.False(body.RootElement.TryGetProperty("reasoning_effort", out _));
+        Assert.False(body.RootElement.TryGetProperty("chat_template_kwargs", out _));
+    }
+
+    [Fact]
+    public async Task StreamingTurnReportsFinalUsageWithoutPrivateSlotsEndpoint()
+    {
+        var handler = new LmStudioHandler(returnToolCall: false);
+        using var client = CreateClient(new HttpClient(handler));
         var progress = new List<ModelRuntimeProgress>();
 
         _ = await client.CompleteChatAsync(
@@ -174,245 +297,564 @@ public sealed class ModelRuntimeClientTests
                 return ValueTask.CompletedTask;
             });
 
+        Assert.Contains(progress, item => item.State == "generationStarted");
         var tokens = Assert.Single(progress, item => item.State == "tokenProgress");
-        Assert.Equal(1_205, tokens.PromptTokens);
-        Assert.Equal(1_103, tokens.ProcessedPromptTokens);
-        Assert.Equal(83, tokens.GeneratedTokens);
-        Assert.Equal(1_186, tokens.CurrentTokens);
-        Assert.InRange(tokens.PromptProgress!.Value, 0.91, 0.92);
-        Assert.True(handler.SlotRequests >= 1);
+        Assert.Equal(100, tokens.PromptTokens);
+        Assert.Equal(20, tokens.GeneratedTokens);
+        Assert.Equal(120, tokens.CurrentTokens);
+        Assert.DoesNotContain(handler.RequestPaths, path => path.StartsWith("/slots", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void ActiveSlotParserIgnoresIdleSlotsAndReadsCurrentTokenCounters()
+    public async Task VisibleTextFragmentsAreForwardedBeforeTheBufferedResultCompletes()
     {
-        using var document = JsonDocument.Parse("""
-            [
-              {"id":0,"is_processing":false,"n_prompt_tokens":0,"n_prompt_tokens_processed":0},
-              {"id":1,"is_processing":true,"n_prompt_tokens":927,"n_prompt_tokens_processed":250,
-               "n_prompt_tokens_cache":200,
-               "next_token":[{"n_decoded":27}]}
-            ]
-            """);
+        var handler = new LmStudioHandler(streamingText: true);
+        using var client = CreateClient(new HttpClient(handler));
+        var progress = new List<ModelRuntimeProgress>();
 
-        var progress = ModelRuntimeClient.ReadActiveSlotProgress(document.RootElement);
+        var result = await client.CompleteChatAsync(
+            "gpt-oss-120b",
+            [new LmChatMessage("user", "BegrÃ¼ÃŸe mich.")],
+            [],
+            nativeProgress: (value, _) =>
+            {
+                progress.Add(value);
+                return ValueTask.CompletedTask;
+            });
 
-        Assert.NotNull(progress);
-        Assert.Equal("tokenProgress", progress.State);
-        Assert.Equal(900, progress.PromptTokens);
-        Assert.Equal(450, progress.ProcessedPromptTokens);
-        Assert.Equal(27, progress.GeneratedTokens);
-        Assert.Equal(477, progress.CurrentTokens);
-        Assert.Equal(0.5, progress.PromptProgress);
+        Assert.Equal("Hallo Welt", result.Content);
+        Assert.Equal(
+            ["Hallo", " Welt"],
+            progress.Where(item => item.State == "contentDelta")
+                .Select(item => item.ContentDelta!)
+                .ToArray());
     }
 
     [Fact]
-    public void ActiveSlotParserPrefersTheNativeLlamaCurrentTokenCounter()
+    public void VisibleTextGateStreamsPlainTextButSuppressesStructuredEnvelopes()
     {
-        using var document = JsonDocument.Parse("""
-            [
-              {"id":0,"is_processing":true,"n_tokens":13331,"n_prompt_tokens":16000,
-               "n_prompt_tokens_processed":12000,"next_token":[{"n_decoded":0}]}
-            ]
-            """);
+        var visible = new IncrementalVisibleTextGate(enabled: true);
+        Assert.Null(visible.Push("Hallo"));
+        var continuation = new string('x', 92);
+        Assert.Equal("Hallo" + continuation, visible.Push(continuation));
+        Assert.True(visible.HasStreamed);
 
-        var progress = ModelRuntimeClient.ReadActiveSlotProgress(document.RootElement);
+        var structured = new IncrementalVisibleTextGate(enabled: true);
+        Assert.Null(structured.Push("  {\"schema\":"));
+        Assert.Null(structured.Push("\"go.ai.agent.response.v1\"}"));
+        Assert.Null(structured.Flush());
+        Assert.False(structured.HasStreamed);
+    }
 
-        Assert.NotNull(progress);
-        Assert.Equal(13_331, progress.CurrentTokens);
-        Assert.Equal(0, progress.GeneratedTokens);
+    [Fact]
+    public async Task StreamingToolFragmentsAreBufferedAndValidatedBeforeReturning()
+    {
+        var handler = new LmStudioHandler(streamingToolCall: true);
+        using var client = CreateClient(new HttpClient(handler));
+        var schema = JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            properties = new { operation = new { type = "string" } },
+            required = RequiredOperation,
+        });
+        var progress = new List<ModelRuntimeProgress>();
+
+        var result = await client.CompleteChatAsync(
+            "gpt-oss-120b",
+            [new LmChatMessage("user", "Untersuche den Workspace.")],
+            [new LmToolDefinition("workspace.inspect", "Workspace untersuchen", schema)],
+            requireToolCall: true,
+            nativeProgress: (value, _) =>
+            {
+                progress.Add(value);
+                return ValueTask.CompletedTask;
+            });
+
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("workspace.inspect", call.Name);
+        Assert.Equal("map", call.Arguments.GetProperty("operation").GetString());
+        Assert.Equal(100, result.InputTokens);
+        Assert.Equal(20, result.OutputTokens);
+        Assert.Equal(7, result.ReasoningTokens);
+        Assert.True(result.HadReasoning);
+        Assert.Contains(progress, item => item.State == "toolSelected" && item.ToolName == "workspace.inspect");
+    }
+
+    [Fact]
+    public async Task CompleteStreamingToolJsonSurvivesMissingDoneFrameWithoutRetry()
+    {
+        var handler = new LmStudioHandler(
+            streamingToolCall: true,
+            completeToolWithoutDone: true);
+        using var client = CreateClient(new HttpClient(handler));
+        var schema = JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            properties = new { operation = new { type = "string" } },
+            required = RequiredOperation,
+        });
+        var progress = new List<ModelRuntimeProgress>();
+
+        var result = await client.CompleteChatAsync(
+            "gpt-oss-120b",
+            [new LmChatMessage("user", "Untersuche den Workspace.")],
+            [new LmToolDefinition("workspace.inspect", "Workspace untersuchen", schema)],
+            requireToolCall: true,
+            nativeProgress: (value, _) =>
+            {
+                progress.Add(value);
+                return ValueTask.CompletedTask;
+            });
+
+        Assert.Equal(1, handler.ChatAttempts);
+        var call = Assert.Single(result.ToolCalls);
+        Assert.Equal("workspace.inspect", call.Name);
+        Assert.Equal("map", call.Arguments.GetProperty("operation").GetString());
+        Assert.DoesNotContain(progress, item => item.State == "generationRetry");
+    }
+
+    [Fact]
+    public async Task StructuredToolOnlyKeepsACompleteToolCallAndDiscardsIncidentalFreeText()
+    {
+        var handler = new LmStudioHandler(
+            streamingToolCall: true,
+            completeToolWithoutDone: true,
+            streamingToolWithFreeText: true);
+        using var client = CreateClient(new HttpClient(handler));
+        var schema = JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            properties = new { operation = new { type = "string" } },
+            required = RequiredOperation,
+        });
+        var progress = new List<ModelRuntimeProgress>();
+
+        var result = await client.CompleteChatAsync(
+            "gpt-oss-120b",
+            [new LmChatMessage("user", "Untersuche den Workspace.")],
+            [new LmToolDefinition("workspace.inspect", "Workspace untersuchen", schema)],
+            requireToolCall: true,
+            nativeProgress: (value, _) =>
+            {
+                progress.Add(value);
+                return ValueTask.CompletedTask;
+            },
+            structuredToolOnly: true);
+
+        Assert.Equal(1, handler.ChatAttempts);
+        Assert.Null(result.Content);
+        Assert.Equal("workspace.inspect", Assert.Single(result.ToolCalls).Name);
+        Assert.DoesNotContain(progress, item => item.State == "contentDelta");
+        Assert.DoesNotContain(progress, item => item.State == "generationRetry");
+    }
+
+    [Fact]
+    public async Task TransientInferenceFailureIsRetriedAtMostTwiceBeforeToolExecution()
+    {
+        var handler = new LmStudioHandler(returnToolCall: false, transientChatFailures: 2);
+        using var client = CreateClient(new HttpClient(handler));
+
+        var result = await client.CompleteChatAsync(
+            "gpt-oss-120b",
+            [new LmChatMessage("user", "Test")],
+            []);
+
+        Assert.Equal("Fertig", result.Content);
+        Assert.Equal(3, handler.ChatAttempts);
+    }
+
+    [Fact]
+    public async Task PrematureStreamingToolJsonIsDiagnosedAndRetriedBeforeExecution()
+    {
+        var handler = new LmStudioHandler(
+            streamingToolCall: true,
+            prematureStreamingFailures: 2);
+        using var client = CreateClient(new HttpClient(handler));
+        var schema = JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            properties = new { operation = new { type = "string" } },
+            required = RequiredOperation,
+        });
+        var progress = new List<ModelRuntimeProgress>();
+
+        var result = await client.CompleteChatAsync(
+            "gpt-oss-120b",
+            [new LmChatMessage("user", "Untersuche den Workspace.")],
+            [new LmToolDefinition("workspace.inspect", "Workspace untersuchen", schema)],
+            requireToolCall: true,
+            nativeProgress: (value, _) =>
+            {
+                progress.Add(value);
+                return ValueTask.CompletedTask;
+            });
+
+        Assert.Equal(3, handler.ChatAttempts);
+        Assert.Equal("workspace.inspect", Assert.Single(result.ToolCalls).Name);
+        var retries = progress.Where(item => item.State == "generationRetry").ToArray();
+        Assert.Equal(2, retries.Length);
+        Assert.Collection(
+            retries,
+            first => AssertRetry(first, 1),
+            second => AssertRetry(second, 2));
+
+        static void AssertRetry(ModelRuntimeProgress progress, int attempt)
+        {
+            Assert.Equal(attempt, progress.Attempt);
+            Assert.Equal("premature_eof", progress.FailureKind);
+            Assert.Equal("workspace.inspect", progress.ToolName);
+            Assert.True(progress.ArgumentCharacters > 0);
+            Assert.False(progress.ToolArgumentsJsonComplete);
+            Assert.False(progress.FinishObserved);
+        }
+    }
+
+    [Fact]
+    public async Task PrematureStreamingToolJsonExhaustionHasStableProviderCode()
+    {
+        var handler = new LmStudioHandler(
+            streamingToolCall: true,
+            prematureStreamingFailures: 3);
+        using var client = CreateClient(new HttpClient(handler));
+        var schema = JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            properties = new { operation = new { type = "string" } },
+            required = RequiredOperation,
+        });
+        var progress = new List<ModelRuntimeProgress>();
+
+        var exception = await Assert.ThrowsAsync<ModelGenerationTerminatedException>(() =>
+            client.CompleteChatAsync(
+                "gpt-oss-120b",
+                [new LmChatMessage("user", "Untersuche den Workspace.")],
+                [new LmToolDefinition("workspace.inspect", "Workspace untersuchen", schema)],
+                requireToolCall: true,
+                nativeProgress: (value, _) =>
+                {
+                    progress.Add(value);
+                    return ValueTask.CompletedTask;
+                }));
+
+        Assert.Equal("transport_retry_exhausted", exception.ProviderCode);
+        Assert.Equal(3, handler.ChatAttempts);
+        Assert.Equal([1, 2, 3], progress
+            .Where(item => item.State == "generationRetry")
+            .Select(item => item.Attempt)
+            .ToArray());
+    }
+
+    [Theory]
+    [InlineData(System.Net.HttpStatusCode.RequestTimeout, true)]
+    [InlineData(System.Net.HttpStatusCode.TooManyRequests, true)]
+    [InlineData(System.Net.HttpStatusCode.ServiceUnavailable, true)]
+    [InlineData(System.Net.HttpStatusCode.BadRequest, false)]
+    [InlineData(System.Net.HttpStatusCode.Unauthorized, false)]
+    public void OnlyTransientProviderFailuresAreRetried(
+        System.Net.HttpStatusCode statusCode,
+        bool expected)
+    {
+        var exception = new HttpRequestException("provider failure", null, statusCode);
+
+        Assert.Equal(expected, ModelRuntimeClient.IsTransientInferenceFailure(exception));
     }
 
     private static ModelRuntimeClient CreateClient(HttpClient http) => new(
         http,
         Options.Create(new GoAiServerOptions
         {
-            ModelRuntimeUri = new Uri("http://llm.test:8080", UriKind.Absolute),
+            ModelRuntimeUri = new Uri("http://lmstudio.test:1234", UriKind.Absolute),
             GeneralModelId = "gpt-oss-120b",
             CodeModelId = CodingModelCatalog.DefaultModelId,
         }),
         NullLogger<ModelRuntimeClient>.Instance);
 
-    private sealed class RouterHandler(
-        bool returnToolCall = true,
+    private sealed class LmStudioHandler(
+        bool returnToolCall = false,
         int transientChatFailures = 0,
-        int chatDelayMilliseconds = 0,
-        IReadOnlyList<string>? modelStates = null,
-        string initiallyLoadedModelId = "gpt-oss-120b") : HttpMessageHandler
+        bool streamingToolCall = false,
+        int prematureStreamingFailures = 0,
+        bool completeToolWithoutDone = false,
+        bool reasoningToolCall = false,
+        bool streamingText = false,
+        bool transientLoadChannelFailure = false,
+        bool streamingToolWithFreeText = false) : HttpMessageHandler
     {
-        private string? _loadedModelId = initiallyLoadedModelId;
+        private string? _loadedKey = "gpt-oss-120b";
+        private string? _loadedInstance = "general-instance";
+
         public List<string> ChatBodies { get; } = [];
         public List<string> ModelOperations { get; } = [];
+        public List<string> RequestPaths { get; } = [];
         public int ChatAttempts { get; private set; }
-        public int SlotRequests { get; private set; }
-        public int ModelStatusRequests { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
         {
             var path = request.RequestUri?.AbsolutePath ?? string.Empty;
-            if (request.Method == HttpMethod.Get && path == "/models")
+            RequestPaths.Add(path);
+            if (request.Method == HttpMethod.Get && path == "/api/v1/models")
             {
-                var stateIndex = Math.Min(ModelStatusRequests, Math.Max(0, (modelStates?.Count ?? 1) - 1));
-                var state = modelStates is { Count: > 0 }
-                    ? modelStates[stateIndex]
-                    : string.Equals(_loadedModelId, "gpt-oss-120b", StringComparison.OrdinalIgnoreCase)
-                        ? "loaded"
-                        : "unloaded";
-                var qwenState = string.Equals(
-                    _loadedModelId,
-                    CodingModelCatalog.Qwen3CoderNextQ8Id,
-                    StringComparison.OrdinalIgnoreCase)
-                        ? "loaded"
-                        : "unloaded";
-                ModelStatusRequests++;
                 return Json(JsonSerializer.Serialize(new
                 {
-                    data = new object[]
+                    models = new object[]
                     {
-                        new { id = "gpt-oss-120b", status = new { value = state } },
-                        new { id = CodingModelCatalog.Qwen3CoderNextQ8Id, status = new { value = qwenState } },
-                        new { id = "qwen3-vl-30b-a3b-instruct", status = new { value = "unloaded" } },
-                        new { id = "text-embedding-bge-m3", status = new { value = "unloaded" } },
+                        Model("gpt-oss-120b", 131_072),
+                        Model("qwen3.8-27b", 262_144),
+                        Model("qwen3-coder-next", 262_144),
+                        Model("qwen3-vl-30b-a3b-instruct", 262_144),
+                        Model("text-embedding-bge-m3", 8_192),
                     },
                 }));
-            }
-            if (request.Method == HttpMethod.Get && path == "/slots")
-            {
-                SlotRequests++;
-                return Json("""
-                    [{"id":0,"is_processing":true,"n_prompt_tokens":1288,"n_prompt_tokens_processed":1103,
-                      "next_token":[{"n_decoded":83}]}]
-                    """);
             }
 
             var body = request.Content is null
                 ? string.Empty
                 : await request.Content.ReadAsStringAsync(cancellationToken);
-            if (path is "/models/load" or "/models/unload")
+            if (request.Method == HttpMethod.Post && path == "/api/v1/models/unload")
             {
-                ModelOperations.Add(path + ":" + body);
                 using var operation = JsonDocument.Parse(body);
-                var modelId = operation.RootElement.GetProperty("model").GetString();
-                if (path == "/models/load")
-                {
-                    _loadedModelId = modelId;
-                }
-                else if (string.Equals(_loadedModelId, modelId, StringComparison.OrdinalIgnoreCase))
-                {
-                    _loadedModelId = null;
-                }
-                return Json("""{"success":true}""");
+                var instance = operation.RootElement.GetProperty("instance_id").GetString();
+                ModelOperations.Add("unload:" + instance);
+                _loadedKey = null;
+                _loadedInstance = null;
+                return Json("{\"success\":true}");
             }
-            if (path == "/v1/chat/completions")
+            if (request.Method == HttpMethod.Post && path == "/api/v1/models/load")
+            {
+                using var operation = JsonDocument.Parse(body);
+                var requestedModel = operation.RootElement.GetProperty("model").GetString();
+                var context = operation.RootElement.GetProperty("context_length").GetInt32();
+                (_loadedKey, _loadedInstance) = requestedModel switch
+                {
+                    "qwen3.8-27b" => ("qwen3.8-27b", "qwen-instance"),
+                    "qwen3-coder-next" => ("qwen3-coder-next", "coder-instance"),
+                    _ => (requestedModel, "loaded-instance"),
+                };
+                ModelOperations.Add($"load:{requestedModel}:{context}");
+                if (transientLoadChannelFailure)
+                {
+                    return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                    {
+                        Content = new StringContent("runtime channel restarted", Encoding.UTF8, "text/plain"),
+                    };
+                }
+                return Json(JsonSerializer.Serialize(new { instance_id = _loadedInstance }));
+            }
+            if (request.Method == HttpMethod.Post && path == "/v1/chat/completions")
             {
                 ChatAttempts++;
-                if (chatDelayMilliseconds > 0)
-                {
-                    await Task.Delay(chatDelayMilliseconds, cancellationToken);
-                }
                 if (ChatAttempts <= transientChatFailures)
                 {
                     throw new HttpRequestException("transient");
                 }
                 ChatBodies.Add(body);
-                return returnToolCall
-                    ? Json("""
-                        {"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"fs.readText","arguments":"{\"path\":\"README.md\"}"}}]}}],"usage":{"prompt_tokens":100,"completion_tokens":20}}
-                        """)
-                    : Json("""
-                        {"choices":[{"message":{"role":"assistant","content":"Fertig"}}],"usage":{"prompt_tokens":10,"completion_tokens":2}}
-                        """);
+                if (ChatAttempts <= prematureStreamingFailures)
+                {
+                    using var requestBody = JsonDocument.Parse(body);
+                    var selectedToolName = requestBody.RootElement.GetProperty("tools")[0]
+                        .GetProperty("function").GetProperty("name").GetString()!;
+                    return PrematureEventStream(selectedToolName);
+                }
+                if (streamingToolCall)
+                {
+                    using var requestBody = JsonDocument.Parse(body);
+                    var selectedToolName = requestBody.RootElement.GetProperty("tools")[0]
+                        .GetProperty("function").GetProperty("name").GetString()!;
+                    return EventStream(selectedToolName, completeToolWithoutDone, streamingToolWithFreeText);
+                }
+                if (reasoningToolCall)
+                {
+                    return ReasoningToolEventStream();
+                }
+                if (streamingText)
+                {
+                    return TextEventStream();
+                }
+                if (returnToolCall)
+                {
+                    using var requestBody = JsonDocument.Parse(body);
+                    var selectedToolName = requestBody.RootElement.GetProperty("tools")[0]
+                        .GetProperty("function").GetProperty("name").GetString();
+                    return Json(JsonSerializer.Serialize(new
+                    {
+                        choices = new[]
+                        {
+                            new
+                            {
+                                message = new
+                                {
+                                    role = "assistant",
+                                    content = (string?)null,
+                                    tool_calls = new[]
+                                    {
+                                        new
+                                        {
+                                            id = "call-1",
+                                            type = "function",
+                                            function = new
+                                            {
+                                                name = selectedToolName,
+                                                arguments = "{\"path\":\"README.md\"}",
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        usage = new { prompt_tokens = 100, completion_tokens = 20 },
+                    }));
+                }
+                return Json("""
+                    {"choices":[{"message":{"role":"assistant","content":"Fertig"}}],"usage":{"prompt_tokens":100,"completion_tokens":20}}
+                    """);
             }
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
+
+        private object Model(string key, int maximumContextLength) => new
+        {
+            key,
+            max_context_length = maximumContextLength,
+            loaded_instances = string.Equals(_loadedKey, key, StringComparison.OrdinalIgnoreCase)
+                ? new object[]
+                {
+                    new
+                    {
+                        id = _loadedInstance,
+                        config = new { context_length = maximumContextLength },
+                    },
+                }
+                : [],
+        };
 
         private static HttpResponseMessage Json(string json) => new(HttpStatusCode.OK)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json"),
         };
-    }
 
-    private sealed class LoadingModelSwitchHandler : HttpMessageHandler
-    {
-        private bool _generalUnloadRequested;
-        private bool _qwenLoadRequested;
-        private int _generalDrainPollsRemaining = 1;
-        private int _qwenLoadPollsRemaining = 1;
-
-        public List<string> ModelOperations { get; } = [];
-        public int ModelStatusRequests { get; private set; }
-
-        protected override async Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request,
-            CancellationToken cancellationToken)
+        private static HttpResponseMessage EventStream(
+            string toolName,
+            bool omitCompletion = false,
+            bool includeFreeText = false)
         {
-            var path = request.RequestUri?.AbsolutePath ?? string.Empty;
-            if (request.Method == HttpMethod.Get && path == "/models")
+            var chunks = new List<object>
             {
-                ModelStatusRequests++;
-                var generalState = !_generalUnloadRequested
-                    ? "loading"
-                    : _generalDrainPollsRemaining-- > 0
-                        ? "loading"
-                        : "unloaded";
-                var qwenState = !_qwenLoadRequested
-                    ? "unloaded"
-                    : _qwenLoadPollsRemaining-- > 0
-                        ? "loading"
-                        : "loaded";
-                return Json(JsonSerializer.Serialize(new
-                {
-                    data = new object[]
+                new { choices = new[] { new { index = 0, delta = (object)new { role = "assistant", reasoning_content = "prüfen" }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { tool_calls = new[] { new { index = 0, id = "call-stream", type = "function", function = new { name = toolName, arguments = "" } } } }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { tool_calls = new[] { new { index = 0, type = "function", function = new { arguments = "{\"operation\":" } } } }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { tool_calls = new[] { new { index = 0, type = "function", function = new { arguments = "\"map\"}" } } } }, finish_reason = (string?)null } } },
+            };
+            if (includeFreeText)
+            {
+                chunks.Insert(1, new { choices = new[] { new { index = 0, delta = (object)new { content = "Interner Begleittext" }, finish_reason = (string?)null } } });
+            }
+            if (!omitCompletion)
+            {
+                chunks.Add(new { choices = new[] { new { index = 0, delta = (object)new { }, finish_reason = (string?)"tool_calls" } } });
+            }
+            var builder = new StringBuilder();
+            foreach (var chunk in chunks)
+            {
+                builder.Append("data: ").Append(JsonSerializer.Serialize(chunk)).Append("\n\n");
+            }
+            if (!omitCompletion)
+            {
+                builder.Append("data: ")
+                    .Append(JsonSerializer.Serialize(new
                     {
-                        new { id = "gpt-oss-120b", status = new { value = generalState } },
-                        new { id = CodingModelCatalog.Qwen3CoderNextQ8Id, status = new { value = qwenState } },
-                        new { id = "qwen3-vl-30b-a3b-instruct", status = new { value = "unloaded" } },
-                        new { id = "text-embedding-bge-m3", status = new { value = "unloaded" } },
-                    },
-                }));
+                        choices = Array.Empty<object>(),
+                        usage = new
+                        {
+                            prompt_tokens = 100,
+                            completion_tokens = 20,
+                            completion_tokens_details = new { reasoning_tokens = 7 },
+                        },
+                    }))
+                    .Append("\n\ndata: [DONE]\n\n");
             }
-
-            var body = request.Content is null
-                ? string.Empty
-                : await request.Content.ReadAsStringAsync(cancellationToken);
-            if (path is "/models/load" or "/models/unload")
+            return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                using var operation = JsonDocument.Parse(body);
-                var modelId = operation.RootElement.GetProperty("model").GetString() ?? string.Empty;
-                ModelOperations.Add(path + ":" + modelId);
-                if (path == "/models/unload")
-                {
-                    _generalUnloadRequested = true;
-                    return Json("""{"success":true}""");
-                }
-
-                if (_generalDrainPollsRemaining >= 0)
-                {
-                    return Json(
-                        """{"error":{"code":500,"message":"model limit reached","type":"server_error"}}""",
-                        HttpStatusCode.InternalServerError);
-                }
-                _qwenLoadRequested = true;
-                return Json("""{"success":true}""");
-            }
-
-            if (path == "/v1/chat/completions")
-            {
-                return Json("""
-                    {"choices":[{"message":{"role":"assistant","content":"Fertig"}}],"usage":{"prompt_tokens":10,"completion_tokens":2}}
-                    """);
-            }
-
-            return new HttpResponseMessage(HttpStatusCode.NotFound);
+                Content = new StringContent(builder.ToString(), Encoding.UTF8, "text/event-stream"),
+            };
         }
 
-        private static HttpResponseMessage Json(
-            string json,
-            HttpStatusCode statusCode = HttpStatusCode.OK) => new(statusCode)
+        private static HttpResponseMessage PrematureEventStream(string toolName)
         {
-            Content = new StringContent(json, Encoding.UTF8, "application/json"),
-        };
+            var chunks = new[]
+            {
+                new { choices = new[] { new { index = 0, delta = (object)new { role = "assistant", reasoning_content = "prüfen" }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { tool_calls = new[] { new { index = 0, id = "call-stream", type = "function", function = new { name = toolName, arguments = "" } } } }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { tool_calls = new[] { new { index = 0, type = "function", function = new { arguments = "{\"operation\":" } } } }, finish_reason = (string?)null } } },
+            };
+            var builder = new StringBuilder();
+            foreach (var chunk in chunks)
+            {
+                builder.Append("data: ").Append(JsonSerializer.Serialize(chunk)).Append("\n\n");
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(builder.ToString(), Encoding.UTF8, "text/event-stream"),
+            };
+        }
+
+        private static HttpResponseMessage ReasoningToolEventStream()
+        {
+            var chunks = new object[]
+            {
+                new { choices = new[] { new { index = 0, delta = (object)new { role = "assistant", reasoning_content = "Ich prÃ¼fe den Workspace.\n<tool_call>\n<function=workspace.inspect>\n" }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { reasoning_content = "<parameter=operation>\nmap\n</parameter>\n" }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { reasoning_content = "</function>\n</tool_call>" }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { }, finish_reason = (string?)"stop" } } },
+            };
+            var builder = new StringBuilder();
+            foreach (var chunk in chunks)
+            {
+                builder.Append("data: ").Append(JsonSerializer.Serialize(chunk)).Append("\n\n");
+            }
+            builder.Append("data: ")
+                .Append(JsonSerializer.Serialize(new
+                {
+                    choices = Array.Empty<object>(),
+                    usage = new
+                    {
+                        prompt_tokens = 120,
+                        completion_tokens = 32,
+                        completion_tokens_details = new { reasoning_tokens = 32 },
+                    },
+                }))
+                .Append("\n\ndata: [DONE]\n\n");
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(builder.ToString(), Encoding.UTF8, "text/event-stream"),
+            };
+        }
+
+        private static HttpResponseMessage TextEventStream()
+        {
+            var chunks = new object[]
+            {
+                new { choices = new[] { new { index = 0, delta = (object)new { role = "assistant", content = "Hallo" }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { content = " Welt" }, finish_reason = (string?)null } } },
+                new { choices = new[] { new { index = 0, delta = (object)new { }, finish_reason = (string?)"stop" } } },
+            };
+            var builder = new StringBuilder();
+            foreach (var chunk in chunks)
+            {
+                builder.Append("data: ").Append(JsonSerializer.Serialize(chunk)).Append("\n\n");
+            }
+            builder.Append("data: ")
+                .Append(JsonSerializer.Serialize(new
+                {
+                    choices = Array.Empty<object>(),
+                    usage = new { prompt_tokens = 15, completion_tokens = 2 },
+                }))
+                .Append("\n\ndata: [DONE]\n\n");
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(builder.ToString(), Encoding.UTF8, "text/event-stream"),
+            };
+        }
     }
 }

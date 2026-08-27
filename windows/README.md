@@ -16,7 +16,7 @@ Das Ergebnis liegt unter `artifacts\portable\win-x64\GO.exe`. BricsCAD wird nur 
 | Skript | Zweck |
 |---|---|
 | `download-ai-models.ps1` | gepinnte Modelldateien herunterladen und prüfen |
-| `download-qwen3-coder-next-q8.ps1` | Qwen3-Coder-Next Q8_0 revisions- und hashgeprüft für den Docker-Coding-Preset herunterladen |
+| `download-qwen3-coder-next-q8.ps1` | Qwen3-Coder-Next Q8_0 revisions- und hashgeprüft in den lokalen LM-Studio-Modellkatalog herunterladen |
 | `remove-obsolete-ai-models.ps1` | alte LM-Studio-, GO-AI-Server- und gpt-oss-20b-Modellbestände nach Sicherheitsprüfung entfernen |
 | `remove-obsolete-artifacts.ps1` | regenerierbare Alt-Builds und frühere Modelltestausgaben entfernen; Diagnose-Traces behalten |
 | `remove-legacy-ai-server-autostart.ps1` | globale Verknüpfung und Registryanzeige der früheren Windows-Server-App entfernen |
@@ -29,4 +29,5 @@ Das Ergebnis liegt unter `artifacts\portable\win-x64\GO.exe`. BricsCAD wird nur 
 | `smoke-ai-stack.ps1` | Gateway, private Dienste, Portbelegung und optional Inferenz prüfen |
 
 Das Deployment benötigt für die Firewallregel einmalig eine administrative PowerShell. Es gibt kein Windows-
-Serverartefakt und keinen LM-Studio-Katalog. Einzelheiten stehen in [GO-AI-SERVER.md](../GO-AI-SERVER.md).
+GO-AI-Serverartefakt: Gateway und Worker laufen in Docker, während LM Studio auf dem GPU-Host ausschließlich den
+lokalen Modellkatalog und die Modellruntime verwaltet. Einzelheiten stehen in [GO-AI-SERVER.md](../GO-AI-SERVER.md).

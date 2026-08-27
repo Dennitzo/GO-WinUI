@@ -1,3 +1,4 @@
+using GoAi.Contracts;
 using GoAi.Server.Core.Models;
 
 namespace GoAi.Server.Core.Runs;
@@ -36,6 +37,13 @@ public sealed record AgentRunCheckpoint(
     bool HasSuccessfulClientToolEvidence = false,
     int FailedPatchAttemptCount = 0,
     int CodingContinuationEpoch = 0,
-    int ConsecutiveModelTurnFailures = 0);
+    int ConsecutiveModelTurnFailures = 0,
+    int AgentProtocolVersion = 1,
+    TaskLedgerSnapshot? TaskLedger = null,
+    IReadOnlyList<AgentActionEnvelope>? AgentActions = null,
+    IReadOnlyList<AgentObservation>? AgentObservations = null,
+    ProviderConversationState? ProviderState = null,
+    string? ActiveActionId = null,
+    string? RequiredAgentToolName = null);
 
 public sealed record WorkspaceReadRange(string Path, int StartLine, int EndLine);

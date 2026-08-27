@@ -53,7 +53,7 @@ services:
       GO_AI_GATEWAY_PORT: "8080"
       GO_AI_PUBLIC_URL: ${GO_AI_PUBLIC_URL:-http://192.168.0.67:8080}
       GO_AI_EXPECTED_LAN_IP: ${GO_AI_EXPECTED_LAN_IP:-192.168.0.67}
-      GO_AI_MODEL_RUNTIME_URL: http://llm:8080
+      GO_AI_MODEL_RUNTIME_URL: http://host.docker.internal:1234
       GO_AI_SEARXNG_URL: http://searxng:8080
       GO_AI_SPEECH_WORKER_URL: http://speech:8080
       GO_AI_MEDIA_WORKER_URL: http://media:8080
@@ -62,11 +62,11 @@ services:
       GO_AI_YOUTUBE_API_KEY: ${GO_AI_YOUTUBE_API_KEY:-}
       NVIDIA_VISIBLE_DEVICES: all
     gpus: all
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     tmpfs:
       - /tmp:size=1g,mode=1777
     depends_on:
-      llm:
-        condition: service_healthy
       searxng:
         condition: service_healthy
       speech:
@@ -89,52 +89,6 @@ services:
       retries: 10
       start_period: 20s
     networks: [edge, backend]
-
-  llm:
-    <<: *common
-    image: go-ai/llm:${GO_AI_IMAGE_VERSION:-1.0.0}
-    build:
-      context: ./llm
-      dockerfile: Dockerfile
-    container_name: go-ai-llm
-    read_only: true
-    cap_drop: [ALL]
-    command:
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - --models-dir
-      - /models
-      - --models-preset
-      - /config/models.ini
-      - --models-max
-      - "1"
-      - --models-autoload
-      - --sleep-idle-seconds
-      - "-1"
-      - --no-webui
-      - --log-colors
-      - off
-    environment:
-      CUDA_VISIBLE_DEVICES: "0,1"
-      NVIDIA_VISIBLE_DEVICES: all
-    volumes:
-      - ${GO_AI_MODEL_ROOT:?GO_AI_MODEL_ROOT is required}:/models:ro
-      - ./llm/models.ini:/config/models.ini:ro
-    gpus: all
-    shm_size: "8gb"
-    mem_limit: 160g
-    pids_limit: 1024
-    tmpfs:
-      - /tmp:size=2g,mode=1777
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/models"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-      start_period: 30s
-    networks: [backend]
 
   searxng:
     <<: *common

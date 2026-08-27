@@ -13,7 +13,8 @@ public sealed partial class SettingsViewModel(
     GoAiConnectionService goAi,
     IPromptTriggerRepository triggerRepository,
     IBackupService backups,
-    ShellViewModel shell) : ObservableObject
+    ShellViewModel shell,
+    ModelCapabilityRegistry modelCapabilities) : ObservableObject
 {
     private static readonly HashSet<string> TriggerSortableColumns =
     [
@@ -66,7 +67,10 @@ public sealed partial class SettingsViewModel(
     public partial string SelectedCodingModel { get; set; } = AppSettings.DefaultSelectedCodingModel;
 
     [ObservableProperty]
-    public partial string ReasoningEffort { get; set; } = "auto";
+    public partial LmModel? SelectedGeneralModelItem { get; set; }
+
+    [ObservableProperty]
+    public partial LmModel? SelectedCodingModelItem { get; set; }
 
     [ObservableProperty]
     public partial string TriggerSearchText { get; set; } = string.Empty;
@@ -109,7 +113,8 @@ public sealed partial class SettingsViewModel(
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel ?? AppSettings.DefaultSelectedModel;
         SelectedCodingModel = current.SelectedCodingModel;
-        ReasoningEffort = current.ReasoningEffort;
+        SelectedGeneralModelItem = EnsureModelItem(Models, SelectedModel);
+        SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);
         Theme = current.Theme;
         AccentColor = current.AccentColor;
         BackgroundColor = current.BackgroundColor;
@@ -170,24 +175,30 @@ public sealed partial class SettingsViewModel(
         var workspace = string.IsNullOrWhiteSpace(LocalToolWorkspacePath)
             ? null
             : Path.GetFullPath(LocalToolWorkspacePath.Trim());
+        var generalModel = PreferCurrentSelection(
+            SelectedGeneralModelItem?.Id,
+            SelectedModel,
+            AppSettings.DefaultSelectedModel);
+        var codingModel = PreferCurrentSelection(
+            SelectedCodingModelItem?.Id,
+            SelectedCodingModel,
+            AppSettings.DefaultSelectedCodingModel);
         await settings.UpdateAsync(current => current with
         {
             IsAiConnectionEnabled = IsAiConnectionEnabled,
             GoAiServerUrl = goAiUri.ToString().TrimEnd('/'),
             LocalToolWorkspacePath = workspace,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
-            SelectedModel = string.IsNullOrWhiteSpace(SelectedModel)
-                ? AppSettings.DefaultSelectedModel
-                : SelectedModel.Trim(),
-            SelectedCodingModel = string.IsNullOrWhiteSpace(SelectedCodingModel)
-                ? AppSettings.DefaultSelectedCodingModel
-                : SelectedCodingModel.Trim(),
-            ReasoningEffort = ReasoningEffort,
+            SelectedModel = generalModel,
+            SelectedCodingModel = codingModel,
+            ReasoningEffort = "auto",
             Theme = Theme,
             AccentColor = AccentColor,
             BackgroundColor = BackgroundColor,
             Language = Language,
         }, cancellationToken);
+        SelectedModel = settings.Current.SelectedModel;
+        SelectedCodingModel = settings.Current.SelectedCodingModel;
         await App.Current.ApplyAiConnectionModeAsync(IsAiConnectionEnabled);
         await SaveTriggersAsync(cancellationToken);
         App.Current.ApplyTheme(Theme);
@@ -213,7 +224,23 @@ public sealed partial class SettingsViewModel(
         IsBusy = true;
         try
         {
-            status = await SaveAsync(cancellationToken);
+            // A ComboBox cannot resolve a saved ID while its dynamic catalog is
+            // still empty. Keep the persisted IDs authoritative until LM Studio
+            // has returned the matching model objects.
+            var requestedGeneralModel = PreferCurrentSelection(
+                SelectedModel,
+                settings.Current.SelectedModel,
+                AppSettings.DefaultSelectedModel);
+            var requestedCodingModel = PreferCurrentSelection(
+                SelectedCodingModel,
+                settings.Current.SelectedCodingModel,
+                AppSettings.DefaultSelectedCodingModel);
+            SelectedModel = requestedGeneralModel;
+            SelectedCodingModel = requestedCodingModel;
+            // Reading the remote catalog must never persist the transient UI
+            // state. In particular, an asynchronous startup refresh must not
+            // overwrite the model IDs restored from settings.json.
+            status = await goAi.TestAsync(cancellationToken);
             if (status is null)
             {
                 Models.Clear();
@@ -227,12 +254,22 @@ public sealed partial class SettingsViewModel(
             }
             using var client = await goAi.CreateClientAsync(cancellationToken);
             var modelStatus = await client.GetModelStatusAsync(cancellationToken);
+            if (!modelStatus.ProviderReachable)
+            {
+                throw new InvalidOperationException(
+                    "LM Studio ist erreichbar, der Modellkatalog konnte jedoch nicht aktualisiert werden.");
+            }
+            modelCapabilities.Update(modelStatus);
             items = modelStatus.Models
                 .Where(model => model.Downloaded && model.Role == "general")
                 .Select(model => new LmModel(
                     model.Id,
                     string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.DisplayName ?? model.Id, model.ContextTokens),
-                    model.ContextTokens))
+                    model.ContextTokens,
+                    model.SupportsTools,
+                    model.SupportsVision,
+                    model.ReasoningEfforts,
+                    model.DefaultReasoningEffort))
                 .ToArray();
             var codingItems = modelStatus.Models
                 .Where(model => model.Downloaded && model.Role == "code")
@@ -243,7 +280,11 @@ public sealed partial class SettingsViewModel(
                 .Select(model => new LmModel(
                     model.Id,
                     string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.DisplayName ?? model.Id, model.ContextTokens),
-                    model.ContextTokens))
+                    model.ContextTokens,
+                    model.SupportsTools,
+                    model.SupportsVision,
+                    model.ReasoningEfforts,
+                    model.DefaultReasoningEffort))
                 .ToArray();
             ConnectionStatus = status.Message;
 
@@ -257,14 +298,23 @@ public sealed partial class SettingsViewModel(
             {
                 CodingModels.Add(item);
             }
-            SelectedModel = SelectAvailableModel(
-                items,
+            // The selection may have changed while the asynchronous catalog
+            // request was running. Re-read the current properties and keep
+            // them authoritative. A temporarily incomplete LM Studio catalog
+            // must not silently replace a persisted model with the first item.
+            SelectedModel = PreferCurrentSelection(
                 SelectedModel,
-                AppSettings.DefaultSelectedModel);
-            SelectedCodingModel = SelectAvailableModel(
-                codingItems,
+                settings.Current.SelectedModel,
+                requestedGeneralModel);
+            SelectedCodingModel = PreferCurrentSelection(
                 SelectedCodingModel,
-                AppSettings.DefaultSelectedCodingModel);
+                settings.Current.SelectedCodingModel,
+                requestedCodingModel);
+            // Bind the ComboBoxes to the actual catalog objects. SelectedValue
+            // can remain visually empty when its value was assigned before an
+            // asynchronously populated ItemsSource existed.
+            SelectedGeneralModelItem = EnsureModelItem(Models, SelectedModel);
+            SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);
             IsServerReady = status.IsReady;
             shell.ApplyAiConnectionState(true, status.IsReady);
             return status;
@@ -292,26 +342,37 @@ public sealed partial class SettingsViewModel(
         }
     }
 
-    private static string SelectAvailableModel(
-        IReadOnlyList<LmModel> models,
-        string? requested,
-        string fallback)
+    internal static string PreferCurrentSelection(string? current, string? persisted, string fallback) =>
+        !string.IsNullOrWhiteSpace(current)
+            ? current.Trim()
+            : !string.IsNullOrWhiteSpace(persisted)
+                ? persisted.Trim()
+                : fallback;
+
+    private static LmModel? FindModel(IEnumerable<LmModel> models, string? id) =>
+        models.FirstOrDefault(model =>
+            string.Equals(model.Id, id?.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    private static LmModel? EnsureModelItem(ObservableCollection<LmModel> models, string? id)
     {
-        var selected = models.FirstOrDefault(model =>
-            string.Equals(model.Id, requested?.Trim(), StringComparison.OrdinalIgnoreCase));
-        if (selected is not null)
+        var normalized = id?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
         {
-            return selected.Id;
+            return null;
         }
 
-        var fallbackModel = models.FirstOrDefault(model =>
-            string.Equals(model.Id, fallback, StringComparison.OrdinalIgnoreCase));
-        if (fallbackModel is not null)
+        var existing = FindModel(models, normalized);
+        if (existing is not null)
         {
-            return fallbackModel.Id;
+            return existing;
         }
 
-        return models.Count > 0 ? models[0].Id : fallback;
+        // Display the persisted selection even before the asynchronous LM
+        // Studio catalog is reachable. A successful refresh replaces this
+        // placeholder with the authoritative descriptor.
+        var placeholder = new LmModel(normalized, normalized);
+        models.Insert(0, placeholder);
+        return placeholder;
     }
 
     public PromptTriggerEditorItem AddTrigger(
@@ -415,6 +476,22 @@ public sealed partial class SettingsViewModel(
 
     partial void OnSelectedPromptTriggerChanged(PromptTriggerEditorItem? value) =>
         OnPropertyChanged(nameof(CanDeleteSelectedPromptTrigger));
+
+    partial void OnSelectedGeneralModelItemChanged(LmModel? value)
+    {
+        if (value is not null)
+        {
+            SelectedModel = value.Id;
+        }
+    }
+
+    partial void OnSelectedCodingModelItemChanged(LmModel? value)
+    {
+        if (value is not null)
+        {
+            SelectedCodingModel = value.Id;
+        }
+    }
 
     private IEnumerable<PromptTriggerEditorItem> ApplyTriggerSort(
         IEnumerable<PromptTriggerEditorItem> source)

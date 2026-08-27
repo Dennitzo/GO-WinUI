@@ -218,7 +218,7 @@ public sealed class AssistantCoordinator(
         }
 
         // A snapshot is local UI state. Never make sidebar/session interaction wait for
-        // llama.cpp, which may take several seconds to time out when it is offline.
+        // LM Studio, which may take several seconds to time out when it is offline.
         var contextLimit = session.PersistentToolAction == PersistentToolAction.Code
             ? ModelContextProfiles.ResolveMaximum(settings.Current.SelectedCodingModel, "code")
             : ModelContextProfiles.ResolveMaximum(settings.Current.SelectedModel, "general");
@@ -229,17 +229,6 @@ public sealed class AssistantCoordinator(
             null,
             pages,
             contextLimit));
-        var generalReasoningProfile = ToReasoningProfileDto(
-            settings.Current.SelectedModel,
-            "general",
-            settings.Current.ReasoningEffort);
-        var codingReasoningProfile = ToReasoningProfileDto(
-            settings.Current.SelectedCodingModel,
-            "code",
-            settings.Current.ReasoningEffort);
-        var activeReasoningEffort = session.PersistentToolAction == PersistentToolAction.Code
-            ? codingReasoningProfile.SelectedEffort
-            : generalReasoningProfile.SelectedEffort;
         return new
         {
             sessions = sessions.Select(ToSessionDto),
@@ -260,12 +249,6 @@ public sealed class AssistantCoordinator(
                 && goAi?.IsRunning == true,
             model = "GO AI Server",
             provider = settings.Current.AiProvider.ToString(),
-            reasoningEffort = activeReasoningEffort,
-            reasoningProfiles = new
-            {
-                general = generalReasoningProfile,
-                code = codingReasoningProfile,
-            },
             contextUsed = context.EstimatedTokens,
             contextLimit,
             contextWasTruncated = context.WasTruncated,
@@ -512,23 +495,6 @@ public sealed class AssistantCoordinator(
                 var campaignSessionId = GetOptionalGuid(envelope.Payload, "sessionId")
                     ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
                 var instruction = GetOptionalString(envelope.Payload, "instruction", 100_000);
-                var requestedReasoning = GetOptionalString(envelope.Payload, "reasoningEffort", 20);
-                var codingReasoning = NormalizeReasoningSelection(
-                    settings.Current.SelectedCodingModel,
-                    "code",
-                    requestedReasoning ?? settings.Current.ReasoningEffort,
-                    rejectUnsupported: requestedReasoning is not null);
-                var codingReasoningProfile = ModelReasoningProfiles.Resolve(
-                    settings.Current.SelectedCodingModel,
-                    "code");
-                await settings.UpdateAsync(
-                    current => current with
-                    {
-                        ReasoningEffort = codingReasoningProfile.IsConfigurable
-                            ? codingReasoning
-                            : current.ReasoningEffort,
-                    },
-                    cancellationToken).ConfigureAwait(false);
                 await chats.SaveDraftAsync(campaignSessionId, string.Empty, cancellationToken).ConfigureAwait(false);
                 await emit(
                     "campaign.changed",
@@ -861,7 +827,6 @@ public sealed class AssistantCoordinator(
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
         session = await EnsureSessionWorkspaceAsync(session, cancellationToken).ConfigureAwait(false);
-        var requestedReasoning = GetOptionalString(envelope.Payload, "reasoningEffort", 20);
         await chats.SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
         var explicitTool = GetOptionalString(envelope.Payload, "toolAction", 40);
         var match = await ResolvePromptMatchAsync(
@@ -869,21 +834,9 @@ public sealed class AssistantCoordinator(
             prompt,
             explicitTool,
             cancellationToken).ConfigureAwait(false);
-        var isCodingRun = match?.Trigger.Action == PromptTriggerAction.Code;
-        var reasoning = NormalizeReasoningSelection(
-            isCodingRun ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel,
-            isCodingRun ? "code" : "general",
-            requestedReasoning ?? settings.Current.ReasoningEffort,
-            rejectUnsupported: requestedReasoning is not null);
-        var reasoningProfile = ModelReasoningProfiles.Resolve(
-            isCodingRun ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel,
-            isCodingRun ? "code" : "general");
         await settings.UpdateAsync(current => current with
         {
             ActiveSessionId = sessionId,
-            ReasoningEffort = reasoningProfile.IsConfigurable
-                ? reasoning
-                : current.ReasoningEffort,
         }, cancellationToken).ConfigureAwait(false);
         var speechMessageId = GetOptionalGuid(envelope.Payload, "speechMessageId");
         if (match?.Trigger.Action == PromptTriggerAction.TextToSpeech)
@@ -1049,54 +1002,6 @@ public sealed class AssistantCoordinator(
         PersistentToolAction.Audiobook => "audiobook",
         _ => null,
     };
-
-    private static ReasoningProfileDto ToReasoningProfileDto(
-        string? modelId,
-        string role,
-        string? requestedEffort)
-    {
-        var profile = ModelReasoningProfiles.Resolve(modelId, role);
-        return new ReasoningProfileDto(
-            modelId ?? string.Empty,
-            role,
-            profile.SupportedEfforts,
-            profile.DefaultEffort,
-            profile.Resolve(
-                string.Equals(requestedEffort?.Trim(), ModelReasoningProfiles.Automatic, StringComparison.OrdinalIgnoreCase)
-                    ? null
-                    : requestedEffort)
-                ?? ModelReasoningProfiles.Automatic);
-    }
-
-    private static string NormalizeReasoningSelection(
-        string? modelId,
-        string role,
-        string? requestedEffort,
-        bool rejectUnsupported)
-    {
-        var profile = ModelReasoningProfiles.Resolve(modelId, role);
-        var requested = requestedEffort?.Trim();
-        var isAutomatic = string.IsNullOrWhiteSpace(requested)
-            || string.Equals(requested, ModelReasoningProfiles.Automatic, StringComparison.OrdinalIgnoreCase);
-        if (rejectUnsupported && !isAutomatic && !profile.Supports(requested))
-        {
-            var supported = profile.SupportedEfforts.Count == 0
-                ? "keine steuerbare Stufe"
-                : string.Join(", ", profile.SupportedEfforts);
-            throw new InvalidOperationException(
-                $"Das aktive Modell '{modelId}' unterstützt Reasoning '{requested}' nicht ({supported}).");
-        }
-
-        return profile.Resolve(isAutomatic ? null : requested)
-            ?? ModelReasoningProfiles.Automatic;
-    }
-
-    private sealed record ReasoningProfileDto(
-        string ModelId,
-        string Role,
-        IReadOnlyList<string> SupportedEfforts,
-        string? DefaultEffort,
-        string SelectedEffort);
 
     private async Task EmitGoAiUpdateAsync(
         GoAiAssistantUpdate update,
@@ -1738,6 +1643,15 @@ public sealed class AssistantCoordinator(
             message.Error,
             message.ContextSummary,
             contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
+            messagePhase = message.MessagePhase switch
+            {
+                ChatMessagePhase.Commentary => "commentary",
+                ChatMessagePhase.FinalAnswer => "final_answer",
+                _ => null,
+            },
+            sourceRunId = message.SourceRunId,
+            sourceItemId = message.SourceItemId,
+            sourceDeltaSequence = message.SourceDeltaSequence,
             codeDiff = message.CodeDiff,
             message.Revision,
             tool = message.ToolExecution,

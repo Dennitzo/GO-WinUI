@@ -29,7 +29,6 @@
     pendingWorkflowTitle: null,
     isRunning: false,
     model: null,
-    reasoningProfiles: { general: null, code: null },
     contextUsed: 0,
     contextLimit: 8192,
     contextWasTruncated: false,
@@ -153,9 +152,6 @@
     composerSpeechStop: byId("composer-speech-stop"),
     send: byId("send"),
     stop: byId("stop"),
-    reasoning: byId("reasoning"),
-    reasoningModel: byId("reasoning-model"),
-    reasoningOptions: byId("reasoning-options"),
     toolsButton: byId("tools-button"),
     toolsMenu: byId("tools-menu"),
     workspaceButton: byId("workspace-button"),
@@ -1360,6 +1356,12 @@
       meta.className = "message-meta";
       const messageTime = timeLabel(message.createdAt || message.updatedAt);
       meta.textContent = messageTime ? `AI - ${messageTime}` : "AI";
+      if (String(message.messagePhase || "").toLowerCase() === "commentary") {
+        const phase = document.createElement("span");
+        phase.className = "message-phase message-phase--commentary";
+        phase.textContent = "Zwischenstand";
+        meta.append(" · ", phase);
+      }
       const liveStatus = state.messageRunStatus.get(String(message.id));
       if (message.status && !message.tool && !liveStatus && !["completed", "Completed"].includes(message.status)) {
         const status = document.createElement("span");
@@ -2070,92 +2072,6 @@
     return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
   }
 
-  const reasoningLabels = Object.freeze({
-    off: "Aus",
-    on: "An",
-    low: "Niedrig",
-    medium: "Mittel",
-    high: "Hoch"
-  });
-  const nonReasoningToolModels = Object.freeze({
-    audioAnalysis: "Audioanalyse-Pipeline",
-    imageAnalysis: "Bildanalyse-Pipeline",
-    imageGeneration: "Bildgenerierung",
-    textToSpeech: "Supertonic",
-    videoAnalysis: "Videoanalyse-Pipeline"
-  });
-
-  function activeReasoningProfile() {
-    if (Object.prototype.hasOwnProperty.call(nonReasoningToolModels, state.selectedToolAction)) {
-      return {
-        modelId: nonReasoningToolModels[state.selectedToolAction],
-        supportedEfforts: [],
-        defaultEffort: null,
-        selectedEffort: "auto"
-      };
-    }
-    const codeActive = state.selectedToolAction === "code"
-      || state.persistentToolAction === "code"
-      || state.assistantMode === "code";
-    return codeActive ? state.reasoningProfiles.code : state.reasoningProfiles.general;
-  }
-
-  function setReasoning(value) {
-    const profile = activeReasoningProfile();
-    const supported = Array.isArray(profile?.supportedEfforts)
-      ? profile.supportedEfforts.filter(item => Object.prototype.hasOwnProperty.call(reasoningLabels, item))
-      : [];
-    const requested = typeof value === "string" ? value : profile?.selectedEffort;
-    const validValue = supported.includes(requested)
-      ? requested
-      : supported.includes(profile?.selectedEffort)
-        ? profile.selectedEffort
-        : supported.includes(profile?.defaultEffort)
-          ? profile.defaultEffort
-          : "auto";
-
-    elements.reasoning.replaceChildren();
-    elements.reasoningOptions.replaceChildren();
-    elements.reasoningModel.textContent = profile?.modelId
-      ? `Aktives Modell: ${profile.modelId}`
-      : "Aktives Modell: Modellautomatik";
-
-    if (supported.length === 0) {
-      const item = document.createElement("option");
-      item.value = "auto";
-      item.textContent = "Modellautomatik";
-      elements.reasoning.append(item);
-      elements.reasoning.value = "auto";
-      if (profile) profile.selectedEffort = "auto";
-      return;
-    }
-
-    for (const effort of supported) {
-      const selectOption = document.createElement("option");
-      selectOption.value = effort;
-      selectOption.textContent = reasoningLabels[effort];
-      elements.reasoning.append(selectOption);
-
-      const button = document.createElement("button");
-      button.className = "reasoning-option";
-      button.type = "button";
-      button.setAttribute("role", "menuitemradio");
-      button.dataset.reasoning = effort;
-      const label = document.createElement("span");
-      label.textContent = reasoningLabels[effort];
-      const check = document.createElement("span");
-      check.className = "option-check";
-      check.textContent = "✓";
-      button.append(label, check);
-      const active = effort === validValue;
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-checked", String(active));
-      elements.reasoningOptions.append(button);
-    }
-    elements.reasoning.value = validValue;
-    if (profile) profile.selectedEffort = validValue;
-  }
-
   function setToolsMenuOpen(open) {
     elements.toolsMenu.hidden = !open;
     elements.toolsButton.setAttribute("aria-expanded", String(open));
@@ -2585,8 +2501,7 @@
       pendingDraft = null;
       post("campaign.run", {
         sessionId: state.activeSessionId,
-        instruction: prompt || null,
-        reasoningEffort: elements.reasoning.value
+        instruction: prompt || null
       });
       elements.prompt.value = "";
       return;
@@ -2599,7 +2514,6 @@
       sessionId: state.activeSessionId,
       prompt,
       documentIds: state.documents.map(item => item.id),
-      reasoningEffort: elements.reasoning.value,
       toolAction: state.selectedToolAction
     });
     elements.prompt.value = "";
@@ -2740,7 +2654,6 @@
     }
     renderCodingWorkspace();
     renderWorkspace();
-    setReasoning(null);
   }
 
   function clearCompletedOneShotToolAction() {
@@ -2830,7 +2743,6 @@
     }
     state.isRunning = Boolean(payload.isRunning);
     state.model = payload.model || null;
-    state.reasoningProfiles = payload.reasoningProfiles || state.reasoningProfiles;
     if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
     if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
     state.contextWasTruncated = Boolean(payload.contextWasTruncated);
@@ -2856,7 +2768,6 @@
       catch { /* WebView storage is optional. */ }
     }
     elements.prompt.value = payload.draft || "";
-    setReasoning(payload.reasoningEffort || null);
     renderSessions();
     renderSessionPin();
     renderMessages(currentSessionMessagesChanged);
@@ -3028,6 +2939,7 @@
           detail: payload.runDetail || null,
           model: payload.model || state.model || null
         });
+        renderMessages(true);
         renderSessions();
         renderStatus();
         syncVoiceCaptureSuspension();
@@ -3418,7 +3330,6 @@
   }
 
   restoreSessionsCollapsed();
-  setReasoning("auto");
 
   elements.toggleSessions.addEventListener("click", () => {
     const collapsed = !elements.appShell.classList.contains("sessions-collapsed");
@@ -3537,12 +3448,6 @@
     setToolsMenuOpen(elements.toolsMenu.hidden);
   });
   elements.toolsMenu.addEventListener("click", event => event.stopPropagation());
-  elements.reasoningOptions.addEventListener("click", event => {
-    const option = event.target.closest(".reasoning-option[data-reasoning]");
-    if (!option) return;
-    setReasoning(option.dataset.reasoning);
-    setToolsMenuOpen(false);
-  });
   for (const option of document.querySelectorAll(".service-option[data-tool-action]")) {
     const visual = toolVisuals[option.dataset.toolAction];
     if (visual) option.prepend(createToolIcon(visual[1]));

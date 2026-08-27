@@ -7,6 +7,19 @@ namespace GoAi.Server.Tests;
 
 public sealed class CodingAgentTests
 {
+    [Fact]
+    public void SchemaRepairExplainsTheSelectedWorkspaceChangeOperation()
+    {
+        using var document = JsonDocument.Parse("""{"operation":"replace","path":"README.md","newText":"neu","expectedSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}""");
+        var instruction = CodingAgentOrchestrator.BuildSchemaRepairInstruction(
+            new LmToolCall("call-1", CodingAgentToolFacade.WorkspaceChange, document.RootElement.Clone()),
+            new ArgumentException("Property 'oldText' is required."));
+
+        Assert.Contains("workspace.change/replace", instruction, StringComparison.Ordinal);
+        Assert.Contains("oldText", instruction, StringComparison.Ordinal);
+        Assert.Contains("write mit content", instruction, StringComparison.Ordinal);
+    }
+
     private static readonly string[] CSharpGlobs = ["**/*.cs"];
     private static readonly string[] SearchTerms = ["SpeechRecognition", "speech", "voice"];
     private static readonly string[] DotNetTestArguments = ["test"];
@@ -88,18 +101,13 @@ public sealed class CodingAgentTests
         Assert.False(RunProcessor.IsRequiredToolCallOutputBudgetExhausted(completed, 8_192));
     }
 
-    [Theory]
-    [InlineData("low")]
-    [InlineData("medium")]
-    [InlineData("high")]
-    public void GptOssReasoningSelectionRemainsInvariant(string selectedEffort)
+    [Fact]
+    public void GoLeavesRuntimeReasoningAtTheLmStudioModelDefault()
     {
-        Assert.Equal(
-            selectedEffort,
-            RunProcessor.ResolveReasoningEffortForRound(
-                "openai/gpt-oss-120b",
-                "code",
-                selectedEffort));
+        Assert.Null(RunProcessor.ResolveReasoningEffortForRound(
+            "gpt-oss-120b",
+            "code",
+            "high"));
     }
 
     [Fact]

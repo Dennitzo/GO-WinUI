@@ -127,6 +127,46 @@ public sealed class RunRepositoryTests
     }
 
     [Fact]
+    public async Task CodingWorkCycleSurvivesCheckpointRoundTrip()
+    {
+        using var context = new TestServerContext();
+        var repository = new RunRepository(context.Database, new RunEventNotifier());
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Erstelle und prüfe eine Datei")])]);
+        var run = await repository.CreateAsync(request, null);
+        var ledger = new TaskLedgerSnapshot(
+            "Erstelle und prüfe eine Datei",
+            CodingTaskKind.Creation,
+            CodingAgentPhase.Editing,
+            "revision-3",
+            [], [], [], [], [],
+            "Setze den ausgewählten Quellenbeleg um.",
+            Research:
+            [
+                new AgentResearchRecord(
+                    "research-key", "webFetch", "https://example.test/source", "action-fetch",
+                    "evidence-fetch", "result-fetch", 0, WorkCycle: 3),
+            ],
+            WorkCycleStage: CodingWorkCycleStage.Implementing,
+            WorkCycle: 3,
+            VerifiedChangeCount: 0,
+            ActiveResearchEvidenceId: "evidence-fetch",
+            ActiveContextGap: "Die erste Quelle enthielt die benötigte Signatur nicht.");
+        var checkpoint = new AgentRunCheckpoint([], 2, 2, 100, 20, AgentProtocolVersion: 2, TaskLedger: ledger);
+
+        await repository.SaveCheckpointAsync(run.Snapshot.RunId, checkpoint);
+        var restored = await repository.GetCheckpointAsync(run.Snapshot.RunId);
+
+        Assert.NotNull(restored?.TaskLedger);
+        Assert.Equal(CodingWorkCycleStage.Implementing, restored.TaskLedger.WorkCycleStage);
+        Assert.Equal(3, restored.TaskLedger.WorkCycle);
+        Assert.Equal("evidence-fetch", restored.TaskLedger.ActiveResearchEvidenceId);
+        Assert.Equal(3, Assert.Single(restored.TaskLedger.Research!).WorkCycle);
+    }
+
+    [Fact]
     public async Task InterruptedRunCanBeIdempotentlyRequeuedButKeyCannotChangeRequest()
     {
         using var context = new TestServerContext();
@@ -151,5 +191,114 @@ public sealed class RunRepositoryTests
         };
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             repository.CreateAsync(different, "restartable-request"));
+    }
+
+    [Fact]
+    public async Task AgentActionAndObservationArePersistedExactlyOnce()
+    {
+        using var context = new TestServerContext();
+        var repository = new RunRepository(context.Database, new RunEventNotifier());
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Prüfe das Projekt")])]);
+        var run = await repository.CreateAsync(request, null);
+        using var argumentsJson = System.Text.Json.JsonDocument.Parse("""{"operation":"map"}""");
+        using var resultJson = System.Text.Json.JsonDocument.Parse("""{"workspaceRevision":"revision-1","fileCount":4}""");
+        var action = new AgentActionEnvelope(
+            "action-1",
+            1,
+            "workspace.inspect",
+            "map",
+            argumentsJson.RootElement.Clone(),
+            "run-action-1",
+            "revision-1",
+            DateTimeOffset.UtcNow);
+        var observation = new AgentObservation(
+            action.ActionId,
+            true,
+            resultJson.RootElement.Clone(),
+            new string('a', 64),
+            EvidenceId: "evidence-1",
+            WorkspaceRevision: "revision-1",
+            CreatedAt: DateTimeOffset.UtcNow);
+
+        Assert.True(await repository.SaveAgentActionAsync(run.Snapshot.RunId, action));
+        Assert.False(await repository.SaveAgentActionAsync(run.Snapshot.RunId, action));
+        var conflictingAction = action with
+        {
+            ActionId = "action-conflict",
+            IdempotencyKey = "run-action-conflict",
+        };
+        Assert.False(await repository.SaveAgentActionAsync(run.Snapshot.RunId, conflictingAction));
+        Assert.Equal(
+            action.ActionId,
+            (await repository.GetAgentActionBySequenceAsync(run.Snapshot.RunId, action.Sequence))?.ActionId);
+        Assert.True(await repository.SaveAgentObservationAsync(run.Snapshot.RunId, observation));
+        Assert.False(await repository.SaveAgentObservationAsync(run.Snapshot.RunId, observation));
+
+        var steps = await repository.GetRecentAgentStepsAsync(run.Snapshot.RunId);
+        var step = Assert.Single(steps);
+        Assert.Equal(action.ActionId, step.Action.ActionId);
+        Assert.NotNull(step.Observation);
+        Assert.Equal(observation.ResultHash, step.Observation!.ResultHash);
+        Assert.Equal("evidence-1", step.Observation.EvidenceId);
+    }
+
+    [Fact]
+    public async Task CommittedClientObservationRemovesRawToolExchangeAtomically()
+    {
+        using var context = new TestServerContext();
+        var repository = new RunRepository(context.Database, new RunEventNotifier());
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Code,
+            [new RunMessage("user", [new ContentPart("text", "Lies die Datei")])]);
+        var run = await repository.CreateAsync(request, null);
+        using var actionArguments = System.Text.Json.JsonDocument.Parse("""{"operation":"read","path":"Program.cs"}""");
+        using var proposalArguments = System.Text.Json.JsonDocument.Parse("""{"path":"Program.cs"}""");
+        using var rawResult = System.Text.Json.JsonDocument.Parse("""{"text":"vollständiger lokaler Quelltext","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}""");
+        using var compactResult = System.Text.Json.JsonDocument.Parse("""{"text":{"omitted":true},"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}""");
+        var action = new AgentActionEnvelope(
+            "action-client-read",
+            1,
+            "workspace.inspect",
+            "read",
+            actionArguments.RootElement.Clone(),
+            "idempotency-client-read",
+            "revision-1",
+            DateTimeOffset.UtcNow);
+        var proposal = new ToolProposal(
+            "proposal-client-read",
+            run.Snapshot.RunId,
+            ClientToolNames.FileSystemReadText,
+            proposalArguments.RootElement.Clone(),
+            ToolRiskClass.ReadOnly,
+            "Datei lesen",
+            DateTimeOffset.UtcNow.AddMinutes(10));
+        var clientResult = new ClientToolResult(
+            proposal.ProposalId,
+            "completed",
+            rawResult.RootElement.Clone());
+        var observation = new AgentObservation(
+            action.ActionId,
+            true,
+            compactResult.RootElement.Clone(),
+            new string('b', 64),
+            EvidenceId: "evidence-client-read",
+            WorkspaceRevision: "revision-1",
+            CreatedAt: DateTimeOffset.UtcNow);
+
+        Assert.True(await repository.SaveAgentActionAsync(run.Snapshot.RunId, action));
+        await repository.SaveToolProposalAsync(proposal);
+        Assert.True(await repository.SaveClientToolResultAsync(run.Snapshot.RunId, clientResult));
+
+        Assert.True(await repository.SaveAgentObservationAsync(run.Snapshot.RunId, observation));
+
+        Assert.Null(await repository.GetToolProposalAsync(proposal.ProposalId, run.Snapshot.RunId));
+        Assert.Null(await repository.GetClientToolResultAsync(proposal.ProposalId));
+        Assert.Equal(
+            compactResult.RootElement.GetRawText(),
+            (await repository.GetAgentObservationAsync(run.Snapshot.RunId, action.ActionId))?.Result.GetRawText());
     }
 }

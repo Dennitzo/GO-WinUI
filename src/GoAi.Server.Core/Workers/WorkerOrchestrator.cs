@@ -188,12 +188,12 @@ public sealed class WorkerOrchestrator : IDisposable
     {
         await WarmSpeechResourcesAsync(cancellationToken).ConfigureAwait(false);
         // Only speech input, speaker separation and TTS are resident for the
-        // Docker-stack lifetime. Startup never selects a llama.cpp model: an
+        // Docker-stack lifetime. Startup never selects an LM Studio model: an
         // already loaded model is preserved and the next AI run chooses its target.
         _runtime.WriteLog(
             "Information",
             "models.startup.on_demand",
-            "llama.cpp-Modelle werden ausschließlich durch konkrete AI-Läufe geladen; der vorhandene Modellzustand bleibt unverändert.");
+            "LM-Studio-Modelle werden ausschließlich durch konkrete AI-Läufe geladen; der vorhandene Modellzustand bleibt unverändert.");
     }
 
     public async Task<SpeechSessionSnapshot> BeginSpeechSessionAsync(
@@ -492,7 +492,7 @@ public sealed class WorkerOrchestrator : IDisposable
                 || string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase))
             {
-                // Heavy llama.cpp targets replace optional worker allocations,
+                // Heavy LM Studio targets replace optional worker allocations,
                 // while the resident speech stack remains available.
                 await _workers.ReleaseAllAsync(
                     exceptWorker: ResidentSpeechWorkerName,
@@ -518,7 +518,7 @@ public sealed class WorkerOrchestrator : IDisposable
             "speech" or "media" or "image" => workerName,
             _ => throw new ArgumentOutOfRangeException(nameof(workerName)),
         };
-        // Worker preparation is intentionally independent of llama.cpp. Media,
+        // Worker preparation is intentionally independent of LM Studio. Media,
         // image and speech work must not cause an implicit General-AI transition.
         await Task.CompletedTask.ConfigureAwait(false);
     }

@@ -33,6 +33,10 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("Run mode is invalid.");
         }
+        if (request.AgentProtocolVersion is not (1 or 2))
+        {
+            throw new ArgumentException("agentProtocolVersion must be 1 or 2.");
+        }
         if (request.ConversationProfile is { } conversationProfile && !Enum.IsDefined(conversationProfile))
         {
             throw new ArgumentException("Conversation profile is invalid.");
@@ -208,7 +212,9 @@ public static class RunRequestValidator
         }
         if (request.PreferredCodeModelId is { } preferredCodeModel
             && (request.Mode != RunMode.Code
-                || !CodingModelCatalog.TryGet(preferredCodeModel, out _)))
+                || string.IsNullOrWhiteSpace(preferredCodeModel)
+                || preferredCodeModel.Length > 512
+                || preferredCodeModel.Any(char.IsControl)))
         {
             throw new ArgumentException(
                 "preferredCodeModelId is only valid in code mode and must name a supported coding model.");
@@ -223,7 +229,8 @@ public static class RunRequestValidator
             if (string.IsNullOrWhiteSpace(reasoningModelId)
                 || reasoningEffort.Length > 16
                 || reasoningEffort.Any(char.IsControl)
-                || !reasoningProfile.Supports(reasoningEffort))
+                || (!reasoningProfile.Supports(reasoningEffort)
+                    && !IsReasoningEffortName(reasoningEffort)))
             {
                 var supported = reasoningProfile.SupportedEfforts.Count == 0
                     ? "keine steuerbare Stufe"
@@ -277,4 +284,7 @@ public static class RunRequestValidator
 
     private static bool IsLowerHex(string value) => value.All(static character =>
         character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsReasoningEffortName(string value) => value.Trim().ToLowerInvariant() is
+        "none" or "off" or "on" or "minimal" or "low" or "medium" or "high" or "xhigh";
 }

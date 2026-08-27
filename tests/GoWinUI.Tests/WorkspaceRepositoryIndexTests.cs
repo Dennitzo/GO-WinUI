@@ -1,5 +1,6 @@
 using GoWinUI.App.Services;
 using GoWinUI.Infrastructure;
+using System.Text.Json;
 
 namespace GoWinUI.Tests;
 
@@ -142,6 +143,104 @@ public sealed class WorkspaceRepositoryIndexTests
         }
         finally
         {
+            try { Directory.Delete(root, recursive: true); } catch (IOException) { }
+            try { Directory.Delete(data, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task ContentIndexUsesFtsSymbolsAndPersistentPromptRetrieval()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"go-workspace-retrieval-{Guid.NewGuid():N}");
+        var data = Path.Combine(Path.GetTempPath(), $"go-workspace-data-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(root, "src"));
+        await File.WriteAllTextAsync(Path.Combine(root, ".editorconfig"), "root = true\n");
+        await File.WriteAllTextAsync(Path.Combine(root, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\" />\n");
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "src", "TemperatureController.cs"),
+            "namespace Sample;\npublic sealed class TemperatureController\n{\n    public double CalculateSetPoint(double outsideTemperature) => outsideTemperature + 2;\n}\n");
+        await File.WriteAllTextAsync(Path.Combine(root, "src", "Unrelated.cs"), "namespace Sample; internal sealed class Unrelated {}\n");
+        try
+        {
+            WorkspaceIndexSnapshot snapshot;
+            using (var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = data }))
+            {
+                snapshot = await index.GetSnapshotForRunAsync(root);
+                var first = await index.BuildOrientationContextAsync(snapshot, "Ändere den TemperatureController SetPoint");
+                var second = await index.BuildOrientationContextAsync(snapshot, "Ändere den TemperatureController SetPoint");
+                var documents = await index.FindCachedSearchDocumentsAsync(
+                    root,
+                    ["outsideTemperature"],
+                    "src",
+                    20);
+                var symbols = JsonSerializer.SerializeToElement(await index.QueryCodeIndexAsync(
+                    root,
+                    "symbols",
+                    "TemperatureController",
+                    path: null,
+                    maximumResults: 20));
+                var dotFile = await index.ReadCachedAsync(root, ".editorconfig", 1, null, 1_000);
+
+                Assert.False(first.CacheHit);
+                Assert.True(second.CacheHit);
+                Assert.Contains(first.Evidence, item => item.Path == "src/TemperatureController.cs");
+                Assert.Contains(documents, item => item.Path == "src/TemperatureController.cs");
+                Assert.NotEmpty(symbols.GetProperty("matches").EnumerateArray());
+                Assert.NotNull(dotFile);
+                Assert.Equal(".editorconfig", dotFile!.Path);
+            }
+
+            using var restored = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = data });
+            var restoredSnapshot = await restored.GetSnapshotForRunAsync(root);
+            var restoredOrientation = await restored.BuildOrientationContextAsync(
+                restoredSnapshot,
+                "Ändere den TemperatureController SetPoint");
+            Assert.True(restoredOrientation.CacheHit);
+
+            await File.AppendAllTextAsync(Path.Combine(root, "src", "TemperatureController.cs"), "// changed\n");
+            var changedSnapshot = await restored.GetSnapshotForRunAsync(root);
+            var changedOrientation = await restored.BuildOrientationContextAsync(
+                changedSnapshot,
+                "Ändere den TemperatureController SetPoint");
+            Assert.False(changedOrientation.CacheHit);
+            Assert.NotEqual(snapshot.RevisionFingerprint, changedSnapshot.RevisionFingerprint);
+            Assert.Contains("src/TemperatureController.cs", changedSnapshot.ChangedPaths ?? []);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch (IOException) { }
+            try { Directory.Delete(data, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public async Task PersistentLineMapReturnsStableNormalizedRanges()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"go-workspace-lines-{Guid.NewGuid():N}");
+        var data = Path.Combine(Path.GetTempPath(), $"go-workspace-data-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "notes.txt"),
+            "eins\r\nzwei\r\ndrei\r\n",
+            new System.Text.UTF8Encoding(false));
+        try
+        {
+            using (var index = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = data }))
+            {
+                var middle = await index.ReadCachedAsync(root, "notes.txt", 2, 2, 1_000);
+                Assert.NotNull(middle);
+                Assert.Equal("zwei", middle!.Text);
+                Assert.Equal(4, middle.TotalLines);
+            }
+
+            using var restored = new WorkspaceRepositoryIndex(new GoInfrastructureOptions { DataDirectory = data });
+            var firstThree = await restored.ReadCachedAsync(root, "notes.txt", 1, 3, 1_000);
+            Assert.NotNull(firstThree);
+            Assert.Equal("eins\nzwei\ndrei", firstThree!.Text);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             try { Directory.Delete(root, recursive: true); } catch (IOException) { }
             try { Directory.Delete(data, recursive: true); } catch (IOException) { }
         }

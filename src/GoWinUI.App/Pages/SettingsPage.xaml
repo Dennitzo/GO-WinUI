@@ -112,20 +112,18 @@
               Header="General AI Modell"
               ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
               DisplayMemberPath="DisplayName"
-              SelectedValuePath="Id"
-              SelectedValue="{x:Bind ViewModel.SelectedModel, Mode=TwoWay}" />
+              SelectedItem="{x:Bind ViewModel.SelectedGeneralModelItem, Mode=TwoWay}" />
             <ComboBox
               Grid.Column="1"
               Header="Coding AI Modell"
               ItemsSource="{x:Bind ViewModel.CodingModels, Mode=OneWay}"
               DisplayMemberPath="DisplayName"
-              SelectedValuePath="Id"
-              SelectedValue="{x:Bind ViewModel.SelectedCodingModel, Mode=TwoWay}" />
+              SelectedItem="{x:Bind ViewModel.SelectedCodingModelItem, Mode=TwoWay}" />
           </Grid>
           <TextBlock
             Margin="0,-6,0,0"
             Foreground="{ThemeResource GoMutedTextBrush}"
-            Text="General- und Coding-Läufe laden automatisch das jeweils ausgewählte Modell. Qwen3-Coder-Next arbeitet ohne einstellbares Reasoning."
+            Text="Modellliste und Kontextgrenzen werden automatisch aus LM Studio geladen. Reasoning verwendet unverändert den in LM Studio konfigurierten Modellstandard. Auch neue lokale Modelle erscheinen ohne App-Neubau in beiden Auswahllisten."
             TextWrapping="Wrap" />
 
         </StackPanel>

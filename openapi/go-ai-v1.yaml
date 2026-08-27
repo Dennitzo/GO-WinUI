@@ -7,6 +7,13 @@ info:
     name: Proprietär
 servers:
   - url: http://192.168.0.67:8080
+security: []
+x-go-agent-protocol-v2:
+  workspaceFile: { $ref: "#/components/schemas/WorkspaceFileRef" }
+  action: { $ref: "#/components/schemas/AgentActionEnvelope" }
+  observation: { $ref: "#/components/schemas/AgentObservation" }
+  ledger: { $ref: "#/components/schemas/TaskLedgerSnapshot" }
+  providerState: { $ref: "#/components/schemas/ProviderConversationState" }
 paths:
   /v1/health/live:
     get:
@@ -53,7 +60,7 @@ paths:
       operationId: getModelStatus
       responses:
         "200":
-          description: Status des privaten llama.cpp-Modellrouters.
+          description: Status des von LM Studio bereitgestellten Modellruntimes.
           content:
             application/json:
               schema:
@@ -169,6 +176,15 @@ paths:
             text/event-stream:
               schema:
                 type: string
+              x-go-event-payloads:
+                agent.phase_changed: { $ref: "#/components/schemas/AgentPhaseChangedEvent" }
+                agent.action_started: { $ref: "#/components/schemas/AgentActionStartedEvent" }
+                agent.observation_committed: { $ref: "#/components/schemas/AgentObservationCommittedEvent" }
+                agent.cache_changed: { $ref: "#/components/schemas/AgentCacheChangedEvent" }
+                agent.verification_changed: { $ref: "#/components/schemas/AgentVerificationChangedEvent" }
+                agent.message_started: { $ref: "#/components/schemas/AgentMessageStartedEvent" }
+                agent.message_delta: { $ref: "#/components/schemas/AgentMessageDeltaEvent" }
+                agent.message_completed: { $ref: "#/components/schemas/AgentMessageCompletedEvent" }
   /v1/runs/{runId}/client-tool-results:
     parameters:
       - $ref: "#/components/parameters/RunId"
@@ -860,10 +876,15 @@ components:
           maxLength: 512
         preferredCodeModelId:
           type: string
-          enum: [qwen3-coder-next-q8_0, gpt-oss-120b]
+          enum: [qwen3.8-27b, qwen3-coder-next-q8_0, gpt-oss-120b]
         reasoningEffort:
           description: Vom ausgewählten Modell tatsächlich unterstützte Reasoning-Stufe.
-          enum: [off, on, low, medium, high]
+          enum: [none, minimal, low, medium, high, xhigh]
+        agentProtocolVersion:
+          description: Version des deterministischen Coding-Agent-Protokolls.
+          type: integer
+          enum: [1, 2]
+          default: 2
         documentContext:
           $ref: "#/components/schemas/DocumentContextDescriptor"
         sessionContext:
@@ -1188,9 +1209,9 @@ components:
         reasoningEfforts:
           type: array
           items:
-            enum: [off, on, low, medium, high]
+            enum: [none, minimal, low, medium, high, xhigh]
         defaultReasoningEffort:
-          enum: [off, on, low, medium, high]
+          enum: [none, minimal, low, medium, high, xhigh]
     ModelStatusSnapshot:
       type: object
       additionalProperties: false
@@ -1228,6 +1249,20 @@ components:
         contextTokens:
           type: integer
         displayName:
+          type: string
+        supportsTools:
+          type: boolean
+        supportsVision:
+          type: boolean
+        reasoningEfforts:
+          type: array
+          items:
+            type: string
+        defaultReasoningEffort:
+          type: string
+        architecture:
+          type: string
+        quantization:
           type: string
     GpuStatusSnapshot:
       type: object
@@ -1817,6 +1852,228 @@ components:
           enum: [question, instruction, cancel, noise]
         normalizedText:
           type: string
+    WorkspaceFileRef:
+      type: object
+      additionalProperties: false
+      required: [fileId, path, sha256, workspaceRevision, length, language]
+      properties:
+        fileId: { type: string }
+        path: { type: string }
+        sha256:
+          type: string
+          pattern: "^[A-Fa-f0-9]{64}$"
+        workspaceRevision: { type: string }
+        length: { type: integer, format: int64, minimum: 0 }
+        language: { type: string }
+        startLine: { type: [integer, "null"], minimum: 1 }
+        endLine: { type: [integer, "null"], minimum: 1 }
+    EvidenceRef:
+      type: object
+      additionalProperties: false
+      required: [evidenceId, kind, summary]
+      properties:
+        evidenceId: { type: string }
+        kind: { type: string }
+        summary: { type: string }
+        path: { type: [string, "null"] }
+        sha256: { type: [string, "null"] }
+        workspaceRevision: { type: [string, "null"] }
+        createdAt: { type: [string, "null"], format: date-time }
+    AgentActionEnvelope:
+      type: object
+      additionalProperties: false
+      required: [actionId, sequence, tool, operation, arguments, idempotencyKey, createdAt]
+      properties:
+        actionId: { type: string }
+        sequence: { type: integer, minimum: 1 }
+        tool:
+          type: string
+          enum: [workspace.inspect, workspace.change, execution.run, research.query, artifact.process, task.finish]
+        operation: { type: string }
+        arguments: { type: object }
+        idempotencyKey: { type: string }
+        workspaceRevision: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+        commentary: { type: [string, "null"], maxLength: 600 }
+        commentaryFingerprint: { type: [string, "null"] }
+    AgentObservation:
+      type: object
+      additionalProperties: false
+      required: [actionId, succeeded, result, resultHash, cacheHit]
+      properties:
+        actionId: { type: string }
+        succeeded: { type: boolean }
+        result: {}
+        resultHash:
+          type: string
+          pattern: "^[A-Fa-f0-9]{64}$"
+        errorCode: { type: [string, "null"] }
+        message: { type: [string, "null"] }
+        evidenceId: { type: [string, "null"] }
+        workspaceRevision: { type: [string, "null"] }
+        cacheHit: { type: boolean }
+        createdAt: { type: [string, "null"], format: date-time }
+    AgentChangeRecord:
+      type: object
+      additionalProperties: false
+      required: [path, actionId, summary]
+      properties:
+        path: { type: string }
+        beforeSha256: { type: [string, "null"] }
+        afterSha256: { type: [string, "null"] }
+        actionId: { type: string }
+        summary: { type: string }
+    AgentVerificationRecord:
+      type: object
+      additionalProperties: false
+      required: [verificationId, kind, target, succeeded, actionId, summary]
+      properties:
+        verificationId: { type: string }
+        kind: { type: string }
+        target: { type: string }
+        succeeded: { type: boolean }
+        actionId: { type: string }
+        summary: { type: string }
+    TaskLedgerSnapshot:
+      type: object
+      additionalProperties: false
+      required: [goal, taskKind, phase, workspaceRevision, constraints, evidence, changes, verifications, failures, nextStep, contextEpoch, consecutiveNoProgressTurns, reorientationUsed]
+      properties:
+        goal: { type: string }
+        taskKind:
+          enum: [analysis, change, creation, execution, research]
+        phase:
+          enum: [orienting, editing, verifying, finishing, blocked, completed]
+        workspaceRevision: { type: string }
+        constraints:
+          type: array
+          items: { type: string }
+        evidence:
+          type: array
+          items: { $ref: "#/components/schemas/EvidenceRef" }
+        changes:
+          type: array
+          items: { $ref: "#/components/schemas/AgentChangeRecord" }
+        verifications:
+          type: array
+          items: { $ref: "#/components/schemas/AgentVerificationRecord" }
+        failures:
+          type: array
+          items: { type: string }
+        nextStep: { type: string }
+        contextEpoch: { type: integer, minimum: 0 }
+        consecutiveNoProgressTurns: { type: integer, minimum: 0 }
+        reorientationUsed: { type: boolean }
+        lastCommentaryFingerprint: { type: [string, "null"] }
+        visibleRunMessage: { type: string }
+        visibleRunMessageDeltaCount: { type: integer, minimum: 0 }
+        workCycleStage:
+          enum: [orienting, researching, implementing, verifying, readyToFinish]
+        workCycle: { type: integer, minimum: 0 }
+        verifiedChangeCount: { type: integer, minimum: 0 }
+        contextGapResearchAllowed: { type: boolean }
+        activeResearchEvidenceId: { type: [string, "null"] }
+        activeContextGap: { type: [string, "null"] }
+    ProviderConversationState:
+      type: object
+      additionalProperties: false
+      required: [transport, prefixCacheKey, contextEpoch]
+      properties:
+        transport: { type: string }
+        responseId: { type: [string, "null"] }
+        modelInstanceId: { type: [string, "null"] }
+        prefixCacheKey: { type: string }
+        contextEpoch: { type: integer, minimum: 0 }
+    AgentPhaseChangedEvent:
+      type: object
+      additionalProperties: false
+      required: [phase, detail, sequence, workspaceRevision]
+      properties:
+        phase:
+          enum: [orienting, editing, verifying, finishing, blocked, completed]
+        detail: { type: string }
+        sequence: { type: integer, minimum: 0 }
+        workspaceRevision: { type: string }
+    AgentActionStartedEvent:
+      type: object
+      additionalProperties: false
+      required: [actionId, sequence, tool, operation, workspaceRevision]
+      properties:
+        actionId: { type: string }
+        sequence: { type: integer, minimum: 1 }
+        tool: { type: string }
+        operation: { type: string }
+        target: { type: [string, "null"] }
+        workspaceRevision: { type: string }
+    AgentObservationCommittedEvent:
+      type: object
+      additionalProperties: false
+      required: [actionId, succeeded, cacheHit, workspaceRevision]
+      properties:
+        actionId: { type: string }
+        succeeded: { type: boolean }
+        errorCode: { type: [string, "null"] }
+        evidenceId: { type: [string, "null"] }
+        cacheHit: { type: boolean }
+        workspaceRevision: { type: string }
+    AgentCacheChangedEvent:
+      type: object
+      additionalProperties: false
+      required: [cache, hit, key, workspaceRevision]
+      properties:
+        cache: { type: string }
+        hit: { type: boolean }
+        key: { type: string }
+        workspaceRevision: { type: string }
+    AgentVerificationChangedEvent:
+      type: object
+      additionalProperties: false
+      required: [verificationId, kind, target, succeeded, actionId, summary, workspaceRevision]
+      properties:
+        verificationId: { type: string }
+        kind: { type: string }
+        target: { type: string }
+        succeeded: { type: boolean }
+        actionId: { type: string }
+        summary: { type: string }
+        workspaceRevision: { type: string }
+    AgentMessageStartedEvent:
+      type: object
+      additionalProperties: false
+      required: [itemId, runId, sequence, phase, origin, milestoneFingerprint]
+      properties:
+        itemId: { type: string }
+        runId: { type: string }
+        sequence: { type: integer, minimum: 0 }
+        phase: { enum: [commentary, final_answer] }
+        origin: { enum: [model, host] }
+        milestoneFingerprint: { type: string }
+    AgentMessageDeltaEvent:
+      type: object
+      additionalProperties: false
+      required: [itemId, runId, sequence, deltaIndex, delta, phase, origin, milestoneFingerprint]
+      properties:
+        itemId: { type: string }
+        runId: { type: string }
+        sequence: { type: integer, minimum: 0 }
+        deltaIndex: { type: integer, minimum: 0 }
+        delta: { type: string }
+        phase: { enum: [commentary, final_answer] }
+        origin: { enum: [model, host] }
+        milestoneFingerprint: { type: string }
+    AgentMessageCompletedEvent:
+      type: object
+      additionalProperties: false
+      required: [itemId, runId, sequence, phase, origin, text, milestoneFingerprint, deltaCount]
+      properties:
+        itemId: { type: string }
+        runId: { type: string }
+        sequence: { type: integer, minimum: 0 }
+        phase: { enum: [commentary, final_answer] }
+        origin: { enum: [model, host] }
+        text: { type: string }
+        milestoneFingerprint: { type: string }
+        deltaCount: { type: integer, minimum: 0 }
     Problem:
       type: object
       required: [type, title, status, detail]

@@ -363,6 +363,15 @@ public sealed class AiClientPersistenceTests
         _ = await journal.CompleteAsync(
             oldTool.ProposalId,
             """{"proposalId":"proposal-old-run","status":"completed","result":{"written":true}}""");
+        _ = await chats.CommitAgentMessageAsync(
+            session.Id,
+            message.Id,
+            "server-run-old",
+            "coding-run-old",
+            ChatMessagePhase.Commentary,
+            "Alter Zwischenstand.",
+            MessageStatus.Streaming,
+            2);
 
         var requestedReplacementId = Guid.NewGuid();
         var second = await runs.BeginAttemptAsync(new GoAiRunRecord(
@@ -377,6 +386,12 @@ public sealed class AiClientPersistenceTests
         Assert.Equal("queued", second.State);
         Assert.Null(second.SelectedModel);
         Assert.Null(second.ErrorCode);
+        var resetMessage = await chats.GetMessageAsync(message.Id, includeInternal: true);
+        Assert.NotNull(resetMessage);
+        Assert.Equal(string.Empty, resetMessage.Content);
+        Assert.Null(resetMessage.SourceRunId);
+        Assert.Null(resetMessage.SourceItemId);
+        Assert.Equal(0, resetMessage.SourceDeltaSequence);
 
         await runs.UpdateAsync(second.Id, "server-run-new", 0, "running", "gpt-oss-120b");
         Assert.Empty(await journal.ListPendingSubmissionsAsync(second.Id, "server-run-new"));
@@ -384,6 +399,13 @@ public sealed class AiClientPersistenceTests
             oldTool.ProposalId,
             Assert.Single(await journal.ListPendingSubmissionsAsync(second.Id, "server-run-old")).ProposalId);
         Assert.Equal("server-run-new", (await runs.GetAsync(first.Id))?.ServerRunId);
+
+        await runs.UpdateAsync(second.Id, "server-run-new", 17, "running", "gpt-oss-120b");
+        await runs.RewindEventsAsync(second.Id, 0, "running", "client.agent_message_replay");
+        var rewound = await runs.GetAsync(second.Id);
+        Assert.NotNull(rewound);
+        Assert.Equal(0, rewound.LastEventId);
+        Assert.Equal("client.agent_message_replay", rewound.ErrorCode);
     }
 
     [Fact]

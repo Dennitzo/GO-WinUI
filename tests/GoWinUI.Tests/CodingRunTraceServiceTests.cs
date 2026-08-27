@@ -532,6 +532,9 @@ public sealed class CodingRunTraceServiceTests
         Assert.Contains("return exactDifference || String(left.id || \"\").localeCompare", app, StringComparison.Ordinal);
         Assert.Contains("case \"conversation.messageRemoved\"", app, StringComparison.Ordinal);
         Assert.Contains("case \"coding.snapshotCommitted\"", app, StringComparison.Ordinal);
+        Assert.Contains("String(message.messagePhase || \"\").toLowerCase() === \"commentary\"", app, StringComparison.Ordinal);
+        Assert.Contains("phase.textContent = \"Zwischenstand\"", app, StringComparison.Ordinal);
+        Assert.Contains(".message-phase--commentary", styles, StringComparison.Ordinal);
         Assert.Contains("function requestConversationRefresh()", app, StringComparison.Ordinal);
         Assert.Contains("post(\"conversation.refresh\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
         Assert.DoesNotContain("currentCodingRun", app, StringComparison.Ordinal);

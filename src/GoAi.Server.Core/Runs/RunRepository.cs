@@ -422,6 +422,133 @@ public sealed class RunRepository
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<bool> SaveAgentActionAsync(
+        string runId,
+        AgentActionEnvelope action,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO agent_actions(action_id, run_id, sequence, idempotency_key, action_json, created_at)
+            VALUES($action, $run, $sequence, $key, $json, $created)
+            ON CONFLICT DO NOTHING;
+            """;
+        command.Parameters.AddWithValue("$action", action.ActionId);
+        command.Parameters.AddWithValue("$run", runId);
+        command.Parameters.AddWithValue("$sequence", action.Sequence);
+        command.Parameters.AddWithValue("$key", action.IdempotencyKey);
+        command.Parameters.AddWithValue("$json", JsonSerializer.Serialize(action, _database.JsonOptions));
+        command.Parameters.AddWithValue("$created", GoAiDatabase.FormatTimestamp(action.CreatedAt));
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+    }
+
+    public async Task<bool> SaveAgentObservationAsync(
+        string runId,
+        AgentObservation observation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO agent_observations(action_id, run_id, observation_json, created_at)
+            VALUES($action, $run, $json, $created)
+            ON CONFLICT(action_id) DO NOTHING;
+            """;
+        command.Parameters.AddWithValue("$action", observation.ActionId);
+        command.Parameters.AddWithValue("$run", runId);
+        command.Parameters.AddWithValue("$json", JsonSerializer.Serialize(observation, _database.JsonOptions));
+        command.Parameters.AddWithValue("$created", GoAiDatabase.FormatTimestamp(observation.CreatedAt ?? DateTimeOffset.UtcNow));
+        var inserted = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+
+        // Client observations are the durable, compact representation of a
+        // completed exchange. Remove the raw proposal/result in the same
+        // transaction so full source snippets cannot remain replicated in the
+        // gateway after they have been consumed.
+        var proposalId = observation.ActionId.StartsWith("action-", StringComparison.Ordinal)
+            ? "proposal-" + observation.ActionId["action-".Length..]
+            : null;
+        if (proposalId is not null)
+        {
+            await using var cleanup = connection.CreateCommand();
+            cleanup.Transaction = transaction;
+            cleanup.CommandText = """
+                DELETE FROM client_tool_results WHERE proposal_id = $proposal AND run_id = $run;
+                DELETE FROM client_tool_proposals WHERE proposal_id = $proposal AND run_id = $run;
+                """;
+            cleanup.Parameters.AddWithValue("$proposal", proposalId);
+            cleanup.Parameters.AddWithValue("$run", runId);
+            _ = await cleanup.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return inserted;
+    }
+
+    public async Task<AgentActionEnvelope?> GetAgentActionBySequenceAsync(
+        string runId,
+        int sequence,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT action_json FROM agent_actions WHERE run_id = $run AND sequence = $sequence;";
+        command.Parameters.AddWithValue("$run", runId);
+        command.Parameters.AddWithValue("$sequence", sequence);
+        var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        return json is null ? null : JsonSerializer.Deserialize<AgentActionEnvelope>(json, _database.JsonOptions);
+    }
+
+    public async Task<AgentObservation?> GetAgentObservationAsync(
+        string runId,
+        string actionId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT observation_json FROM agent_observations WHERE run_id = $run AND action_id = $action;";
+        command.Parameters.AddWithValue("$run", runId);
+        command.Parameters.AddWithValue("$action", actionId);
+        var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        return json is null ? null : JsonSerializer.Deserialize<AgentObservation>(json, _database.JsonOptions);
+    }
+
+    public async Task<IReadOnlyList<(AgentActionEnvelope Action, AgentObservation? Observation)>> GetRecentAgentStepsAsync(
+        string runId,
+        int maximumResults = 6,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT a.action_json, o.observation_json
+            FROM agent_actions a
+            LEFT JOIN agent_observations o ON o.action_id = a.action_id
+            WHERE a.run_id = $run
+            ORDER BY a.sequence DESC
+            LIMIT $maximum;
+            """;
+        command.Parameters.AddWithValue("$run", runId);
+        command.Parameters.AddWithValue("$maximum", Math.Clamp(maximumResults, 1, 64));
+        var result = new List<(AgentActionEnvelope, AgentObservation?)>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var action = JsonSerializer.Deserialize<AgentActionEnvelope>(reader.GetString(0), _database.JsonOptions)
+                ?? throw new InvalidDataException("Persisted agent action is invalid.");
+            var observation = reader.IsDBNull(1)
+                ? null
+                : JsonSerializer.Deserialize<AgentObservation>(reader.GetString(1), _database.JsonOptions);
+            result.Add((action, observation));
+        }
+        result.Reverse();
+        return result;
+    }
+
     private async Task<RunSnapshot?> FindByIdempotencyKeyAsync(
         string idempotencyKey,
         CancellationToken cancellationToken)

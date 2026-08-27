@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://go-preview.local data: blob:; media-src 'self' https://go-preview.local; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
   <title>GO AI Assistent</title>
   <link rel="stylesheet" href="vendor/katex/0.16.10/katex.min.css">
-  <link rel="stylesheet" href="styles.css?v=20260823-1">
+  <link rel="stylesheet" href="styles.css?v=20260826-1">
 </head>
 <body>
   <div id="app-shell" class="app-shell">
@@ -111,10 +111,7 @@
                   <span>Tools</span>
                 </button>
                 <div id="tools-menu" class="tools-menu" role="menu" hidden>
-                  <div class="tools-menu__title">Schlussfolgern</div>
-                  <div id="reasoning-model" class="reasoning-model" aria-live="polite"></div>
-                  <div id="reasoning-options" class="reasoning-options"></div>
-                  <div class="tools-menu__title tools-menu__section">Aktionen</div>
+                  <div class="tools-menu__title">Aktionen</div>
                   <div class="tools-menu__actions">
                   <button class="service-option" type="button" role="menuitem" data-tool-action="audioAnalysis"><span>Audio analysieren</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="imageAnalysis"><span>Bild analysieren</span></button>
@@ -146,9 +143,6 @@
                 <span class="context-ring" aria-hidden="true"></span>
                 <span id="context-label">0%</span>
               </div>
-              <select id="reasoning" hidden aria-label="Reasoning-Aufwand">
-                <option value="auto" selected>Modellautomatik</option>
-              </select>
             </div>
 
             <div class="toolbar-group composer-submit">
@@ -259,6 +253,6 @@
   <script src="bridge.js?v=20260821-2"></script>
   <script src="voice.js?v=20260822-2"></script>
   <script src="markdown.js?v=20260821-1"></script>
-  <script src="app.js?v=20260823-1"></script>
+  <script src="app.js?v=20260826-1"></script>
 </body>
 </html>

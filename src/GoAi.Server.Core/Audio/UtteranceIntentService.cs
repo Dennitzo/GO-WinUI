@@ -63,7 +63,7 @@ public sealed class UtteranceIntentService
                 activity.Mode == GpuLeaseMode.Exclusive
                 && string.Equals(activity.Workload, "llm-code", StringComparison.Ordinal)))
         {
-            // Qwen owns llama.cpp while a coding run is active. Voice input must
+            // Qwen owns LM Studio while a coding run is active. Voice input must
             // remain responsive instead of queuing an otherwise hidden General-AI
             // intent request behind that potentially long run.
             return ClassifyLocallyDuringCoding(text);

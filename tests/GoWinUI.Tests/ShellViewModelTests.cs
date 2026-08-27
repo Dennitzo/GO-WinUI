@@ -81,8 +81,8 @@ public sealed class ShellViewModelTests
         Assert.All(viewModel.AiServices, static item => Assert.Equal("Bereit", item.StateLabel));
         Assert.Contains(viewModel.AiServices, static item =>
             item.DisplayName == "Coding"
-            && item.Runtime.Contains("Qwen3-Coder-Next", StringComparison.Ordinal)
-            && item.Runtime.Contains("llama.cpp", StringComparison.Ordinal));
+            && item.Runtime.Contains("Qwen3.8", StringComparison.Ordinal)
+            && item.Runtime.Contains("LM Studio", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public sealed class ShellViewModelTests
             now,
             ActiveWorkloads:
             [
-                new("lease-general", "llm-general", "gpt-oss-120b", "Docker · llama.cpp", "run-1", now),
+                new("lease-general", "llm-general", "gpt-oss-120b", "LM Studio", "run-1", now),
                 new("lease-speech", "live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT", "caption-1", now),
             ]));
 
@@ -158,7 +158,7 @@ public sealed class ShellViewModelTests
             "lease-code",
             [],
             now,
-            ActiveWorkloads: [new("lease-code", "llm-code", "Coding-Agent · gpt-oss-120b", "Docker · llama.cpp", "run-code", now)]));
+            ActiveWorkloads: [new("lease-code", "llm-code", "Coding-Agent · Qwen3.8 27B", "LM Studio", "run-code", now)]));
 
         Assert.True(viewModel.AiServices.Single(static item => item.Key == "coding").IsActive);
         Assert.False(viewModel.AiServices.Single(static item => item.Key == "general").IsActive);
@@ -166,11 +166,11 @@ public sealed class ShellViewModelTests
 
     private static ModelStatusSnapshot ReadyModels() => new(
         true,
-        "http://llm:8080",
+        "http://host.docker.internal:1234",
         [
             new("gpt-oss-120b", "general", true, true, "loaded", 131_072),
             new("gpt-oss-120b", "code", true, false, "unloaded", 131_072),
-            new("qwen3-coder-next-q8_0", "code", true, true, "loaded", 262_144),
+            new("qwen3.8-27b", "code", true, true, "loaded", 262_144),
             new("Qwen3-VL", "vision", true, false, "available", 262_144),
         ],
         DateTimeOffset.UtcNow);

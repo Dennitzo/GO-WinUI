@@ -32,10 +32,29 @@ public interface IChatRepository
     Task<IReadOnlyList<ChatMessage>> ListMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<long> GetConversationRevisionAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<ChatMessage?> GetMessageAsync(Guid messageId, bool includeInternal = false, CancellationToken cancellationToken = default);
+    Task<ChatMessage?> GetAgentMessageAsync(
+        string sourceRunId,
+        string sourceItemId,
+        CancellationToken cancellationToken = default);
     Task<ChatTurn> AddTurnAsync(
         Guid sessionId,
         string userContent,
         MessageContentProfile assistantContentProfile = MessageContentProfile.General,
+        CancellationToken cancellationToken = default);
+    Task<ChatTurn> AddCodingTurnAsync(
+        Guid sessionId,
+        string userContent,
+        MessageContentProfile assistantContentProfile = MessageContentProfile.General,
+        CancellationToken cancellationToken = default);
+    Task<ChatMessage> CommitAgentMessageAsync(
+        Guid sessionId,
+        Guid finalAnchorMessageId,
+        string sourceRunId,
+        string sourceItemId,
+        ChatMessagePhase phase,
+        string content,
+        MessageStatus status,
+        long sourceDeltaSequence,
         CancellationToken cancellationToken = default);
     Task<ChatMessage> AddMessageAsync(
         Guid sessionId,
@@ -57,6 +76,7 @@ public interface IChatRepository
         Task.CompletedTask;
     Task<int> DeleteInternalMessagesAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
     Task<int> DeleteEmptyTerminalMessagesAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
+    Task ResetAgentMessageForRetryAsync(Guid messageId, CancellationToken cancellationToken = default);
     Task UpdateMessageAsync(Guid messageId, string content, MessageStatus status, string? errorMessage = null, CancellationToken cancellationToken = default);
     Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default);
     Task<SessionContextPreparation?> GetSessionContextPreparationAsync(string cacheKey, CancellationToken cancellationToken = default);
@@ -185,6 +205,12 @@ public interface IGoAiRunRepository
         long lastEventId,
         string state,
         string? selectedModel = null,
+        string? errorCode = null,
+        CancellationToken cancellationToken = default);
+    Task RewindEventsAsync(
+        Guid id,
+        long lastEventId,
+        string state,
         string? errorCode = null,
         CancellationToken cancellationToken = default);
 }

@@ -34,7 +34,7 @@ public sealed class ModelRouter
         var status = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
         if (!status.ProviderReachable)
         {
-            throw new HttpRequestException("llama.cpp model status is unavailable.");
+            throw new HttpRequestException("LM Studio model status is unavailable.");
         }
         var model = status.Models.FirstOrDefault(candidate =>
             candidate.Downloaded
@@ -84,8 +84,10 @@ public sealed class ModelRouter
         var modelId = string.IsNullOrWhiteSpace(request.PreferredCodeModelId)
             ? _options.CodeModelId
             : request.PreferredCodeModelId.Trim();
-        var profile = CodingModelCatalog.Get(modelId);
-        return new ModelSelection(profile.Id, "code", profile.ContextLength);
+        return new ModelSelection(
+            modelId,
+            "code",
+            ModelContextProfiles.ResolveMaximum(modelId, "code"));
     }
 
     private static bool ContainsCodeIntent(string text)

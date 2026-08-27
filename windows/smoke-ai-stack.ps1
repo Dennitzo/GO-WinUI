@@ -3,6 +3,7 @@
 param(
     [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'GO-AI-Stack'),
     [string] $ModelRoot,
+    [string] $LmStudioModelRoot,
     [string] $ServerUrl = 'http://192.168.0.67:8080',
     [ValidateRange(1, 120)] [int] $WaitMinutes = 10,
     [switch] $IncludeInference
@@ -11,8 +12,15 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
-$paths = Get-GoAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot
+$paths = Get-GoAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot -LmStudioModelRoot $LmStudioModelRoot
 if (-not (Test-Path -LiteralPath $paths.EnvironmentFile -PathType Leaf)) { Write-GoAiStackEnvironment -Paths $paths }
+
+$lmStudio = Invoke-RestMethod -Uri 'http://127.0.0.1:1234/api/v1/models' -Method Get -TimeoutSec 10
+foreach ($requiredModel in @('gpt-oss-120b', 'qwen3.8-27b')) {
+    if (-not @($lmStudio.models | Where-Object { $_.key -eq $requiredModel })) {
+        throw "Required LM Studio model is not installed: $requiredModel"
+    }
+}
 
 $deadline = [DateTimeOffset]::UtcNow.AddMinutes($WaitMinutes)
 $health = $null
@@ -48,4 +56,4 @@ if ($IncludeInference) {
     )
     $ready = Invoke-RestMethod -Uri ($ServerUrl.TrimEnd('/') + '/v1/health/ready') -TimeoutSec 30
 }
-Write-Host "GO AI stack smoke passed. Readiness: $($ready.status)" -ForegroundColor Green
+Write-Host "GO AI hybrid stack smoke passed. Readiness: $($ready.status)" -ForegroundColor Green

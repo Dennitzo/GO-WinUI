@@ -3,6 +3,8 @@
 param(
     [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'GO-AI-Stack'),
 
+    [string] $LmStudioModelRoot = (Join-Path $env:USERPROFILE '.lmstudio\models'),
+
     [switch] $SkipLlmModels,
 
     [switch] $SkipWorkerModels
@@ -165,9 +167,11 @@ function Invoke-PinnedUriFileDownload {
 
 $DataRoot = [IO.Path]::GetFullPath($DataRoot)
 $modelRoot = Join-Path $DataRoot 'Models'
+$lmStudioModelRoot = [IO.Path]::GetFullPath($LmStudioModelRoot)
 $downloadRoot = Join-Path $DataRoot 'Downloads'
 $toolRoot = Join-Path $DataRoot 'Tools\huggingface'
 New-Item -ItemType Directory -Path $modelRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $lmStudioModelRoot -Force | Out-Null
 
 if (-not $SkipLlmModels) {
     $runtimeFiles = @(
@@ -175,7 +179,7 @@ if (-not $SkipLlmModels) {
             Repository = 'lmstudio-community/gpt-oss-120b-GGUF'
             Revision = 'ffa0c82eff830f6644fa19b14ef2c0e11f7cd1e8'
             FileName = 'gpt-oss-120b-MXFP4-00001-of-00002.gguf'
-            RelativePath = 'llm\gpt-oss-120b-MXFP4-00001-of-00002.gguf'
+            RelativePath = 'lmstudio-community\gpt-oss-120b-GGUF\gpt-oss-120b-MXFP4-00001-of-00002.gguf'
             ExistingPartialPath = $null
             Length = 39815566336
             Sha256 = '01d8a3bc7efdaa331112e8a0a42ec9046fcee2a1dce910452aafaccb996759f3'
@@ -184,16 +188,34 @@ if (-not $SkipLlmModels) {
             Repository = 'lmstudio-community/gpt-oss-120b-GGUF'
             Revision = 'ffa0c82eff830f6644fa19b14ef2c0e11f7cd1e8'
             FileName = 'gpt-oss-120b-MXFP4-00002-of-00002.gguf'
-            RelativePath = 'llm\gpt-oss-120b-MXFP4-00002-of-00002.gguf'
+            RelativePath = 'lmstudio-community\gpt-oss-120b-GGUF\gpt-oss-120b-MXFP4-00002-of-00002.gguf'
             ExistingPartialPath = $null
             Length = 23571779104
             Sha256 = 'b7bf9fba295115d0e32951ce54911b3020dd92459b88a3908ad58479be6f7676'
         },
         [pscustomobject]@{
+            Repository = 'lmstudio-community/Qwen3.8-27B-GGUF'
+            Revision = '5a7da681f60570ab5b439a587e912d2e5eddb582'
+            FileName = 'Qwen3.8-27B-Q4_K_M.gguf'
+            RelativePath = 'lmstudio-community\Qwen3.8-27B-GGUF\Qwen3.8-27B-Q4_K_M.gguf'
+            ExistingPartialPath = $null
+            Length = 16810714336
+            Sha256 = 'e00082f779fa385cee8c68a3ec8833a75778cc87272240b942f74e0b8243e520'
+        },
+        [pscustomobject]@{
+            Repository = 'lmstudio-community/Qwen3.8-27B-GGUF'
+            Revision = '5a7da681f60570ab5b439a587e912d2e5eddb582'
+            FileName = 'mmproj-Qwen3.8-27B-BF16.gguf'
+            RelativePath = 'lmstudio-community\Qwen3.8-27B-GGUF\mmproj-Qwen3.8-27B-BF16.gguf'
+            ExistingPartialPath = $null
+            Length = 931145856
+            Sha256 = '97ba9d70e7407f08c880def231fd360a312c76d0053387733f10dcf6affd75a1'
+        },
+        [pscustomobject]@{
             Repository = 'Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF'
             Revision = 'f54435e6cc31258f04b0969105c3f6badb197931'
             FileName = 'Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf'
-            RelativePath = 'vision\Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf'
+            RelativePath = 'Qwen\Qwen3-VL-30B-A3B-Instruct-GGUF\Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf'
             Length = 18556687168
             Sha256 = '87bb374d849f80ebdfabb304189fac9e0bd35a0f74506e6a59c51b206cbe863b'
         },
@@ -201,7 +223,7 @@ if (-not $SkipLlmModels) {
             Repository = 'Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF'
             Revision = 'f54435e6cc31258f04b0969105c3f6badb197931'
             FileName = 'mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf'
-            RelativePath = 'vision\mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf'
+            RelativePath = 'Qwen\Qwen3-VL-30B-A3B-Instruct-GGUF\mmproj-Qwen3VL-30B-A3B-Instruct-F16.gguf'
             ExistingPartialPath = $null
             Length = 1083499584
             Sha256 = 'cae72cf123cc9e08d553cd5a5055d6d3cf0f82652aa41c3e4aa424cda9a26f7f'
@@ -210,7 +232,7 @@ if (-not $SkipLlmModels) {
             Repository = 'ggml-org/bge-m3-Q8_0-GGUF'
             Revision = '9eba04c5d75ba5a1595e45de734d36bef4e5cb98'
             FileName = 'bge-m3-q8_0.gguf'
-            RelativePath = 'embedding\bge-m3-q8_0.gguf'
+            RelativePath = 'ggml-org\bge-m3-Q8_0-GGUF\bge-m3-q8_0.gguf'
             ExistingPartialPath = $null
             Length = 634553760
             Sha256 = 'aa473d51f451a22f0fcf39ba3330c14bed38a385712b1113440f69df4047a173'
@@ -221,7 +243,7 @@ if (-not $SkipLlmModels) {
             Repository = $file.Repository
             Revision = $file.Revision
             FileName = $file.FileName
-            Destination = (Join-Path $modelRoot $file.RelativePath)
+            Destination = (Join-Path $lmStudioModelRoot $file.RelativePath)
             ExpectedLength = $file.Length
             Sha256 = $file.Sha256
             StagingDirectory = $downloadRoot
@@ -338,4 +360,4 @@ if (-not $SkipWorkerModels) {
     }
 }
 
-Write-Host "GO AI model downloads are complete: $modelRoot" -ForegroundColor Green
+Write-Host "GO AI model downloads are complete. LM Studio models: $lmStudioModelRoot; worker models: $modelRoot" -ForegroundColor Green

@@ -5,6 +5,8 @@ param(
 
     [string] $ModelRoot,
 
+    [string] $LmStudioModelRoot = (Join-Path $env:USERPROFILE '.lmstudio\models'),
+
     [switch] $PlanOnly
 )
 
@@ -142,17 +144,17 @@ function Receive-PinnedShard {
     Write-Host "Pinned shard downloaded: $destination" -ForegroundColor Green
 }
 
-$paths = Get-GoAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot
-$resolvedModelRoot = [IO.Path]::GetFullPath($paths.ModelRoot)
+$paths = Get-GoAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot -LmStudioModelRoot $LmStudioModelRoot
+$resolvedModelRoot = [IO.Path]::GetFullPath($paths.LmStudioModelRoot)
 $destinationDirectory = [IO.Path]::GetFullPath(
-    (Join-Path $resolvedModelRoot 'llm\qwen3-coder-next-q8_0'))
+    (Join-Path $resolvedModelRoot 'Qwen\Qwen3-Coder-Next-GGUF'))
 $modelRootPrefix = $resolvedModelRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
 if (-not $destinationDirectory.StartsWith($modelRootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Destination must stay below the GO AI model root: $destinationDirectory"
+    throw "Destination must stay below the LM Studio model root: $destinationDirectory"
 }
 
 $stagingDirectory = Join-Path $destinationDirectory '.download'
-$dockerModelPath = '/models/llm/qwen3-coder-next-q8_0/Qwen3-Coder-Next-Q8_0-00001-of-00004.gguf'
+$lmStudioModelKey = 'qwen3-coder-next'
 $totalLength = [long] 0
 foreach ($file in $files) {
     $totalLength += [long] $file.Length
@@ -162,7 +164,7 @@ Write-Host 'Qwen3-Coder-Next Q8_0 download plan' -ForegroundColor Cyan
 Write-Host "Repository: $repository@$revision"
 Write-Host "Destination: $destinationDirectory"
 Write-Host ("Download size: {0:N2} GiB" -f ($totalLength / 1GB))
-Write-Host "Docker model path: $dockerModelPath"
+Write-Host "LM Studio model key: $lmStudioModelKey"
 foreach ($file in $files) {
     Write-Host ("  {0} | {1:N2} GiB | SHA-256 {2}" -f $file.Name, ($file.Length / 1GB), $file.Sha256) -ForegroundColor DarkGray
 }
@@ -213,5 +215,5 @@ foreach ($file in $files) {
 }
 
 Write-Host 'Qwen3-Coder-Next Q8_0 download completed and verified.' -ForegroundColor Green
-Write-Host "Docker model path: $dockerModelPath" -ForegroundColor Green
-Write-Host 'The active Docker model catalog was not changed.' -ForegroundColor Yellow
+Write-Host "LM Studio model key: $lmStudioModelKey" -ForegroundColor Green
+Write-Host 'Refresh the LM Studio model catalog if the model is not immediately visible.' -ForegroundColor Yellow

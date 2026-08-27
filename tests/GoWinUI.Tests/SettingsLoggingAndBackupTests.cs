@@ -121,7 +121,7 @@ public sealed class SettingsLoggingAndBackupTests
     }
 
     [Fact]
-    public async Task VersionThirteenMigratesToQwenAndCurrentCodingSelectionsPersist()
+    public async Task LegacySettingsMigrateToQwen38AndCurrentCodingSelectionsPersist()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var settings = environment.Get<ISettingsStore>();
@@ -131,7 +131,7 @@ public sealed class SettingsLoggingAndBackupTests
             Version = 13,
             SelectedCodingModel = "gpt-oss-120b",
         });
-        Assert.Equal("qwen3-coder-next-q8_0", (await settings.LoadAsync()).SelectedCodingModel);
+        Assert.Equal(AppSettings.DefaultSelectedCodingModel, (await settings.LoadAsync()).SelectedCodingModel);
 
         await settings.SaveAsync(new AppSettings
         {
@@ -149,7 +149,49 @@ public sealed class SettingsLoggingAndBackupTests
     }
 
     [Fact]
-    public async Task VersionTenReasoningMigratesToModelAutomaticAndCurrentValuesPersist()
+    public async Task CurrentSettingsPreserveDynamicallyDiscoveredModelIds()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+        const string dynamicGeneralModel = "vendor/new-general-model:q8_0";
+        const string dynamicCodingModel = "vendor/new-coding-model:q6_k";
+
+        await settings.SaveAsync(new AppSettings
+        {
+            Version = AppSettings.CurrentVersion,
+            SelectedModel = dynamicGeneralModel,
+            SelectedCodingModel = dynamicCodingModel,
+        });
+
+        var restored = await settings.LoadAsync();
+        Assert.Equal(dynamicGeneralModel, restored.SelectedModel);
+        Assert.Equal(dynamicCodingModel, restored.SelectedCodingModel);
+    }
+
+    [Fact]
+    public async Task GeneralAndCodingModelSelectionsSurviveCoordinatorRestart()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var store = environment.Get<ISettingsStore>();
+
+        using (var first = new SettingsCoordinator(store))
+        {
+            await first.InitializeAsync();
+            await first.UpdateAsync(current => current with
+            {
+                SelectedModel = "general-after-restart",
+                SelectedCodingModel = "coding-after-restart",
+            });
+        }
+
+        using var second = new SettingsCoordinator(store);
+        await second.InitializeAsync();
+        Assert.Equal("general-after-restart", second.Current.SelectedModel);
+        Assert.Equal("coding-after-restart", second.Current.SelectedCodingModel);
+    }
+
+    [Fact]
+    public async Task EveryLegacyReasoningSettingIsResetToLmStudioAutomatic()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var settings = environment.Get<ISettingsStore>();
@@ -158,7 +200,10 @@ public sealed class SettingsLoggingAndBackupTests
         Assert.Equal("auto", (await settings.LoadAsync()).ReasoningEffort);
 
         await settings.SaveAsync(new AppSettings { Version = 11, ReasoningEffort = "on" });
-        Assert.Equal("on", (await settings.LoadAsync()).ReasoningEffort);
+        Assert.Equal("auto", (await settings.LoadAsync()).ReasoningEffort);
+
+        await settings.SaveAsync(new AppSettings { Version = 11, ReasoningEffort = "off" });
+        Assert.Equal("auto", (await settings.LoadAsync()).ReasoningEffort);
 
         await settings.SaveAsync(new AppSettings { Version = 11, ReasoningEffort = "xhigh" });
         Assert.Equal("auto", (await settings.LoadAsync()).ReasoningEffort);
