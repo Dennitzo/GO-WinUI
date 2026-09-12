@@ -44,12 +44,14 @@ public sealed class ChatAndContextTests
         Assert.Equal(ChatRole.User, result.Messages[^1].Role);
         Assert.Contains("Markdown-Pipe-Tabellen", result.Messages[0].Content, StringComparison.Ordinal);
         Assert.Contains("Dokument-Policy", result.Messages[0].Content, StringComparison.Ordinal);
-        Assert.Equal(1_024, result.MaxOutputTokens);
+        Assert.Equal(8_192 - result.EstimatedTokens, result.MaxOutputTokens);
 
         using var envelope = JsonDocument.Parse(Assert.IsType<string>(result.RequestEnvelopeJson));
         var root = envelope.RootElement;
         Assert.Equal("barebone.general.markdown.request.v1", root.GetProperty("schema").GetString());
         Assert.Equal("document_qa", root.GetProperty("route").GetProperty("route").GetString());
+        Assert.Equal("document", root.GetProperty("route").GetProperty("capabilityProfile").GetString());
+        Assert.Equal("document", root.GetProperty("modePolicy").GetProperty("capabilityProfile").GetString());
         Assert.False(root.GetProperty("modePolicy").GetProperty("cadToolsAllowed").GetBoolean());
         Assert.Contains(root.GetProperty("policyRefs").EnumerateArray(), static value => value.GetString() == "documents");
         Assert.Contains("ZWEI", root.GetProperty("documentContext").GetProperty("selectedText").GetString(), StringComparison.Ordinal);
@@ -58,7 +60,7 @@ public sealed class ChatAndContextTests
     }
 
     [Fact]
-    public void GeneralChatEnvelopeUsesTgaPoliciesAndStructuredResponseContract()
+    public void GeneralChatEnvelopeUsesGeneralPoliciesAndStructuredResponseContract()
     {
         var result = new GoWinUI.Core.Chat.ContextAssembler().Build(new(
             "GO Anwendungshinweis.",
@@ -78,17 +80,24 @@ public sealed class ChatAndContextTests
         Assert.True(root.GetProperty("responseContract").GetProperty("sessionTitle").GetProperty("refreshOnEveryRun").GetBoolean());
         Assert.Equal(6, root.GetProperty("responseContract").GetProperty("sessionTitle").GetProperty("maximumWords").GetInt32());
         Assert.True(root.GetProperty("responseContract").GetProperty("contextSummary").GetProperty("mustNotContainMarkdown").GetBoolean());
-        Assert.Equal("TGA-Fachplanung", root.GetProperty("domainProfile").GetProperty("name").GetString());
-        Assert.True(root.GetProperty("domainProfile").GetProperty("applicationNameIsNotProgrammingLanguage").GetBoolean());
+        Assert.Equal("Allgemeine Assistenz", root.GetProperty("domainProfile").GetProperty("name").GetString());
+        Assert.True(root.GetProperty("domainProfile").GetProperty("userTopicDefinesFocus").GetBoolean());
+        Assert.Equal("general", root.GetProperty("route").GetProperty("capabilityProfile").GetString());
+        Assert.Equal("general", root.GetProperty("modePolicy").GetProperty("capabilityProfile").GetString());
+        Assert.Collection(root.GetProperty("domainProfile").GetProperty("focus").EnumerateArray(),
+            static value => Assert.Equal("Code", value.GetString()),
+            static value => Assert.Equal("Wissen", value.GetString()),
+            static value => Assert.Equal("Schreiben", value.GetString()),
+            static value => Assert.Equal("Analyse", value.GetString()),
+            static value => Assert.Equal("Planung", value.GetString()));
         Assert.Collection(
             root.GetProperty("policyRefs").EnumerateArray(),
             static value => Assert.Equal("general", value.GetString()));
-        Assert.Equal(8_192, result.MaxOutputTokens);
+        Assert.Equal(131_072 - result.EstimatedTokens, result.MaxOutputTokens);
         Assert.Contains("|---|---|", result.Messages[0].Content, StringComparison.Ordinal);
         Assert.Contains("\\[...\\]", result.Messages[0].Content, StringComparison.Ordinal);
-        Assert.Contains("Technischen Gebäudeausrüstung", result.Messages[0].Content, StringComparison.Ordinal);
         Assert.Contains("Programmiersprache Go", result.Messages[0].Content, StringComparison.Ordinal);
-        Assert.Contains("Biete keine Go-Programmierung", result.Messages[0].Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("Biete keine Go-Programmierung", result.Messages[0].Content, StringComparison.Ordinal);
 
         using var transmittedEnvelope = JsonDocument.Parse(result.Messages[^1].Content);
         Assert.Equal("Erstelle eine Vergleichstabelle.", transmittedEnvelope.RootElement.GetProperty("originalUserPrompt").GetString());
@@ -102,28 +111,28 @@ public sealed class ChatAndContextTests
     {
         const string raw = """
             ```json
-            {"schema":"barebone.agent.response.v2","type":"message","message":"## Heizlast\n\nDie Berechnung ist vorbereitet.","sessionTitle":"Heizlast Bestand fachlich prüfen"}
+            {"schema":"barebone.agent.response.v2","type":"message","message":"## Algorithmus\n\nDie Analyse ist vorbereitet.","sessionTitle":"Suchalgorithmus auf Korrektheit prüfen"}
             ```
             """;
 
         var response = GeneralAgentResponseParser.Parse(raw, "Hallo");
 
         Assert.True(response.IsStructured);
-        Assert.Equal("## Heizlast\n\nDie Berechnung ist vorbereitet.", response.Message);
-        Assert.Equal("Heizlast Bestand fachlich prüfen", response.SessionTitle);
-        Assert.Equal("Heizlast Die Berechnung ist vorbereitet.", response.ContextSummary);
+        Assert.Equal("## Algorithmus\n\nDie Analyse ist vorbereitet.", response.Message);
+        Assert.Equal("Suchalgorithmus auf Korrektheit prüfen", response.SessionTitle);
+        Assert.Equal("Algorithmus Die Analyse ist vorbereitet.", response.ContextSummary);
     }
 
     [Fact]
     public void LegacySessionTitleMarkerIsRemovedFromTheVisibleAnswer()
     {
-        const string raw = "GO_SESSION_TITLE: Projektstart BricsCAD CATS\n\n## Projektstart\n\nRäume werden in BricsCAD vorbereitet.";
+        const string raw = "GO_SESSION_TITLE: Projektstart mit Python\n\n## Projektstart\n\nTests werden mit Python vorbereitet.";
 
         var response = GeneralAgentResponseParser.Parse(raw, "Projekt starten");
 
         Assert.DoesNotContain("GO_SESSION_TITLE", response.Message, StringComparison.Ordinal);
-        Assert.Equal("Projektstart BricsCAD CATS", response.SessionTitle);
-        Assert.Equal("Projektstart Räume werden in BricsCAD vorbereitet.", response.ContextSummary);
+        Assert.Equal("Projektstart mit Python", response.SessionTitle);
+        Assert.Equal("Projektstart Tests werden mit Python vorbereitet.", response.ContextSummary);
     }
 
     [Fact]
@@ -178,9 +187,9 @@ public sealed class ChatAndContextTests
     [Fact]
     public void WorkflowMetadataConvertsMarkdownToShortPlainText()
     {
-        const string markdown = "**Projektstart mit BricsCAD & C.A.T.S. – Raum-Erstellung**\n\n---\n\n## 1 Projektvorbereitung in BricsCAD\n\n| Schritt | Aktion | Hinweis |";
+        const string markdown = "**Projektstart mit Python & SQLite – Datenimport**\n\n---\n\n## 1 Projektvorbereitung mit Python\n\n| Schritt | Aktion | Hinweis |";
 
-        Assert.Equal("Projektstart mit BricsCAD & C.A.T.S. – Raum-Erstellung", GeneralAgentResponseParser.CreateWorkflowTitle(markdown));
+        Assert.Equal("Projektstart mit Python & SQLite – Datenimport", GeneralAgentResponseParser.CreateWorkflowTitle(markdown));
         var summary = GeneralAgentResponseParser.CreateContextSummary(null, markdown);
         Assert.DoesNotContain("**", summary, StringComparison.Ordinal);
         Assert.DoesNotContain("|", summary, StringComparison.Ordinal);
@@ -191,11 +200,63 @@ public sealed class ChatAndContextTests
     public void GenericGreetingNeverBecomesTheSessionTitleFallback()
     {
         var response = GeneralAgentResponseParser.Parse(
-            "Hallo! Wobei kann ich dich in der TGA-Planung unterstützen?",
+            "Hallo! Wobei kann ich dir helfen?",
             "Hallo");
 
         Assert.False(response.IsStructured);
-        Assert.Equal("Einstieg in die TGA-Fachplanung", response.SessionTitle);
+        Assert.Equal("Gespräch mit GO", response.SessionTitle);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuiltInPoliciesDoNotAssumeAnIndustryOrExcludeProgramming(bool hasDocumentContext)
+    {
+        var policy = GeneralChatPolicies.Compose(string.Empty, hasDocumentContext);
+        Assert.Contains("Code, Wissen, Schreiben, Analyse und Planung", policy, StringComparison.Ordinal);
+        Assert.Contains("Fragen zur Programmiersprache Go sind ebenso zulässig", policy, StringComparison.Ordinal);
+        Assert.Contains("Hallo! Wobei kann ich dir helfen?", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("TGA", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Gebäudeausrüstung", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Heizung", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Elektro", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Norminhalte", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("SI-Einheiten", policy, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("Erkläre Interfaces in Go.")]
+    [InlineData("Prüfe diesen C#-Algorithmus auf Fehler.")]
+    [InlineData("Plane meinen Lernplan für Englisch.")]
+    [InlineData("Überarbeite meinen Bewerbungstext.")]
+    public void GeneralRequestsRetainTheirOriginalTopicWithoutAForcedSpecialty(string prompt)
+    {
+        var result = new ContextAssembler().Build(new("Beachte den Nutzerauftrag.", prompt, [], null, [], 32_768));
+        using var envelope = JsonDocument.Parse(result.Messages[^1].Content);
+        Assert.Equal(prompt, envelope.RootElement.GetProperty("originalUserPrompt").GetString());
+        Assert.Equal("general", envelope.RootElement.GetProperty("route").GetProperty("capabilityProfile").GetString());
+        Assert.DoesNotContain("TGA", result.Messages[0].Content, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Biete keine", result.Messages[0].Content, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("Go")]
+    [InlineData("SQL")]
+    [InlineData("C#")]
+    [InlineData("C++")]
+    [InlineData("R")]
+    public void ShortProgrammingTopicsAreNotMistakenForGreetings(string prompt)
+    {
+        var response = GeneralAgentResponseParser.Parse("Welche Frage möchtest du dazu klären?", prompt);
+        Assert.Equal(prompt, response.SessionTitle);
+    }
+
+    [Fact]
+    public void SessionTitleNormalizationPreservesLanguageNamesAndLimitsWords()
+    {
+        Assert.Equal("Einstieg in C#", GeneralAgentResponseParser.NormalizeTitle("## **Einstieg in C#**"));
+        Assert.Equal("Eine konkrete Analyse der bestehenden Python", GeneralAgentResponseParser.NormalizeTitle("Eine konkrete Analyse der bestehenden Python Anwendung mit Tests"));
+        Assert.Null(GeneralAgentResponseParser.NormalizeTitle("## Neue Sitzung"));
     }
 
     private static string FindRepositoryRoot()

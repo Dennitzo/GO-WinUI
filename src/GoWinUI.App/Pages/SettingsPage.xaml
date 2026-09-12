@@ -99,7 +99,18 @@
           <TextBlock
             Margin="0,-6,0,0"
             Foreground="{ThemeResource GoMutedTextBrush}"
-            Text="Modellliste und Kontextgrenzen werden automatisch aus LM Studio geladen. Reasoning verwendet unverändert den in LM Studio konfigurierten Modellstandard. Auch neue lokale Modelle erscheinen ohne App-Neubau in der Auswahlliste."
+            Text="Die native Unsloth-Laufzeit erkennt lokale GGUF-Modelle und ihre Fähigkeiten. General und Coding verwenden unabhängig ausgewählte Textmodelle aus demselben Modellordner; Vision und Embedding werden automatisch zugeordnet."
+            TextWrapping="Wrap" />
+
+          <ComboBox
+            Header="Coding AI Modell"
+            ItemsSource="{x:Bind ViewModel.CodingModels, Mode=OneWay}"
+            DisplayMemberPath="DisplayName"
+            SelectedItem="{x:Bind ViewModel.SelectedCodingModelItem, Mode=TwoWay}" />
+          <TextBlock
+            Margin="0,-6,0,0"
+            Foreground="{ThemeResource GoMutedTextBrush}"
+            Text="{x:Bind ViewModel.CodingModelStatus, Mode=OneWay}"
             TextWrapping="Wrap" />
 
         </StackPanel>
@@ -122,6 +133,11 @@
               <ComboBoxItem Content="English" Tag="en-US" />
             </ComboBox>
           </StackPanel>
+          <ToggleSwitch
+            Header="Werkzeugschritte automatisch aufklappen"
+            IsOn="{x:Bind ViewModel.CodingToolStepsExpanded, Mode=TwoWay}"
+            OffContent="Standardmäßig eingeklappt"
+            OnContent="Standardmäßig ausgeklappt" />
           <StackPanel Spacing="7">
             <TextBlock FontWeight="SemiBold" Text="Akzentfarbe" />
             <ListView x:Name="AccentColorList" HorizontalAlignment="Stretch" ItemsSource="{x:Bind AccentColors}" SelectionChanged="OnAccentColorChanged" SelectionMode="Single">

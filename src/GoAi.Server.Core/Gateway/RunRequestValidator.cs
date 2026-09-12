@@ -12,10 +12,11 @@ public static class RunRequestValidator
         "documents",
         "documentIo",
         "pdf",
+        "coding",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
-        "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
+        "web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze",
         "image.generate", "math.evaluate", "context.embed", "context.retrieve",
     };
 
@@ -33,6 +34,11 @@ public static class RunRequestValidator
         if (request.ConversationProfile is { } conversationProfile && !Enum.IsDefined(conversationProfile))
         {
             throw new ArgumentException("Conversation profile is invalid.");
+        }
+        if (request.Mode == RunMode.Coding
+            && request.ClientCapabilities?.Contains("coding", StringComparer.OrdinalIgnoreCase) != true)
+        {
+            throw new ArgumentException("Coding runs require the coding capability and a selected local workspace.");
         }
         if (request.ConversationProfile == ConversationProfile.Audiobook
             && (request.Mode != RunMode.General || request.AllowedServerTools is not { Count: 0 }))
@@ -134,6 +140,10 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("The run contains unknown or excessive allowed server tools.");
         }
+        if (request.AllowedServerTools?.Contains("web.deepResearch", StringComparer.Ordinal) == true
+            && (request.Mode != RunMode.Coding || !request.AllowedServerTools.Contains("web.search", StringComparer.Ordinal)
+                || !request.AllowedServerTools.Contains("web.fetch", StringComparer.Ordinal)))
+            throw new ArgumentException("web.deepResearch requires Coding mode and explicit web.search/web.fetch permission.");
         if (request.SessionId?.Length > 128)
         {
             throw new ArgumentException("sessionId may contain at most 128 characters.");
@@ -184,8 +194,8 @@ public static class RunRequestValidator
         }
         if (request.ReasoningEffort is { } reasoningEffort)
         {
-            var reasoningModelId = request.PreferredGeneralModelId;
-            const string reasoningRole = "general";
+            var reasoningModelId = request.Mode == RunMode.Coding ? request.PreferredCodingModelId : request.PreferredGeneralModelId;
+            var reasoningRole = request.Mode == RunMode.Coding ? "coding" : "general";
             var reasoningProfile = ModelReasoningProfiles.Resolve(reasoningModelId, reasoningRole);
             if (string.IsNullOrWhiteSpace(reasoningModelId)
                 || reasoningEffort.Length > 16
@@ -200,20 +210,25 @@ public static class RunRequestValidator
                     $"reasoningEffort '{reasoningEffort}' wird vom ausgewählten Modell nicht unterstützt ({supported}).");
             }
         }
-        if (request.Limits?.MaximumOutputTokens is { } maximumOutputTokens
-            && maximumOutputTokens is < 1 or > 65_536)
+        if (request.PreferredCodingModelId is { } codingModel
+            && (string.IsNullOrWhiteSpace(codingModel) || codingModel.Length > 512 || codingModel.Any(char.IsControl)))
         {
-            throw new ArgumentException("maximumOutputTokens must be between 1 and 65536.");
+            throw new ArgumentException("preferredCodingModelId must contain a bounded model ID.");
+        }
+        if (request.Limits?.MaximumOutputTokens is { } maximumOutputTokens
+            && maximumOutputTokens < 1)
+        {
+            throw new ArgumentException("maximumOutputTokens must be positive; the loaded model context bounds the effective limit.");
         }
         if (request.Limits?.MaximumContextTokens is { } maximumContextTokens
-            && maximumContextTokens is < 1_024 or > 262_144)
+            && maximumContextTokens < 2_048)
         {
-            throw new ArgumentException("maximumContextTokens must be between 1024 and 262144.");
+            throw new ArgumentException("maximumContextTokens must be at least 2048; the model catalog bounds the effective limit.");
         }
         if (request.Limits?.TimeoutSeconds is { } timeoutSeconds
-            && timeoutSeconds is < 30 or > 14_400)
+            && (request.Mode == RunMode.Coding ? timeoutSeconds != 0 && timeoutSeconds < 30 : timeoutSeconds is < 30 or > 14_400))
         {
-            throw new ArgumentException("timeoutSeconds must be between 30 and 14400.");
+            throw new ArgumentException("timeoutSeconds must be 0 (unlimited Coding) or at least 30; non-Coding runs support 30 through 14400 seconds.");
         }
     }
 

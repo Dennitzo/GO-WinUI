@@ -1,4 +1,4 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using GoAi.Server.Core.Runs;
 
 namespace GoAi.Server.Tests;
@@ -42,7 +42,7 @@ public sealed class ModelRouterTests
     {
         using var context = new TestServerContext();
         var router = new ModelRouter(context.WrappedOptions);
-        var request = CreateRequest(RunMode.General, "TGA erklären") with
+        var request = CreateRequest(RunMode.General, "Rekursion erklären") with
         {
             PreferredGeneralModelId = "gpt-oss-120b",
         };

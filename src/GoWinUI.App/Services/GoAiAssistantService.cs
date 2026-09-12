@@ -2,6 +2,7 @@ using GoAi.Client;
 using GoAi.Contracts;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Chat;
+using GoWinUI.Core.Coding;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
@@ -36,7 +37,8 @@ public sealed record GoAiAssistantUpdate(
     int? ContextUsed = null,
     int? ContextLimit = null,
     int? LoadedFiles = null,
-    bool ContextWasCompacted = false);
+    bool ContextWasCompacted = false,
+    AssistantToolStep? ToolStep = null);
 
 public sealed record GoAiSpeechUpdate(
     bool IsActive,
@@ -69,7 +71,7 @@ internal sealed class GoAiRunTerminalException(
     public bool Retryable { get; } = retryable;
 }
 
-public sealed class GoAiAssistantService(
+public sealed partial class GoAiAssistantService(
     GoAiConnectionService connection,
     IChatRepository chats,
     IAssistantAttachmentRepository attachments,
@@ -88,6 +90,7 @@ public sealed class GoAiAssistantService(
     ILogger<GoAiAssistantService> logger) : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
+    private static readonly JsonSerializerOptions ToolDisplayJsonOptions = new() { WriteIndented = true };
     private static readonly Action<ILogger, string, string, Exception?> RunDiagnostic = LoggerMessage.Define<string, string>(
         LogLevel.Information,
         new EventId(5300, nameof(RunDiagnostic)),
@@ -98,6 +101,8 @@ public sealed class GoAiAssistantService(
     private CancellationTokenSource? _activeSpeechCancellation;
     private string? _activeServerRunId;
     private string? _activeSessionId;
+    private string? _activeCodingWorkspace;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _codingWorkspaces = new(StringComparer.Ordinal);
     private int _explicitCancellation;
     private int _startupRunsStopped;
     private int _speechActive;
@@ -160,8 +165,8 @@ public sealed class GoAiAssistantService(
                 sessionAttachments,
                 _activeCancellation.Token).ConfigureAwait(false);
             var assistant = turn.AssistantMessage;
-            var contextLimit = ModelContextProfiles.ResolveMaximum(settings.Current.SelectedModel, "general");
-            var initialModel = settings.Current.SelectedModel;
+            var initialModel = action == PromptTriggerAction.Coding ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
+            var contextLimit = ModelContextProfiles.ResolveMaximum(initialModel, action == PromptTriggerAction.Coding ? "coding" : "general");
             await update(new(
                 GoAiAssistantUpdateKind.Started,
                 assistant,
@@ -218,6 +223,7 @@ public sealed class GoAiAssistantService(
         finally
         {
             _activeServerRunId = null;
+            _activeCodingWorkspace = null;
             Volatile.Write(ref _activeSessionId, null);
             _activeCancellation?.Dispose();
             _activeCancellation = null;
@@ -248,6 +254,27 @@ public sealed class GoAiAssistantService(
                     continue;
                 }
                 _activeServerRunId = run.ServerRunId;
+                if (run.Action == PromptTriggerAction.Coding)
+                {
+                    try
+                    {
+                        _activeCodingWorkspace = ResolvePersistedCodingWorkspace(run);
+                        _codingWorkspaces[run.ServerRunId] = _activeCodingWorkspace;
+                    }
+                    catch (InvalidDataException exception)
+                    {
+                        await runs.UpdateAsync(run.Id, run.ServerRunId, run.LastEventId, "failed",
+                            errorCode: "run.workspace_missing", cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                        foreach (var step in (message.ToolSteps ?? []).Where(static step => step.Status == "running"))
+                            await chats.SaveToolStepAsync(message.Id, CompleteOpenToolStep(step, "failed", null), CancellationToken.None).ConfigureAwait(false);
+                        await chats.UpdateMessageAsync(message.Id, message.Content, MessageStatus.Failed, exception.Message,
+                            CancellationToken.None).ConfigureAwait(false);
+                        await CancelPersistedServerRunsAsync([run.ServerRunId], _activeCancellation.Token).ConfigureAwait(false);
+                        var failed = await chats.GetMessageAsync(message.Id, CancellationToken.None).ConfigureAwait(false) ?? message;
+                        await update(new(GoAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Projektordner fehlt")).ConfigureAwait(false);
+                        continue;
+                    }
+                }
                 await update(new(GoAiAssistantUpdateKind.Started, message, Status: "Wird fortgesetzt", Detail: "SSE-Ereignisse werden ab dem letzten bestätigten Ereignis geladen.")).ConfigureAwait(false);
                 try
                 {
@@ -257,16 +284,42 @@ public sealed class GoAiAssistantService(
                 {
                     throw new GoAiStreamDetachedException(cancellationToken);
                 }
+                catch (OperationCanceledException)
+                {
+                    var current = await chats.GetMessageAsync(message.Id, CancellationToken.None).ConfigureAwait(false) ?? message;
+                    await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Cancelled,
+                        cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                    await update(new(GoAiAssistantUpdateKind.Cancelled,
+                        current with { Status = MessageStatus.Cancelled, UpdatedAt = DateTimeOffset.UtcNow }, Status: "Abgebrochen")).ConfigureAwait(false);
+                }
+                catch (GoAiRunTerminalException exception)
+                {
+                    var current = await chats.GetMessageAsync(message.Id, CancellationToken.None).ConfigureAwait(false) ?? message;
+                    var visible = string.IsNullOrWhiteSpace(current.Content) ? VisibleFailure(exception) : current.Content;
+                    await chats.UpdateMessageAsync(current.Id, visible, MessageStatus.Failed, exception.Message,
+                        CancellationToken.None).ConfigureAwait(false);
+                    var failed = await chats.GetMessageAsync(current.Id, CancellationToken.None).ConfigureAwait(false) ?? current;
+                    await update(new(GoAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Fehlgeschlagen")).ConfigureAwait(false);
+                }
             }
             finally
             {
                 _activeServerRunId = null;
+                _activeCodingWorkspace = null;
                 Volatile.Write(ref _activeSessionId, null);
                 _activeCancellation?.Dispose();
                 _activeCancellation = null;
                 _gate.Release();
             }
         }
+    }
+
+    internal static string ResolvePersistedCodingWorkspace(GoAiRunRecord run)
+    {
+        if (string.IsNullOrWhiteSpace(run.WorkspacePath) || !Path.IsPathFullyQualified(run.WorkspacePath)
+            || !Directory.Exists(run.WorkspacePath))
+            throw new InvalidDataException("Der ursprüngliche Projektordner dieses Coding-Laufs ist nicht gespeichert oder nicht mehr vorhanden. Starte die Aufgabe mit einer neuen Nachricht im gewünschten Projekt erneut.");
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(run.WorkspacePath));
     }
 
     public async Task StopPersistedRunsAtStartupAsync(CancellationToken cancellationToken = default)
@@ -300,6 +353,9 @@ public sealed class GoAiAssistantService(
         var serverRunIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var run in staleRuns)
         {
+            // Coding is a durable job. Reconnect to this exact run and its tool
+            // receipts after a client restart instead of cancelling or replaying it.
+            if (run.Action == PromptTriggerAction.Coding && !string.IsNullOrWhiteSpace(run.ServerRunId)) continue;
             await runRepository.UpdateAsync(
                 run.Id,
                 run.ServerRunId,
@@ -374,19 +430,22 @@ public sealed class GoAiAssistantService(
     {
         Interlocked.Exchange(ref _explicitCancellation, 1);
         var serverRunId = _activeServerRunId;
+        try { _activeCancellation?.Cancel(); }
+        catch (ObjectDisposedException) { }
         if (!string.IsNullOrWhiteSpace(serverRunId))
         {
             try
             {
-                using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
-                await client.CancelRunAsync(serverRunId, cancellationToken).ConfigureAwait(false);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(5));
+                using var client = await connection.CreateClientAsync(timeout.Token).ConfigureAwait(false);
+                await client.CancelRunAsync(serverRunId, timeout.Token).ConfigureAwait(false);
             }
-            catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+            catch (Exception exception) when (exception is not OutOfMemoryException && !cancellationToken.IsCancellationRequested)
             {
                 RunDiagnostic(logger, serverRunId, $"cancel request failed ({exception.GetType().Name})", exception);
             }
         }
-        _activeCancellation?.Cancel();
     }
 
     public async Task CancelCurrentAndWaitAsync(CancellationToken cancellationToken = default)
@@ -398,6 +457,7 @@ public sealed class GoAiAssistantService(
 
     public async Task CancelSpeechAsync(CancellationToken cancellationToken = default)
     {
+        CancelAutomaticSpeech();
         var speechCancellation = Volatile.Read(ref _activeSpeechCancellation);
         try
         {
@@ -424,7 +484,7 @@ public sealed class GoAiAssistantService(
         ValidateAnchoredSpeechMessage(message, sessionId, expectedUpdatedAt, anchor);
     }
 
-    public async Task SpeakAsync(
+    public Task SpeakAsync(
         Guid sessionId,
         string? explicitText,
         Guid? sourceMessageId,
@@ -433,6 +493,22 @@ public sealed class GoAiAssistantService(
         SpeechStartAnchor? startAnchor = null,
         DateTimeOffset? expectedMessageUpdatedAt = null,
         CancellationToken cancellationToken = default)
+    {
+        CancelAutomaticSpeech();
+        return SpeakCoreAsync(sessionId, explicitText, sourceMessageId, update, progress,
+            startAnchor, expectedMessageUpdatedAt, null, cancellationToken);
+    }
+
+    private async Task SpeakCoreAsync(
+        Guid sessionId,
+        string? explicitText,
+        Guid? sourceMessageId,
+        Func<GoAiSpeechUpdate, Task> update,
+        Func<SpeechPlaybackProgress, Task>? progress,
+        SpeechStartAnchor? startAnchor,
+        DateTimeOffset? expectedMessageUpdatedAt,
+        SpeechSource? directSource,
+        CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(update);
@@ -452,7 +528,7 @@ public sealed class GoAiAssistantService(
                 "Vorlesen wird vorbereitet",
                 "Der Vorlesekontext wird ermittelt.")).ConfigureAwait(false);
 
-            var source = await ResolveSpeechSourceAsync(
+            var source = directSource ?? await ResolveSpeechSourceAsync(
                 sessionId,
                 explicitText,
                 sourceMessageId,
@@ -898,7 +974,9 @@ public sealed class GoAiAssistantService(
                     assistant,
                     Status: "Wird erneut versucht",
                     Detail: $"Derselbe Prompt wird nach einem technischen Abbruch erneut ausgeführt · Versuch {retryCount} in {delay.TotalSeconds:0} Sekunden",
-                    Model: settings.Current.SelectedModel)).ConfigureAwait(false);
+                    Model: trigger?.Trigger.Action == PromptTriggerAction.Coding
+                        ? settings.Current.SelectedCodingModel
+                        : settings.Current.SelectedModel)).ConfigureAwait(false);
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -935,7 +1013,7 @@ public sealed class GoAiAssistantService(
         }
         IReadOnlyList<AssistantAttachment> uploadSource = action switch
         {
-            PromptTriggerAction.ImageGeneration => [],
+            PromptTriggerAction.ImageGeneration or PromptTriggerAction.Coding => [],
             PromptTriggerAction.AudioAnalysis or PromptTriggerAction.VideoAnalysis or PromptTriggerAction.ImageAnalysis =>
                 selectedMedia is null ? [] : [selectedMedia],
             _ => sessionAttachments,
@@ -947,9 +1025,19 @@ public sealed class GoAiAssistantService(
         {
             RunAccepted accepted;
             var idempotencyKey = $"go-client-{Guid.NewGuid():N}";
+            if (action == PromptTriggerAction.Coding)
+            {
+                var codingSession = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
+                _activeCodingWorkspace ??= codingSession?.CodingWorkspacePath;
+                if (string.IsNullOrWhiteSpace(_activeCodingWorkspace) || !Path.IsPathFullyQualified(_activeCodingWorkspace)
+                    || !Directory.Exists(_activeCodingWorkspace))
+                    throw new InvalidOperationException("Wähle über den Coding-Chip zuerst einen vorhandenen Projektordner.");
+                _activeCodingWorkspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_activeCodingWorkspace));
+            }
             var attempt = new GoAiRunRecord(
                 Guid.NewGuid(), assistant.SessionId, assistant.Id, action, idempotencyKey, null, 0, "queued",
-                null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+                null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                WorkspacePath: action == PromptTriggerAction.Coding ? _activeCodingWorkspace : null);
             localRun = await runs.BeginAttemptAsync(attempt, cancellationToken).ConfigureAwait(false);
             if (action == PromptTriggerAction.ImageGeneration)
             {
@@ -963,9 +1051,9 @@ public sealed class GoAiAssistantService(
                 var analysisPrompt = string.IsNullOrWhiteSpace(requestedAnalysis)
                     ? action switch
                     {
-                        PromptTriggerAction.ImageAnalysis => "Analysiere dieses Bild fachlich für die TGA-Planung. Nenne sichtbare Befunde, Unsicherheiten und erforderliche Prüfungen.",
-                        PromptTriggerAction.VideoAnalysis => "Analysiere diesen Bildschirm- oder Videoclip fachlich für die TGA-Planung. Beschreibe zeitcodiert relevante Vorgänge, Befunde, Unsicherheiten und erforderliche Prüfungen.",
-                        _ => "Analysiere diese Audioaufnahme fachlich für die TGA-Planung. Fasse Inhalte, Entscheidungen, offene Punkte und Unsicherheiten zusammen.",
+                        PromptTriggerAction.ImageAnalysis => "Analysiere dieses Bild. Beschreibe relevante sichtbare Inhalte und kennzeichne Unsicherheiten.",
+                        PromptTriggerAction.VideoAnalysis => "Analysiere diesen Bildschirm- oder Videoclip. Beschreibe relevante Vorgänge mit Zeitangaben und kennzeichne Unsicherheiten.",
+                        _ => "Analysiere diese Audioaufnahme. Fasse Inhalte, Entscheidungen, offene Punkte und Unsicherheiten zusammen.",
                     }
                     : requestedAnalysis;
                 accepted = await client.AnalyzeMediaAsync(
@@ -987,6 +1075,10 @@ public sealed class GoAiAssistantService(
                     update,
                     cancellationToken).ConfigureAwait(false);
                 accepted = await client.CreateRunAsync(request, idempotencyKey, cancellationToken).ConfigureAwait(false);
+                if (request.Mode == RunMode.Coding && localRun.WorkspacePath is { } workspace)
+                {
+                    _codingWorkspaces[accepted.RunId] = workspace;
+                }
             }
 
             localRun = localRun with { ServerRunId = accepted.RunId, State = ToStorage(accepted.State), UpdatedAt = DateTimeOffset.UtcNow };
@@ -1106,7 +1198,7 @@ public sealed class GoAiAssistantService(
         Exception exception,
         CancellationToken cancellationToken = default)
     {
-        if (cancellationToken.IsCancellationRequested || exception is OperationCanceledException)
+        if (action == PromptTriggerAction.Coding || cancellationToken.IsCancellationRequested || exception is OperationCanceledException)
         {
             return false;
         }
@@ -1139,35 +1231,74 @@ public sealed class GoAiAssistantService(
         or "run.timeout"
         or "run.gateway_stopped";
 
-    internal static string? FormatModelTokenProgress(
-        ModelGenerationEvent progress,
-        ref int activeRunTokens,
-        ref bool hasRunStarted)
+    internal sealed class ModelTokenProgressState
     {
-        if (string.Equals(progress.State, "generationStarted", StringComparison.Ordinal))
+        public int ActiveTokens { get; set; }
+        public int ProcessedPromptTokens { get; set; }
+        public int GeneratedTokens { get; set; }
+        public bool HasStarted { get; set; }
+    }
+
+    internal static string? FormatModelTokenProgress(ModelGenerationEvent progress, ModelTokenProgressState counter)
+    {
+        if (progress.State == "providerRetryWaiting")
+            return $"Erneuter Verbindungsversuch in {progress.ElapsedSeconds ?? 0} Sekunden · {progress.FailureKind}";
+        if (progress.State is "generationStarted" or "generationRetry")
         {
-            activeRunTokens = 0;
-            hasRunStarted = true;
+            counter.ActiveTokens = 0;
+            counter.ProcessedPromptTokens = 0;
+            counter.GeneratedTokens = 0;
+            counter.HasStarted = true;
+            return "0 Token";
         }
-        else if (string.Equals(progress.State, "tokenProgress", StringComparison.Ordinal)
+        if (progress.State is "codingWaiting" or "codingLoading")
+        {
+            return $"Runde {progress.Attempt ?? 1} · {progress.ElapsedSeconds ?? 0} s · {FormatCurrentModelTokens(counter)}";
+        }
+        if (progress.State == "promptProcessing")
+        {
+            counter.ProcessedPromptTokens = Math.Max(counter.ProcessedPromptTokens, progress.ProcessedPromptTokens ?? 0);
+            counter.ActiveTokens = counter.ProcessedPromptTokens + counter.GeneratedTokens;
+            counter.HasStarted = true;
+            return progress.PromptProgress is { } fraction
+                ? $"Kontext wird verarbeitet · {fraction:P0} · {counter.ProcessedPromptTokens:N0} Token"
+                : $"Kontext wird verarbeitet · {counter.ProcessedPromptTokens:N0} Token";
+        }
+        if (progress.ToolName?.StartsWith("coding.", StringComparison.Ordinal) == true)
+        {
+            return $"{progress.ToolName} · {progress.ArgumentCharacters ?? 0:N0} Zeichen vorbereitet";
+        }
+        if (string.Equals(progress.State, "tokenProgress", StringComparison.Ordinal)
                  && (progress.CurrentTokens is not null
                      || progress.ProcessedPromptTokens is not null
                      || progress.GeneratedTokens is not null))
         {
-            hasRunStarted = true;
-            var currentTokens = progress.CurrentTokens
-                ?? (progress.ProcessedPromptTokens is { } processedPromptTokens
-                    ? Math.Max(0, processedPromptTokens) + Math.Max(0, progress.GeneratedTokens ?? 0)
-                    : progress.GeneratedTokens!.Value);
-            activeRunTokens = Math.Max(activeRunTokens, Math.Max(0, currentTokens));
+            counter.HasStarted = true;
+            if ((progress.ProcessedPromptTokens ?? progress.PromptTokens) is { } processed && processed > 0)
+                counter.ProcessedPromptTokens = processed;
+            if (progress.GeneratedTokens is { } generated)
+                counter.GeneratedTokens = Math.Max(0, generated);
+            else if (progress.CurrentTokens is { } total && counter.ProcessedPromptTokens > 0)
+                counter.GeneratedTokens = Math.Max(0, total - counter.ProcessedPromptTokens);
+            // Native streams initially report CurrentTokens as generated fragments only.
+            // Keep the earlier prompt count separately instead of comparing both units.
+            counter.ActiveTokens = counter.ProcessedPromptTokens + counter.GeneratedTokens;
+            if (counter.GeneratedTokens == 0 && progress.CurrentTokens is { } current)
+                counter.ActiveTokens = Math.Max(counter.ActiveTokens, Math.Max(0, current));
         }
-        else if (!hasRunStarted)
+        else if (!counter.HasStarted)
         {
             return null;
         }
 
-        return $"{activeRunTokens:N0} Token";
+        return FormatCurrentModelTokens(counter);
     }
+
+    private static string FormatCurrentModelTokens(ModelTokenProgressState counter) => counter.GeneratedTokens > 0
+        ? counter.ProcessedPromptTokens > 0
+            ? $"{counter.ProcessedPromptTokens:N0} Kontexttoken · ca. {counter.GeneratedTokens:N0} erzeugte Token"
+            : $"ca. {counter.GeneratedTokens:N0} erzeugte Token"
+        : $"{counter.ActiveTokens:N0} Token";
 
     private async Task<ChatMessage> StreamRunAsync(
         GoAiRunRecord localRun,
@@ -1183,8 +1314,67 @@ public sealed class GoAiAssistantService(
         var collectedArtifacts = (await artifacts.ListForMessageAsync(
             assistant.Id,
             cancellationToken).ConfigureAwait(false)).ToList();
-        var activeModelRunTokens = 0;
-        var hasModelRunStarted = false;
+        var modelTokenProgress = new ModelTokenProgressState();
+        var commandProgressByStep = new Dictionary<string, CodingCommandProgress>(StringComparer.Ordinal);
+        var toolStartOffsets = (assistant.ToolSteps ?? []).Where(static step => step.ContentOffset is not null)
+            .ToDictionary(static step => step.Id, static step => step.ContentOffset!.Value, StringComparer.Ordinal);
+
+        async Task RecordToolStepAsync(string id, string tool, string status, string? detail, bool appendResult = false,
+            string? previewHtml = null, string? inputJson = null, string? outputJson = null, string? explanation = null,
+            DateTimeOffset? eventAt = null)
+        {
+            if (localRun.Action != PromptTriggerAction.Coding) return;
+            var previous = assistant.ToolSteps?.FirstOrDefault(step => step.Id == id);
+            // Replayed terminal events must not append the same result a second time.
+            if (appendResult && previous?.Status == status && status != "running") return;
+            if (appendResult && !string.IsNullOrWhiteSpace(previous?.Detail))
+                detail = (previous.InputJson is not null ? FormatStoredToolInput(previous) : previous.Detail) + "\n\nErgebnis:\n" + detail;
+            if (!toolStartOffsets.TryGetValue(id, out var startOffset)) toolStartOffsets[id] = startOffset = content.Length;
+            var now = NextToolStepUpdate(previous);
+            var step = AssistantToolStep.Merge(previous, new AssistantToolStep(id, tool, status, detail, previewHtml,
+                inputJson, outputJson, explanation, RebaseToolContentOffset(content, startOffset, assistant.Content),
+                previous?.StartedAt ?? eventAt ?? now, status == "running" ? null : eventAt ?? now, now));
+            var steps = await chats.SaveToolStepAsync(assistant.Id, step, CancellationToken.None).ConfigureAwait(false);
+            assistant = assistant with { ToolSteps = steps };
+            await update(new(GoAiAssistantUpdateKind.Status, assistant,
+                Status: status == "running" ? "Werkzeug arbeitet" : status == "completed" ? "Werkzeug abgeschlossen" : "Werkzeug beendet",
+                Detail: tool, Model: model, ToolStep: steps.First(value => value.Id == id))).ConfigureAwait(false);
+        }
+
+        async Task FinishOpenToolStepsAsync(string status)
+        {
+            foreach (var step in (assistant.ToolSteps ?? []).Where(step => step.Status == "running").ToArray())
+            {
+                commandProgressByStep.Remove(step.Id, out var progress);
+                var terminal = CompleteOpenToolStep(step, status, progress);
+                await RecordToolStepAsync(terminal.Id, terminal.Tool, terminal.Status, terminal.Detail,
+                    outputJson: terminal.OutputJson).ConfigureAwait(false);
+            }
+        }
+
+        async Task PersistContentAsync(MessageStatus status, CancellationToken token)
+        {
+            if (localRun.Action == PromptTriggerAction.Coding)
+            {
+                var visible = NormalizeCodingNarration(content);
+                var previousSteps = assistant.ToolSteps ?? [];
+                var rebased = visible.StartsWith(assistant.Content, StringComparison.Ordinal) ? previousSteps : previousSteps.Select(step =>
+                    {
+                        var offset = RebaseToolContentOffset(content, toolStartOffsets.GetValueOrDefault(step.Id, step.ContentOffset ?? 0), visible);
+                        return step.ContentOffset == offset ? step : step with { ContentOffset = offset, UpdatedAt = NextToolStepUpdate(step) };
+                    }).ToArray();
+                if (rebased.SequenceEqual(previousSteps))
+                    await chats.UpdateMessageAsync(assistant.Id, visible, status, cancellationToken: token).ConfigureAwait(false);
+                else
+                    await chats.UpdateMessageWithToolStepsAsync(assistant.Id, visible, status, rebased, token).ConfigureAwait(false);
+                assistant = assistant with { Content = visible, Status = status, ToolSteps = rebased, UpdatedAt = DateTimeOffset.UtcNow };
+            }
+            else
+            {
+                await chats.UpdateMessageAsync(assistant.Id, content, status, cancellationToken: token).ConfigureAwait(false);
+                assistant = assistant with { Content = content, Status = status, UpdatedAt = DateTimeOffset.UtcNow };
+            }
+        }
 
         async Task<ChatMessage> CompleteAsync(
             string runId,
@@ -1192,6 +1382,7 @@ public sealed class GoAiAssistantService(
             string? selectedModel,
             string? serverSessionTitle)
         {
+            await FinishOpenToolStepsAsync("interrupted").ConfigureAwait(false);
             model = selectedModel ?? model;
             if (string.IsNullOrWhiteSpace(content))
             {
@@ -1201,12 +1392,10 @@ public sealed class GoAiAssistantService(
             }
 
             var parsed = GeneralAgentResponseParser.Parse(content, serverSessionTitle ?? string.Empty);
-            content = RemoveDocumentEvidenceFooter(parsed.Message);
-            await chats.UpdateMessageAsync(
-                assistant.Id,
-                content,
-                MessageStatus.Completed,
-                cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            // Coding narration and the tool offsets form one chronological record.
+            // Keep that visible narration instead of replacing it with a parsed envelope.
+            if (localRun.Action != PromptTriggerAction.Coding) content = RemoveDocumentEvidenceFooter(parsed.Message);
+            await PersistContentAsync(MessageStatus.Completed, CancellationToken.None).ConfigureAwait(false);
             await chats.SetMessageContextSummaryAsync(
                 assistant.Id,
                 parsed.ContextSummary,
@@ -1266,6 +1455,10 @@ public sealed class GoAiAssistantService(
                 await toolExecutions.MarkSubmittedAsync(
                     pending.ProposalId,
                     CancellationToken.None).ConfigureAwait(false);
+                await RecordToolStepAsync(pending.ProposalId, pending.ToolName,
+                    GetToolResultStatus(pendingResult),
+                    FormatClientToolResultDetail(pendingResult), appendResult: true,
+                    outputJson: SerializeClientToolOutput(pendingResult, assistant.ToolSteps?.FirstOrDefault(step => step.Id == pending.ProposalId)?.OutputJson)).ConfigureAwait(false);
                 acknowledgedEventId = Math.Max(acknowledgedEventId, pending.EventId);
                 localRun = localRun with
                 {
@@ -1325,11 +1518,21 @@ public sealed class GoAiAssistantService(
                             await update(new(
                                 GoAiAssistantUpdateKind.Status,
                                 assistant,
-                                Status: "Denkt nach",
+                                Status: generation.State switch
+                                {
+                                    "codingLoading" => "Coding-Modell wird geladen",
+                                    "codingWaiting" => "Coding-Modell arbeitet",
+                                    "codingCompacting" => "Projektkontext wird verdichtet",
+                                    "providerRetryWaiting" => "Lokales Modell vorübergehend nicht erreichbar",
+                                    "deepResearchPlanning" => "Deep Research: Recherche planen",
+                                    "deepResearchSearch" => "Deep Research: Quellen suchen",
+                                    "deepResearchFetch" => "Deep Research: Quellen lesen",
+                                    "deepResearchSynthesis" => "Deep Research: Ergebnisse prüfen",
+                                    _ => "Modell generiert",
+                                },
                                 Detail: FormatModelTokenProgress(
                                     generation,
-                                    ref activeModelRunTokens,
-                                    ref hasModelRunStarted),
+                                    modelTokenProgress),
                                 Model: model)).ConfigureAwait(false);
                         }
                         break;
@@ -1355,6 +1558,12 @@ public sealed class GoAiAssistantService(
                         }
                         break;
                     case RunEventTypes.ServerToolStarted:
+                        await RecordToolStepAsync(
+                            StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId") ?? "server-" + item.Id,
+                            StringProperty(item.Data, "tool") ?? "web.search", "running", StringProperty(item.Data, "target"),
+                            inputJson: item.Data.TryGetProperty("arguments", out var serverArguments) ? serverArguments.GetRawText() : JsonSerializer.Serialize(new { target = StringProperty(item.Data, "target") }, JsonOptions),
+                            explanation: DescribeServerTool(StringProperty(item.Data, "tool") ?? "web.search", StringProperty(item.Data, "target")),
+                            eventAt: item.CreatedAt).ConfigureAwait(false);
                         await update(new(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
@@ -1364,8 +1573,19 @@ public sealed class GoAiAssistantService(
                             Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ServerToolCompleted:
+                        var serverToolName = StringProperty(item.Data, "tool") ?? "web.search";
+                        var serverStepId = StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId")
+                            ?? assistant.ToolSteps?.LastOrDefault(step => step.Tool == serverToolName && step.Status == "running")?.Id
+                            ?? "server-" + item.Id;
+                        await RecordToolStepAsync(serverStepId, serverToolName,
+                            item.Data.TryGetProperty("success", out var serverSuccess) && serverSuccess.ValueKind == JsonValueKind.False ? "failed" : "completed",
+                            FormatToolResultDetail(item.Data.TryGetProperty("result", out var serverResult) ? serverResult : item.Data), appendResult: true,
+                            outputJson: SerializeClientToolOutput(new ClientToolResult(serverStepId,
+                                item.Data.TryGetProperty("success", out var succeeded) && succeeded.ValueKind == JsonValueKind.False ? "failed" : "completed",
+                                serverResult.ValueKind == JsonValueKind.Undefined ? item.Data : serverResult,
+                                StringProperty(item.Data, "errorCode"), StringProperty(item.Data, "errorMessage"))), eventAt: item.CreatedAt).ConfigureAwait(false);
                         var extracted = ExtractToolResultText(item.Data);
-                        if (!string.IsNullOrWhiteSpace(extracted))
+                        if (localRun.Action != PromptTriggerAction.Coding && !string.IsNullOrWhiteSpace(extracted))
                         {
                             content = AppendContent(content, extracted);
                             await chats.UpdateMessageAsync(
@@ -1383,18 +1603,17 @@ public sealed class GoAiAssistantService(
                         }
                         break;
                     case RunEventTypes.TextDelta:
-                        content += item.Data.Deserialize<TextDeltaEvent>(JsonOptions)?.Delta ?? string.Empty;
-                        await chats.UpdateMessageAsync(
-                            assistant.Id,
-                            content,
-                            MessageStatus.Streaming,
-                            cancellationToken: cancellationToken).ConfigureAwait(false);
-                        assistant = assistant with
+                        var textDelta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions);
+                        content = ApplyTextDelta(content, textDelta);
+                        if (textDelta?.ReplaceFrom == 0 && localRun.Action == PromptTriggerAction.Coding)
                         {
-                            Content = content,
-                            Status = MessageStatus.Streaming,
-                            UpdatedAt = DateTimeOffset.UtcNow,
-                        };
+                            content = NormalizeCodingNarration(content);
+                            // Earlier steps belong to the unchanged preceding turns. Their
+                            // stored offsets already refer to sanitized, visible narration.
+                            foreach (var step in assistant.ToolSteps ?? [])
+                                toolStartOffsets[step.Id] = step.ContentOffset ?? 0;
+                        }
+                        await PersistContentAsync(MessageStatus.Streaming, cancellationToken).ConfigureAwait(false);
                         await update(new(GoAiAssistantUpdateKind.Delta, assistant)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ClientToolProposed:
@@ -1412,11 +1631,28 @@ public sealed class GoAiAssistantService(
                             Status: "Lokale Aktion",
                             Detail: proposal.Summary,
                             Model: model)).ConfigureAwait(false);
+                        await RecordToolStepAsync(proposal.ProposalId, proposal.Name, "running", FormatToolInputDetail(proposal),
+                            previewHtml: GetToolPreviewHtml(proposal), inputJson: proposal.Arguments.GetRawText(),
+                            explanation: proposal.Summary, eventAt: item.CreatedAt).ConfigureAwait(false);
                         var result = await ExecuteClientToolOnceAsync(
                             localRun,
                             item,
                             proposal,
+                            async progress =>
+                            {
+                                commandProgressByStep[proposal.ProposalId] = progress;
+                                var outputJson = SerializeToolProgress(progress);
+                                await RecordToolStepAsync(proposal.ProposalId, proposal.Name, "running",
+                                    FormatToolInputDetail(proposal) + "\n\n" + FormatProgressOutputDetail(progress),
+                                    outputJson: outputJson).ConfigureAwait(false);
+                            },
                             cancellationToken).ConfigureAwait(false);
+                        commandProgressByStep.Remove(proposal.ProposalId, out var finalProgress);
+                        await RecordToolStepAsync(proposal.ProposalId, proposal.Name,
+                            GetToolResultStatus(result),
+                            FormatClientToolResultDetail(result, finalProgress), appendResult: true,
+                            outputJson: SerializeClientToolOutput(result, assistant.ToolSteps?.FirstOrDefault(step => step.Id == proposal.ProposalId)?.OutputJson,
+                                finalProgress)).ConfigureAwait(false);
                         if (proposal.Name == ClientToolNames.DocumentCreate
                             && string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase))
                         {
@@ -1433,6 +1669,12 @@ public sealed class GoAiAssistantService(
                             item.RunId,
                             result,
                             cancellationToken).ConfigureAwait(false);
+                        await update(new(
+                            GoAiAssistantUpdateKind.Status,
+                            assistant,
+                            Status: result.Status == "completed" ? "Werkzeug abgeschlossen" : "Werkzeug fehlgeschlagen",
+                            Detail: $"{proposal.Name} · {result.Message ?? result.Status}",
+                            Model: model)).ConfigureAwait(false);
                         await toolExecutions.MarkSubmittedAsync(
                             proposal.ProposalId,
                             CancellationToken.None).ConfigureAwait(false);
@@ -1472,6 +1714,7 @@ public sealed class GoAiAssistantService(
                             completed?.ModelId,
                             completed?.SessionTitle).ConfigureAwait(false);
                     case RunEventTypes.RunFailed:
+                        await FinishOpenToolStepsAsync("failed").ConfigureAwait(false);
                         var failed = item.Data.Deserialize<RunFailedEvent>(JsonOptions);
                         await runs.UpdateAsync(
                             localRun.Id,
@@ -1486,6 +1729,7 @@ public sealed class GoAiAssistantService(
                             failed?.Message ?? "Der Serverlauf ist fehlgeschlagen.",
                             failed?.Retryable ?? false);
                     case RunEventTypes.RunCancelled:
+                        await FinishOpenToolStepsAsync("cancelled").ConfigureAwait(false);
                         await runs.UpdateAsync(
                             localRun.Id,
                             item.RunId,
@@ -1556,6 +1800,12 @@ public sealed class GoAiAssistantService(
         }
         catch (GoAiRunTerminalException)
         {
+            await FinishOpenToolStepsAsync("failed").ConfigureAwait(false);
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            await FinishOpenToolStepsAsync("cancelled").ConfigureAwait(false);
             throw;
         }
         catch (GoAiStreamDisconnectedException)
@@ -1585,10 +1835,169 @@ public sealed class GoAiAssistantService(
         }
     }
 
+    internal static string ApplyTextDelta(string content, TextDeltaEvent? delta) => delta?.ReplaceFrom switch
+    {
+        null => content + (delta?.Delta ?? string.Empty),
+        0 => delta.Delta,
+        _ => throw new InvalidDataException("Eine Textkorrektur muss die vollständige AI-Nachricht enthalten."),
+    };
+
+    internal static string FormatToolInputDetail(ToolProposal proposal)
+    {
+        var args = proposal.Arguments;
+        if (proposal.Name == ClientToolNames.CodingCommand)
+        {
+            var command = JsonSerializer.Serialize(args, ToolDisplayJsonOptions);
+            return "Prozessaufruf:\n" + ToolCodeBlock("json", command)
+                + (StringProperty(args, "workingDirectory") is null ? "\nworkingDirectory: . (ausgewähltes Projekt)" : string.Empty);
+        }
+        var path = StringProperty(args, "path") ?? ".";
+        if (args.ValueKind == JsonValueKind.Object && proposal.Name is (ClientToolNames.CodingEdit or ClientToolNames.CodingWrite))
+        {
+            var diff = new StringBuilder();
+            var edits = args.TryGetProperty("edits", out var batch) && batch.ValueKind == JsonValueKind.Array
+                ? batch.EnumerateArray().ToArray() : [args];
+            foreach (var edit in edits)
+            {
+                var oldText = StringProperty(edit, "oldText") ?? string.Empty;
+                var newText = StringProperty(edit, "newText") ?? StringProperty(edit, "content") ?? string.Empty;
+                foreach (var line in oldText.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+                    if (oldText.Length > 0) diff.Append('-').AppendLine(line);
+                foreach (var line in newText.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+                    diff.Append('+').AppendLine(line);
+            }
+            var metadata = args.EnumerateObject().Where(property => property.Name is not ("oldText" or "newText" or "content" or "edits"))
+                .ToDictionary(property => property.Name, property => property.Value, StringComparer.Ordinal);
+            return "Datei: " + path + "\n\n" + ToolCodeBlock("diff", diff.ToString())
+                + "\nVorgeschlagene Änderung; Ausführungsstatus siehe Werkzeugschritt.\n\nParameter:\n"
+                + ToolCodeBlock("json", JsonSerializer.Serialize(metadata, ToolDisplayJsonOptions));
+        }
+        return "Eingabe:\n" + FormatToolResultDetail(args);
+    }
+
+    internal static string? GetToolPreviewHtml(ToolProposal proposal) => proposal.Name == "coding.renderHtml"
+        && StringProperty(proposal.Arguments, "code") is { Length: > 0 and <= 16_000 } html ? html : null;
+
+    internal static string GetToolResultStatus(ClientToolResult result) => result.Status == "rejected" ? "denied"
+        : result.Status != "completed" || (result.Result.ValueKind == JsonValueKind.Object
+            && result.Result.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
+            ? "failed" : "completed";
+
+    internal static string FormatClientToolResultDetail(ClientToolResult result, CodingCommandProgress? lastProgress = null)
+    {
+        var detail = FormatToolResultDetail(result.Result);
+        if (!string.IsNullOrEmpty(result.ErrorCode) || !string.IsNullOrEmpty(result.Message))
+            detail += "\n\nDiagnose:\n" + FormatToolResultDetail(JsonSerializer.SerializeToElement(new
+        {
+            result.ErrorCode, result.Message,
+        }, JsonSerializerOptions.Web));
+        var hasFinalCommandOutput = result.Result.ValueKind == JsonValueKind.Object
+            && result.Result.TryGetProperty("exitCode", out _)
+            && result.Result.TryGetProperty("stdout", out _)
+            && result.Result.TryGetProperty("stderr", out _);
+        // A callback or client failure can replace the process result with an error receipt.
+        // Keep its actual partial streams, while a complete process result remains authoritative.
+        return lastProgress is not null && !hasFinalCommandOutput
+            ? detail + "\n\n" + FormatCommandPartialOutput(lastProgress)
+            : detail;
+    }
+
+    internal static AssistantToolStep CompleteOpenToolStep(AssistantToolStep step, string status, CodingCommandProgress? lastProgress) =>
+        step with
+        {
+            Status = status,
+            OutputJson = CompleteToolOutput(step, status, lastProgress),
+            CompletedAt = step.CompletedAt ?? DateTimeOffset.UtcNow,
+            UpdatedAt = NextToolStepUpdate(step),
+            Detail = step.Tool == ClientToolNames.CodingCommand && lastProgress is not null
+                ? (step.Detail is { Length: > 0 } detail ? detail + "\n\n" : string.Empty)
+                    + FormatCommandPartialOutput(lastProgress)
+                : step.Detail,
+        };
+
+    private static string FormatCommandPartialOutput(CodingCommandProgress progress) =>
+        $"Letzte empfangene Teilausgabe bei {progress.ElapsedMilliseconds} ms; kein abschließender Prozessstatus verfügbar."
+        + $" Ausgabe gekürzt: {(progress.Truncated ? "ja" : "nein")}"
+        + "\n\nStandardausgabe (stdout):\n" + ToolCodeBlock("text", progress.Stdout)
+        + "\n\nFehlerausgabe (stderr):\n" + ToolCodeBlock("text", progress.Stderr);
+
+    internal static string FormatToolResultDetail(JsonElement result)
+    {
+        if (result.ValueKind == JsonValueKind.Undefined) return "Kein Ergebnis verfügbar.";
+        if (result.ValueKind == JsonValueKind.Object && result.TryGetProperty("exitCode", out var exitCode)
+            && result.TryGetProperty("stdout", out var stdout) && result.TryGetProperty("stderr", out var stderr))
+        {
+            return FormatCommandResultDetail(result, exitCode, stdout, stderr, "text");
+        }
+        if (result.ValueKind == JsonValueKind.Object && result.TryGetProperty("diff", out var diffValue))
+        {
+            var detail = new StringBuilder("Änderungen:\n").Append(FormatDiffResultDetail(diffValue));
+            if (result.TryGetProperty("stagedDiff", out var staged) && staged.ValueKind != JsonValueKind.Null)
+                detail.Append("\n\nVorgemerkte Änderungen:\n").Append(FormatDiffResultDetail(staged));
+            // Preserve status, diagnostics and notes as well as the actual diff contents.
+            var metadata = result.EnumerateObject().Where(property => property.Name is not ("diff" or "stagedDiff"))
+                .ToDictionary(property => property.Name, property => property.Value, StringComparer.Ordinal);
+            if (metadata.Count > 0)
+                detail.Append("\n\nWeitere Git-Daten:\n").Append(ToolCodeBlock("json", JsonSerializer.Serialize(metadata, ToolDisplayJsonOptions)));
+            return detail.ToString();
+        }
+        var json = JsonSerializer.Serialize(result, ToolDisplayJsonOptions);
+        return ToolCodeBlock("json", json);
+    }
+
+    private static string FormatDiffResultDetail(JsonElement result)
+    {
+        if (result.ValueKind == JsonValueKind.String) return ToolCodeBlock("diff", result.GetString() ?? string.Empty);
+        if (result.ValueKind == JsonValueKind.Object && result.TryGetProperty("stdout", out var stdout))
+        {
+            if (result.TryGetProperty("exitCode", out var exitCode) && result.TryGetProperty("stderr", out var stderr))
+                return FormatCommandResultDetail(result, exitCode, stdout, stderr, "diff");
+            var metadata = result.EnumerateObject().Where(property => property.Name != "stdout")
+                .ToDictionary(property => property.Name, property => property.Value, StringComparer.Ordinal);
+            return ToolCodeBlock("diff", (stdout.ValueKind == JsonValueKind.String ? stdout.GetString() : stdout.ToString()) ?? string.Empty)
+                + (metadata.Count > 0 ? "\n\n" + ToolCodeBlock("json", JsonSerializer.Serialize(metadata, ToolDisplayJsonOptions)) : string.Empty);
+        }
+        return FormatToolResultDetail(result);
+    }
+
+    private static string FormatCommandResultDetail(JsonElement result, JsonElement exitCode, JsonElement stdout, JsonElement stderr, string language)
+    {
+        var timedOut = result.TryGetProperty("timedOut", out var timeout) && timeout.ValueKind == JsonValueKind.True;
+        var truncated = result.TryGetProperty("truncated", out var clipped) && clipped.ValueKind == JsonValueKind.True;
+        var duration = result.TryGetProperty("elapsedMilliseconds", out var elapsed) ? elapsed.ToString() : "?";
+        var detail = $"Exit-Code: **{exitCode}** · Dauer: {duration} ms · Zeitlimit erreicht: {(timedOut ? "ja" : "nein")}"
+            + $" · Ausgabe vom Werkzeug gekürzt: {(truncated ? "ja" : "nein")}\n\nStandardausgabe (stdout):\n"
+            + ToolCodeBlock(language, stdout.ValueKind == JsonValueKind.String ? stdout.GetString() ?? "" : stdout.ToString())
+            + "\n\nFehlerausgabe (stderr):\n"
+            + ToolCodeBlock("text", stderr.ValueKind == JsonValueKind.String ? stderr.GetString() ?? "" : stderr.ToString());
+        var metadata = result.EnumerateObject().Where(property => property.Name is not ("exitCode" or "stdout" or "stderr" or "timedOut" or "truncated" or "elapsedMilliseconds"))
+            .ToDictionary(property => property.Name, property => property.Value, StringComparer.Ordinal);
+        return metadata.Count > 0 ? detail + "\n\nProzessdaten:\n" + ToolCodeBlock("json", JsonSerializer.Serialize(metadata, ToolDisplayJsonOptions)) : detail;
+    }
+
+    internal static string FormatCommandProgressDetail(CodingCommandProgress progress) =>
+        $"Prozess läuft · Dauer: {progress.ElapsedMilliseconds} ms · Ausgabe gekürzt: {(progress.Truncated ? "ja" : "nein")}"
+        + "\n\nStandardausgabe (stdout):\n" + ToolCodeBlock("text", progress.Stdout)
+        + "\n\nFehlerausgabe (stderr):\n" + ToolCodeBlock("text", progress.Stderr);
+
+    private static string ToolCodeBlock(string language, string content)
+    {
+        var longest = 2;
+        var current = 0;
+        foreach (var character in content)
+        {
+            current = character == '`' ? current + 1 : 0;
+            longest = Math.Max(longest, current);
+        }
+        var fence = new string('`', longest + 1);
+        return fence + language + "\n" + content + "\n" + fence;
+    }
+
     private async Task<ClientToolResult> ExecuteClientToolOnceAsync(
         GoAiRunRecord localRun,
         RunEvent item,
         ToolProposal proposal,
+        Func<CodingCommandProgress, Task>? commandProgress,
         CancellationToken cancellationToken)
     {
         var execution = await toolExecutions.GetAsync(proposal.ProposalId, cancellationToken).ConfigureAwait(false);
@@ -1611,7 +2020,9 @@ public sealed class GoAiAssistantService(
                 proposal,
                 localRun.SessionId,
                 localRun.AssistantMessageId,
-                cancellationToken).ConfigureAwait(false);
+                codingWorkspacePath: _codingWorkspaces.GetValueOrDefault(item.RunId),
+                commandProgress: commandProgress,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             var json = JsonSerializer.Serialize(result, JsonOptions);
             _ = await toolExecutions.CompleteAsync(proposal.ProposalId, json, CancellationToken.None).ConfigureAwait(false);
             return result;
@@ -1880,10 +2291,41 @@ public sealed class GoAiAssistantService(
         CancellationToken cancellationToken)
     {
         _ = sessionAttachments;
-        _ = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+        var codingSession = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
         var action = trigger?.Trigger.Action;
         var audiobook = action == PromptTriggerAction.Audiobook;
+        if (action == PromptTriggerAction.Coding)
+        {
+            _activeCodingWorkspace ??= codingSession.CodingWorkspacePath;
+            if (string.IsNullOrWhiteSpace(_activeCodingWorkspace) || !Directory.Exists(_activeCodingWorkspace))
+            {
+                throw new InvalidOperationException("Wähle über den Coding-Chip zuerst einen vorhandenen Projektordner.");
+            }
+            var codingModel = settings.Current.SelectedCodingModel?.Trim();
+            if (string.IsNullOrWhiteSpace(codingModel))
+            {
+                throw new InvalidOperationException("Wähle in den Einstellungen ein lokales Coding-AI-Modell.");
+            }
+            var codingCatalog = await client.GetCodingModelsAsync(cancellationToken).ConfigureAwait(false);
+            var availableCodingModel = codingCatalog.Models.FirstOrDefault(model => model.Downloaded
+                && string.Equals(model.Id, codingModel, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException("Das ausgewählte Coding-AI-Modell ist nicht verfügbar.");
+            // Coding uses its own actual model window and a bounded history directly.
+            // It must not wait for a different model's context preparation.
+            var codingMessages = BuildHistoryMessages(historyBeforePrompt,
+                CalculateCodingHistoryBudget(availableCodingModel.ContextTokens, originalPrompt)).ToList();
+            codingMessages.Add(new RunMessage("user", [new ContentPart("text", Text: originalPrompt)]));
+            return new RunRequest(
+                GoAiProtocol.Version,
+                RunMode.Coding,
+                codingMessages,
+                ClientCapabilities: ["coding"],
+                Limits: CreateChatRunLimits(availableCodingModel.ContextTokens, unlimitedDuration: true),
+                SessionId: sessionId.ToString("D"),
+                AllowedServerTools: GetAllowedServerTools(PromptTriggerAction.Coding),
+                PreferredCodingModelId: codingModel);
+        }
         var contextProfile = audiobook
             ? SessionContextProfile.Audiobook
             : SessionContextProfile.General;
@@ -1993,10 +2435,7 @@ public sealed class GoAiAssistantService(
             ClientCapabilities: capabilities
                 .OrderBy(static capability => capability, StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
-            Limits: new RunLimits(
-                MaximumOutputTokens: 8_192,
-                MaximumContextTokens: Math.Clamp(sessionContext.ContextLength, 1_024, 262_144),
-                TimeoutSeconds: 3_600),
+            Limits: CreateChatRunLimits(sessionContext.ContextLength),
             SessionId: sessionId.ToString("D"),
             AllowedServerTools: GetAllowedServerTools(action, originalPrompt),
             PreferredGeneralModelId: selectedModel,
@@ -2008,6 +2447,20 @@ public sealed class GoAiAssistantService(
 
     internal static string? ResolvePreferredModel(AppSettings current) =>
         current.SelectedModel?.Trim();
+
+    // The gateway and native tokenizer compute the available output window after
+    // messages and tools. An omitted output limit must not reintroduce a UI cap.
+    internal static RunLimits CreateChatRunLimits(int contextLength, bool unlimitedDuration = false) => new(
+        MaximumOutputTokens: null,
+        MaximumContextTokens: contextLength,
+        TimeoutSeconds: unlimitedDuration ? 0 : 3_600);
+
+    internal static int CalculateCodingHistoryBudget(int contextLength, string prompt)
+    {
+        const int toolAndOutputReserve = 8_192;
+        var promptTokens = (prompt.Length + 2L) / 3L;
+        return (int)Math.Clamp((contextLength - toolAndOutputReserve - promptTokens) * 3L, 0L, 1_200_000L);
+    }
 
     internal static int CalculateDocumentHistoryReserveTokens(
         IReadOnlyList<ChatMessage> history,
@@ -2040,7 +2493,7 @@ public sealed class GoAiAssistantService(
         {
             var remaining = historyBudget - selectedCharacters;
             var candidate = eligibleHistory[index];
-            if (remaining <= 0 || candidate.Content.Length > remaining)
+            if (remaining <= 0 || candidate.Content.Length > remaining || selectedHistory.Count >= 499)
             {
                 break;
             }
@@ -2075,6 +2528,7 @@ public sealed class GoAiAssistantService(
         string? prompt = null) => action switch
     {
         PromptTriggerAction.WebSearch => ["web.search", "web.fetch"],
+        PromptTriggerAction.Coding => ["web.search", "web.fetch", "web.deepResearch"],
         PromptTriggerAction.YouTubeSearch => ["youtube.search", "web.fetch"],
         PromptTriggerAction.Audiobook => [],
         _ => ["math.evaluate", "context.embed", "context.retrieve"],
@@ -2444,10 +2898,11 @@ public sealed class GoAiAssistantService(
         ? next.Trim()
         : current.TrimEnd() + "\n\n" + next.Trim();
 
-    private static string StringProperty(JsonElement data, string name) =>
-        data.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString() ?? string.Empty
-            : string.Empty;
+    private static string? StringProperty(JsonElement data, string name) =>
+        data.ValueKind == JsonValueKind.Object && data.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(value.GetString())
+            ? value.GetString()
+            : null;
 
     private static string RequireRemaining(PromptTriggerMatch trigger, string error)
     {
@@ -2480,6 +2935,7 @@ public sealed class GoAiAssistantService(
         {
             return;
         }
+        CancelAutomaticSpeech();
         _activeCancellation?.Cancel();
         _activeCancellation?.Dispose();
         _activeSpeechCancellation?.Cancel();

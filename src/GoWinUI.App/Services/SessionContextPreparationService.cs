@@ -622,8 +622,8 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             [new RunMessage("user", parts)],
             ClientCapabilities: [],
             Limits: new RunLimits(
-                MaximumOutputTokens: Math.Clamp((targetCharacters + 5) / 6, 64, 8_192),
-                MaximumContextTokens: Math.Clamp(contextLength, 1_024, 262_144),
+                MaximumOutputTokens: null,
+                MaximumContextTokens: contextLength,
                 TimeoutSeconds: 3_600),
             SessionId: sessionId.ToString("D"),
             AllowedServerTools: [],

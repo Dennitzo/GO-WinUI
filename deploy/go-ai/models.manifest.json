@@ -2,6 +2,13 @@
   "schemaVersion": 1,
   "models": [
     {
+      "repository": "lmstudio-community/gpt-oss-20b-GGUF",
+      "revision": "21f8a86825e36be34d24601e6d5ab45e2d366f4b",
+      "path": "lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
+      "length": 12109565632,
+      "sha256": "65d06d31a3977d553cb3af137b5c26b5f1e9297a6aaa29ae7caa98788cde53ab"
+    },
+    {
       "repository": "lmstudio-community/gpt-oss-120b-GGUF",
       "revision": "ffa0c82eff830f6644fa19b14ef2c0e11f7cd1e8",
       "path": "lmstudio-community/gpt-oss-120b-GGUF/gpt-oss-120b-MXFP4-00001-of-00002.gguf",

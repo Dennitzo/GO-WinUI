@@ -23,13 +23,24 @@ public sealed class AssistantCoordinator(
     MicrophoneTranscriptionService? microphone = null)
 {
     private const string DefaultSessionTitle = "Neue Sitzung";
-    private const string DefaultSystemPrompt = "GO ist ein lokales Arbeitstool für TGA-Fachplanung. Unterstütze Fachplaner bei technischer Gebäudeausrüstung, Anlagenkonzepten, Berechnungen, Koordination und Dokumentation. GO ist hier ein Produktname und nicht die Programmiersprache Go. Weise auf Unsicherheit, fehlende Projektdaten und erforderliche fachliche Prüfungen hin; erfinde keine Norminhalte, Quellen oder Projektangaben.";
+    private const string DefaultSystemPrompt = "GO ist ein allgemeiner lokaler AI-Assistent. Unterstütze die konkrete Aufgabe des Nutzers, etwa beim Programmieren, Schreiben, Lernen, Analysieren oder Planen. Passe Sprache, Detailtiefe und Vorgehen an die Frage an. Unterscheide belegte Informationen von Annahmen, benenne relevante Unsicherheiten und erfinde keine Fakten, Quellen oder Ergebnisse.";
     private int _startupRunsHandled;
+    private Task? _resumeTask;
 
     public Task SaveDraftAsync(Guid sessionId, string draft, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfGreaterThan(draft.Length, 100_000);
         return chats.SaveDraftAsync(sessionId, draft, cancellationToken);
+    }
+
+    public async Task SetCodingWorkspacePathAsync(Guid sessionId, string path, CancellationToken cancellationToken = default)
+    {
+        EnsureContextCanChange();
+        var fullPath = Path.GetFullPath(path);
+        if (!Directory.Exists(fullPath)) throw new DirectoryNotFoundException("Der Coding-Projektordner existiert nicht.");
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die ausgewählte Coding-Sitzung wurde nicht gefunden.");
+        await chats.SetCodingWorkspacePathAsync(session.Id, fullPath, activateCoding: true, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool> HasAudiobookVoiceContextAsync(CancellationToken cancellationToken = default)
@@ -173,22 +184,41 @@ public sealed class AssistantCoordinator(
         var documentItems = await documents.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var attachmentItems = await attachments.ListAsync(session.Id, cancellationToken).ConfigureAwait(false);
         var documentGroupStatus = BuildDocumentGroupStatus(documentItems, attachmentItems.Count);
-        var pages = new List<DocumentPage>();
-        foreach (var document in documentItems)
-        {
-            pages.AddRange(await documents.ReadPagesAsync(document.Id, cancellationToken).ConfigureAwait(false));
-        }
-
         // A snapshot is local UI state. Never make sidebar/session interaction wait for
-        // LM Studio, which may take several seconds to time out when it is offline.
-        var contextLimit = ModelContextProfiles.ResolveMaximum(settings.Current.SelectedModel, "general");
-        var context = contextAssembler.Build(new(
-            DefaultSystemPrompt,
-            string.IsNullOrWhiteSpace(session.Draft) ? "Nächste Benutzereingabe" : session.Draft,
-            messages,
-            null,
-            pages,
-            contextLimit));
+        // the native model runtime, which may be offline or loading a model.
+        var isCodingSession = session.PersistentToolAction == PersistentToolAction.Coding;
+        var selectedModel = isCodingSession ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
+        var contextLimit = ModelContextProfiles.ResolveMaximum(selectedModel, isCodingSession ? "coding" : "general");
+        ContextBuildResult context;
+        if (isCodingSession)
+        {
+            // Match the history sent by the Coding client. General chat policies and
+            // attached document pages are not part of that request.
+            var codingHistory = GoAiAssistantService.BuildHistoryMessages(messages,
+                GoAiAssistantService.CalculateCodingHistoryBudget(contextLimit, session.Draft));
+            var historyCharacters = codingHistory.Sum(message => message.Content.Sum(part => part.Text?.Length ?? 0));
+            var eligibleHistoryCount = messages.Count(message => message.Status == MessageStatus.Completed
+                && message.Role is ChatRole.User or ChatRole.Assistant
+                && !string.IsNullOrWhiteSpace(message.Content));
+            context = new([], Math.Max(1, (historyCharacters + session.Draft.Length + 3) / 4),
+                codingHistory.Count < eligibleHistoryCount,
+                "Geschätzter Coding-Kontext aus Chatverlauf und Entwurf. Systemprompt und Werkzeugergebnisse ergänzt der Server während des Laufs.");
+        }
+        else
+        {
+            var pages = new List<DocumentPage>();
+            foreach (var document in documentItems)
+            {
+                pages.AddRange(await documents.ReadPagesAsync(document.Id, cancellationToken).ConfigureAwait(false));
+            }
+            context = contextAssembler.Build(new(
+                DefaultSystemPrompt,
+                string.IsNullOrWhiteSpace(session.Draft) ? "Nächste Benutzereingabe" : session.Draft,
+                messages,
+                null,
+                pages,
+                contextLimit));
+        }
         return new
         {
             sessions = sessions.Select(ToSessionDto),
@@ -204,13 +234,15 @@ public sealed class AssistantCoordinator(
             draft = session.Draft,
             isRunning = settings.Current.IsAiConnectionEnabled
                 && goAi?.IsRunning == true,
-            model = "GO AI Server",
+            model = isCodingSession ? selectedModel ?? "GO AI Server" : "GO AI Server",
             provider = settings.Current.AiProvider.ToString(),
             contextUsed = context.EstimatedTokens,
             contextLimit,
             contextWasTruncated = context.WasTruncated,
             contextNotice = context.TruncationNotice,
             selectedToolAction = PersistentToolActionName(session.PersistentToolAction),
+            codingWorkspacePath = session.CodingWorkspacePath,
+            codingToolStepsExpanded = settings.Current.CodingToolStepsExpanded,
             isSessionPaneOpen = settings.Current.IsAssistantSessionPaneOpen,
         };
     }
@@ -225,6 +257,7 @@ public sealed class AssistantCoordinator(
         {
             activeSessionId = sessionId,
             conversationRevision = conversation.Session.ConversationRevision,
+            codingToolStepsExpanded = settings.Current.CodingToolStepsExpanded,
             messages = conversation.Messages.Select(message => ToMessageDto(
                 message,
                 conversation.Artifacts.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
@@ -280,16 +313,8 @@ public sealed class AssistantCoordinator(
                     && settings.Current.AiProvider == AiProviderKind.GoAiServer
                     && goAi is not null)
                 {
-                    try
-                    {
-                        await goAi.ResumePendingAsync(
-                            update => EmitGoAiUpdateAsync(update, emit, envelope.RequestId),
-                            cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (GoAiStreamDetachedException)
-                    {
-                        // The persisted Last-Event-ID remains authoritative for the next WebView instance.
-                    }
+                    if (_resumeTask is null || _resumeTask.IsCompleted)
+                        _resumeTask = ResumePendingInBackgroundAsync(emit, envelope.RequestId, cancellationToken);
                 }
                 break;
             }
@@ -340,6 +365,7 @@ public sealed class AssistantCoordinator(
                 break;
             case "session.tool":
                 await SetSessionToolAsync(
+                    GetRequiredGuid(envelope.Payload, "sessionId"),
                     GetOptionalString(envelope.Payload, "action", 32),
                     emit,
                     envelope.RequestId,
@@ -479,6 +505,7 @@ public sealed class AssistantCoordinator(
     }
 
     private async Task SetSessionToolAsync(
+        Guid sessionId,
         string? requestedAction,
         Func<string, object, string?, Task> emit,
         string requestId,
@@ -489,9 +516,11 @@ public sealed class AssistantCoordinator(
             null or "" => (PersistentToolAction?)null,
             "bricsCad" => PersistentToolAction.BricsCad,
             "audiobook" => PersistentToolAction.Audiobook,
+            "coding" => PersistentToolAction.Coding,
             _ => throw new InvalidOperationException("Die angeforderte persistente Tool-Aktion ist unbekannt."),
         };
-        var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die ausgewählte Tool-Sitzung wurde nicht gefunden.");
         await chats.SetPersistentToolActionAsync(session.Id, action, cancellationToken).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId).ConfigureAwait(false);
     }
@@ -715,6 +744,22 @@ public sealed class AssistantCoordinator(
         }
     }
 
+    private async Task ResumePendingInBackgroundAsync(Func<string, object, string?, Task> emit,
+        string requestId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await goAi!.ResumePendingAsync(update => EmitGoAiUpdateAsync(update, emit, requestId), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (GoAiStreamDetachedException) { }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            try { await emit("host.error", new { message = exception.Message }, requestId).ConfigureAwait(false); }
+            catch (Exception bridgeException) when (bridgeException is not OutOfMemoryException) { }
+        }
+    }
+
     internal static PromptTriggerMatch CreateToolMatch(string toolAction, string prompt)
     {
         var action = toolAction switch
@@ -724,6 +769,7 @@ public sealed class AssistantCoordinator(
             "imageGeneration" => PromptTriggerAction.ImageGeneration,
             "bricsCad" => PromptTriggerAction.BricsCad,
             "audiobook" => PromptTriggerAction.Audiobook,
+            "coding" => PromptTriggerAction.Coding,
             "textToSpeech" => PromptTriggerAction.TextToSpeech,
             "translation" => PromptTriggerAction.Translation,
             "videoAnalysis" => PromptTriggerAction.VideoAnalysis,
@@ -770,6 +816,7 @@ public sealed class AssistantCoordinator(
         {
             PersistentToolAction.BricsCad => CreateToolMatch("bricsCad", prompt),
             PersistentToolAction.Audiobook => CreateToolMatch("audiobook", prompt),
+            PersistentToolAction.Coding => CreateToolMatch("coding", prompt),
             _ => null,
         };
     }
@@ -798,6 +845,7 @@ public sealed class AssistantCoordinator(
     {
         PromptTriggerAction.BricsCad => PersistentToolAction.BricsCad,
         PromptTriggerAction.Audiobook => PersistentToolAction.Audiobook,
+        PromptTriggerAction.Coding => PersistentToolAction.Coding,
         _ => null,
     };
 
@@ -805,14 +853,26 @@ public sealed class AssistantCoordinator(
     {
         PersistentToolAction.BricsCad => "bricsCad",
         PersistentToolAction.Audiobook => "audiobook",
+        PersistentToolAction.Coding => "coding",
         _ => null,
     };
 
-    private async Task EmitGoAiUpdateAsync(
+    internal async Task EmitGoAiUpdateAsync(
         GoAiAssistantUpdate update,
         Func<string, object, string?, Task> emit,
         string requestId)
     {
+        goAi?.ObserveAutomaticSpeech(update,
+            speech => emit("speech.status", new
+            {
+                active = speech.IsActive,
+                status = speech.Status,
+                detail = speech.Detail,
+                model = speech.Model,
+                error = speech.Error,
+                cacheHit = speech.CacheHit,
+            }, requestId),
+            playback => emit("speech.progress", SpeechPlaybackProgressBridge.ToPayload(playback), requestId));
         var artifactsForMessage = update.Artifacts
             ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false);
         switch (update.Kind)
@@ -857,6 +917,7 @@ public sealed class AssistantCoordinator(
                     messageId = update.Message.Id,
                     sessionId = update.Message.SessionId,
                     content = update.Message.Content,
+                    toolSteps = update.Message.ToolSteps ?? [],
                 }, requestId).ConfigureAwait(false);
                 break;
             case GoAiAssistantUpdateKind.Status:
@@ -868,6 +929,7 @@ public sealed class AssistantCoordinator(
                     runDetail = update.Detail,
                     model = update.Model,
                     contextUsed = update.ContextUsed,
+                    toolStep = update.ToolStep,
                     contextLimit = update.ContextLimit,
                     contextWasTruncated = update.ContextWasCompacted,
                     loadedFiles = update.LoadedFiles,
@@ -1067,6 +1129,7 @@ public sealed class AssistantCoordinator(
             contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
             message.Revision,
             tool = message.ToolExecution,
+            toolSteps = message.ToolSteps ?? [],
             artifacts = (messageArtifacts ?? []).Select(ToArtifactDto),
         };
     }

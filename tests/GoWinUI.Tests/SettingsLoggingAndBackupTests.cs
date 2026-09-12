@@ -2,8 +2,10 @@ using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
+using GoWinUI.Infrastructure.Settings;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Text.Json;
 
 namespace GoWinUI.Tests;
 
@@ -106,13 +108,14 @@ public sealed class SettingsLoggingAndBackupTests
         Assert.False((await settings.LoadAsync()).IsAiConnectionEnabled);
     }
 
-    [Fact]
-    public async Task CurrentSettingsPreserveDynamicallyDiscoveredModelIds()
+    [Theory]
+    [InlineData("vendor/new-general-model:q8_0")]
+    [InlineData("coding/gpt-oss-120b-MXFP4~f00a")]
+    [InlineData("coding/qwen3-coder-next-Q8_0~c012")]
+    public async Task CurrentSettingsPreserveDynamicallyDiscoveredModelIds(string dynamicGeneralModel)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var settings = environment.Get<ISettingsStore>();
-        const string dynamicGeneralModel = "vendor/new-general-model:q8_0";
-
         await settings.SaveAsync(new AppSettings
         {
             Version = AppSettings.CurrentVersion,
@@ -124,7 +127,7 @@ public sealed class SettingsLoggingAndBackupTests
     }
 
     [Fact]
-    public async Task TerminalOnlyModelIsNotRestoredAsTheGeneralUiModel()
+    public async Task FormerTerminalModelRemainsSelectableForGeneralChat()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var settings = environment.Get<ISettingsStore>();
@@ -135,7 +138,7 @@ public sealed class SettingsLoggingAndBackupTests
             SelectedModel = "qwen3-coder-next",
         });
 
-        Assert.Equal(AppSettings.DefaultSelectedModel, (await settings.LoadAsync()).SelectedModel);
+        Assert.Equal("qwen3-coder-next", (await settings.LoadAsync()).SelectedModel);
     }
 
     [Fact]
@@ -158,8 +161,53 @@ public sealed class SettingsLoggingAndBackupTests
         Assert.Equal("general-after-restart", second.Current.SelectedModel);
     }
 
+    [Theory]
+    [InlineData("\"lmStudio\"")]
+    [InlineData("1")]
+    public async Task LegacyProviderMigratesWithoutLosingModelSelectionsOrSessionSettings(string legacyProvider)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = Assert.IsType<JsonSettingsStore>(environment.Get<ISettingsStore>());
+        var sessionId = Guid.NewGuid();
+        const string generalModel = "coding/gpt-oss-120b-MXFP4~f00a";
+        const string codingModel = "coding/Qwen3.8-27B-Q4_K_M~c012";
+        var workspace = Path.Combine(environment.Directory, "native-project");
+        await File.WriteAllTextAsync(settings.SettingsPath, JsonSerializer.Serialize(new
+        {
+            version = 17,
+            aiProvider = JsonSerializer.Deserialize<JsonElement>(legacyProvider),
+            lmStudioBaseUrl = "http://localhost:1234",
+            goAiServerUrl = "http://localhost:8080",
+            isAiConnectionEnabled = false,
+            selectedModel = generalModel,
+            selectedCodingModel = codingModel,
+            codingWorkspacePath = workspace,
+            activeSessionId = sessionId,
+            isAssistantSessionPaneOpen = false,
+            accentColor = "#34ABCD",
+        }));
+
+        var restored = await settings.LoadAsync();
+        Assert.Equal(AppSettings.CurrentVersion, restored.Version);
+        Assert.Equal(AiProviderKind.GoAiServer, restored.AiProvider);
+        Assert.Equal(generalModel, restored.SelectedModel);
+        Assert.Equal(codingModel, restored.SelectedCodingModel);
+        Assert.Equal(workspace, restored.CodingWorkspacePath);
+        Assert.Equal(sessionId, restored.ActiveSessionId);
+        Assert.Equal("http://localhost:8080", restored.GoAiServerUrl);
+        Assert.False(restored.IsAiConnectionEnabled);
+        Assert.False(restored.IsAssistantSessionPaneOpen);
+        Assert.Equal("#34ABCD", restored.AccentColor);
+
+        await settings.SaveAsync(restored);
+        using var persisted = JsonDocument.Parse(await File.ReadAllTextAsync(settings.SettingsPath));
+        Assert.Equal("goAiServer", persisted.RootElement.GetProperty("aiProvider").GetString());
+        Assert.False(persisted.RootElement.TryGetProperty("lmStudioBaseUrl", out _));
+        Assert.Equal(generalModel, (await settings.LoadAsync()).SelectedModel);
+    }
+
     [Fact]
-    public async Task EveryLegacyReasoningSettingIsResetToLmStudioAutomatic()
+    public async Task EveryLegacyReasoningSettingIsResetToRuntimeAutomatic()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var settings = environment.Get<ISettingsStore>();

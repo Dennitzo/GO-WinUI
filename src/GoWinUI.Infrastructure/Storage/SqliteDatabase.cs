@@ -1,6 +1,4 @@
 using System.Globalization;
-using System.Text;
-using System.Text.Json;
 using GoWinUI.Core.Chat;
 using GoWinUI.Core.Contracts;
 using Microsoft.Data.Sqlite;
@@ -10,7 +8,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 29;
+    public const int CurrentSchemaVersion = 33;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -78,6 +76,10 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationTwentySevenAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentyEightAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationTwentyNineAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyOneAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -220,8 +222,6 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
         var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
         if (!exists)
         {
-            await SeedBuiltInWorkflowAsync(command, BuiltInWorkflows.Water, cancellationToken).ConfigureAwait(false);
-            await SeedBuiltInWorkflowAsync(command, BuiltInWorkflows.Heating, cancellationToken).ConfigureAwait(false);
             command.Parameters.Clear();
             command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(1, $now);";
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
@@ -1175,6 +1175,95 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private static async Task ApplyMigrationThirtyAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=30;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            // Remove only the two retired seeds. Copies and user-authored workflows
+            // retain their IDs and content; foreign keys clear obsolete selections
+            // and tags while preserving the associated chats and messages.
+            command.CommandText = """
+                DELETE FROM workflows
+                WHERE is_built_in=1
+                  AND id IN ('0e2fd00a-aa2e-5b23-9e06-3a0645a2ecad',
+                             '7ceee4f5-8c41-5ce3-9332-7ccbb7d8d3fb');
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(30,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyOneAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=31;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            // A workspace grants file access for one session. Never infer this
+            // association from the application's most recently picked folder.
+            command.CommandText = """
+                ALTER TABLE chat_sessions ADD COLUMN coding_workspace_path TEXT NULL;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(31,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyTwoAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=32;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_messages ADD COLUMN tool_steps_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(tool_steps_json));
+                INSERT INTO schema_migrations(version,applied_at) VALUES(32,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyThreeAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=33;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            // The current session path cannot establish an older run's original workspace.
+            // Leave legacy runs NULL so resume fails safely instead of guessing a project.
+            command.CommandText = """
+                ALTER TABLE go_ai_runs ADD COLUMN workspace_path TEXT NULL;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(33,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
@@ -1203,34 +1292,6 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
         if (await violations.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             throw new InvalidDataException("SQLite foreign_key_check failed after migration.");
-        }
-    }
-
-    private static async Task SeedBuiltInWorkflowAsync(SqliteCommand command, BuiltInWorkflow workflow, CancellationToken cancellationToken)
-    {
-        var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
-        command.Parameters.Clear();
-        command.CommandText = """
-            INSERT OR IGNORE INTO workflows
-                (id, slug, title, description, domain, context_summary, content_json, is_built_in, revision, created_at, updated_at)
-            VALUES ($id, $slug, $title, $description, $domain, $summary, $json, 1, 1, $now, $now);
-            """;
-        command.Parameters.AddWithValue("$id", workflow.Id.ToString("D"));
-        command.Parameters.AddWithValue("$slug", workflow.Slug);
-        command.Parameters.AddWithValue("$title", workflow.Title);
-        command.Parameters.AddWithValue("$description", workflow.Description);
-        command.Parameters.AddWithValue("$domain", workflow.Domain);
-        command.Parameters.AddWithValue("$summary", workflow.ContextSummary);
-        command.Parameters.AddWithValue("$json", workflow.ContentJson);
-        command.Parameters.AddWithValue("$now", now);
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var tag in workflow.Tags)
-        {
-            command.Parameters.Clear();
-            command.CommandText = "INSERT OR IGNORE INTO workflow_tags(workflow_id, tag) VALUES($id, $tag);";
-            command.Parameters.AddWithValue("$id", workflow.Id.ToString("D"));
-            command.Parameters.AddWithValue("$tag", tag);
-            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -1498,48 +1559,4 @@ internal static class PromptTriggerSeeds
         new(Guid.Parse("a1000000-0000-4000-8000-000000000019"), "audiobook", "Hörbuch erstellen", "Erstellt oder lenkt ein fortlaufendes, direkt vorlesbares Hörbuchkapitel.", 190),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000020"), "audiobook", "Hörbuch fortsetzen", "Setzt das Hörbuch dieser Sitzung mit der vorhandenen Story-Chronik fort.", 200),
     ];
-}
-
-internal sealed record BuiltInWorkflow(
-    Guid Id,
-    string Slug,
-    string Title,
-    string Description,
-    string Domain,
-    string ContextSummary,
-    string ContentJson,
-    string[] Tags);
-
-internal static class BuiltInWorkflows
-{
-    internal static readonly BuiltInWorkflow Water = Read(
-        Guid.Parse("0e2fd00a-aa2e-5b23-9e06-3a0645a2ecad"),
-        "bemessung_der_trinkwasserinstallation_nach_din_1988_300.json");
-
-    internal static readonly BuiltInWorkflow Heating = Read(
-        Guid.Parse("7ceee4f5-8c41-5ce3-9332-7ccbb7d8d3fb"),
-        "heizlastberechnung_nach_din_en_12831.json");
-
-    private static BuiltInWorkflow Read(Guid id, string fileName)
-    {
-        var resourceName = $"GoWinUI.Infrastructure.Resources.Workflows.{fileName}";
-        using var stream = typeof(BuiltInWorkflows).Assembly.GetManifestResourceStream(resourceName)
-            ?? throw new InvalidOperationException($"Eingebetteter Workflow '{resourceName}' fehlt.");
-        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-        var json = reader.ReadToEnd();
-        using var document = JsonDocument.Parse(json);
-        var root = document.RootElement;
-        var tags = root.TryGetProperty("tags", out var tagArray) && tagArray.ValueKind == JsonValueKind.Array
-            ? tagArray.EnumerateArray().Select(static tag => tag.GetString()).OfType<string>().ToArray()
-            : [];
-        return new(
-            id,
-            root.GetProperty("id").GetString() ?? throw new InvalidDataException("Workflow-ID fehlt."),
-            root.GetProperty("title").GetString() ?? throw new InvalidDataException("Workflow-Titel fehlt."),
-            root.GetProperty("description").GetString() ?? string.Empty,
-            root.GetProperty("domain").GetString() ?? string.Empty,
-            root.GetProperty("contextSummary").GetString() ?? string.Empty,
-            json,
-            tags);
-    }
 }

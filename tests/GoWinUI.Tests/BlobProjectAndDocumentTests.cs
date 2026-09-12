@@ -74,12 +74,12 @@ public sealed class BlobProjectAndDocumentTests
         var projects = environment.Get<IProjectRepository>();
         var blobs = environment.Get<IBinaryObjectStore>();
         var now = DateTimeOffset.UtcNow;
-        var project = await projects.CreateAsync(new(Guid.Empty, "TGA", "BIM", "", "", ProjectStatus.Active, 0, now, now));
+        var project = await projects.CreateAsync(new(Guid.Empty, "Beispielprojekt", "BIM", "", "", ProjectStatus.Active, 0, now, now));
         var cpdbBlob = await blobs.ImportAsync(new MemoryStream([1]), "application/octet-stream");
         var ifcBlob = await blobs.ImportAsync(new MemoryStream([2]), "application/x-step");
 
-        await projects.AddAssetAsync(new(Guid.Empty, project.Id, cpdbBlob.Id, "projekt.cpdb.vec", "application/octet-stream", AssetCategory.Cpdb, "C:\\TGA\\projekt.cpdb.vec", cpdbBlob.Sha256, cpdbBlob.Length, 0, 0, now, now));
-        await projects.AddAssetAsync(new(Guid.Empty, project.Id, ifcBlob.Id, "modell.ifc", "application/x-step", AssetCategory.Ifc, "C:\\TGA\\modell.ifc", ifcBlob.Sha256, ifcBlob.Length, 1, 0, now, now));
+        await projects.AddAssetAsync(new(Guid.Empty, project.Id, cpdbBlob.Id, "projekt.cpdb.vec", "application/octet-stream", AssetCategory.Cpdb, "C:\\Beispielprojekt\\projekt.cpdb.vec", cpdbBlob.Sha256, cpdbBlob.Length, 0, 0, now, now));
+        await projects.AddAssetAsync(new(Guid.Empty, project.Id, ifcBlob.Id, "modell.ifc", "application/x-step", AssetCategory.Ifc, "C:\\Beispielprojekt\\modell.ifc", ifcBlob.Sha256, ifcBlob.Length, 1, 0, now, now));
 
         var assets = await projects.ListAssetsAsync(project.Id);
         Assert.Contains(assets, asset => asset.Category == AssetCategory.Cpdb);

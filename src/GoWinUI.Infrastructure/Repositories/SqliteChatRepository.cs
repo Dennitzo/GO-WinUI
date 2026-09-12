@@ -3,6 +3,7 @@ using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure.Storage;
 using Microsoft.Data.Sqlite;
+using System.Text.Json;
 
 namespace GoWinUI.Infrastructure.Repositories;
 
@@ -13,7 +14,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision
+            SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path
             FROM chat_sessions
             WHERE $search='' OR rowid IN (SELECT rowid FROM session_search WHERE session_search MATCH $fts)
             ORDER BY is_pinned DESC, updated_at DESC;
@@ -34,7 +35,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision FROM chat_sessions WHERE id=$id;";
+        command.CommandText = "SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path FROM chat_sessions WHERE id=$id;";
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSession(reader) : null;
@@ -69,6 +70,43 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
 
     public Task SelectWorkflowAsync(Guid id, Guid? workflowId, CancellationToken cancellationToken = default) =>
         UpdateSessionAsync(id, "selected_workflow_id=$value", workflowId?.ToString("D"), cancellationToken);
+
+    public Task SetCodingWorkspacePathAsync(Guid id, string? path, CancellationToken cancellationToken = default) =>
+        SetCodingWorkspacePathAsync(id, path, activateCoding: false, cancellationToken);
+
+    public Task SetCodingWorkspacePathAsync(Guid id, string? path, bool activateCoding, CancellationToken cancellationToken = default)
+    {
+        var normalized = string.IsNullOrWhiteSpace(path) ? null : path.Trim();
+        if (normalized is not null)
+        {
+            if (!Path.IsPathFullyQualified(normalized) || normalized.Any(char.IsControl))
+            {
+                throw new ArgumentException("Der Coding-Projektordner muss ein absoluter Pfad sein.", nameof(path));
+            }
+            normalized = Path.GetFullPath(normalized);
+        }
+        if (activateCoding && normalized is null)
+            throw new ArgumentException("Zum Aktivieren von Coding ist ein Projektordner erforderlich.", nameof(path));
+        return database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                UPDATE chat_sessions
+                SET coding_workspace_path=$path,
+                    persistent_tool_action=CASE WHEN $activate=1 THEN 'code' ELSE persistent_tool_action END,
+                    updated_at=$now
+                WHERE id=$id;
+                """;
+            command.Parameters.AddWithValue("$id", id.ToString("D"));
+            command.Parameters.AddWithValue("$path", (object?)normalized ?? DBNull.Value);
+            command.Parameters.AddWithValue("$activate", activateCoding ? 1 : 0);
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            var changed = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            if (activateCoding && changed != 1)
+                throw new InvalidOperationException("Die ausgewählte Coding-Sitzung wurde nicht gefunden.");
+        }, cancellationToken);
+    }
 
     public Task SetPinnedAsync(Guid id, bool isPinned, CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
@@ -130,7 +168,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,revision
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,revision,tool_steps_json
             FROM chat_messages WHERE session_id=$id ORDER BY created_at,id;
             """;
         command.Parameters.AddWithValue("$id", sessionId.ToString("D"));
@@ -255,6 +293,98 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken);
 
+    public Task<IReadOnlyList<AssistantToolStep>> SaveToolStepAsync(Guid messageId, AssistantToolStep toolStep, CancellationToken cancellationToken = default)
+    {
+        ValidateToolStep(toolStep);
+        return database.WriteAsync<IReadOnlyList<AssistantToolStep>>(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SELECT tool_steps_json FROM chat_messages WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+            var json = await command.ExecuteScalarAsync(token).ConfigureAwait(false) as string
+                ?? throw new InvalidOperationException("Die Werkzeugnachricht wurde nicht gefunden.");
+            var steps = JsonSerializer.Deserialize<List<AssistantToolStep>>(json, JsonSerializerOptions.Web) ?? [];
+            var index = steps.FindIndex(value => string.Equals(value.Id, toolStep.Id, StringComparison.Ordinal));
+            if (index >= 0)
+            {
+                var merged = AssistantToolStep.Merge(steps[index], toolStep);
+                if (steps[index] == merged) return steps;
+                steps[index] = merged;
+            }
+            else
+            {
+                steps.Add(toolStep);
+            }
+            command.CommandText = """
+                UPDATE chat_messages SET tool_steps_json=$steps,revision=revision+1,updated_at=$now WHERE id=$id;
+                UPDATE chat_sessions SET conversation_revision=conversation_revision+1,updated_at=$now
+                    WHERE id=(SELECT session_id FROM chat_messages WHERE id=$id);
+                """;
+            command.Parameters.AddWithValue("$steps", JsonSerializer.Serialize(steps, JsonSerializerOptions.Web));
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            return steps;
+        }, cancellationToken);
+    }
+
+    public Task UpdateMessageWithToolStepsAsync(Guid messageId, string content, MessageStatus status,
+        IReadOnlyList<AssistantToolStep> toolSteps, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(toolSteps);
+        if (toolSteps.Select(static step => step.Id).Distinct(StringComparer.Ordinal).Count() != toolSteps.Count)
+            throw new ArgumentException("Ungültige Werkzeugchronologie.", nameof(toolSteps));
+        foreach (var step in toolSteps) ValidateToolStep(step);
+        var visibleContent = ChatContentSanitizer.Sanitize(content);
+        if (toolSteps.Any(step => step.ContentOffset > visibleContent.Length))
+            throw new ArgumentException("Werkzeugposition liegt außerhalb des Nachrichtentextes.", nameof(toolSteps));
+        return database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SELECT tool_steps_json FROM chat_messages WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
+            var storedJson = await command.ExecuteScalarAsync(token).ConfigureAwait(false) as string
+                ?? throw new InvalidOperationException("Die Werkzeugnachricht wurde nicht gefunden.");
+            var mergedSteps = JsonSerializer.Deserialize<List<AssistantToolStep>>(storedJson, JsonSerializerOptions.Web) ?? [];
+            foreach (var step in toolSteps)
+            {
+                var index = mergedSteps.FindIndex(value => value.Id == step.Id);
+                if (index < 0) mergedSteps.Add(step);
+                else mergedSteps[index] = AssistantToolStep.Merge(mergedSteps[index], step);
+            }
+            if (mergedSteps.Any(step => step.ContentOffset > visibleContent.Length))
+                throw new InvalidOperationException("Die Werkzeugchronologie passt nicht zum neuen Nachrichtentext.");
+            command.CommandText = """
+                UPDATE chat_messages SET content=$content,status=$status,tool_steps_json=$steps,revision=revision+1,updated_at=$now WHERE id=$id;
+                UPDATE chat_sessions SET conversation_revision=conversation_revision+1,updated_at=$now
+                    WHERE id=(SELECT session_id FROM chat_messages WHERE id=$id);
+                """;
+            command.Parameters.AddWithValue("$content", visibleContent);
+            command.Parameters.AddWithValue("$status", SqliteMapping.EnumName(status));
+            command.Parameters.AddWithValue("$steps", JsonSerializer.Serialize(mergedSteps, JsonSerializerOptions.Web));
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+    }
+
+    private static void ValidateToolStep(AssistantToolStep toolStep)
+    {
+        ArgumentNullException.ThrowIfNull(toolStep);
+        if (string.IsNullOrWhiteSpace(toolStep.Id) || toolStep.Id.Length > 200 || string.IsNullOrWhiteSpace(toolStep.Tool)
+            || toolStep.Tool.Length > 128 || toolStep.Detail?.Length > AssistantToolStep.MaximumDetailCharacters || toolStep.PreviewHtml?.Length > 16_000
+            || toolStep.InputJson?.Length > AssistantToolStep.MaximumStructuredJsonCharacters
+            || toolStep.OutputJson?.Length > AssistantToolStep.MaximumStructuredJsonCharacters
+            || toolStep.Explanation?.Length > AssistantToolStep.MaximumExplanationCharacters || toolStep.ContentOffset < 0
+            || toolStep.Status is not ("running" or "completed" or "failed" or "denied" or "cancelled" or "interrupted"))
+            throw new ArgumentException("Ungültiger oder zu großer Werkzeugschritt.", nameof(toolStep));
+        foreach (var json in new[] { toolStep.InputJson, toolStep.OutputJson }.Where(static value => value is not null))
+        {
+            try { using var document = JsonDocument.Parse(json!); }
+            catch (JsonException exception) { throw new ArgumentException("Werkzeugdaten müssen gültiges JSON enthalten.", nameof(toolStep), exception); }
+        }
+    }
+
     public Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
         {
@@ -325,7 +455,12 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
                 WHERE id=$id;
                 """;
             command.Parameters.AddWithValue("$id", id.ToString("D"));
-            command.Parameters.AddWithValue("$action", action is null ? DBNull.Value : SqliteMapping.EnumName(action.Value));
+            command.Parameters.AddWithValue("$action", action switch
+            {
+                null => DBNull.Value,
+                PersistentToolAction.Coding => "code",
+                _ => SqliteMapping.EnumName(action.Value),
+            });
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken);
@@ -461,7 +596,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,revision
+            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,revision,tool_steps_json
             FROM chat_messages
             WHERE id=$id;
             """;
@@ -558,8 +693,9 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         reader.IsDBNull(4) ? null : reader.ReadGuid(4), reader.GetString(5),
         !reader.IsDBNull(6) && reader.GetInt32(6) != 0,
         reader.IsDBNull(7) ? null : reader.ReadDate(7),
-        reader.IsDBNull(8) ? null : reader.ReadEnum<PersistentToolAction>(8),
-        reader.IsDBNull(9) ? 0 : reader.GetInt64(9));
+        reader.IsDBNull(8) ? null : reader.GetString(8) == "code" ? PersistentToolAction.Coding : reader.ReadEnum<PersistentToolAction>(8),
+        reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+        reader.IsDBNull(10) ? null : reader.GetString(10));
 
     internal static ChatMessage ReadMessage(SqliteDataReader reader) => new(
         reader.ReadGuid(0), reader.ReadGuid(1), reader.ReadEnum<ChatRole>(2), reader.GetString(3),
@@ -569,5 +705,6 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12)),
         reader.IsDBNull(13) ? null : reader.GetString(13),
         reader.IsDBNull(14) ? MessageContentProfile.General : reader.ReadEnum<MessageContentProfile>(14),
-        reader.IsDBNull(15) ? 1 : reader.GetInt64(15));
+        reader.IsDBNull(15) ? 1 : reader.GetInt64(15),
+        reader.FieldCount < 17 || reader.IsDBNull(16) ? [] : JsonSerializer.Deserialize<AssistantToolStep[]>(reader.GetString(16), JsonSerializerOptions.Web) ?? []);
 }

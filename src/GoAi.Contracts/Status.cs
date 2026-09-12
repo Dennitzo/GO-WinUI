@@ -43,7 +43,8 @@ public sealed record ModelStatusSnapshot(
     string ProviderUrl,
     IReadOnlyList<ModelRuntimeStatus> Models,
     DateTimeOffset CheckedAt,
-    string? ErrorCode = null);
+    string? ErrorCode = null,
+    string? ErrorMessage = null);
 
 public sealed record ModelRuntimeStatus(
     string Id,

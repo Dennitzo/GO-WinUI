@@ -1,20 +1,18 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 
 namespace GoAi.Server.Core.Configuration;
 
-public sealed record LmStudioModelProfile(
+public sealed record NativeModelProfile(
     string Id,
     string RuntimeModelId,
     string DisplayName,
     int ContextLength,
     string SamplingProfile);
 
-public static class LmStudioModelCatalog
+public static class NativeModelCatalog
 {
     public const string GptOss120BId = "gpt-oss-120b";
-    // LM Studio 0.4.18 exposes and loads the downloaded catalog entry by this
-    // stable key. The former openai/ prefix is listed by some newer builds but
-    // is rejected by the pinned runtime's /api/v1/models/load endpoint.
+    // Legacy selection aliases are resolved against installed native presets by ModelRuntimeClient.
     public const string GptOss120BRuntimeId = "gpt-oss-120b";
     public const string Qwen38Id = "qwen3.8-27b";
     public const string Qwen38RuntimeId = "qwen/qwen3.8-27b";
@@ -23,7 +21,7 @@ public static class LmStudioModelCatalog
     public const string Qwen3CoderNextRuntimeId = "qwen3-coder-next";
     public const string DefaultModelId = GptOss120BId;
 
-    public static IReadOnlyList<LmStudioModelProfile> Models { get; } =
+    public static IReadOnlyList<NativeModelProfile> Models { get; } =
     [
         new(
             Qwen38Id,
@@ -45,7 +43,7 @@ public static class LmStudioModelCatalog
             "qwen3-coder-next"),
     ];
 
-    public static bool TryGet(string? modelId, out LmStudioModelProfile profile)
+    public static bool TryGet(string? modelId, out NativeModelProfile profile)
     {
         var normalized = string.Equals(
             modelId?.Trim(),
@@ -54,14 +52,15 @@ public static class LmStudioModelCatalog
                 ? Qwen3CoderNextQ8Id
                 : modelId?.Trim();
         profile = Models.FirstOrDefault(candidate =>
-            string.Equals(candidate.Id, normalized, StringComparison.OrdinalIgnoreCase))!;
+            string.Equals(candidate.Id, normalized, StringComparison.OrdinalIgnoreCase)
+            || normalized?.Contains(candidate.Id, StringComparison.OrdinalIgnoreCase) == true)!;
         return profile is not null;
     }
 
-    public static LmStudioModelProfile Get(string? modelId) =>
+    public static NativeModelProfile Get(string? modelId) =>
         TryGet(modelId, out var profile)
             ? profile
-            : throw new ArgumentException($"Nicht unterstütztes LM-Studio-Modell: {modelId}", nameof(modelId));
+            : throw new ArgumentException($"Nicht unterstütztes native llama-Modell: {modelId}", nameof(modelId));
 
     public static string GetDisplayName(string? modelId) =>
         TryGet(modelId, out var profile) ? profile.DisplayName : modelId ?? "AI-Modell";

@@ -26,7 +26,8 @@ public sealed partial class SettingsViewModel(
 
     private readonly List<(Guid Id, long Revision)> _deletedTriggers = [];
 
-    public ObservableCollection<LmModel> Models { get; } = [];
+    public ObservableCollection<LocalAiModel> Models { get; } = [];
+    public ObservableCollection<LocalAiModel> CodingModels { get; } = [];
     public ObservableCollection<PromptTriggerEditorItem> PromptTriggers { get; } = [];
     public IReadOnlyList<PromptTriggerActionOption> TriggerActions { get; } =
         PromptTriggerEditorItem.AvailableActions;
@@ -60,7 +61,19 @@ public sealed partial class SettingsViewModel(
     public partial string? SelectedModel { get; set; }
 
     [ObservableProperty]
-    public partial LmModel? SelectedGeneralModelItem { get; set; }
+    public partial LocalAiModel? SelectedGeneralModelItem { get; set; }
+
+    [ObservableProperty]
+    public partial string? SelectedCodingModel { get; set; }
+
+    [ObservableProperty]
+    public partial LocalAiModel? SelectedCodingModelItem { get; set; }
+
+    [ObservableProperty]
+    public partial string CodingModelStatus { get; set; } = "Lokale GGUF-Modelle werden beim Aktualisieren erkannt.";
+
+    [ObservableProperty]
+    public partial bool CodingToolStepsExpanded { get; set; }
 
     [ObservableProperty]
     public partial string TriggerSearchText { get; set; } = string.Empty;
@@ -102,6 +115,9 @@ public sealed partial class SettingsViewModel(
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel ?? AppSettings.DefaultSelectedModel;
         SelectedGeneralModelItem = EnsureModelItem(Models, SelectedModel);
+        SelectedCodingModel = current.SelectedCodingModel;
+        SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);
+        CodingToolStepsExpanded = current.CodingToolStepsExpanded;
         Theme = current.Theme;
         AccentColor = current.AccentColor;
         BackgroundColor = current.BackgroundColor;
@@ -146,35 +162,14 @@ public sealed partial class SettingsViewModel(
         }
 
         Models.Clear();
+        CodingModels.Clear();
         IsServerReady = false;
         ConnectionStatus = "Offline · keine Serververbindungen";
     }
 
     public async Task<GoAiConnectionStatus?> SaveAsync(CancellationToken cancellationToken = default)
     {
-        if (!Uri.TryCreate(GoAiServerUrl.Trim(), UriKind.Absolute, out var goAiUri)
-            || goAiUri.Scheme is not ("http" or "https"))
-        {
-            throw new InvalidOperationException("GO benötigt eine gültige HTTP- oder HTTPS-Adresse zum Docker-Gateway.");
-        }
-
-        var generalModel = PreferCurrentSelection(
-            SelectedGeneralModelItem?.Id,
-            SelectedModel,
-            AppSettings.DefaultSelectedModel);
-        await settings.UpdateAsync(current => current with
-        {
-            IsAiConnectionEnabled = IsAiConnectionEnabled,
-            GoAiServerUrl = goAiUri.ToString().TrimEnd('/'),
-            LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
-            SelectedModel = generalModel,
-            ReasoningEffort = "auto",
-            Theme = Theme,
-            AccentColor = AccentColor,
-            BackgroundColor = BackgroundColor,
-            Language = Language,
-        }, cancellationToken);
-        SelectedModel = settings.Current.SelectedModel;
+        await SavePreferencesAsync(cancellationToken);
         await App.Current.ApplyAiConnectionModeAsync(IsAiConnectionEnabled);
         await SaveTriggersAsync(cancellationToken);
         App.Current.ApplyTheme(Theme);
@@ -194,6 +189,37 @@ public sealed partial class SettingsViewModel(
         return status;
     }
 
+    // Keep preference persistence independent of window updates and connection
+    // probes so it can also be validated without launching the WinUI app.
+    internal async Task SavePreferencesAsync(CancellationToken cancellationToken = default)
+    {
+        if (!Uri.TryCreate(GoAiServerUrl.Trim(), UriKind.Absolute, out var goAiUri)
+            || goAiUri.Scheme is not ("http" or "https"))
+        {
+            throw new InvalidOperationException("GO benötigt eine gültige HTTP- oder HTTPS-Adresse zum Docker-Gateway.");
+        }
+
+        var generalModel = PreferCurrentSelection(
+            SelectedGeneralModelItem?.Id,
+            SelectedModel,
+            AppSettings.DefaultSelectedModel);
+        await settings.UpdateAsync(current => current with
+        {
+            IsAiConnectionEnabled = IsAiConnectionEnabled,
+            GoAiServerUrl = goAiUri.ToString().TrimEnd('/'),
+            LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
+            SelectedModel = generalModel,
+            SelectedCodingModel = SelectedCodingModelItem?.Id ?? SelectedCodingModel,
+            CodingToolStepsExpanded = CodingToolStepsExpanded,
+            ReasoningEffort = "auto",
+            Theme = Theme,
+            AccentColor = AccentColor,
+            BackgroundColor = BackgroundColor,
+            Language = Language,
+        }, cancellationToken);
+        SelectedModel = settings.Current.SelectedModel;
+    }
+
     public async Task<GoAiConnectionStatus?> RefreshModelsAsync(CancellationToken cancellationToken = default)
     {
         GoAiConnectionStatus? status = null;
@@ -201,7 +227,7 @@ public sealed partial class SettingsViewModel(
         try
         {
             // A ComboBox cannot resolve a saved ID while its dynamic catalog is
-            // still empty. Keep the persisted IDs authoritative until LM Studio
+            // still empty. Keep the persisted IDs authoritative until the native runtime
             // has returned the matching model objects.
             var requestedGeneralModel = PreferCurrentSelection(
                 SelectedModel,
@@ -211,30 +237,39 @@ public sealed partial class SettingsViewModel(
             // Reading the remote catalog must never persist the transient UI
             // state. In particular, an asynchronous startup refresh must not
             // overwrite the model IDs restored from settings.json.
+            if (!settings.Current.IsAiConnectionEnabled)
+            {
+                Models.Clear();
+                CodingModels.Clear();
+                return null;
+            }
+            using var client = await goAi.CreateClientAsync(cancellationToken);
+            // Load the Coding catalog even while another native model is being prepared.
+            await RefreshCodingModelsAsync(client, cancellationToken);
             status = await goAi.TestAsync(cancellationToken);
             if (status is null)
             {
                 Models.Clear();
                 return null;
             }
-            IReadOnlyList<LmModel> items;
+            IReadOnlyList<LocalAiModel> items;
             if (!status.IsReachable)
             {
                 throw new InvalidOperationException(status.Message);
             }
-            using var client = await goAi.CreateClientAsync(cancellationToken);
-            var modelStatus = await client.GetModelStatusAsync(cancellationToken);
+            using var modelTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            modelTimeout.CancelAfter(TimeSpan.FromSeconds(12));
+            var modelStatus = await client.GetModelStatusAsync(modelTimeout.Token);
             if (!modelStatus.ProviderReachable)
             {
                 throw new InvalidOperationException(
-                    "LM Studio ist erreichbar, der Modellkatalog konnte jedoch nicht aktualisiert werden.");
+                    goAi.NativeRuntimeError ?? modelStatus.ErrorMessage ?? "Der lokale General-Modellkatalog ist nicht erreichbar. Prüfe die native Unsloth-Laufzeit und den Modellordner.");
             }
             modelCapabilities.Update(modelStatus);
             items = modelStatus.Models
                 .Where(model => model.Downloaded
-                    && model.Role == "general"
-                    && !IsTerminalOnlyModel(model.Id))
-                .Select(model => new LmModel(
+                    && model.Role == "general")
+                .Select(model => new LocalAiModel(
                     model.Id,
                     string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.DisplayName ?? model.Id, model.ContextTokens),
                     model.ContextTokens,
@@ -252,7 +287,7 @@ public sealed partial class SettingsViewModel(
             }
             // The selection may have changed while the asynchronous catalog
             // request was running. Re-read the current properties and keep
-            // them authoritative. A temporarily incomplete LM Studio catalog
+            // them authoritative. A temporarily incomplete local model catalog
             // must not silently replace a persisted model with the first item.
             SelectedModel = PreferCurrentSelection(
                 SelectedModel,
@@ -289,9 +324,31 @@ public sealed partial class SettingsViewModel(
         }
     }
 
-    internal static bool IsTerminalOnlyModel(string? modelId) =>
-        !string.IsNullOrWhiteSpace(modelId)
-        && modelId.Contains("qwen3-coder-next", StringComparison.OrdinalIgnoreCase);
+    private async Task RefreshCodingModelsAsync(GoAi.Client.GoAiClient client, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(8));
+            var catalog = await client.GetCodingModelsAsync(timeout.Token);
+            var selected = SelectedCodingModel ?? settings.Current.SelectedCodingModel;
+            CodingModels.Clear();
+            foreach (var item in catalog.Models)
+            {
+                CodingModels.Add(new LocalAiModel(item.Id,
+                    $"{item.DisplayName ?? item.Id} · {item.ContextTokens:N0} Token",
+                    item.ContextTokens, item.SupportsTools, item.SupportsVision));
+            }
+            SelectedCodingModel = selected;
+            SelectedCodingModelItem = EnsureModelItem(CodingModels, selected);
+            CodingModelStatus = $"{catalog.Models.Count} lokale Modelle · {catalog.ModelRoot}"
+                + (string.IsNullOrWhiteSpace(catalog.Message) ? string.Empty : $" · {catalog.Message}");
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException && !cancellationToken.IsCancellationRequested)
+        {
+            CodingModelStatus = $"Coding-Modellkatalog nicht erreichbar: {exception.Message}";
+        }
+    }
 
     internal static string PreferCurrentSelection(string? current, string? persisted, string fallback) =>
         !string.IsNullOrWhiteSpace(current)
@@ -300,11 +357,11 @@ public sealed partial class SettingsViewModel(
                 ? persisted.Trim()
                 : fallback;
 
-    private static LmModel? FindModel(IEnumerable<LmModel> models, string? id) =>
+    private static LocalAiModel? FindModel(IEnumerable<LocalAiModel> models, string? id) =>
         models.FirstOrDefault(model =>
             string.Equals(model.Id, id?.Trim(), StringComparison.OrdinalIgnoreCase));
 
-    private static LmModel? EnsureModelItem(ObservableCollection<LmModel> models, string? id)
+    private static LocalAiModel? EnsureModelItem(ObservableCollection<LocalAiModel> models, string? id)
     {
         var normalized = id?.Trim();
         if (string.IsNullOrWhiteSpace(normalized))
@@ -318,10 +375,10 @@ public sealed partial class SettingsViewModel(
             return existing;
         }
 
-        // Display the persisted selection even before the asynchronous LM
-        // Studio catalog is reachable. A successful refresh replaces this
+        // Display the persisted selection even before the asynchronous native
+        // model catalog is reachable. A successful refresh replaces this
         // placeholder with the authoritative descriptor.
-        var placeholder = new LmModel(normalized, normalized);
+        var placeholder = new LocalAiModel(normalized, normalized);
         models.Insert(0, placeholder);
         return placeholder;
     }
@@ -428,12 +485,17 @@ public sealed partial class SettingsViewModel(
     partial void OnSelectedPromptTriggerChanged(PromptTriggerEditorItem? value) =>
         OnPropertyChanged(nameof(CanDeleteSelectedPromptTrigger));
 
-    partial void OnSelectedGeneralModelItemChanged(LmModel? value)
+    partial void OnSelectedGeneralModelItemChanged(LocalAiModel? value)
     {
         if (value is not null)
         {
             SelectedModel = value.Id;
         }
+    }
+
+    partial void OnSelectedCodingModelItemChanged(LocalAiModel? value)
+    {
+        if (value is not null) SelectedCodingModel = value.Id;
     }
 
     private IEnumerable<PromptTriggerEditorItem> ApplyTriggerSort(

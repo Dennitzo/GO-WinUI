@@ -11,7 +11,7 @@ public sealed record GeneralAgentResponse(
 public static class GeneralAgentResponseParser
 {
     public const string ResponseSchema = "barebone.agent.response.v2";
-    private const string GreetingFallbackTitle = "Einstieg in die TGA-Fachplanung";
+    private const string GreetingFallbackTitle = "Gespräch mit GO";
 
     private static readonly HashSet<string> GenericTitles = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -23,9 +23,6 @@ public static class GeneralAgentResponseParser
         "Hallo",
         "Neue Sitzung",
         "Neuer Chat",
-        "TGA",
-        "TGA Planung",
-        "TGA-Planung",
         "Willkommen",
         "Workflow",
     };
@@ -122,7 +119,8 @@ public static class GeneralAgentResponseParser
             .Replace('—', ' ')
             .Replace('–', ' ')
             .ReplaceLineEndings(" ")
-            .Trim(' ', '\t', '#', '`', '"', '\'', '.', '!', '?', ';', ':', ',', '-', '–', '—');
+            .Trim(' ', '\t', '`', '"', '\'', '.', '!', '?', ';', ':', ',', '-', '–', '—')
+            .TrimStart('#').TrimStart();
         value = string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         if (value.StartsWith("Titel:", StringComparison.OrdinalIgnoreCase))
         {
@@ -192,8 +190,8 @@ public static class GeneralAgentResponseParser
     private static bool IsLowSignalPrompt(string prompt)
     {
         var value = prompt.Trim().TrimEnd('.', '!', '?').ToLowerInvariant();
-        return value.Length <= 3
-            || value is "hallo" or "hello" or "hi" or "hey" or "moin" or "servus" or "guten tag"
+        return value.Length == 0
+            || value is "hallo" or "hello" or "hi" or "hey" or "moin" or "servus" or "guten tag" or "guten morgen" or "guten abend"
             || value is "ja" or "nein" or "ok" or "okay" or "weiter" or "danke";
     }
 

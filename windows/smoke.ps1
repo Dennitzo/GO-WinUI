@@ -82,9 +82,13 @@ New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
 $previousDataDirectory = $env:GO_DATA_DIRECTORY
 $previousBridgeDirectory = $env:GO_BRIDGE_DIRECTORY
 $previousInstanceKey = $env:GO_SMOKE_INSTANCE_KEY
+$previousBundleExtractBaseDirectory = $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR
 $env:GO_DATA_DIRECTORY = Join-Path $smokeRoot 'Data'
 $env:GO_BRIDGE_DIRECTORY = Join-Path $smokeRoot 'Bridge'
 $env:GO_SMOKE_INSTANCE_KEY = [Guid]::NewGuid().ToString('N')
+if ($Mode -eq 'SingleFile') {
+    $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = Join-Path $smokeRoot 'Bundle'
+}
 $process = $null
 try {
     $process = Start-Process -FilePath (Join-Path $PublishDirectory 'GO.exe') -PassThru -WindowStyle Hidden
@@ -121,6 +125,27 @@ try {
         Write-Warning 'WebView2 x64 initialization was not asserted on the ARM64 build host; validate it on the supported x64 target.'
     }
 
+    $runtimeContentDirectory = $PublishDirectory
+    if ($Mode -eq 'SingleFile') {
+        $extractedAssemblies = @(Get-ChildItem -LiteralPath $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR -Recurse -File -Filter 'GO.dll' -ErrorAction SilentlyContinue)
+        if ($extractedAssemblies.Count -ne 1) {
+            throw "Runtime smoke failed; expected one extracted GO.dll under $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR, found $($extractedAssemblies.Count)."
+        }
+        $runtimeContentDirectory = $extractedAssemblies[0].DirectoryName
+    }
+    $nativeRuntimeFiles = @(
+        'Assets\NativeRuntime\windows\manage-coding-llama.ps1',
+        'Assets\NativeRuntime\workers\coding\catalog.py'
+    )
+    foreach ($nativeRuntimeFile in $nativeRuntimeFiles) {
+        $nativeRuntimePath = Join-Path $runtimeContentDirectory $nativeRuntimeFile
+        if (-not (Test-Path -LiteralPath $nativeRuntimePath -PathType Leaf) -or
+            (Get-Item -LiteralPath $nativeRuntimePath).Length -eq 0) {
+            throw "Runtime smoke failed; bundled native model runtime support is missing or empty: $nativeRuntimePath"
+        }
+    }
+    Write-Host "Native model runtime support verified: $runtimeContentDirectory"
+
     if (-not $process.CloseMainWindow() -or -not $process.WaitForExit(5000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         $process.WaitForExit(5000) | Out-Null
@@ -134,6 +159,7 @@ finally {
     $env:GO_DATA_DIRECTORY = $previousDataDirectory
     $env:GO_BRIDGE_DIRECTORY = $previousBridgeDirectory
     $env:GO_SMOKE_INSTANCE_KEY = $previousInstanceKey
+    $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = $previousBundleExtractBaseDirectory
     $smokeRoot = [IO.Path]::GetFullPath($smokeRoot)
     if (-not [string]::Equals([IO.Path]::GetDirectoryName($smokeRoot), $smokeBase, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to remove unsafe smoke directory: $smokeRoot"

@@ -408,7 +408,7 @@ public sealed class AiClientPersistenceTests
     }
 
     [Fact]
-    public async Task ClientStartupStopsEveryPersistedRunBeforeTheWebViewCanResumeIt()
+    public async Task ClientStartupStopsGeneralRunsAndPreservesCodingRunAndEventCursorForResume()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -423,13 +423,23 @@ public sealed class AiClientPersistenceTests
         var normalRun = await runRepository.CreateAsync(new GoAiRunRecord(
             Guid.NewGuid(), normalSession.Id, normalMessage.Id, null,
             "startup-normal", "server-normal", 12, "running", "gpt-oss-120b", null, now, now));
+        var codingSession = await chats.CreateSessionAsync("Coding Dauerlauf");
+        var codingMessage = await chats.AddMessageAsync(codingSession.Id, ChatRole.Assistant, "Erster Schritt erledigt.", MessageStatus.Streaming);
+        var codingRun = await runRepository.CreateAsync(new GoAiRunRecord(
+            Guid.NewGuid(), codingSession.Id, codingMessage.Id, PromptTriggerAction.Coding,
+            "startup-coding", "server-coding", 18_765, "waitingForClient", "coding/model", null, now.AddDays(-3), now));
 
         var serverRunIds = await GoAiAssistantService.StopPersistedRunsLocallyAsync(
             runRepository,
             chats);
 
         Assert.Equal(["server-normal"], serverRunIds);
-        Assert.Empty(await runRepository.ListResumableAsync());
+        var resumable = Assert.Single(await runRepository.ListResumableAsync());
+        Assert.Equal(codingRun.Id, resumable.Id);
+        Assert.Equal(18_765, resumable.LastEventId);
+        Assert.Equal("waitingForClient", resumable.State);
+        Assert.Equal("Erster Schritt erledigt.", (await chats.GetMessageAsync(codingMessage.Id))!.Content);
+        Assert.Equal(MessageStatus.Streaming, (await chats.GetMessageAsync(codingMessage.Id))!.Status);
         var stoppedNormalRun = Assert.IsType<GoAiRunRecord>(await runRepository.GetAsync(normalRun.Id));
         Assert.Equal("cancelled", stoppedNormalRun.State);
         Assert.Equal("client.run_stopped_on_start", stoppedNormalRun.ErrorCode);

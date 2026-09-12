@@ -14,6 +14,7 @@
         "queue.changed",
         "model.selected",
         "model.loading",
+        "model.generation",
         "model.fallback",
         "provider.fallback",
         "context.changed",
@@ -34,6 +35,28 @@
   "allOf": [
     {
       "if": {
+        "properties": { "type": { "const": "text.delta" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "data": { "$ref": "#/$defs/textDelta" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "model.generation" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "data": { "$ref": "#/$defs/modelGeneration" }
+        }
+      }
+    },
+    {
+      "if": {
         "properties": { "type": { "const": "context.changed" } },
         "required": ["type"]
       },
@@ -45,6 +68,45 @@
     }
   ],
   "$defs": {
+    "textDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["delta"],
+      "properties": {
+        "delta": { "type": "string" },
+        "replaceFrom": {
+          "type": ["integer", "null"],
+          "enum": [0, null],
+          "description": "null oder fehlend hängt delta an. 0 ersetzt die gesamte bisherige Narration dieses Serverlaufs durch delta; vorherige Modellturns bleiben im autoritativen Text enthalten. Ermöglicht Coding-Retrykorrekturen ohne verschobene Client-Textpositionen."
+        }
+      }
+    },
+    "modelGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "Modellphase. codingLoading, codingWaiting und deepResearchWaiting melden verstrichene Wartezeit; sie belegen allein keinen Tokenfortschritt. Deep Research publiziert seine Planungs-, Such-, Quellen- und Synthesephasen separat.",
+          "examples": ["codingLoading", "codingWaiting", "deepResearchPlanning", "deepResearchSearch", "deepResearchFetch", "deepResearchSynthesis", "deepResearchWaiting", "deepResearchCompleted", "generationStarted", "promptProcessing", "tokenProgress", "toolSelected"]
+        },
+        "toolName": { "type": ["string", "null"] },
+        "argumentCharacters": { "type": ["integer", "null"], "minimum": 0 },
+        "promptProgress": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "promptTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "processedPromptTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "generatedTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "tokensPerSecond": { "type": ["number", "null"], "minimum": 0 },
+        "currentTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "attempt": { "type": ["integer", "null"], "minimum": 1 },
+        "failureKind": { "type": ["string", "null"] },
+        "toolArgumentsJsonComplete": { "type": ["boolean", "null"] },
+        "contentCharacters": { "type": ["integer", "null"], "minimum": 0 },
+        "finishObserved": { "type": ["boolean", "null"] },
+        "elapsedSeconds": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
     "contextChanged": {
       "type": "object",
       "additionalProperties": false,

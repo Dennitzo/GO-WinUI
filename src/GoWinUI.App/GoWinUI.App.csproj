@@ -60,6 +60,20 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <Content Include="..\..\windows\manage-coding-llama.ps1">
+      <Link>Assets\NativeRuntime\windows\manage-coding-llama.ps1</Link>
+      <TargetPath>Assets\NativeRuntime\windows\manage-coding-llama.ps1</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="..\..\workers\coding\catalog.py">
+      <Link>Assets\NativeRuntime\workers\coding\catalog.py</Link>
+      <TargetPath>Assets\NativeRuntime\workers\coding\catalog.py</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

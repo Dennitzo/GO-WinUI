@@ -28,7 +28,7 @@ public sealed class SqliteConversationSnapshotRepository(SqliteDatabase database
             command.Transaction = transaction;
             command.CommandText = """
                 SELECT id,title,created_at,updated_at,selected_workflow_id,draft,
-                       is_pinned,pinned_at,persistent_tool_action,conversation_revision
+                       is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path
                 FROM chat_sessions WHERE id=$id;
                 """;
             command.Parameters.AddWithValue("$id", sessionId.ToString("D"));
@@ -50,7 +50,7 @@ public sealed class SqliteConversationSnapshotRepository(SqliteDatabase database
             command.CommandText = """
                 SELECT id,session_id,role,content,status,created_at,updated_at,error,
                        tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,
-                       content_profile,revision
+                       content_profile,revision,tool_steps_json
                 FROM chat_messages
                 WHERE session_id=$session
                 ORDER BY created_at,id;

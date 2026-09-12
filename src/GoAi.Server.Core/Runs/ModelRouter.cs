@@ -1,4 +1,4 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Models;
 using Microsoft.Extensions.Options;
@@ -26,21 +26,32 @@ public sealed class ModelRouter
             return selected;
         }
 
-        var status = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var status = request.Mode == RunMode.Coding
+            ? await _modelRuntime.GetCodingStatusAsync(cancellationToken).ConfigureAwait(false)
+            : await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
         if (!status.ProviderReachable)
         {
-            throw new HttpRequestException("LM Studio model status is unavailable.");
+            throw new HttpRequestException(request.Mode == RunMode.Coding
+                ? "Der native llama Coding-Dienst ist nicht erreichbar."
+                : "native llama model status is unavailable.");
         }
-        var model = status.Models.FirstOrDefault(candidate =>
-            candidate.Downloaded
-            && string.Equals(candidate.Id, selected.ModelId, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(candidate.Role, selected.Role, StringComparison.OrdinalIgnoreCase))
+        if (request.Mode == RunMode.Coding && string.IsNullOrWhiteSpace(selected.ModelId))
+        {
+            selected = selected with { ModelId = status.Models.FirstOrDefault(static model => model.Downloaded && model.Role == "coding")?.Id
+                ?? throw new InvalidOperationException("Kein lokales GGUF-Coding-Modell verfügbar.") };
+        }
+        var model = ModelRuntimeClient.ResolveModelStatus(status.Models, selected.ModelId, selected.Role)
             ?? throw new InvalidOperationException(
                 $"The selected {selected.Role} model '{selected.ModelId}' is not available.");
-        return selected with { ContextLength = Math.Max(2_048, model.ContextTokens) };
+        return selected with { ModelId = model.Id, ContextLength = Math.Max(2_048, model.ContextTokens) };
     }
 
-    public ModelSelection Select(RunRequest request) => SelectGeneral(request);
+    public ModelSelection Select(RunRequest request) => request.Mode == RunMode.Coding
+        ? new ModelSelection(
+            string.IsNullOrWhiteSpace(request.PreferredCodingModelId) ? _options.CodingModelId : request.PreferredCodingModelId.Trim(),
+            "coding",
+            _options.CodingContextLength)
+        : SelectGeneral(request);
 
     private ModelSelection SelectGeneral(RunRequest request)
     {

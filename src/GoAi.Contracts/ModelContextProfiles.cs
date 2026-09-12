@@ -1,7 +1,7 @@
 namespace GoAi.Contracts;
 
 /// <summary>
-/// Native context limits of the model revisions pinned by the GO Docker stack.
+/// Training context limits of the locally installed model families.
 /// Clients use the same values when budgeting a request before the gateway is
 /// contacted; the gateway remains authoritative through its capability data.
 /// </summary>
@@ -12,31 +12,26 @@ public static class ModelContextProfiles
     public const int Qwen3CoderNextMaximum = 262_144;
     public const int Qwen3VlMaximum = 262_144;
     public const int BgeM3Maximum = 8_192;
+    // Conservative fallback for an unknown family. Loaded runtime capability data is authoritative.
+    public const int NativeRuntimeDefault = 32_768;
+    public const int CodingRuntimeDefault = NativeRuntimeDefault;
 
     public static int ResolveMaximum(string? modelId, string? role)
     {
-        var normalized = modelId?.Trim() ?? string.Empty;
-        if (normalized.Contains("qwen3.8-27b", StringComparison.OrdinalIgnoreCase))
-        {
-            return Qwen38Maximum;
-        }
-        if (normalized.Contains("qwen3-coder-next", StringComparison.OrdinalIgnoreCase))
-        {
-            return Qwen3CoderNextMaximum;
-        }
-        if (normalized.Contains("qwen3-vl", StringComparison.OrdinalIgnoreCase))
-        {
-            return Qwen3VlMaximum;
-        }
-        if (normalized.Contains("bge-m3", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(role, "embedding", StringComparison.OrdinalIgnoreCase)
+            || modelId?.Contains("bge-m3", StringComparison.OrdinalIgnoreCase) == true)
         {
             return BgeM3Maximum;
         }
-        if (normalized.Contains("gpt-oss", StringComparison.OrdinalIgnoreCase))
-        {
+        if (modelId?.Contains("gpt-oss", StringComparison.OrdinalIgnoreCase) == true)
             return GptOss120BMaximum;
-        }
-
-        return GptOss120BMaximum;
+        if (modelId?.Contains("qwen3.8", StringComparison.OrdinalIgnoreCase) == true)
+            return Qwen38Maximum;
+        if (modelId?.Contains("qwen3-coder-next", StringComparison.OrdinalIgnoreCase) == true)
+            return Qwen3CoderNextMaximum;
+        if (modelId?.Contains("qwen3vl", StringComparison.OrdinalIgnoreCase) == true
+            || modelId?.Contains("qwen3-vl", StringComparison.OrdinalIgnoreCase) == true)
+            return Qwen3VlMaximum;
+        return NativeRuntimeDefault;
     }
 }

@@ -1,4 +1,4 @@
-using GoAi.Client;
+﻿using GoAi.Client;
 using GoAi.Contracts;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -63,7 +63,7 @@ async Task<object> RunBasicSmokeAsync()
     Ensure(ready.Status is "ready" or "modelNotLoaded" or "modelLoading", $"Readiness failed: {ready.Reason}");
     Ensure(capabilities.ProtocolVersion == GoAiProtocol.Version, "Protocol version mismatch.");
     Ensure(capabilities.LiveCaptions?.Available == true, "Live system-audio captions are not advertised.");
-    Ensure(models.ProviderReachable, "The LM Studio model server is not reachable.");
+    Ensure(models.ProviderReachable, "The native llama model server is not reachable.");
     Ensure(gpu.Available && gpu.Devices.Count > 0, "No GPU was detected.");
     return new
     {
@@ -136,7 +136,7 @@ async Task<object> RunLiveSmokeAsync()
 
     var general = await CreateAndCompleteRunAsync(
         RunMode.General,
-        "Dies ist ein Text-Smoke-Test. Antworte in genau einem kurzen deutschen Satz zum Thema TGA-Planung.");
+        "Dies ist ein Text-Smoke-Test. Bestätige in genau einem kurzen deutschen Satz, dass du Fragen beantworten und bei Aufgaben helfen kannst.");
     EnsureEvent(general, RunEventTypes.TextDelta);
     EnsureCompletedWithModel(general, "gpt-oss-120b");
     await AssertSseResumeAsync(general);
@@ -156,13 +156,13 @@ async Task<object> RunLiveSmokeAsync()
 
     var embedding = await CreateAndCompleteRunAsync(
         RunMode.General,
-        "Dies ist ein strukturierter Embedding-Smoke-Test. Rufe zwingend genau einmal context.embed mit den Inputs [\"Heizung\", \"Lüftung\"] auf und nenne danach ausschließlich die Vektordimension.");
+        "Dies ist ein strukturierter Embedding-Smoke-Test. Rufe zwingend genau einmal context.embed mit den Inputs [\"Information\", \"Zusammenhang\"] auf und nenne danach ausschließlich die Vektordimension.");
     EnsureToolEvent(embedding, "context.embed");
 
     var web = await client.SearchWebAsync(new WebSearchRequest(options.SearchQuery, 3, "de-DE"));
     Ensure(web.Results.Count > 0, "SearXNG returned no web results.");
     Ensure(string.Equals(web.Provider, "searxng", StringComparison.OrdinalIgnoreCase), "Unexpected web provider.");
-    var youtube = await client.SearchYouTubeAsync(new WebSearchRequest("TGA Planung", 3, "de-DE"));
+    var youtube = await client.SearchYouTubeAsync(new WebSearchRequest("Wissenschaft einfach erklärt", 3, "de-DE"));
     Ensure(youtube.Results.Count > 0, "YouTube fallback returned no results.");
     Ensure(youtube.IsFallback, "YouTube search did not report the configured SearXNG fallback.");
     var fetched = await client.FetchWebAsync(new WebFetchRequest("https://example.com/"));
@@ -207,7 +207,7 @@ async Task<object> RunLiveSmokeAsync()
     Ensure(completedCaptions.State == "completed" && completedCaptions.Transcript.Contains(caption.Text, StringComparison.Ordinal),
         "Live-caption session did not preserve the confirmed transcript.");
 
-    var speech = await client.SynthesizeSpeechAsync(new SpeechRequest("GO AI Sprachtest für die technische Gebäudeausrüstung."));
+    var speech = await client.SynthesizeSpeechAsync(new SpeechRequest("GO AI Sprachtest für den allgemeinen Assistenten."));
     Ensure(string.Equals(speech.Provider, SpeechProviderIds.SupertonicF5Cuda, StringComparison.Ordinal),
         $"Speech used unexpected provider {speech.Provider}.");
     Ensure(speech.Artifact.MediaType == "audio/wav", "TTS did not create WAV audio.");
@@ -222,7 +222,7 @@ async Task<object> RunLiveSmokeAsync()
     EnsureCompletedWithModel(videoRun, "qwen3-vl");
 
     var generated = await client.GenerateImageAsync(
-        new ImageGenerationRequest("Technische schematische Darstellung eines Lüftungskanals auf neutralem Hintergrund", 512, 512, 424242, 1),
+        new ImageGenerationRequest("Ein roter Apfel auf einem hellen Holztisch vor neutralem Hintergrund", 512, 512, 424242, 1),
         $"image-smoke-{Guid.NewGuid():N}");
     var imageRun = await CompleteRunAsync(client, generated.RunId);
     var generatedArtifact = GetArtifacts(imageRun).Single();
@@ -435,6 +435,6 @@ internal sealed record Arguments(
             Read("--audio"),
             Read("--video"),
             Path.GetFullPath(output),
-            Read("--search-query") ?? "VDI Richtlinie technische Gebäudeausrüstung");
+            Read("--search-query") ?? "Wie entsteht ein Regenbogen");
     }
 }

@@ -2,7 +2,7 @@ namespace GoWinUI.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
-public enum PersistentToolAction { BricsCad, Audiobook }
+public enum PersistentToolAction { BricsCad, Audiobook, Coding }
 public enum MessageContentProfile { General, Audiobook }
 public enum SessionContextProfile { General, Audiobook }
 public enum ProjectStatus { Active, Archived }
@@ -19,7 +19,8 @@ public sealed record ChatSession(
     bool IsPinned = false,
     DateTimeOffset? PinnedAt = null,
     PersistentToolAction? PersistentToolAction = null,
-    long ConversationRevision = 0);
+    long ConversationRevision = 0,
+    string? CodingWorkspacePath = null);
 
 public sealed record ChatMessage(
     Guid Id,
@@ -33,7 +34,50 @@ public sealed record ChatMessage(
     ToolExecutionInfo? ToolExecution = null,
     string? ContextSummary = null,
     MessageContentProfile ContentProfile = MessageContentProfile.General,
-    long Revision = 1);
+    long Revision = 1,
+    IReadOnlyList<AssistantToolStep>? ToolSteps = null);
+
+public sealed record AssistantToolStep(
+    string Id,
+    string Tool,
+    string Status,
+    string? Detail = null,
+    string? PreviewHtml = null,
+    string? InputJson = null,
+    string? OutputJson = null,
+    string? Explanation = null,
+    int? ContentOffset = null,
+    DateTimeOffset? StartedAt = null,
+    DateTimeOffset? CompletedAt = null,
+    DateTimeOffset? UpdatedAt = null)
+{
+    // Display/storage limit only. Tool collection and model-context budgets are independent.
+    public const int MaximumDetailCharacters = 2_097_152;
+    public const int MaximumStructuredJsonCharacters = 2_097_152;
+    public const int MaximumExplanationCharacters = 2_000;
+
+    public static AssistantToolStep Merge(AssistantToolStep? previous, AssistantToolStep incoming)
+    {
+        ArgumentNullException.ThrowIfNull(incoming);
+        if (previous is null) return incoming;
+        if (incoming.Status == "running" && previous.Status != "running") return previous;
+        if (previous.UpdatedAt is { } previousAt
+            && (incoming.UpdatedAt is { } incomingAt && incomingAt < previousAt
+                || incoming.UpdatedAt is null)) return previous;
+        return incoming with
+        {
+            InputJson = previous.InputJson ?? incoming.InputJson,
+            OutputJson = incoming.OutputJson ?? previous.OutputJson,
+            Explanation = previous.Explanation ?? incoming.Explanation,
+            ContentOffset = incoming.ContentOffset ?? previous.ContentOffset,
+            StartedAt = previous.StartedAt ?? incoming.StartedAt,
+            CompletedAt = incoming.Status == "running" ? null : incoming.CompletedAt ?? previous.CompletedAt,
+            UpdatedAt = incoming.UpdatedAt ?? previous.UpdatedAt,
+            Detail = incoming.Detail ?? previous.Detail,
+            PreviewHtml = incoming.PreviewHtml ?? previous.PreviewHtml,
+        };
+    }
+}
 
 public sealed record ChatTurn(ChatMessage UserMessage, ChatMessage AssistantMessage);
 
@@ -196,7 +240,7 @@ public sealed record DocumentIngestResult(
     string? Error,
     bool HasExtractableText);
 
-public sealed record LmModel(
+public sealed record LocalAiModel(
     string Id,
     string? DisplayName = null,
     int? ContextLength = null,
@@ -205,7 +249,7 @@ public sealed record LmModel(
     IReadOnlyList<string>? ReasoningEfforts = null,
     string? DefaultReasoningEffort = null);
 
-public sealed record LmChatMessage(ChatRole Role, string Content);
+public sealed record LocalChatMessage(ChatRole Role, string Content);
 
 public sealed record ContextBuildRequest(
     string SystemPrompt,
@@ -216,7 +260,7 @@ public sealed record ContextBuildRequest(
     int ContextLength);
 
 public sealed record ContextBuildResult(
-    IReadOnlyList<LmChatMessage> Messages,
+    IReadOnlyList<LocalChatMessage> Messages,
     int EstimatedTokens,
     bool WasTruncated,
     string? TruncationNotice,
@@ -235,7 +279,7 @@ public sealed record WindowPlacement(
 
 public sealed record AppSettings
 {
-    public const int CurrentVersion = 16;
+    public const int CurrentVersion = 19;
     public const string DefaultSelectedModel = "gpt-oss-120b";
     public const string DefaultAccentColor = "#A970FF";
     public const string DefaultBackgroundColor = "#6B6872";
@@ -248,8 +292,11 @@ public sealed record AppSettings
     public string GoAiProtocolVersion { get; init; } = "1.0";
     public string LiveCaptionLanguage { get; init; } = "auto";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
-    // Legacy JSON field retained for backward-compatible deserialization. GO no
-    // longer controls reasoning and always normalizes this value to "auto".
+    public string? SelectedCodingModel { get; init; }
+    public string? CodingWorkspacePath { get; init; }
+    public bool CodingToolStepsExpanded { get; init; }
+    // Legacy JSON field retained for backward-compatible deserialization. "auto"
+    // uses the gateway's highest supported model-specific reasoning default.
     public string ReasoningEffort { get; init; } = "auto";
     public AppTheme Theme { get; init; } = AppTheme.System;
     public string AccentColor { get; init; } = DefaultAccentColor;

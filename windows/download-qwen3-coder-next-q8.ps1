@@ -5,7 +5,7 @@ param(
 
     [string] $ModelRoot,
 
-    [string] $LmStudioModelRoot = (Join-Path $env:USERPROFILE '.lmstudio\models'),
+    [string] $NativeModelRoot = (Join-Path $env:USERPROFILE '.cache\huggingface\hub'),
 
     [switch] $PlanOnly
 )
@@ -144,17 +144,16 @@ function Receive-PinnedShard {
     Write-Host "Pinned shard downloaded: $destination" -ForegroundColor Green
 }
 
-$paths = Get-GoAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot -LmStudioModelRoot $LmStudioModelRoot
-$resolvedModelRoot = [IO.Path]::GetFullPath($paths.LmStudioModelRoot)
-$destinationDirectory = [IO.Path]::GetFullPath(
-    (Join-Path $resolvedModelRoot 'Qwen\Qwen3-Coder-Next-GGUF'))
+$paths = Get-GoAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot -NativeModelRoot $NativeModelRoot
+$resolvedModelRoot = [IO.Path]::GetFullPath($paths.NativeModelRoot)
+$firstShard = Resolve-GoNativeModelFile -NativeModelRoot $resolvedModelRoot -Repository $repository -Revision $revision -FileName ($variant + '/' + $files[0].Name)
+$destinationDirectory = Split-Path $firstShard -Parent
 $modelRootPrefix = $resolvedModelRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
 if (-not $destinationDirectory.StartsWith($modelRootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Destination must stay below the LM Studio model root: $destinationDirectory"
+    throw "Destination must stay below the native model root: $destinationDirectory"
 }
 
 $stagingDirectory = Join-Path $destinationDirectory '.download'
-$lmStudioModelKey = 'qwen3-coder-next'
 $totalLength = [long] 0
 foreach ($file in $files) {
     $totalLength += [long] $file.Length
@@ -164,7 +163,7 @@ Write-Host 'Qwen3-Coder-Next Q8_0 download plan' -ForegroundColor Cyan
 Write-Host "Repository: $repository@$revision"
 Write-Host "Destination: $destinationDirectory"
 Write-Host ("Download size: {0:N2} GiB" -f ($totalLength / 1GB))
-Write-Host "LM Studio model key: $lmStudioModelKey"
+Write-Host 'The native catalog assigns a stable local ID after all four shards are complete.'
 foreach ($file in $files) {
     Write-Host ("  {0} | {1:N2} GiB | SHA-256 {2}" -f $file.Name, ($file.Length / 1GB), $file.Sha256) -ForegroundColor DarkGray
 }
@@ -214,6 +213,8 @@ foreach ($file in $files) {
         -Curl $curl
 }
 
-Write-Host 'Qwen3-Coder-Next Q8_0 download completed and verified.' -ForegroundColor Green
-Write-Host "LM Studio model key: $lmStudioModelKey" -ForegroundColor Green
-Write-Host 'Refresh the LM Studio model catalog if the model is not immediately visible.' -ForegroundColor Yellow
+$refsDirectory = Join-Path (Join-Path $resolvedModelRoot ('models--' + $repository.Replace('/', '--'))) 'refs'
+New-Item -ItemType Directory -Path $refsDirectory -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $refsDirectory 'main'), $revision, [Text.Encoding]::ASCII)
+Write-Host 'Qwen3-Coder-Next Q8_0 download completed and verified in the native Unsloth cache.' -ForegroundColor Green
+Write-Host 'Refresh the GO model catalog to select the model for General or Coding.' -ForegroundColor Yellow

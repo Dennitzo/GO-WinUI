@@ -3,5 +3,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>GoWinUI.Core</RootNamespace>
     <AssemblyName>GoWinUI.Core</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 </Project>

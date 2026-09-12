@@ -19,7 +19,7 @@ public static class ContextPlanner
     public static ContextPlan Prepare(
         IReadOnlyList<LmChatMessage> source,
         int contextLength,
-        int maximumOutputTokens,
+        int? maximumOutputTokens,
         bool allowLossyCompaction = true)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -103,12 +103,14 @@ public static class ContextPlanner
                 : null);
     }
 
-    public static int ComputeInputTokenBudget(int contextLength, int maximumOutputTokens)
+    public static int ComputeInputTokenBudget(int contextLength, int? maximumOutputTokens)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(contextLength, 2_048);
-        ArgumentOutOfRangeException.ThrowIfNegative(maximumOutputTokens);
+        if (maximumOutputTokens is { } explicitLimit) ArgumentOutOfRangeException.ThrowIfNegative(explicitLimit);
         var safetyTokens = Math.Min(8_192, Math.Max(2_048, contextLength / 16));
-        return Math.Max(1_024, contextLength - maximumOutputTokens - safetyTokens);
+        // Automatic output consumes the remaining context after exact native token counting.
+        // Do not reserve the whole window for output and evict the user's input.
+        return Math.Max(1_024, contextLength - safetyTokens);
     }
 
     public static int EstimateTokens(IReadOnlyList<LmChatMessage> messages)

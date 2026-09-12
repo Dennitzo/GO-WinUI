@@ -1,5 +1,6 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
+using GoAi.Server.Core.Coding;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
@@ -11,27 +12,26 @@ using System.Text.Json;
 namespace GoAi.Server.Core.Models;
 
 /// <summary>
-/// Connects the Docker gateway to LM Studio's local REST and OpenAI-compatible
-/// APIs. GO remains the only tool executor; LM Studio owns model residency and
-/// produces text, embeddings, vision responses and native tool calls.
+/// Connects every model role to the native Windows llama.cpp router.
+/// GO remains the only tool executor; the local Unsloth catalog owns model paths.
 /// </summary>
-public sealed class ModelRuntimeClient : IDisposable
+public sealed partial class ModelRuntimeClient : IDisposable
 {
     private static readonly Action<ILogger, Exception?> LogRouterUnavailable = LoggerMessage.Define(
         LogLevel.Warning,
         new EventId(4101, "ModelRouterUnavailable"),
-        "The LM Studio model server is unavailable.");
+        "The native llama model server is unavailable.");
     private static readonly Action<ILogger, Exception?> LogInferenceRetry = LoggerMessage.Define(
         LogLevel.Warning,
         new EventId(4102, "ModelInferenceRetry"),
-        "Transient LM Studio inference failure; retrying before any tool is executed.");
+        "Transient model inference failure; retrying before any tool is executed.");
     private static readonly Action<ILogger, int, string, int, string, int, bool, Exception?> LogStreamingAttempt =
         LoggerMessage.Define<int, string, int, string, int, bool>(
             LogLevel.Warning,
             new EventId(4103, "ModelStreamingAttemptIncomplete"),
-            "LM Studio inference attempt {Attempt}/3 ended ({FailureKind}); fragments={GeneratedFragments}, tool={ToolName}, argumentCharacters={ArgumentCharacters}, argumentJsonComplete={ArgumentJsonComplete}.");
+            "Model inference attempt {Attempt}/3 ended ({FailureKind}); fragments={GeneratedFragments}, tool={ToolName}, argumentCharacters={ArgumentCharacters}, argumentJsonComplete={ArgumentJsonComplete}.");
     private static readonly TimeSpan StatusCacheDuration = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan ModelLoadTimeout = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan ModelLoadTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ModelTurnTimeout = TimeSpan.FromMinutes(20);
     private readonly HttpClient _httpClient;
     private readonly GoAiServerOptions _options;
@@ -40,6 +40,7 @@ public sealed class ModelRuntimeClient : IDisposable
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly object _cacheLock = new();
     private readonly Dictionary<string, RuntimeModel> _runtimeCatalog = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _modelTransitions = new(StringComparer.OrdinalIgnoreCase);
     private ModelStatusSnapshot? _cachedStatus;
     private IReadOnlyList<ModelRuntimeStatus> _lastReachableModels = [];
     private DateTimeOffset _cacheExpiresAt;
@@ -64,37 +65,45 @@ public sealed class ModelRuntimeClient : IDisposable
     {
         lock (_cacheLock)
         {
-            if (_cachedStatus is not null && DateTimeOffset.UtcNow < _cacheExpiresAt)
-            {
-                return _cachedStatus;
-            }
+            if (_cachedStatus is not null && DateTimeOffset.UtcNow < _cacheExpiresAt) return _cachedStatus;
         }
-
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        var ownsModelGate = false;
         try
         {
-            using var response = await _httpClient.GetAsync("api/v1/models", cancellationToken).ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            using var document = JsonDocument.Parse(
-                await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-            var runtimeModels = ReadRuntimeModels(document.RootElement);
-            RememberRuntimeModels(runtimeModels);
-            var models = BuildRuntimeStatuses(runtimeModels);
-            return Cache(new ModelStatusSnapshot(
-                true,
-                _options.ModelRuntimeUri.ToString(),
-                models,
-                DateTimeOffset.UtcNow));
+            ownsModelGate = await _modelGate.WaitAsync(0, timeout.Token).ConfigureAwait(false);
+            // A model operation can take minutes. Do not wait behind it or query
+            // a child that is being removed; the router remains independently checkable.
+            var models = ownsModelGate
+                ? await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false)
+                : ApplyTransitionStatus(await ReadRuntimeCatalogAsync(timeout.Token).ConfigureAwait(false));
+            var status = new ModelStatusSnapshot(true, _options.ModelRuntimeUri.ToString(), BuildRuntimeStatuses(models), DateTimeOffset.UtcNow);
+            // A transition snapshot must not outlive the operation that produced it.
+            return ownsModelGate ? Cache(status) : status;
         }
-        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception) when (exception is HttpRequestException or JsonException or OperationCanceledException)
         {
             LogRouterUnavailable(_logger, exception);
-            return Cache(new ModelStatusSnapshot(
-                false,
-                _options.ModelRuntimeUri.ToString(),
-                GetLastReachableModels(),
-                DateTimeOffset.UtcNow,
-                exception is TaskCanceledException ? "modelRuntime.timeout" : "modelRuntime.unreachable"));
+            return Cache(new ModelStatusSnapshot(false, _options.ModelRuntimeUri.ToString(), GetLastReachableModels(), DateTimeOffset.UtcNow,
+                exception is OperationCanceledException ? "modelRuntime.timeout"
+                    : exception is JsonException ? "modelRuntime.invalidResponse" : "modelRuntime.unreachable",
+                DescribeModelRuntimeFailure(exception)));
         }
+        finally { if (ownsModelGate) _modelGate.Release(); }
+    }
+
+    private string DescribeModelRuntimeFailure(Exception exception)
+    {
+        var endpoint = _options.ModelRuntimeUri.GetComponents(UriComponents.SchemeAndServer, UriFormat.Unescaped);
+        if (exception is OperationCanceledException)
+            return $"Windows llama.cpp ({endpoint}) antwortete nicht innerhalb von 5 Sekunden.";
+        var detail = string.Concat(exception.Message.Where(static character => !char.IsControl(character)));
+        if (detail.Length > 1_000) detail = detail[..1_000];
+        return exception is JsonException
+            ? $"Windows llama.cpp ({endpoint}) lieferte einen ungültigen Modellstatus: {detail}"
+            : $"Windows llama.cpp ({endpoint}) ist nicht erreichbar oder lieferte einen HTTP-Fehler: {detail}";
     }
 
     public async Task<string> EnsureModelLoadedAsync(
@@ -104,10 +113,16 @@ public sealed class ModelRuntimeClient : IDisposable
         (await EnsureModelPreparedAsync(modelId, contextLength, null, cancellationToken).ConfigureAwait(false)).InstanceId;
 
     internal async Task<ModelPreparation> EnsureModelPreparedAsync(
-        string modelId,
-        int contextLength,
-        Func<CancellationToken, Task>? loadingStarted,
+        string modelId, int contextLength, Func<CancellationToken, Task>? loadingStarted,
         CancellationToken cancellationToken = default)
+    {
+        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return await PrepareNativeModelAsync(modelId, contextLength, loadingStarted, cancellationToken).ConfigureAwait(false); }
+        finally { _turnGate.Release(); }
+    }
+
+    private async Task<ModelPreparation> PrepareNativeModelAsync(
+        string modelId, int contextLength, Func<CancellationToken, Task>? loadingStarted, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelId);
         await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -115,144 +130,89 @@ public sealed class ModelRuntimeClient : IDisposable
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ModelLoadTimeout);
-            var operationToken = timeout.Token;
-            var runtimeModels = await GetRuntimeModelsAsync(operationToken).ConfigureAwait(false);
-            var selected = runtimeModels.FirstOrDefault(candidate =>
-                MatchesRuntimeModel(candidate, ResolveKnownRuntimeModelId(modelId)));
-            if (selected is null)
+            var runtimeModels = await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);
+            var selected = ResolveInstalledModel(runtimeModels, modelId)
+                ?? throw new FileNotFoundException($"Das lokale Unsloth-Modell '{modelId}' ist nicht installiert.");
+            if (contextLength > selected.MaximumContextLength)
+                throw new ModelContextLengthException(selected.Id, contextLength, selected.MaximumContextLength);
+            if (selected.State is "loaded" or "sleeping") return new ModelPreparation(selected.Id, WasAlreadyLoaded: true, selected.LoadedContextLength);
+            BeginModelTransition(runtimeModels.Where(model => model.Id != selected.Id && model.State is "loaded" or "loading" or "sleeping"), selected.Id);
+            if (loadingStarted is not null) await loadingStarted(cancellationToken).ConfigureAwait(false);
+            // Change residency only when the selected model actually needs loading. A resumed tool round reuses it.
+            foreach (var loaded in runtimeModels.Where(model => model.Id != selected.Id && model.State is "loaded" or "loading" or "sleeping"))
+                await UnloadRuntimeInstanceAsync(loaded.Id, timeout.Token).ConfigureAwait(false);
+            try { await LoadRuntimeModelAsync(selected.Id, timeout.Token).ConfigureAwait(false); }
+            catch (Exception exception) when (IsTransientInferenceFailure(exception) && !timeout.IsCancellationRequested)
             {
-                throw new FileNotFoundException(
-                    $"Das LM-Studio-Modell '{modelId}' ist nicht installiert.");
+                // A dropped load response can follow a successful native allocation. Reconcile once before retrying anything.
+                var recovered = (await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false)).FirstOrDefault(model => model.Id == selected.Id);
+                if (recovered?.State is not ("loaded" or "sleeping" or "loading")) throw;
             }
-            RememberRuntimeModels(runtimeModels);
-            var definition = CreateDefinition(selected);
-            var availableContextLength = selected.MaximumContextLength > 0
-                ? selected.MaximumContextLength
-                : Math.Max(contextLength, 2_048);
-            if (contextLength > availableContextLength)
+            while (true)
             {
-                throw new ModelContextLengthException(modelId, contextLength, availableContextLength);
-            }
-            var canReuseLoadedInstance = string.Equals(selected.State, "loaded", StringComparison.OrdinalIgnoreCase)
-                && selected.LoadedContextLength >= contextLength
-                && !string.IsNullOrWhiteSpace(selected.InstanceId);
-            if (canReuseLoadedInstance)
-            {
-                return new ModelPreparation(selected.InstanceId!, WasAlreadyLoaded: true);
-            }
-
-            if (loadingStarted is not null)
-            {
-                await loadingStarted(cancellationToken).ConfigureAwait(false);
-            }
-            foreach (var loaded in runtimeModels.Where(candidate =>
-                         string.Equals(candidate.State, "loaded", StringComparison.OrdinalIgnoreCase)
-                         && !MatchesRuntimeModel(candidate, definition.RuntimeModelId)
-                         && !string.IsNullOrWhiteSpace(candidate.InstanceId)))
-            {
-                await UnloadRuntimeInstanceAsync(loaded.InstanceId!, operationToken).ConfigureAwait(false);
-            }
-            if (string.Equals(selected.State, "loaded", StringComparison.OrdinalIgnoreCase)
-                && !string.IsNullOrWhiteSpace(selected.InstanceId))
-            {
-                await UnloadRuntimeInstanceAsync(selected.InstanceId!, operationToken).ConfigureAwait(false);
-            }
-            string instanceId;
-            try
-            {
-                instanceId = await LoadRuntimeModelAsync(
-                    definition,
-                    contextLength,
-                    operationToken).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (
-                IsTransientInferenceFailure(exception)
-                && !operationToken.IsCancellationRequested)
-            {
-                // LM Studio can close the HTTP load channel while the native
-                // runtime finishes loading successfully. Reconcile against the
-                // authoritative model catalog before failing the run or issuing
-                // a second load request.
-                var recoveredInstanceId = await WaitForLoadedInstanceAsync(
-                    definition.RuntimeModelId,
-                    contextLength,
-                    operationToken).ConfigureAwait(false);
-                if (string.IsNullOrWhiteSpace(recoveredInstanceId))
+                var current = (await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false)).FirstOrDefault(model => model.Id == selected.Id);
+                if (current?.State is "loaded" or "sleeping")
                 {
-                    throw;
+                    InvalidateStatus();
+                    return new ModelPreparation(selected.Id, WasAlreadyLoaded: false, current.LoadedContextLength);
                 }
-                instanceId = recoveredInstanceId;
+                if (current?.State == "failed") throw new InvalidOperationException($"Das native Modell '{selected.Id}' konnte nicht geladen werden. Runtime-Logs und freien GPU-Speicher prüfen.");
+                await Task.Delay(TimeSpan.FromSeconds(1), timeout.Token).ConfigureAwait(false);
             }
-            InvalidateStatus();
-            return new ModelPreparation(instanceId, WasAlreadyLoaded: false);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException($"Das Modell '{modelId}' wurde nicht innerhalb von 30 Minuten geladen.");
+            throw new TimeoutException($"Das Modell '{modelId}' wurde nicht innerhalb von 5 Minuten geladen.", exception);
         }
-        finally
-        {
-            _modelGate.Release();
-        }
+        finally { EndModelTransition(); _modelGate.Release(); }
     }
 
     public async Task<bool> UnloadModelAsync(string modelId, CancellationToken cancellationToken = default)
     {
-        await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var runtimeModels = await GetRuntimeModelsAsync(cancellationToken).ConfigureAwait(false);
-            var loaded = runtimeModels.FirstOrDefault(candidate =>
-                MatchesRuntimeModel(candidate, ResolveKnownRuntimeModelId(modelId))
-                && string.Equals(candidate.State, "loaded", StringComparison.OrdinalIgnoreCase)
-                && !string.IsNullOrWhiteSpace(candidate.InstanceId));
-            if (loaded is null)
+            await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                return false;
+                var model = ResolveInstalledModel(await GetRuntimeModelsAsync(cancellationToken).ConfigureAwait(false), modelId);
+                if (model is null || model.State is not ("loaded" or "loading" or "sleeping")) return false;
+                BeginModelTransition([model], null);
+                await UnloadRuntimeInstanceAsync(model.Id, cancellationToken).ConfigureAwait(false);
+                return true;
             }
-            await UnloadRuntimeInstanceAsync(loaded.InstanceId!, cancellationToken).ConfigureAwait(false);
-            InvalidateStatus();
-            return true;
+            finally { EndModelTransition(); _modelGate.Release(); }
         }
-        finally
-        {
-            _modelGate.Release();
-        }
+        finally { _turnGate.Release(); }
     }
 
-    public Task UnloadAllModelsAsync(CancellationToken cancellationToken = default) =>
-        UnloadModelsExceptAsync([], cancellationToken);
+    public Task UnloadAllModelsAsync(CancellationToken cancellationToken = default) => UnloadModelsExceptAsync([], cancellationToken);
 
-    public async Task UnloadModelsExceptAsync(
-        IReadOnlyCollection<string> preservedModelIds,
-        CancellationToken cancellationToken = default)
+    public async Task UnloadModelsExceptAsync(IReadOnlyCollection<string> preservedModelIds, CancellationToken cancellationToken = default)
     {
-        var preserved = new HashSet<string>(preservedModelIds, StringComparer.OrdinalIgnoreCase);
-        await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var runtimeModels = await GetRuntimeModelsAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var model in runtimeModels.Where(candidate =>
-                         string.Equals(candidate.State, "loaded", StringComparison.OrdinalIgnoreCase)
-                         && !preserved.Any(preservedId =>
-                             MatchesRuntimeModel(candidate, ResolveKnownRuntimeModelId(preservedId)))
-                         && !string.IsNullOrWhiteSpace(candidate.InstanceId)))
+            await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                await UnloadRuntimeInstanceAsync(model.InstanceId!, cancellationToken).ConfigureAwait(false);
+                var models = await GetRuntimeModelsAsync(cancellationToken).ConfigureAwait(false);
+                var preserved = preservedModelIds.Select(id => ResolveInstalledModel(models, id)?.Id).Where(static id => id is not null).ToHashSet(StringComparer.Ordinal);
+                var unloading = models.Where(model => model.State is "loaded" or "loading" or "sleeping" && !preserved.Contains(model.Id)).ToArray();
+                BeginModelTransition(unloading, null);
+                foreach (var model in unloading)
+                    await UnloadRuntimeInstanceAsync(model.Id, cancellationToken).ConfigureAwait(false);
             }
-            InvalidateStatus();
+            finally { EndModelTransition(); _modelGate.Release(); }
         }
-        finally
-        {
-            _modelGate.Release();
-        }
+        finally { _turnGate.Release(); }
     }
 
     public async Task<LmChatResult> CompleteChatAsync(
         string modelId,
         IReadOnlyList<LmChatMessage> messages,
         IReadOnlyList<LmToolDefinition> tools,
-        int maximumOutputTokens = 8_192,
+        int? maximumOutputTokens = null,
         string modelRole = "general",
         string? reasoningEffort = null,
         bool requireToolCall = false,
@@ -263,21 +223,19 @@ public sealed class ModelRuntimeClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         ValidateToolChoice(tools, requireToolCall, requiredToolName);
-        var modelContext = TryGetRuntimeModel(modelId, out var catalogModel)
-            && catalogModel.MaximumContextLength > 0
-                ? catalogModel.MaximumContextLength
-                : ModelContextProfiles.ResolveMaximum(modelId, modelRole);
-        var context = requiredContextLength is { } requested
-            ? Math.Clamp(requested, 1, modelContext)
-            : modelContext;
-        var preparation = await EnsureModelPreparedAsync(
-            modelId,
-            context,
-            loadingStarted: null,
-            cancellationToken).ConfigureAwait(false);
+        var coding = string.Equals(modelRole, "coding", StringComparison.Ordinal);
+        if (coding && !IsCodingModel(modelId))
+        {
+            throw new ArgumentException("Coding requires an installed model from the Coding model catalog.", nameof(modelId));
+        }
         await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // The preset chooses the model's maximum that fits. A request limit is
+            // an upper bound; it must not require a larger allocation after fitting.
+            var preparation = await PrepareNativeModelAsync(modelId, 0, null, cancellationToken).ConfigureAwait(false);
+            var context = requiredContextLength is { } requested
+                ? Math.Min(requested, preparation.ContextLength) : preparation.ContextLength;
             if (nativeProgress is not null)
             {
                 await nativeProgress(new ModelRuntimeProgress("generationStarted"), cancellationToken).ConfigureAwait(false);
@@ -286,20 +244,25 @@ public sealed class ModelRuntimeClient : IDisposable
             var body = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["model"] = preparation.InstanceId,
-                ["messages"] = NormalizeMessageOrderForLmStudio(messages)
+                ["messages"] = NormalizeMessageOrderForNativeRuntime(messages)
                     .Select(ToOpenAiMessage)
                     .ToArray(),
-                // Streaming is an internal transport detail. GO buffers and
-                // validates the complete assistant turn before exposing text or
-                // executing a tool, while incremental bytes keep long LM Studio
-                // predictions from looking like an idle/dead HTTP channel.
+                // Stream progress and text immediately. A tool is executed only
+                // after its complete payload has been buffered and validated.
                 ["stream"] = true,
+                ["return_progress"] = true,
+                ["cache_prompt"] = true,
                 ["stream_options"] = new { include_usage = true },
-                ["max_tokens"] = Math.Clamp(maximumOutputTokens, 1, 65_536),
-                ["parallel_tool_calls"] = false,
+                ["parallel_tool_calls"] = coding,
             };
             ApplyModelSampling(body, modelId);
             ApplyReasoningSettings(body, modelId, modelRole, reasoningEffort);
+            if (coding)
+            {
+                body["return_progress"] = true;
+                body["sse_ping_interval"] = 5;
+                body["cache_prompt"] = true;
+            }
             if (tools.Count > 0)
             {
                 body["tools"] = tools.Select(static tool => new
@@ -312,7 +275,7 @@ public sealed class ModelRuntimeClient : IDisposable
                         parameters = tool.Parameters,
                     },
                 }).ToArray();
-                // LM Studio's OpenAI-compatible endpoint accepts auto/required/none.
+                // native llama's OpenAI-compatible endpoint accepts auto/required/none.
                 // The host uses "required" whenever the current agent protocol
                 // mandates one structured action. Schema validation still decides
                 // which of the supplied tools and arguments are acceptable.
@@ -323,6 +286,16 @@ public sealed class ModelRuntimeClient : IDisposable
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ModelTurnTimeout);
+            var stallProgress = coding ? new NativeInferenceStallProgress(() => timeout.CancelAfter(ModelTurnTimeout)) : null;
+            Func<ModelRuntimeProgress, CancellationToken, ValueTask>? progressWithDeadline = nativeProgress;
+            if (stallProgress is not null)
+            {
+                progressWithDeadline = async (progress, token) =>
+                {
+                    stallProgress.Observe(progress);
+                    if (nativeProgress is not null) await nativeProgress(progress, token).ConfigureAwait(false);
+                };
+            }
             var transportToolNames = tools.ToDictionary(
                 static tool => ToTransportToolName(tool.Name),
                 static tool => tool.Name,
@@ -330,8 +303,10 @@ public sealed class ModelRuntimeClient : IDisposable
             var result = await CompleteStreamingChatWithBoundedRetryAsync(
                 body,
                 transportToolNames,
-                nativeProgress,
+                progressWithDeadline,
                 structuredToolOnly,
+                context,
+                maximumOutputTokens,
                 timeout.Token).ConfigureAwait(false);
             if (nativeProgress is not null)
             {
@@ -356,7 +331,7 @@ public sealed class ModelRuntimeClient : IDisposable
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new ModelGenerationTerminatedException("model_turn_timeout", exception);
+            throw new ModelGenerationTerminatedException(coding ? "model_stall_timeout" : "model_turn_timeout", exception);
         }
         finally
         {
@@ -373,7 +348,10 @@ public sealed class ModelRuntimeClient : IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(inputs));
         }
-        var preparation = await EnsureModelPreparedAsync(
+        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+        var preparation = await PrepareNativeModelAsync(
             modelId,
             _options.EmbeddingContextLength,
             loadingStarted: null,
@@ -391,6 +369,8 @@ public sealed class ModelRuntimeClient : IDisposable
             .Select(static item => (IReadOnlyList<double>)item.GetProperty("embedding")
                 .EnumerateArray().Select(static number => number.GetDouble()).ToArray())
             .ToArray();
+        }
+        finally { _turnGate.Release(); }
     }
 
     public async Task<string> AnalyzeImagesAsync(
@@ -403,9 +383,12 @@ public sealed class ModelRuntimeClient : IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(imagePaths));
         }
-        var preparation = await EnsureModelPreparedAsync(
+        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+        var preparation = await PrepareNativeModelAsync(
             modelId,
-            _options.VisionContextLength,
+            0,
             loadingStarted: null,
             cancellationToken).ConfigureAwait(false);
         var content = new List<object> { new { type = "text", text = prompt } };
@@ -424,26 +407,27 @@ public sealed class ModelRuntimeClient : IDisposable
                 image_url = new { url = $"data:{mediaType};base64,{Convert.ToBase64String(bytes)}" },
             });
         }
-        using var response = await SendJsonAsync(
-            HttpMethod.Post,
-            "v1/chat/completions",
-            new
+        var body = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["model"] = preparation.InstanceId,
+            ["stream"] = false,
+            ["messages"] = new object[]
             {
-                model = preparation.InstanceId,
-                stream = false,
-                messages = new object[]
-                {
-                    new { role = "system", content = "Analysiere ausschließlich die bereitgestellten Medien fachlich. Erfinde keine sichtbaren Details." },
-                    new { role = "user", content = content.ToArray() },
-                },
+                new { role = "system", content = "Analysiere ausschließlich die bereitgestellten Medien fachlich. Erfinde keine sichtbaren Details." },
+                new { role = "user", content = content.ToArray() },
             },
-            cancellationToken).ConfigureAwait(false);
+        };
+        ApplyReasoningSettings(body, preparation.InstanceId, "vision", null);
+        var budgetedBody = await ApplyTokenBudgetAsync(body, preparation.ContextLength, null, null, cancellationToken).ConfigureAwait(false);
+        using var response = await SendJsonAsync(HttpMethod.Post, "v1/chat/completions", budgetedBody, cancellationToken).ConfigureAwait(false);
         using var document = JsonDocument.Parse(
             await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
         var text = ReadContent(document.RootElement.GetProperty("choices")[0].GetProperty("message"));
         return string.IsNullOrWhiteSpace(text)
             ? throw new JsonException("Das Vision-Modell lieferte keine Textantwort.")
             : text;
+        }
+        finally { _turnGate.Release(); }
     }
 
     internal static string DetectImageMediaType(ReadOnlySpan<byte> bytes)
@@ -459,117 +443,129 @@ public sealed class ModelRuntimeClient : IDisposable
 
     private async Task<RuntimeModel[]> GetRuntimeModelsAsync(CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync("api/v1/models", cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        using var document = JsonDocument.Parse(
-            await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-        var models = ReadRuntimeModels(document.RootElement);
+        var models = await ReadRuntimeCatalogAsync(cancellationToken).ConfigureAwait(false);
+        var reconciled = false;
+        for (var index = 0; index < models.Length; index++)
+        {
+            if (models[index].State is not ("loaded" or "sleeping")) continue;
+            var modelId = models[index].Id;
+            try
+            {
+                using var props = await _httpClient.GetAsync("props?model=" + Uri.EscapeDataString(modelId), cancellationToken).ConfigureAwait(false);
+                props.EnsureSuccessStatusCode();
+                using var properties = await JsonDocument.ParseAsync(await props.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), cancellationToken: cancellationToken).ConfigureAwait(false);
+                var loadedContext = ReadLoadedContextLength(properties.RootElement);
+                models[index] = models[index] with { LoadedContextLength = Math.Min(loadedContext, models[index].MaximumContextLength) };
+            }
+            catch (Exception exception) when (!reconciled && !cancellationToken.IsCancellationRequested
+                && exception is HttpRequestException or JsonException)
+            {
+                // A native model switch can remove the child after /models but
+                // before /props. Reconcile once, and only accept a demonstrated
+                // residency change; a broken still-resident child remains an error.
+                var refreshed = await ReadRuntimeCatalogAsync(cancellationToken).ConfigureAwait(false);
+                if (refreshed.FirstOrDefault(model => model.Id == modelId)?.State is "loaded" or "sleeping") throw;
+                models = refreshed;
+                reconciled = true;
+                index = -1;
+            }
+        }
         RememberRuntimeModels(models);
         return models;
     }
 
-    private async Task<string> LoadRuntimeModelAsync(
-        ModelDefinition definition,
-        int contextLength,
-        CancellationToken cancellationToken)
+    private async Task<RuntimeModel[]> ReadRuntimeCatalogAsync(CancellationToken cancellationToken)
     {
-        using var response = await SendJsonAsync(
-            HttpMethod.Post,
-            "api/v1/models/load",
-            string.Equals(definition.Role, "embedding", StringComparison.OrdinalIgnoreCase)
-                ? new
-                {
-                    model = definition.RuntimeModelId,
-                    context_length = contextLength,
-                    echo_load_config = true,
-                }
-                : (object)new
-                {
-                    model = definition.RuntimeModelId,
-                    context_length = contextLength,
-                    parallel = 1,
-                    flash_attention = true,
-                    offload_kv_cache_to_gpu = true,
-                    echo_load_config = true,
-                },
-            cancellationToken).ConfigureAwait(false);
-        using var document = JsonDocument.Parse(
-            await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-        var instanceId = document.RootElement.TryGetProperty("instance_id", out var instance)
-            ? instance.GetString()
-            : document.RootElement.TryGetProperty("model_instance_id", out var modelInstance)
-                ? modelInstance.GetString()
-                : null;
-        if (string.IsNullOrWhiteSpace(instanceId))
-        {
-            throw new JsonException($"LM Studio lieferte für '{definition.RuntimeModelId}' keine Instanz-ID.");
-        }
-        return instanceId;
+        using var response = await _httpClient.GetAsync("v1/models?reload=1", cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), cancellationToken: cancellationToken).ConfigureAwait(false);
+        return ReadRuntimeModels(document.RootElement, _options.GeneralContextLength, _options.VisionContextLength, _options.EmbeddingContextLength);
     }
 
-    private async Task<string?> WaitForLoadedInstanceAsync(
-        string runtimeModelId,
-        int contextLength,
-        CancellationToken cancellationToken)
+    private void BeginModelTransition(IEnumerable<RuntimeModel> unloadingModels, string? loadingModelId)
     {
-        for (var attempt = 0; attempt < 15; attempt++)
+        lock (_cacheLock)
         {
-            try
-            {
-                var models = await GetRuntimeModelsAsync(cancellationToken).ConfigureAwait(false);
-                var loaded = models.FirstOrDefault(candidate =>
-                    MatchesRuntimeModel(candidate, runtimeModelId)
-                    && string.Equals(candidate.State, "loaded", StringComparison.OrdinalIgnoreCase)
-                    && candidate.LoadedContextLength >= contextLength
-                    && !string.IsNullOrWhiteSpace(candidate.InstanceId));
-                if (loaded?.InstanceId is { Length: > 0 } instanceId)
-                {
-                    return instanceId;
-                }
-            }
-            catch (Exception exception) when (
-                IsTransientInferenceFailure(exception)
-                && !cancellationToken.IsCancellationRequested)
-            {
-                // The catalog endpoint may briefly restart together with the
-                // inference engine. The bounded reconciliation loop continues.
-            }
-
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+            _modelTransitions.Clear();
+            foreach (var model in unloadingModels) _modelTransitions[model.Id] = "unloading";
+            if (loadingModelId is not null) _modelTransitions[loadingModelId] = "loading";
+            _cachedStatus = null;
+            _cacheExpiresAt = default;
         }
-
-        return null;
     }
 
-    private async Task UnloadRuntimeInstanceAsync(string instanceId, CancellationToken cancellationToken)
+    private void EndModelTransition()
     {
-        using var response = await SendJsonAsync(
-            HttpMethod.Post,
-            "api/v1/models/unload",
-            new { instance_id = instanceId },
-            cancellationToken).ConfigureAwait(false);
+        lock (_cacheLock)
+        {
+            _modelTransitions.Clear();
+            _cachedStatus = null;
+            _cacheExpiresAt = default;
+        }
+    }
+
+    private RuntimeModel[] ApplyTransitionStatus(RuntimeModel[] models)
+    {
+        lock (_cacheLock)
+        {
+            for (var index = 0; index < models.Length; index++)
+            {
+                var model = models[index];
+                var state = model.State;
+                if (_modelTransitions.TryGetValue(model.Id, out var transition)
+                    && (transition == "loading" || state is "loaded" or "sleeping" or "loading"))
+                    state = transition;
+                var knownContext = _runtimeCatalog.TryGetValue(model.Id, out var known)
+                    ? known.LoadedContextLength : 0;
+                models[index] = model with
+                {
+                    State = state,
+                    InstanceId = state is "loaded" or "sleeping" ? model.InstanceId : null,
+                    // Reuse only a previously observed effective context. The
+                    // nominal catalog maximum remains provisional during loading.
+                    LoadedContextLength = state is "loaded" or "sleeping" ? knownContext : 0,
+                };
+            }
+        }
+        return models;
+    }
+
+    private async Task LoadRuntimeModelAsync(string modelId, CancellationToken cancellationToken)
+    {
+        using var response = await SendJsonAsync(HttpMethod.Post, "models/load", new { model = modelId }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task UnloadRuntimeInstanceAsync(string modelId, CancellationToken cancellationToken)
+    {
+        using var response = await SendJsonAsync(HttpMethod.Post, "models/unload", new { model = modelId }, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<LmChatResult> CompleteStreamingChatWithBoundedRetryAsync(
-        IReadOnlyDictionary<string, object?> body,
+        Dictionary<string, object?> body,
         IReadOnlyDictionary<string, string> transportToolNames,
         Func<ModelRuntimeProgress, CancellationToken, ValueTask>? nativeProgress,
         bool structuredToolOnly,
-        CancellationToken cancellationToken)
+        int contextLength,
+        int? maximumOutputTokens,
+        CancellationToken cancellationToken,
+        string? completionEndpoint = null)
     {
         Exception? last = null;
         string? protocolRepairTool = null;
         const int maximumAttempts = 3;
         for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
+            var requestPhase = "token_counting";
             try
             {
-                var requestBody = protocolRepairTool is null
+                var unbudgetedBody = protocolRepairTool is null
                     ? body
                     : CreateToolProtocolRepairBody(body, protocolRepairTool);
+                var requestBody = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, cancellationToken).ConfigureAwait(false);
+                requestPhase = "generation";
                 using var response = await SendJsonAsync(
                     HttpMethod.Post,
-                    "v1/chat/completions",
+                    completionEndpoint ?? "v1/chat/completions",
                     requestBody,
                     cancellationToken).ConfigureAwait(false);
                 return await ParseStreamingChatResponseAsync(
@@ -577,6 +573,8 @@ public sealed class ModelRuntimeClient : IDisposable
                     transportToolNames,
                     nativeProgress,
                     structuredToolOnly,
+                    body.TryGetValue("parallel_tool_calls", out var parallelCalls) && parallelCalls is true
+                        ? CodingRunBudget.MaximumNativeCallsPerTurn : 1,
                     cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (
@@ -622,6 +620,7 @@ public sealed class ModelRuntimeClient : IDisposable
                 }
                 if (attempt >= maximumAttempts)
                 {
+                    if (incomplete is null) throw new ModelProviderRequestException(requestPhase, maximumAttempts, exception);
                     throw new ModelGenerationTerminatedException("transport_retry_exhausted", exception);
                 }
                 LogInferenceRetry(_logger, exception);
@@ -664,6 +663,7 @@ public sealed class ModelRuntimeClient : IDisposable
         IReadOnlyDictionary<string, string> transportToolNames,
         Func<ModelRuntimeProgress, CancellationToken, ValueTask>? nativeProgress,
         bool structuredToolOnly,
+        int maximumToolCalls,
         CancellationToken cancellationToken)
     {
         var mediaType = response.Content.Headers.ContentType?.MediaType;
@@ -673,7 +673,7 @@ public sealed class ModelRuntimeClient : IDisposable
             {
                 using var document = JsonDocument.Parse(
                     await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-                return ParseChatResult(document.RootElement, transportToolNames, structuredToolOnly);
+                return ParseChatResult(document.RootElement, transportToolNames, structuredToolOnly, maximumToolCalls);
             }
             catch (JsonException exception)
             {
@@ -686,7 +686,7 @@ public sealed class ModelRuntimeClient : IDisposable
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: false);
-        var accumulator = new StreamingChatAccumulator(structuredToolOnly);
+        var accumulator = new StreamingChatAccumulator(structuredToolOnly, maximumToolCalls);
         var eventData = new StringBuilder();
         var progressClock = Stopwatch.StartNew();
         var lastReportedFragments = 0;
@@ -725,7 +725,7 @@ public sealed class ModelRuntimeClient : IDisposable
 
         if (!accumulator.Done && !accumulator.FinishObserved)
         {
-            // LM Studio can close its engine channel after it has already sent a
+            // native llama can close its engine channel after it has already sent a
             // complete single tool call but before the final finish_reason or
             // [DONE] frame. The host still validates the tool name, JSON schema,
             // workspace revision and idempotency key before execution, so this
@@ -766,6 +766,17 @@ public sealed class ModelRuntimeClient : IDisposable
             }
 
             using var chunk = JsonDocument.Parse(payload);
+            if (nativeProgress is not null
+                && chunk.RootElement.TryGetProperty("prompt_progress", out var promptProgress)
+                && promptProgress.ValueKind == JsonValueKind.Object)
+            {
+                var total = promptProgress.TryGetProperty("total", out var totalValue) && totalValue.TryGetInt32(out var totalTokens) ? totalTokens : 0;
+                var processed = promptProgress.TryGetProperty("processed", out var processedValue) && processedValue.TryGetInt32(out var processedTokens) ? processedTokens : 0;
+                await nativeProgress(new ModelRuntimeProgress("promptProcessing",
+                    PromptProgress: total > 0 ? Math.Clamp((double)processed / total, 0, 1) : null,
+                    PromptTokens: total > 0 ? total : null,
+                    ProcessedPromptTokens: processed), cancellationToken).ConfigureAwait(false);
+            }
             var contentDelta = accumulator.Add(chunk.RootElement);
             if (!structuredToolOnly && nativeProgress is not null && !string.IsNullOrEmpty(contentDelta))
             {
@@ -802,7 +813,7 @@ public sealed class ModelRuntimeClient : IDisposable
         }
     }
 
-    private sealed class StreamingChatAccumulator(bool structuredToolOnly)
+    private sealed class StreamingChatAccumulator(bool structuredToolOnly, int maximumToolCalls)
     {
         private readonly StringBuilder _content = new();
         private readonly StringBuilder _reasoningContent = new();
@@ -908,9 +919,9 @@ public sealed class ModelRuntimeClient : IDisposable
 
         public LmChatResult Build(IReadOnlyDictionary<string, string> transportToolNames)
         {
-            if (_toolCalls.Count > 1)
+            if (_toolCalls.Count > maximumToolCalls)
             {
-                throw new JsonException("Der Modellturn darf genau einen Toolaufruf liefern.");
+                throw new JsonException($"Der Modellturn darf höchstens {maximumToolCalls} Toolaufrufe liefern.");
             }
             var calls = new List<LmToolCall>(_toolCalls.Count);
             foreach (var item in _toolCalls.OrderBy(static item => item.Key).Select(static item => item.Value))
@@ -1058,7 +1069,7 @@ public sealed class ModelRuntimeClient : IDisposable
         StreamingAttemptSnapshot snapshot,
         Exception? innerException = null)
         : IOException(
-            $"LM Studio beendete den Streaming-Turn unvollständig ({failureKind}).",
+            $"native llama beendete den Streaming-Turn unvollständig ({failureKind}).",
             innerException)
     {
         public string FailureKind { get; } = failureKind;
@@ -1104,7 +1115,7 @@ public sealed class ModelRuntimeClient : IDisposable
             response.Dispose();
             detail = detail.Length <= 2_000 ? detail : detail[..2_000];
             throw new HttpRequestException(
-                $"LM Studio returned HTTP {(int)response.StatusCode}: {detail}",
+                $"Windows llama.cpp returned HTTP {(int)response.StatusCode}: {detail}",
                 null,
                 response.StatusCode);
         }
@@ -1114,19 +1125,20 @@ public sealed class ModelRuntimeClient : IDisposable
     private static LmChatResult ParseChatResult(
         JsonElement root,
         IReadOnlyDictionary<string, string> transportToolNames,
-        bool structuredToolOnly = false)
+        bool structuredToolOnly = false,
+        int maximumToolCalls = 1)
     {
         if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
         {
-            throw new JsonException("Die LM-Studio-Antwort enthält keine Auswahl.");
+            throw new JsonException("Die native llama-Antwort enthält keine Auswahl.");
         }
         var message = choices[0].GetProperty("message");
         var calls = new List<LmToolCall>();
         if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
         {
-            if (toolCalls.GetArrayLength() > 1)
+            if (toolCalls.GetArrayLength() > maximumToolCalls)
             {
-                throw new JsonException("Der Modellturn darf genau einen Toolaufruf liefern.");
+                throw new JsonException($"Der Modellturn darf höchstens {maximumToolCalls} Toolaufrufe liefern.");
             }
             foreach (var item in toolCalls.EnumerateArray())
             {
@@ -1334,7 +1346,7 @@ public sealed class ModelRuntimeClient : IDisposable
             return true;
         }
 
-        // Some LM Studio chat templates expose the complete registered function
+        // Some native llama chat templates expose the complete registered function
         // name to the model but emit the readable part without GO's collision
         // hash. Accept that normalization only when it identifies one schema
         // unambiguously; otherwise the ordinary catalog validation must reject it.
@@ -1408,7 +1420,7 @@ public sealed class ModelRuntimeClient : IDisposable
         return new { role = NormalizeRole(message.Role), content = message.Content ?? string.Empty };
     }
 
-    internal static IReadOnlyList<LmChatMessage> NormalizeMessageOrderForLmStudio(
+    internal static IReadOnlyList<LmChatMessage> NormalizeMessageOrderForNativeRuntime(
         IReadOnlyList<LmChatMessage> messages)
     {
         if (messages.Count == 0)
@@ -1433,7 +1445,7 @@ public sealed class ModelRuntimeClient : IDisposable
                     continue;
                 }
 
-                // Qwen's LM Studio templates require every system instruction
+                // Qwen's native llama templates require every system instruction
                 // to precede the conversation. Runtime retry and tool guidance
                 // is chronological, so keep it in place as a controlled user
                 // turn instead of moving stale instructions to the beginning.
@@ -1501,7 +1513,7 @@ public sealed class ModelRuntimeClient : IDisposable
 
     private static void ApplyModelSampling(Dictionary<string, object?> body, string modelId)
     {
-        if (!LmStudioModelCatalog.TryGet(modelId, out var profile)
+        if (!NativeModelCatalog.TryGet(modelId, out var profile)
             || !string.Equals(profile.SamplingProfile, "qwen3-coder-next", StringComparison.Ordinal))
         {
             return;
@@ -1520,27 +1532,16 @@ public sealed class ModelRuntimeClient : IDisposable
         string modelRole,
         string? requestedEffort)
     {
-        // No GO-side preset means LM Studio and the loaded model keep their own
-        // default reasoning configuration. In particular, do not translate a
-        // missing value into the catalog's advertised default.
-        if (string.IsNullOrWhiteSpace(requestedEffort)
-            || string.Equals(
-                requestedEffort.Trim(),
-                ModelReasoningProfiles.Automatic,
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
         var profile = ResolveRuntimeReasoningProfile(modelId, modelRole);
-        var explicitEffort = requestedEffort.Trim();
+        var explicitEffort = string.Equals(requestedEffort?.Trim(), ModelReasoningProfiles.Automatic, StringComparison.OrdinalIgnoreCase)
+            ? null : requestedEffort?.Trim();
         if (!string.IsNullOrWhiteSpace(explicitEffort) && !profile.Supports(explicitEffort))
         {
             var supported = profile.SupportedEfforts.Count == 0
                 ? "keine steuerbare Stufe"
                 : string.Join(", ", profile.SupportedEfforts);
             throw new InvalidOperationException(
-                $"reasoningEffort '{explicitEffort}' wird vom ausgewÃ¤hlten Modell nicht unterstÃ¼tzt ({supported}).");
+                $"reasoningEffort '{explicitEffort}' wird vom ausgewählten Modell nicht unterstützt ({supported}).");
         }
         var effort = profile.Resolve(explicitEffort);
         if (string.IsNullOrWhiteSpace(effort))
@@ -1548,11 +1549,11 @@ public sealed class ModelRuntimeClient : IDisposable
             return;
         }
 
-        if (string.Equals(profile.Family, "lmstudio-native", StringComparison.Ordinal)
+        if (string.Equals(profile.Family, "llama-native", StringComparison.Ordinal)
             || string.Equals(profile.Family, ModelReasoningProfiles.GptOssFamily, StringComparison.Ordinal))
         {
             body["reasoning_effort"] = string.Equals(effort, "none", StringComparison.OrdinalIgnoreCase)
-                ? "off"
+                ? "none"
                 : effort;
             return;
         }
@@ -1614,140 +1615,60 @@ public sealed class ModelRuntimeClient : IDisposable
         return $"go_{stem}_{hash}";
     }
 
-    private static string ResolveKnownRuntimeModelId(string modelId) => modelId.ToLowerInvariant() switch
+    internal static RuntimeModel[] ReadRuntimeModels(JsonElement root, int textContextLength = 32_768, int visionContextLength = 32_768, int embeddingContextLength = 8_192)
     {
-        LmStudioModelCatalog.GptOss120BId => LmStudioModelCatalog.GptOss120BRuntimeId,
-        LmStudioModelCatalog.Qwen38Id => LmStudioModelCatalog.Qwen38RuntimeId,
-        LmStudioModelCatalog.Qwen3CoderNextQ8Id => LmStudioModelCatalog.Qwen3CoderNextRuntimeId,
-        "qwen3-vl-30b-a3b-instruct" => "qwen3-vl-30b-a3b-instruct",
-        "text-embedding-bge-m3" => "text-embedding-bge-m3",
-        _ => modelId,
-    };
-
-    internal static RuntimeModel[] ReadRuntimeModels(JsonElement root)
-    {
-        var array = root.ValueKind == JsonValueKind.Array
-            ? root
-            : root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array
-                ? data
-                : root.TryGetProperty("models", out var models) && models.ValueKind == JsonValueKind.Array
-                    ? models
-                    : default;
-        if (array.ValueKind != JsonValueKind.Array)
-            throw new JsonException("LM Studio lieferte keinen Modellkatalog.");
-        return array.EnumerateArray().Select(static item =>
+        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            throw new JsonException("Der native llama-Router lieferte keinen gültigen Modellkatalog.");
+        var models = new List<RuntimeModel>();
+        foreach (var item in data.EnumerateArray())
         {
-            var id = item.TryGetProperty("key", out var keyValue) ? keyValue.GetString()
-                : item.TryGetProperty("id", out var idValue) ? idValue.GetString()
-                : item.TryGetProperty("model", out var modelValue) ? modelValue.GetString()
-                : null;
-            var maximumContextLength = item.TryGetProperty("max_context_length", out var maximumContext)
-                && maximumContext.TryGetInt32(out var parsedMaximumContext)
-                    ? parsedMaximumContext
-                    : 0;
-            var type = item.TryGetProperty("type", out var typeValue)
-                ? typeValue.GetString() ?? "llm"
-                : "llm";
-            var displayName = item.TryGetProperty("display_name", out var displayNameValue)
-                ? displayNameValue.GetString()
-                : null;
-            var architecture = item.TryGetProperty("architecture", out var architectureValue)
-                ? architectureValue.GetString()
-                : null;
-            string? quantization = null;
-            if (item.TryGetProperty("quantization", out var quantizationValue))
+            var id = item.TryGetProperty("id", out var idValue) ? idValue.GetString() : null;
+            if (id is null || !(id.StartsWith("coding/", StringComparison.Ordinal) || id.StartsWith("vision/", StringComparison.Ordinal) || id.StartsWith("embedding/", StringComparison.Ordinal))) continue;
+            var embedding = id.StartsWith("embedding/", StringComparison.Ordinal);
+            var vision = id.StartsWith("vision/", StringComparison.Ordinal);
+            var fallback = embedding ? embeddingContextLength : vision ? visionContextLength : textContextLength;
+            var context = ReadNominalContextLength(item, id, fallback);
+            var state = "unloaded";
+            if (item.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.Object)
             {
-                quantization = quantizationValue.ValueKind == JsonValueKind.String
-                    ? quantizationValue.GetString()
-                    : quantizationValue.ValueKind == JsonValueKind.Object
-                        && quantizationValue.TryGetProperty("name", out var quantizationName)
-                            ? quantizationName.GetString()
-                            : null;
+                state = status.TryGetProperty("failed", out var failed) && failed.ValueKind == JsonValueKind.True ? "failed"
+                    : status.TryGetProperty("value", out var value) ? value.GetString() ?? "unloaded" : "unloaded";
             }
-            var supportsVision = false;
-            var supportsTools = false;
-            IReadOnlyList<string> reasoningEfforts = [];
-            string? defaultReasoningEffort = null;
-            if (item.TryGetProperty("capabilities", out var capabilities)
-                && capabilities.ValueKind == JsonValueKind.Object)
-            {
-                supportsVision = ReadBoolean(capabilities, "vision");
-                supportsTools = ReadBoolean(capabilities, "trained_for_tool_use");
-                if (capabilities.TryGetProperty("reasoning", out var reasoning)
-                    && reasoning.ValueKind == JsonValueKind.Object)
-                {
-                    reasoningEfforts = ReadReasoningEfforts(reasoning);
-                    defaultReasoningEffort = reasoning.TryGetProperty("default", out var defaultValue)
-                        ? NormalizeReasoningEffort(defaultValue.GetString())
-                        : null;
-                }
-            }
-            string? instanceId = null;
-            var loadedContextLength = 0;
-            if (item.TryGetProperty("loaded_instances", out var loadedInstances)
-                && loadedInstances.ValueKind == JsonValueKind.Array
-                && loadedInstances.GetArrayLength() > 0)
-            {
-                var loadedInstance = loadedInstances[0];
-                instanceId = loadedInstance.TryGetProperty("id", out var instance)
-                    ? instance.GetString()
-                    : null;
-                if (loadedInstance.TryGetProperty("config", out var config)
-                    && config.ValueKind == JsonValueKind.Object
-                    && config.TryGetProperty("context_length", out var loadedContext)
-                    && loadedContext.TryGetInt32(out var parsedLoadedContext))
-                {
-                    loadedContextLength = parsedLoadedContext;
-                }
-            }
-            return new RuntimeModel(
-                id ?? string.Empty,
-                type,
-                string.IsNullOrWhiteSpace(instanceId) ? "unloaded" : "loaded",
-                instanceId,
-                maximumContextLength,
-                loadedContextLength,
-                displayName,
-                architecture,
-                quantization,
-                supportsTools,
-                supportsVision,
-                reasoningEfforts,
-                defaultReasoningEffort);
-        }).Where(static model => model.Id.Length > 0).ToArray();
+            var name = id[(id.IndexOf('/') + 1)..];
+            var hash = name.LastIndexOf('~');
+            if (hash > 0) name = name[..hash];
+            var reasoning = embedding ? new ModelReasoningProfile(ModelReasoningProfiles.UnknownFamily, ["none"], "none") : ModelReasoningProfiles.Resolve(id, vision ? "vision" : "general");
+            models.Add(new RuntimeModel(id, embedding ? "embedding" : "llm", state, state is "loaded" or "sleeping" ? id : null,
+                context, state is "loaded" or "sleeping" ? context : 0, name, null, null, !embedding, vision, reasoning.SupportedEfforts, reasoning.DefaultEffort));
+        }
+        return [.. models];
     }
 
-    private static bool MatchesRuntimeModel(RuntimeModel candidate, string runtimeModelId) =>
-        RuntimeIdentifiersEqual(candidate.Id, runtimeModelId)
-        || RuntimeIdentifiersEqual(candidate.InstanceId, runtimeModelId);
+    private static RuntimeModel? ResolveInstalledModel(IReadOnlyList<RuntimeModel> models, string requestedId) =>
+        models.FirstOrDefault(model => string.Equals(model.Id, requestedId, StringComparison.OrdinalIgnoreCase))
+        ?? models.Where(model => LegacyModelMatches(model.Id, requestedId)).OrderByDescending(static model => model.State is "loaded" or "sleeping").ThenBy(static model => model.Id, StringComparer.Ordinal).FirstOrDefault();
 
-    private static bool RuntimeIdentifiersEqual(string? left, string? right)
+    internal static ModelRuntimeStatus? ResolveModelStatus(IReadOnlyList<ModelRuntimeStatus> models, string requestedId, string role) =>
+        models.Where(model => model.Downloaded && string.Equals(model.Role, role, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(model => string.Equals(model.Id, requestedId, StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(static model => model.Loaded)
+            .ThenBy(static model => model.Id, StringComparer.Ordinal)
+            .FirstOrDefault(model => string.Equals(model.Id, requestedId, StringComparison.OrdinalIgnoreCase) || LegacyModelMatches(model.Id, requestedId));
+
+    private static bool LegacyModelMatches(string installedId, string requestedId)
     {
-        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
-        {
-            return false;
-        }
-        if (string.Equals(left, right, StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        // LM Studio exposes the downloaded catalog key without a publisher
-        // prefix (for example "qwen3.8-27b"), while GO deliberately keeps the
-        // stable load identifier ("qwen/qwen3.8-27b"). Loaded instance IDs may
-        // use either form. Match the terminal alias as well so status, reuse,
-        // unload and model switching all observe the same installed model.
-        return string.Equals(
-            TerminalRuntimeAlias(left),
-            TerminalRuntimeAlias(right),
-            StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string TerminalRuntimeAlias(string value)
-    {
-        var normalized = value.Trim().TrimEnd('/').Replace('\\', '/');
-        var separator = normalized.LastIndexOf('/');
-        return separator >= 0 ? normalized[(separator + 1)..] : normalized;
+        // An explicit native preset ID is exact: never silently switch its model or quantization.
+        if (requestedId.StartsWith("coding/", StringComparison.OrdinalIgnoreCase) || requestedId.StartsWith("vision/", StringComparison.OrdinalIgnoreCase) || requestedId.StartsWith("embedding/", StringComparison.OrdinalIgnoreCase)) return false;
+        var alias = requestedId[(requestedId.LastIndexOf('/') + 1)..].ToLowerInvariant().Replace("text-embedding-", "", StringComparison.Ordinal);
+        var name = installedId[(installedId.IndexOf('/') + 1)..];
+        var hash = name.LastIndexOf('~');
+        if (hash > 0) name = name[..hash];
+        static string Normalize(string value) => string.Concat(value.Where(char.IsLetterOrDigit)).ToLowerInvariant();
+        var expected = Normalize(alias);
+        if (expected.Length < 4 || !Normalize(name).Contains(expected, StringComparison.Ordinal)) return false;
+        var desiredPrefix = requestedId.Contains("embedding", StringComparison.OrdinalIgnoreCase) || expected == "bgem3" ? "embedding/"
+            : requestedId.Contains("-vl-", StringComparison.OrdinalIgnoreCase) ? "vision/" : "coding/";
+        return installedId.StartsWith(desiredPrefix, StringComparison.OrdinalIgnoreCase);
     }
 
     private static ModelRuntimeStatus[] BuildRuntimeStatuses(RuntimeModel[] runtimeModels)
@@ -1755,21 +1676,23 @@ public sealed class ModelRuntimeClient : IDisposable
         var statuses = new List<ModelRuntimeStatus>(runtimeModels.Length * 2);
         foreach (var model in runtimeModels)
         {
-            var context = model.MaximumContextLength > 0 ? model.MaximumContextLength : 2_048;
+            var context = model.LoadedContextLength > 0 ? model.LoadedContextLength
+                : model.MaximumContextLength > 0 ? model.MaximumContextLength : 2_048;
             var displayName = string.IsNullOrWhiteSpace(model.Quantization)
                 ? model.DisplayName ?? model.Id
                 : $"{model.DisplayName ?? model.Id} · {model.Quantization}";
-            var loaded = string.Equals(model.State, "loaded", StringComparison.OrdinalIgnoreCase);
+            var loaded = model.State is "loaded" or "sleeping";
             if (string.Equals(model.Type, "embedding", StringComparison.OrdinalIgnoreCase))
             {
                 statuses.Add(CreateRuntimeStatus(model, "embedding", context, displayName, loaded));
                 continue;
             }
 
-            statuses.Add(CreateRuntimeStatus(model, "general", context, displayName, loaded));
-            if (model.SupportsVision)
+            if (model.SupportsVision) statuses.Add(CreateRuntimeStatus(model, "vision", context, displayName, loaded));
+            else
             {
-                statuses.Add(CreateRuntimeStatus(model, "vision", context, displayName, loaded));
+                statuses.Add(CreateRuntimeStatus(model, "general", context, displayName, loaded));
+                statuses.Add(CreateRuntimeStatus(model, "coding", context, displayName, loaded));
             }
         }
         return [.. statuses];
@@ -1799,13 +1722,6 @@ public sealed class ModelRuntimeClient : IDisposable
             model.Quantization);
     }
 
-    private static ModelDefinition CreateDefinition(RuntimeModel model) => new(
-        model.Id,
-        model.Id,
-        string.Equals(model.Type, "embedding", StringComparison.OrdinalIgnoreCase) ? "embedding" : "general",
-        model.MaximumContextLength > 0 ? model.MaximumContextLength : 2_048,
-        model.DisplayName ?? model.Id);
-
     private void RememberRuntimeModels(IEnumerable<RuntimeModel> models)
     {
         lock (_cacheLock)
@@ -1820,12 +1736,7 @@ public sealed class ModelRuntimeClient : IDisposable
 
     private bool TryGetRuntimeModel(string modelId, out RuntimeModel model)
     {
-        lock (_cacheLock)
-        {
-            model = _runtimeCatalog.Values.FirstOrDefault(candidate =>
-                MatchesRuntimeModel(candidate, ResolveKnownRuntimeModelId(modelId)))!;
-            return model is not null;
-        }
+        lock (_cacheLock) { model = ResolveInstalledModel(_runtimeCatalog.Values.ToArray(), modelId)!; return model is not null; }
     }
 
     private ModelReasoningProfile ResolveRuntimeReasoningProfile(string modelId, string role) =>
@@ -1833,59 +1744,8 @@ public sealed class ModelRuntimeClient : IDisposable
             ? ResolveRuntimeReasoningProfile(model, role)
             : ModelReasoningProfiles.Resolve(modelId, role);
 
-    private static ModelReasoningProfile ResolveRuntimeReasoningProfile(RuntimeModel model, string role)
-    {
-        if (model.ReasoningEfforts.Count > 0)
-        {
-            var defaultEffort = model.DefaultReasoningEffort;
-            if (string.IsNullOrWhiteSpace(defaultEffort)
-                || !model.ReasoningEfforts.Contains(defaultEffort, StringComparer.OrdinalIgnoreCase))
-            {
-                defaultEffort = model.ReasoningEfforts[0];
-            }
-            return new ModelReasoningProfile("lmstudio-native", model.ReasoningEfforts, defaultEffort);
-        }
-
-        // LM Studio versions before the reasoning-capability field still expose
-        // architecture and model key. Retain the known OpenAI-compatible
-        // gpt-oss control while treating every other unknown model conservatively.
-        return model.Id.Contains("gpt-oss", StringComparison.OrdinalIgnoreCase)
-            ? ModelReasoningProfiles.Resolve(model.Id, role)
-            : new ModelReasoningProfile(ModelReasoningProfiles.UnknownFamily, ["none"], "none");
-    }
-
-    private static bool ReadBoolean(JsonElement parent, string propertyName) =>
-        parent.TryGetProperty(propertyName, out var value)
-        && value.ValueKind is JsonValueKind.True or JsonValueKind.False
-        && value.GetBoolean();
-
-    private static string[] ReadReasoningEfforts(JsonElement reasoning)
-    {
-        if (!reasoning.TryGetProperty("allowed_options", out var options)
-            || options.ValueKind != JsonValueKind.Array)
-        {
-            return [];
-        }
-        return options.EnumerateArray()
-            .Select(static value => NormalizeReasoningEffort(value.GetString()))
-            .Where(static value => value is not null)
-            .Select(static value => value!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-    }
-
-    private static string? NormalizeReasoningEffort(string? effort) => effort?.Trim().ToLowerInvariant() switch
-    {
-        "off" => "none",
-        "none" => "none",
-        "on" => "on",
-        "minimal" => "minimal",
-        "low" => "low",
-        "medium" => "medium",
-        "high" => "high",
-        "xhigh" => "xhigh",
-        _ => null,
-    };
+    private static ModelReasoningProfile ResolveRuntimeReasoningProfile(RuntimeModel model, string role) =>
+        ModelReasoningProfiles.Resolve(model.Id, role);
 
     private ModelStatusSnapshot Cache(ModelStatusSnapshot status)
     {
@@ -1927,13 +1787,6 @@ public sealed class ModelRuntimeClient : IDisposable
         _modelGate.Dispose();
         _turnGate.Dispose();
     }
-
-    private sealed record ModelDefinition(
-        string Id,
-        string RuntimeModelId,
-        string Role,
-        int ContextTokens,
-        string DisplayName);
 
     internal sealed record RuntimeModel(
         string Id,

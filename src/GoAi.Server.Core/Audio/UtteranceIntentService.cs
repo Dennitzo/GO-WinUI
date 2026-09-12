@@ -76,7 +76,7 @@ public sealed class UtteranceIntentService
                 new("user", text),
             ],
             [],
-            maximumOutputTokens: 128,
+            maximumOutputTokens: null,
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         return Parse(result.Content, text);

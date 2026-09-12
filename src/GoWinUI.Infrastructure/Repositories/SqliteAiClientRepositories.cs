@@ -717,6 +717,7 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
 {
     public async Task<GoAiRunRecord> CreateAsync(GoAiRunRecord run, CancellationToken cancellationToken = default)
     {
+        run = run with { WorkspacePath = NormalizeWorkspace(run.WorkspacePath) };
         await database.WriteAsync(async (connection, transaction, token) =>
         {
             await using var command = connection.CreateCommand();
@@ -724,8 +725,8 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
             command.CommandText = """
                 INSERT INTO go_ai_runs
                     (id, session_id, assistant_message_id, action, idempotency_key, server_run_id,
-                     last_event_id, state, selected_model, error_code, created_at, updated_at)
-                VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated);
+                     last_event_id, state, selected_model, error_code, created_at, updated_at, workspace_path)
+                VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated, $workspace);
                 """;
             Bind(command, run);
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
@@ -738,6 +739,7 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
         {
+            run = run with { WorkspacePath = NormalizeWorkspace(run.WorkspacePath) };
             await using (var validateAnchor = connection.CreateCommand())
             {
                 validateAnchor.Transaction = transaction;
@@ -755,14 +757,25 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
                 }
             }
 
+            await using (var existing = connection.CreateCommand())
+            {
+                existing.Transaction = transaction;
+                existing.CommandText = SelectSql + " WHERE r.assistant_message_id=$message;";
+                existing.Parameters.AddWithValue("$message", run.AssistantMessageId.ToString("D"));
+                var previous = (await ReadAsync(existing, token).ConfigureAwait(false)).SingleOrDefault();
+                if (previous is not null && !string.Equals(previous.WorkspacePath, run.WorkspacePath,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    throw new InvalidDataException("Der Projektordner eines gespeicherten Laufs darf nicht geändert werden. Starte im gewünschten Projekt eine neue Nachricht.");
+            }
+
             await using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
                 command.CommandText = """
                     INSERT INTO go_ai_runs
                         (id, session_id, assistant_message_id, action, idempotency_key, server_run_id,
-                         last_event_id, state, selected_model, error_code, created_at, updated_at)
-                    VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated)
+                         last_event_id, state, selected_model, error_code, created_at, updated_at, workspace_path)
+                    VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated, $workspace)
                     ON CONFLICT(assistant_message_id) DO UPDATE SET
                         action=excluded.action,
                         idempotency_key=excluded.idempotency_key,
@@ -931,6 +944,15 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         command.Parameters.AddWithValue("$error", (object?)run.ErrorCode ?? DBNull.Value);
         command.Parameters.AddWithValue("$created", SqlitePromptTriggerRepository.Format(run.CreatedAt));
         command.Parameters.AddWithValue("$updated", SqlitePromptTriggerRepository.Format(run.UpdatedAt));
+        command.Parameters.AddWithValue("$workspace", (object?)run.WorkspacePath ?? DBNull.Value);
+    }
+
+    private static string? NormalizeWorkspace(string? workspace)
+    {
+        if (workspace is null) return null;
+        if (string.IsNullOrWhiteSpace(workspace) || !Path.IsPathFullyQualified(workspace) || workspace.Any(char.IsControl))
+            throw new InvalidDataException("Der gespeicherte Coding-Projektordner muss ein absoluter Pfad sein.");
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspace));
     }
 
     private static async Task<IReadOnlyList<GoAiRunRecord>> ReadAsync(SqliteCommand command, CancellationToken cancellationToken)
@@ -945,14 +967,14 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
                 reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetInt64(6), reader.GetString(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9),
                 SqlitePromptTriggerRepository.ParseDate(reader.GetString(10)),
-                SqlitePromptTriggerRepository.ParseDate(reader.GetString(11))));
+                SqlitePromptTriggerRepository.ParseDate(reader.GetString(11)), reader.IsDBNull(12) ? null : reader.GetString(12)));
         }
         return items;
     }
 
     private const string SelectSql = """
         SELECT r.id, r.session_id, r.assistant_message_id, r.action, r.idempotency_key, r.server_run_id,
-               r.last_event_id, r.state, r.selected_model, r.error_code, r.created_at, r.updated_at
+               r.last_event_id, r.state, r.selected_model, r.error_code, r.created_at, r.updated_at, r.workspace_path
         FROM go_ai_runs r
         """;
 }

@@ -10,7 +10,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
+        Converters = { new GatewayProviderConverter(), new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -103,6 +103,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         return settings with
         {
             Version = AppSettings.CurrentVersion,
+            AiProvider = AiProviderKind.GoAiServer,
             IsAiConnectionEnabled = settings.Version < 13
                 || settings.IsAiConnectionEnabled,
             GoAiServerUrl = goAiServerUrl.TrimEnd('/'),
@@ -116,6 +117,8 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
                         ? "auto"
                         : settings.LiveCaptionLanguage.Trim(),
             SelectedModel = NormalizeGeneralModel(settings.SelectedModel),
+            SelectedCodingModel = string.IsNullOrWhiteSpace(settings.SelectedCodingModel) ? null : settings.SelectedCodingModel.Trim(),
+            CodingWorkspacePath = string.IsNullOrWhiteSpace(settings.CodingWorkspacePath) ? null : settings.CodingWorkspacePath.Trim(),
             ReasoningEffort = NormalizeReasoningEffort(settings.Version, settings.ReasoningEffort),
             AccentColor = accentColor,
             BackgroundColor = backgroundColor,
@@ -132,17 +135,13 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
     {
         var normalized = value?.Trim();
         if (string.IsNullOrWhiteSpace(normalized)
-            || normalized.Contains("gpt-oss-120b", StringComparison.OrdinalIgnoreCase)
-            || IsTerminalOnlyModel(normalized))
+            || string.Equals(normalized, "openai/gpt-oss-120b", StringComparison.OrdinalIgnoreCase))
         {
             return AppSettings.DefaultSelectedModel;
         }
 
         return NormalizeModelId(normalized, AppSettings.DefaultSelectedModel);
     }
-
-    private static bool IsTerminalOnlyModel(string value) =>
-        value.Contains("qwen3-coder-next", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeModelId(string? value, string fallback)
     {
@@ -183,5 +182,22 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         return normalized.Length <= AppSettings.MaximumRecentActivityTextLength
             ? normalized
             : string.Concat(normalized.AsSpan(0, AppSettings.MaximumRecentActivityTextLength - 1), "…");
+    }
+
+    private sealed class GatewayProviderConverter : JsonConverter<AiProviderKind>
+    {
+        public override AiProviderKind Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            // Older files used LM Studio provider names or numeric enum values.
+            // There is now one connection route; retain every other user setting.
+            if (reader.TokenType is JsonTokenType.String or JsonTokenType.Number)
+            {
+                return AiProviderKind.GoAiServer;
+            }
+            throw new JsonException("Der AI-Provider muss ein Name oder ein numerischer Altwert sein.");
+        }
+
+        public override void Write(Utf8JsonWriter writer, AiProviderKind value, JsonSerializerOptions options) =>
+            writer.WriteStringValue("goAiServer");
     }
 }

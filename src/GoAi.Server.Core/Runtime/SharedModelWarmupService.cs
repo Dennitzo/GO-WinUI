@@ -1,4 +1,4 @@
-using GoAi.Server.Core.Workers;
+﻿using GoAi.Server.Core.Workers;
 using Microsoft.Extensions.Hosting;
 
 namespace GoAi.Server.Core.Runtime;
@@ -19,7 +19,7 @@ public sealed class SharedModelWarmupService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Compose may start the gateway before every worker is ready. Retry only
-        // the resident speech stack; LM Studio model selection remains request-driven.
+        // the resident speech stack; native llama model selection remains request-driven.
         var deadline = DateTimeOffset.UtcNow.AddMinutes(10);
         var attempt = 0;
         while (!stoppingToken.IsCancellationRequested && DateTimeOffset.UtcNow < deadline)
@@ -31,7 +31,7 @@ public sealed class SharedModelWarmupService : BackgroundService
                 _runtime.WriteLog(
                     "Information",
                     "models.startup.warm.completed",
-                    "Spracheingabe, Sprechertrennung und Sprachausgabe sind vorgeladen. LM-Studio-Modelle warten unverändert auf einen AI-Lauf.");
+                    "Spracheingabe, Sprechertrennung und Sprachausgabe sind vorgeladen. native llama-Modelle warten unverändert auf einen AI-Lauf.");
                 return;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

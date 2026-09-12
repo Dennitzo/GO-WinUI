@@ -1,17 +1,31 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using GoAi.Server.Core.Gateway;
 
 namespace GoAi.Server.Tests;
 
 public sealed class RunRequestValidatorTests
 {
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    [InlineData(604800)]
+    [InlineData(int.MaxValue)]
+    public void CodingAcceptsUnlimitedOrOptionalMultiDayDuration(int? timeout)
+    {
+        var request = new RunRequest(GoAiProtocol.Version, RunMode.Coding,
+            [new RunMessage("user", [new ContentPart("text", "Arbeite am Projekt bis zum Abschluss.")])],
+            ClientCapabilities: ["coding"], Limits: new RunLimits(TimeoutSeconds: timeout));
+        RunRequestValidator.Validate(request);
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request with { Limits = new RunLimits(TimeoutSeconds: -1) }));
+    }
+
     [Fact]
     public void ValidConversationContractIsAccepted()
     {
         var request = new RunRequest(
             GoAiProtocol.Version,
             RunMode.Auto,
-            [new RunMessage("user", [new ContentPart("text", "TGA-Frage")])],
+            [new RunMessage("user", [new ContentPart("text", "Allgemeine Frage")])],
             ClientCapabilities: ["documentIo", "screenCapture"],
             SessionId: "session-1");
 

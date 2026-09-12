@@ -124,11 +124,11 @@ public sealed class WorkerOrchestrator : IDisposable
             [
                 new LmChatMessage(
                     "system",
-                    "Gib jeden Textabschnitt ausschließlich auf Deutsch aus. Übersetze alle nichtdeutschen Sprachen vollständig ins natürliche Deutsche; lasse bereits deutsche Wörter sowie Namen, Zahlen, Einheiten und TGA-Fachbegriffe unverändert. Gemischtsprachige Abschnitte müssen ebenfalls vollständig deutsch werden. Antworte ausschließlich als JSON-Array aus Zeichenketten, in derselben Reihenfolge und mit exakt derselben Anzahl Elemente wie die Eingabe."),
+                    "Gib jeden Textabschnitt ausschließlich auf Deutsch aus. Übersetze alle nichtdeutschen Sprachen vollständig ins natürliche Deutsche. Bewahre Bedeutung, Namen, Zahlen und Einheiten; übersetze Fachbegriffe passend zum jeweiligen Inhalt. Gemischtsprachige Abschnitte müssen ebenfalls vollständig deutsch werden. Ergänze keine Inhalte. Antworte ausschließlich als JSON-Array aus Zeichenketten, in derselben Reihenfolge und mit exakt derselben Anzahl Elemente wie die Eingabe."),
                 new LmChatMessage("user", input),
             ],
             [],
-            maximumOutputTokens: 1_024,
+            maximumOutputTokens: null,
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var content = result.Content
@@ -188,12 +188,12 @@ public sealed class WorkerOrchestrator : IDisposable
     {
         await WarmSpeechResourcesAsync(cancellationToken).ConfigureAwait(false);
         // Only speech input, speaker separation and TTS are resident for the
-        // Docker-stack lifetime. Startup never selects an LM Studio model: an
+        // Docker-stack lifetime. Startup never selects an native llama model: an
         // already loaded model is preserved and the next AI run chooses its target.
         _runtime.WriteLog(
             "Information",
             "models.startup.on_demand",
-            "LM-Studio-Modelle werden ausschließlich durch konkrete AI-Läufe geladen; der vorhandene Modellzustand bleibt unverändert.");
+            "native llama-Modelle werden ausschließlich durch konkrete AI-Läufe geladen; der vorhandene Modellzustand bleibt unverändert.");
     }
 
     public async Task<SpeechSessionSnapshot> BeginSpeechSessionAsync(
@@ -488,11 +488,13 @@ public sealed class WorkerOrchestrator : IDisposable
         await _resourceTransitionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (LmStudioModelCatalog.TryGet(modelId, out _)
-                || string.Equals(modelId, _options.VisionModelId, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(modelId, _options.EmbeddingModelId, StringComparison.OrdinalIgnoreCase))
+            var modelStatus = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+            var selected = ModelRuntimeClient.ResolveModelStatus(modelStatus.Models, modelId, "general")
+                ?? ModelRuntimeClient.ResolveModelStatus(modelStatus.Models, modelId, "vision")
+                ?? ModelRuntimeClient.ResolveModelStatus(modelStatus.Models, modelId, "embedding");
+            if (selected is { Loaded: false })
             {
-                // Heavy LM Studio targets replace optional worker allocations,
+                // Heavy native llama targets replace optional worker allocations,
                 // while the resident speech stack remains available.
                 await _workers.ReleaseAllAsync(
                     exceptWorker: ResidentSpeechWorkerName,
@@ -518,7 +520,7 @@ public sealed class WorkerOrchestrator : IDisposable
             "speech" or "media" or "image" => workerName,
             _ => throw new ArgumentOutOfRangeException(nameof(workerName)),
         };
-        // Worker preparation is intentionally independent of LM Studio. Media,
+        // Worker preparation is intentionally independent of native llama. Media,
         // image and speech work must not cause an implicit General-AI transition.
         await Task.CompletedTask.ConfigureAwait(false);
     }

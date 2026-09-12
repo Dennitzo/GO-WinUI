@@ -13,7 +13,8 @@ public sealed record GoAiConnectionStatus(
 
 public sealed class GoAiConnectionService(
     SettingsCoordinator settings,
-    ILogger<GoAiConnectionService> logger) : IDisposable
+    ILogger<GoAiConnectionService> logger,
+    NativeModelRuntimeService? nativeRuntime = null) : IDisposable
 {
     public const string DefaultServerUrl = "http://192.168.0.67:8080";
     private static readonly TimeSpan DefaultProbeTimeout = TimeSpan.FromSeconds(12);
@@ -30,12 +31,15 @@ public sealed class GoAiConnectionService(
         settings.Current.IsAiConnectionEnabled ? new CancellationTokenSource() : null;
     private bool _disposed;
 
+    public string? NativeRuntimeError { get; private set; }
+
     internal GoAiConnectionService(
         SettingsCoordinator settings,
         ILogger<GoAiConnectionService> logger,
         Func<HttpMessageHandler> httpHandlerFactory,
-        TimeSpan? probeTimeout = null)
-        : this(settings, logger)
+        TimeSpan? probeTimeout = null,
+        NativeModelRuntimeService? nativeRuntime = null)
+        : this(settings, logger, nativeRuntime)
     {
         _httpHandlerFactory = httpHandlerFactory ?? throw new ArgumentNullException(nameof(httpHandlerFactory));
         if (probeTimeout is { } timeout)
@@ -45,14 +49,29 @@ public sealed class GoAiConnectionService(
         }
     }
 
-    public Task<GoAiClient> CreateClientAsync(CancellationToken cancellationToken = default)
+    public async Task<GoAiClient> CreateClientAsync(CancellationToken cancellationToken = default)
     {
-        _ = cancellationToken;
         var connectionModeToken = GetConnectionModeToken();
         if (!Uri.TryCreate(settings.Current.GoAiServerUrl.TrimEnd('/') + "/", UriKind.Absolute, out var baseAddress)
             || baseAddress.Scheme is not ("http" or "https"))
         {
             throw new InvalidOperationException("Die Docker-Gatewayadresse ist ungültig.");
+        }
+
+        if (nativeRuntime is not null)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, connectionModeToken);
+            try
+            {
+                await nativeRuntime.EnsureStartedAsync(baseAddress, linked.Token).ConfigureAwait(false);
+                NativeRuntimeError = null;
+            }
+            catch (OperationCanceledException) when (linked.IsCancellationRequested) { throw; }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                // Other gateway services remain usable even if a local language-model dependency is missing.
+                NativeRuntimeError = exception.Message;
+            }
         }
 
         HttpMessageHandler handler = _httpHandlerFactory?.Invoke()
@@ -64,7 +83,7 @@ public sealed class GoAiConnectionService(
             Timeout = Timeout.InfiniteTimeSpan,
         };
         httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("GO-WinUI/1.0");
-        return Task.FromResult(new GoAiClient(httpClient, _clientId, ownsHttpClient: true));
+        return new GoAiClient(httpClient, _clientId, ownsHttpClient: true);
     }
 
     public async Task<GoAiConnectionStatus> TestAsync(CancellationToken cancellationToken = default)
@@ -76,10 +95,10 @@ public sealed class GoAiConnectionService(
 
         try
         {
+            using var client = await CreateClientAsync(cancellationToken).ConfigureAwait(false);
             using var probeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             probeCancellation.CancelAfter(_probeTimeout);
             var probeToken = probeCancellation.Token;
-            using var client = await CreateClientAsync(cancellationToken).ConfigureAwait(false);
             var live = await client.GetLiveHealthAsync(probeToken).ConfigureAwait(false);
             if (!string.Equals(live.ProtocolVersion, settings.Current.GoAiProtocolVersion, StringComparison.Ordinal))
             {
@@ -100,7 +119,7 @@ public sealed class GoAiConnectionService(
                 "modelNotLoaded" => new(true, true,
                     "Verbunden · Modell wird beim ersten AI-Lauf geladen", capabilities, health),
                 _ => new(true, false,
-                    $"Verbunden · Eingeschränkt · {health.Reason ?? "Dienstfehler"}", capabilities, health),
+                    $"Verbunden · Eingeschränkt · {NativeRuntimeError ?? health.Reason ?? "Dienstfehler"}", capabilities, health),
             };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

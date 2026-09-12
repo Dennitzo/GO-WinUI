@@ -14,7 +14,6 @@ namespace GoWinUI.App.Pages;
 public sealed partial class SettingsPage : Page
 {
     private readonly ILogger<SettingsPage> _logger;
-    private readonly ShellViewModel _shell;
     private bool _connectionModeReady;
     private bool _synchronizing;
 
@@ -22,7 +21,6 @@ public sealed partial class SettingsPage : Page
     {
         InitializeComponent();
         ViewModel = App.Current.GetService<SettingsViewModel>();
-        _shell = App.Current.GetService<ShellViewModel>();
         _logger = App.Current.GetService<ILogger<SettingsPage>>();
     }
 
@@ -64,7 +62,9 @@ public sealed partial class SettingsPage : Page
                 await ViewModel.InitializeAsync();
                 SynchronizeControls();
                 UpdatePromptTriggerSortIndicators();
-                if (_shell.IsAiAvailable)
+                // Discovery starts the local runtime if needed; it cannot depend on a
+                // readiness flag that is itself populated by that first discovery.
+                if (ViewModel.IsAiConnectionEnabled)
                 {
                     await ViewModel.RefreshModelsAsync();
                 }

@@ -46,7 +46,7 @@ public sealed class DockerClientEndToEndLiveTests
                     "text",
                     "Erkläre in zwölf kurzen, nummerierten Absätzen auf Deutsch, wie ein zuverlässiger Softwaretest aufgebaut wird. "
                     + "Schreibe normalen Markdown-Fließtext ohne Werkzeuge, JSON oder technische Metadaten.")])],
-                Limits: new RunLimits(2_048, 131_072, 2_400),
+                Limits: new RunLimits(2_048, 32_768, 2_400),
                 SessionId: $"go-streaming-live-{Guid.NewGuid():N}",
                 PreferredGeneralModelId: modelId,
                 ConversationProfile: ConversationProfile.General),
@@ -90,7 +90,11 @@ public sealed class DockerClientEndToEndLiveTests
         Assert.True(
             completedAt - deltas[0].SeenAt >= TimeSpan.FromMilliseconds(250),
             "Das erste Textdelta traf erst gemeinsam mit dem Abschlussereignis ein.");
-        Assert.False(string.IsNullOrWhiteSpace(string.Concat(deltas.Select(static delta => delta.Text))));
+        var visibleText = string.Concat(deltas.Select(static delta => delta.Text));
+        Assert.False(string.IsNullOrWhiteSpace(visibleText));
+        Assert.Contains("Test", visibleText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("TGA", visibleText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Gebäudeausrüstung", visibleText, StringComparison.OrdinalIgnoreCase);
     }
 
     private static Uri ResolveServerUrl()

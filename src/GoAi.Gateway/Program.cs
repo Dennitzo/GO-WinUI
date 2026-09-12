@@ -10,7 +10,11 @@ var options = new GoAiServerOptions
     ExpectedLanIp = Environment.GetEnvironmentVariable("GO_AI_EXPECTED_LAN_IP") ?? "192.168.0.67",
     GatewayPort = ReadGatewayPort(),
     PublicUrl = Environment.GetEnvironmentVariable("GO_AI_PUBLIC_URL") ?? "http://192.168.0.67:8080",
-    ModelRuntimeUri = ResolveUri("GO_AI_MODEL_RUNTIME_URL", "http://host.docker.internal:1234"),
+    ModelRuntimeUri = ResolveUri("GO_AI_MODEL_RUNTIME_URL", "http://host.docker.internal:8081"),
+    CodingModelRoot = Environment.GetEnvironmentVariable("GO_AI_CODING_MODEL_ROOT") ?? "Windows Unsloth Modellordner",
+    CodingModelId = Environment.GetEnvironmentVariable("GO_AI_CODING_MODEL_ID") ?? string.Empty,
+    CodingMaximumModelRounds = ReadCodingBudget("GO_AI_CODING_MAXIMUM_MODEL_ROUNDS", 0, 2),
+    CodingMaximumToolCalls = ReadCodingBudget("GO_AI_CODING_MAXIMUM_TOOL_CALLS", 0, 1),
     SearxngUri = ResolveUri("GO_AI_SEARXNG_URL", "http://searxng:8080"),
     SpeechWorkerUri = ResolveUri("GO_AI_SPEECH_WORKER_URL", "http://speech:8080"),
     MediaWorkerUri = ResolveUri("GO_AI_MEDIA_WORKER_URL", "http://media:8080"),
@@ -36,6 +40,10 @@ var builder = Host.CreateDefaultBuilder(args)
         destination.GatewayPort = options.GatewayPort;
         destination.PublicUrl = options.PublicUrl;
         destination.ModelRuntimeUri = options.ModelRuntimeUri;
+        destination.CodingModelRoot = options.CodingModelRoot;
+        destination.CodingModelId = options.CodingModelId;
+        destination.CodingMaximumModelRounds = options.CodingMaximumModelRounds;
+        destination.CodingMaximumToolCalls = options.CodingMaximumToolCalls;
         destination.SearxngUri = options.SearxngUri;
         destination.SpeechWorkerUri = options.SpeechWorkerUri;
         destination.MediaWorkerUri = options.MediaWorkerUri;
@@ -61,6 +69,15 @@ static int ReadGatewayPort()
         && port is >= 1024 and <= 65535
         ? port
         : 8080;
+}
+
+static int ReadCodingBudget(string variable, int fallback, int minimum)
+{
+    var configured = Environment.GetEnvironmentVariable(variable);
+    if (string.IsNullOrWhiteSpace(configured)) return fallback;
+    return int.TryParse(configured, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value)
+        && (value == 0 || value >= minimum) ? value
+        : throw new InvalidOperationException($"{variable} must be 0 (unlimited) or an integer of at least {minimum}.");
 }
 
 static Uri ResolveUri(string variableName, string fallback)

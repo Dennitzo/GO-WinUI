@@ -44,10 +44,10 @@ public static class ModelReasoningProfiles
             return new(
                 GptOssFamily,
                 GptOssEfforts,
-                "medium");
+                "high");
         }
 
-        if (normalizedModelId.Contains("qwen3.8-27b", StringComparison.OrdinalIgnoreCase))
+        if (normalizedModelId.Contains("qwen3.8-", StringComparison.OrdinalIgnoreCase))
         {
             return new(Qwen38Family, Qwen38Efforts, "xhigh");
         }

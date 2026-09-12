@@ -1,4 +1,4 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using GoAi.Server.Core.Storage;
 using System.Security.Cryptography;
 
@@ -11,7 +11,7 @@ public sealed class UploadServiceTests
     {
         using var context = new TestServerContext();
         var service = new UploadService(context.Database, context.WrappedOptions);
-        var bytes = System.Text.Encoding.UTF8.GetBytes("TGA Projektdokument");
+        var bytes = System.Text.Encoding.UTF8.GetBytes("Allgemeines Projektdokument");
         var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         var created = await service.CreateAsync(new UploadManifest("projekt.txt", "text/plain", bytes.Length, sha));
 

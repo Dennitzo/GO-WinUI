@@ -1,4 +1,5 @@
 using GoAi.Contracts;
+using GoAi.Server.Core.Research;
 using GoAi.Server.Core.Runtime;
 using Microsoft.AspNetCore.Http;
 using System.Net;
@@ -59,6 +60,7 @@ public sealed class ProblemDetailsMiddleware
         InvalidDataException => (422, "upload.integrity_failed", "Integritätsprüfung fehlgeschlagen", exception.Message),
         OperationCanceledException => ((int)HttpStatusCode.Conflict, "operation.cancelled", "Vorgang abgebrochen", "Die laufende Operation wurde abgebrochen."),
         InvalidOperationException => ((int)HttpStatusCode.Conflict, "operation.invalid_state", "Vorgang nicht möglich", exception.Message),
+        SearxngEngineUnavailableException => ((int)HttpStatusCode.ServiceUnavailable, "web.search.engines_unavailable", "Suchmaschinen vorübergehend gestört", exception.Message),
         HttpRequestException => ((int)HttpStatusCode.BadGateway, "upstream.failed", "Externer Dienst nicht erreichbar", "Ein interner AI-Dienst konnte die Anfrage nicht ausführen."),
         _ => ((int)HttpStatusCode.InternalServerError, "server.unhandled", "Interner Serverfehler", "Die Anfrage konnte nicht abgeschlossen werden."),
     };

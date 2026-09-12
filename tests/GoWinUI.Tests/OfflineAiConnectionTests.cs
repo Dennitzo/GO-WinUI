@@ -10,6 +10,45 @@ namespace GoWinUI.Tests;
 
 public sealed class OfflineAiConnectionTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NativeStartupHasItsOwnBudgetAndDoesNotHideAReachableGateway(bool nativeStartFails)
+    {
+        var probe = new ProbeHttpHandler(new Dictionary<string, (HttpStatusCode StatusCode, string Body)>
+        {
+            ["/v1/health/live"] = (HttpStatusCode.OK,
+                """{"status":"live","protocolVersion":"1.0","timestamp":"2026-09-12T07:00:00Z"}"""),
+            ["/v1/capabilities"] = (HttpStatusCode.OK,
+                """{"protocolVersion":"1.0","serverVersion":"1.0","models":[],"serverTools":[],"clientTools":[],"uploadLimits":{},"mediaTypes":[],"supportsSseResume":true,"uploadChunkSize":8388608}"""),
+            ["/v1/health/ready"] = (HttpStatusCode.OK, nativeStartFails
+                ? """{"status":"notReady","protocolVersion":"1.0","timestamp":"2026-09-12T07:00:00Z","reason":"native unavailable"}"""
+                : """{"status":"modelNotLoaded","protocolVersion":"1.0","timestamp":"2026-09-12T07:00:00Z"}"""),
+        });
+        var running = false;
+        using var runtime = new NativeModelRuntimeService(_ => true, _ => Task.FromResult(running), async token =>
+        {
+            await Task.Delay(100, token);
+            if (nativeStartFails) throw new FileNotFoundException("Native binary missing: C:/missing/llama-server.exe");
+            running = true;
+        });
+        using var settings = new SettingsCoordinator(new RecordingSettingsStore(new AppSettings
+        {
+            IsAiConnectionEnabled = true, GoAiServerUrl = "http://127.0.0.1:65000",
+        }));
+        await settings.InitializeAsync();
+        using var connection = new GoAiConnectionService(settings, NullLogger<GoAiConnectionService>.Instance,
+            () => probe, TimeSpan.FromMilliseconds(50), runtime);
+
+        var status = await connection.TestAsync();
+
+        Assert.True(status.IsReachable);
+        Assert.Equal(!nativeStartFails, status.IsReady);
+        Assert.Equal(3, probe.Paths.Count);
+        if (nativeStartFails) Assert.Contains("C:/missing/llama-server.exe", status.Message, StringComparison.Ordinal);
+        else Assert.Null(connection.NativeRuntimeError);
+    }
+
     [Fact]
     public async Task RequestDrivenModelStateIsReportedAsReadyForClientUse()
     {

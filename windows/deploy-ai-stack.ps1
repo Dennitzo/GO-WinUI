@@ -3,7 +3,7 @@
 param(
     [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'GO-AI-Stack'),
     [string] $ModelRoot,
-    [string] $LmStudioModelRoot,
+    [string] $NativeModelRoot,
     [string] $ServerIp = '192.168.0.67',
     [string] $ImageVersion = '1.0.0',
     [string] $LegacyDatabasePath,
@@ -27,10 +27,10 @@ function Test-SqliteDatabase {
     if ($LASTEXITCODE -ne 0) { throw "SQLite integrity check failed: $Path" }
 }
 
-$paths = Get-GoAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot -LmStudioModelRoot $LmStudioModelRoot
+$paths = Get-GoAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot -NativeModelRoot $NativeModelRoot
 $directories = @(
     $paths.ModelRoot,
-    $paths.LmStudioModelRoot,
+    $paths.NativeModelRoot,
     (Join-Path $paths.DataRoot 'data\database'),
     (Join-Path $paths.DataRoot 'data\uploads'),
     (Join-Path $paths.DataRoot 'data\artifacts\worker'),
@@ -55,23 +55,30 @@ if (-not $SkipModelHashVerification) {
     $manifestPath = Resolve-GoRepositoryPath -RelativePath 'deploy\go-ai\models.manifest.json'
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     foreach ($entry in $manifest.models) {
-        $file = Join-Path $paths.LmStudioModelRoot ([string]$entry.path -replace '/', '\')
-        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Pinned model is missing: $file" }
-        if ((Get-Item -LiteralPath $file).Length -ne [long]$entry.length) { throw "Pinned model length mismatch: $file" }
-        $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($hash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Pinned model SHA-256 mismatch: $file" }
-        Write-Host "Verified $($entry.path)" -ForegroundColor DarkGray
+        $repository = [string]$entry.repository
+        $relativePath = ([string]$entry.path).Substring($repository.Length + 1)
+        $candidatePaths = @(Resolve-GoNativeModelFile -NativeModelRoot $paths.NativeModelRoot -Repository $repository -Revision $entry.revision -FileName $relativePath)
+        # Some repositories publish split GGUFs inside a quantization directory.
+        # Accept both that native layout and already migrated flat snapshots.
+        if ($relativePath -match '^([^/]+)-\d{5}-of-\d{5}\.gguf$') {
+            $nestedPath = $Matches[1] + '/' + $relativePath
+            $candidatePaths += Resolve-GoNativeModelFile -NativeModelRoot $paths.NativeModelRoot -Repository $repository -Revision $entry.revision -FileName $nestedPath
+        }
+        foreach ($file in $candidatePaths) {
+            # The manifest contains historical alternatives; uninstalled models are optional.
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            if ((Get-Item -LiteralPath $file).Length -ne [long]$entry.length) { throw "Pinned model length mismatch: $file" }
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Pinned model SHA-256 mismatch: $file" }
+            Write-Host "Verified $file" -ForegroundColor DarkGray
+        }
     }
 }
 
-$requiredLmStudioResources = @(
-    'lmstudio-community\Qwen3.8-27B-GGUF\Qwen3.8-27B-Q4_K_M.gguf',
-    'lmstudio-community\Qwen3.8-27B-GGUF\mmproj-Qwen3.8-27B-BF16.gguf'
-)
-foreach ($relativePath in $requiredLmStudioResources) {
-    $resource = Join-Path $paths.LmStudioModelRoot $relativePath
-    if (-not (Test-Path -LiteralPath $resource -PathType Leaf)) {
-        throw "Required LM Studio model resource is missing: $resource"
+$nativeModels = @(Get-GoNativeModelCatalog -NativeModelRoot $paths.NativeModelRoot)
+foreach ($role in @('general', 'vision', 'embedding')) {
+    if (@($nativeModels | Where-Object { $_.role -eq $role }).Count -eq 0) {
+        throw "No complete native $role model is installed in $($paths.NativeModelRoot). Vision models require a matching projector."
     }
 }
 
@@ -104,9 +111,9 @@ if (Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue) {
 }
 
 if (-not $SkipBuild) {
-    & (Join-Path $PSScriptRoot 'build-ai-stack.ps1') -DataRoot $paths.DataRoot -ModelRoot $paths.ModelRoot -ServerIp $ServerIp -ImageVersion $ImageVersion
+    & (Join-Path $PSScriptRoot 'build-ai-stack.ps1') -DataRoot $paths.DataRoot -ModelRoot $paths.ModelRoot -NativeModelRoot $paths.NativeModelRoot -ServerIp $ServerIp -ImageVersion $ImageVersion
 }
 if (-not $SkipStart) {
-    & (Join-Path $PSScriptRoot 'start-ai-stack.ps1') -DataRoot $paths.DataRoot -ModelRoot $paths.ModelRoot -LmStudioModelRoot $paths.LmStudioModelRoot -ServerIp $ServerIp -ImageVersion $ImageVersion
+    & (Join-Path $PSScriptRoot 'start-ai-stack.ps1') -DataRoot $paths.DataRoot -ModelRoot $paths.ModelRoot -NativeModelRoot $paths.NativeModelRoot -ServerIp $ServerIp -ImageVersion $ImageVersion
 }
-Write-Host 'GO AI hybrid deployment completed: Docker gateway/workers plus LM Studio model runtime.' -ForegroundColor Green
+Write-Host 'GO AI deployment completed: Docker gateway/workers plus native Unsloth / llama.cpp models.' -ForegroundColor Green

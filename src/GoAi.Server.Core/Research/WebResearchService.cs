@@ -52,6 +52,8 @@ public sealed partial class WebResearchService
         {
             throw new ArgumentException("Search language may contain at most 16 characters.", nameof(request));
         }
+        if (!SearxngSearchProfiles.IsValid(request.Profile))
+            throw new ArgumentException("Search profile must be auto, general, python, web or dotnet.", nameof(request));
 
         var maximum = Math.Clamp(request.MaximumResults, 1, 20);
         var youtubeApiKey = _options.YouTubeApiKey;
@@ -65,6 +67,8 @@ public sealed partial class WebResearchService
         {
             Query = $"q={Uri.EscapeDataString(query)}&format=json&language={Uri.EscapeDataString(request.Language ?? "de-DE")}",
         };
+        if (!youtubeFallback && SearxngSearchProfiles.Engines(request.Profile, query) is { } engines)
+            builder.Query += "&engines=" + Uri.EscapeDataString(engines);
         var client = _httpClientFactory.CreateClient(nameof(WebResearchService));
         client.Timeout = TimeSpan.FromSeconds(20);
         using var response = await client.GetAsync(builder.Uri, cancellationToken).ConfigureAwait(false);
@@ -92,13 +96,36 @@ public sealed partial class WebResearchService
             }
         }
 
+        var failures = ReadEngineFailures(document.RootElement);
+        if (results.Count == 0 && failures.Count > 0)
+            throw new SearxngEngineUnavailableException(failures);
         return new WebSearchResponse(
             request.Query,
             results,
             "searxng",
             youtubeFallback,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            failures.Count > 0 ? failures : null);
     }
+
+    private static List<SearchEngineFailure> ReadEngineFailures(JsonElement response)
+    {
+        if (!response.TryGetProperty("unresponsive_engines", out var engines) || engines.ValueKind != JsonValueKind.Array)
+            return [];
+        var failures = new List<SearchEngineFailure>();
+        foreach (var engine in engines.EnumerateArray().Take(8))
+        {
+            if (engine.ValueKind != JsonValueKind.Array || engine.GetArrayLength() < 2
+                || engine[0].ValueKind != JsonValueKind.String || engine[1].ValueKind != JsonValueKind.String) continue;
+            var name = CleanDiagnostic(engine[0].GetString()!, 64);
+            var reason = CleanDiagnostic(engine[1].GetString()!, 160);
+            if (name.Length > 0) failures.Add(new(name, reason.Length > 0 ? reason : "Engine meldet keine Antwort"));
+        }
+        return failures;
+    }
+
+    private static string CleanDiagnostic(string value, int maximum) =>
+        new(value.Take(maximum).Select(static character => char.IsControl(character) ? ' ' : character).ToArray());
 
     private async Task<WebSearchResponse> SearchYouTubeAsync(
         WebSearchRequest request,
@@ -814,7 +841,11 @@ public sealed partial class WebResearchService
     private static string NormalizeHtml(string html)
     {
         var withoutScripts = ScriptAndStyleRegex().Replace(html, " ");
-        var withoutTags = HtmlTagRegex().Replace(withoutScripts, " ");
+        // Inline markup does not insert a word boundary. Sphinx splits API names
+        // across spans (asyncio.<span>timeout</span>); adding spaces breaks exact
+        // targeted lookups. Structural elements still separate paragraphs/cells.
+        var withoutInlineTags = InlineHtmlTagRegex().Replace(withoutScripts, string.Empty);
+        var withoutTags = HtmlTagRegex().Replace(withoutInlineTags, " ");
         return WhitespaceRegex().Replace(WebUtility.HtmlDecode(withoutTags), " ").Trim();
     }
 
@@ -832,6 +863,9 @@ public sealed partial class WebResearchService
 
     [GeneratedRegex("<(script|style)\\b[^>]*>.*?</\\1>", RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant)]
     private static partial Regex ScriptAndStyleRegex();
+
+    [GeneratedRegex("</?(?:span|code|a|strong|em|b|i|u|s|small|mark|abbr|kbd|samp|var|sub|sup|wbr)\\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex InlineHtmlTagRegex();
 
     [GeneratedRegex("<[^>]+>", RegexOptions.CultureInvariant)]
     private static partial Regex HtmlTagRegex();

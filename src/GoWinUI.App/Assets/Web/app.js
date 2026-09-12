@@ -36,6 +36,9 @@
     },
     readFromContextTarget: null,
     messageRunStatus: new Map(),
+    codingActivity: new Map(),
+    codingToolStepsExpanded: false,
+    codingPreviewDialog: null,
     artifactPreviewUrls: new Map(),
     artifactPreviewPending: new Set(),
     selectedToolAction: null,
@@ -89,8 +92,9 @@
   };
 
   const byId = id => document.getElementById(id);
-  const persistentToolActions = new Set(["bricsCad", "audiobook"]);
+  const persistentToolActions = new Set(["bricsCad", "audiobook", "coding"]);
   const toolVisuals = Object.freeze({
+    coding: ["Coding", "M8 6l-6 6 6 6M16 6l6 6-6 6M14 3l-4 18"],
     audioAnalysis: ["Audio analysieren", "M4 12h2m2-5 4 10 3-7 2 4h3"],
     imageAnalysis: ["Bild analysieren", "M4 5h16v14H4zM7 15l3-3 3 3 2-2 2 2"],
     imageGeneration: ["Bild erstellen", "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
@@ -131,7 +135,12 @@
     newSession: byId("new-session"),
     messageList: byId("message-list"),
     messageScroll: byId("message-scroll"),
+    codingWorkspace: byId("coding-workspace"),
+    codingWorkspaceName: byId("coding-workspace-name"),
     prompt: byId("prompt"),
+    chatPane: document.querySelector(".chat-pane"),
+    chatHeader: document.querySelector(".chat-header"),
+    composerRegion: document.querySelector(".composer-region"),
     composerSpeechStatus: byId("composer-speech-status"),
     composerSpeechDetail: byId("composer-speech-detail"),
     composerSpeechPause: byId("composer-speech-pause"),
@@ -189,9 +198,48 @@
   };
 
   const sidebarStorageKey = "go.assistant.sessions-collapsed";
+  const chatScroll = globalThis.createGoChatScroll({
+    scroller: elements.messageScroll, content: elements.messageList, button: byId("scroll-to-latest")
+  });
   const sessionScrollStoragePrefix = "go.assistant.session-scroll.v1:";
   let draftTimer = 0;
   let pendingDraft = null;
+  let promptResizeFrame = 0;
+
+  function resizePrompt() {
+    const prompt = elements.prompt;
+    const pane = elements.chatPane.getBoundingClientRect();
+    if (pane.height <= 0 || prompt.clientWidth <= 0) return;
+    const viewport = globalThis.visualViewport;
+    const bottom = Math.min(pane.bottom, viewport ? viewport.offsetTop + viewport.height : globalThis.innerHeight);
+    const overhead = elements.composerRegion.getBoundingClientRect().height - prompt.getBoundingClientRect().height;
+    const minimum = parseFloat(globalThis.getComputedStyle(prompt).minHeight) || 58;
+    // Reserve the actual toolbar, attachments and header; the conversation can
+    // yield its space to the draft until the available window height is filled.
+    const maximum = Math.max(minimum, Math.floor(bottom - pane.top
+      - elements.chatHeader.getBoundingClientRect().height - overhead - 12));
+    const previousScroll = prompt.scrollTop;
+    prompt.style.maxHeight = `${maximum}px`;
+    prompt.style.overflowY = "hidden";
+    prompt.style.height = "0px";
+    const contentHeight = prompt.scrollHeight;
+    prompt.style.height = `${Math.min(maximum, Math.max(minimum, contentHeight))}px`;
+    prompt.style.overflowY = contentHeight > maximum ? "auto" : "hidden";
+    prompt.scrollTop = contentHeight > maximum ? previousScroll : 0;
+  }
+
+  function schedulePromptResize() {
+    if (promptResizeFrame) return;
+    promptResizeFrame = requestAnimationFrame(() => {
+      promptResizeFrame = 0;
+      resizePrompt();
+    });
+  }
+
+  function setPromptValue(value) {
+    elements.prompt.value = value;
+    schedulePromptResize();
+  }
 
   function post(type, payload) {
     try {
@@ -305,6 +353,7 @@
 
   function restoreSessionScrollPosition(sessionId) {
     const saved = readSessionScrollPosition(sessionId);
+    chatScroll.restore(!saved || saved.atEnd);
     requestAnimationFrame(() => {
       if (String(sessionId || "") !== String(state.activeSessionId || "")) return;
       const scroller = elements.messageScroll;
@@ -312,6 +361,7 @@
       if (!saved) {
         scroller.scrollTop = maximumTop;
         scroller.scrollLeft = 0;
+        chatScroll.refresh();
         return;
       }
       if (saved.atEnd) {
@@ -332,6 +382,7 @@
         }
       }
       scroller.scrollLeft = Math.max(0, saved.left);
+      chatScroll.refresh();
     });
   }
 
@@ -391,6 +442,10 @@
   }
 
   function renderMessages(scrollToEnd) {
+    if (state.selectedToolAction === "coding" || state.messages.some(message => message.toolSteps?.length)) {
+      renderCodingMessages(scrollToEnd);
+      return;
+    }
     const previousScrollTop = elements.messageScroll.scrollTop;
     const previousScrollLeft = elements.messageScroll.scrollLeft;
     elements.messageList.replaceChildren();
@@ -400,16 +455,69 @@
     if (!state.messages.length && state.activeSessionId) {
       const empty = document.createElement("div");
       empty.className = "chat-empty-state";
-      empty.textContent = "Wobei kann ich dich in der TGA-Planung unterstützen?";
+      if (state.selectedToolAction === "coding") {
+        const heading = document.createElement("h2");
+        heading.textContent = "Woran arbeiten wir?";
+        const description = document.createElement("p");
+        description.textContent = state.codingWorkspacePath
+          ? "Beschreibe eine Änderung, einen Fehler oder eine Frage zum Projekt."
+          : "Wähle über Workspace deinen Projektordner und beschreibe die gewünschte Codeänderung.";
+        empty.append(createToolIcon(toolVisuals.coding[1]), heading, description);
+      } else {
+        empty.textContent = "Wobei kann ich dich unterstützen?";
+      }
       elements.messageList.append(empty);
     }
     applySpeechHighlight();
-    if (scrollToEnd) {
-      requestAnimationFrame(() => { elements.messageScroll.scrollTop = elements.messageScroll.scrollHeight; });
-    } else {
+    if (!chatScroll.following) {
       elements.messageScroll.scrollTop = previousScrollTop;
       elements.messageScroll.scrollLeft = previousScrollLeft;
     }
+    if (scrollToEnd === "force") chatScroll.jump(false);
+    else chatScroll.refresh();
+  }
+
+  function renderCodingMessages(scrollToEnd) {
+    const scroller = elements.messageScroll;
+    const previousTop = scroller.scrollTop;
+    const previousLeft = scroller.scrollLeft;
+    const follow = scrollToEnd === "force" || chatScroll.following;
+    const viewportTop = scroller.getBoundingClientRect().top;
+    const visibleAnchor = selector => [...elements.messageList.querySelectorAll(selector)]
+      .find(item => item.getBoundingClientRect().bottom > viewportTop + 2);
+    const anchor = visibleAnchor(".coding-diff__line, .coding-output, .coding-result, .coding-narration")
+      || visibleAnchor(".coding-step") || visibleAnchor(".message");
+    const anchorTop = anchor?.getBoundingClientRect().top;
+    const existing = new Map([...elements.messageList.children].map(item => [String(item.dataset.messageId), item]));
+    let index = 0;
+    for (const message of state.messages) {
+      const old = existing.get(String(message.id));
+      const next = createMessage(message, old);
+      const article = old ? globalThis.goCodingTimeline.reconcile(old, next) : next;
+      const at = elements.messageList.children[index];
+      if (article !== at) elements.messageList.insertBefore(article, at || null);
+      index++;
+    }
+    while (elements.messageList.children.length > index) elements.messageList.lastChild.remove();
+    if (!state.messages.length && state.activeSessionId) {
+      const empty = document.createElement("div");
+      empty.className = "chat-empty-state";
+      const heading = document.createElement("h2");
+      heading.textContent = "Woran arbeiten wir?";
+      const description = document.createElement("p");
+      description.textContent = state.codingWorkspacePath
+        ? "Beschreibe eine Änderung, einen Fehler oder eine Frage zum Projekt."
+        : "Wähle über Workspace deinen Projektordner und beschreibe die gewünschte Codeänderung.";
+      empty.append(createToolIcon(toolVisuals.coding[1]), heading, description);
+      elements.messageList.append(empty);
+    }
+    applySpeechHighlight();
+    scroller.scrollLeft = previousLeft;
+    if (!follow) {
+      scroller.scrollTop = anchor?.isConnected ? previousTop + anchor.getBoundingClientRect().top - anchorTop : previousTop;
+    }
+    if (scrollToEnd === "force") chatScroll.jump(false);
+    else chatScroll.refresh();
   }
 
   const speechHighlightName = "go-speech-current";
@@ -424,6 +532,9 @@
   }
 
   function speechBlockCandidates(content, kind) {
+    if (content.classList.contains("coding-timeline")) {
+      return [...content.querySelectorAll(".coding-narration")].flatMap(part => speechBlockCandidates(part, kind));
+    }
     const selectors = {
       heading: ":scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6",
       paragraph: ":scope > p",
@@ -776,6 +887,8 @@
   }
 
   function scrollMessageToTop(article) {
+    article = [...elements.messageList.querySelectorAll("article")]
+      .find(item => item.dataset.messageId === article.dataset.messageId) || article;
     const scrollerBounds = elements.messageScroll.getBoundingClientRect();
     const messageBounds = article.getBoundingClientRect();
     const top = elements.messageScroll.scrollTop + messageBounds.top - scrollerBounds.top - 8;
@@ -827,13 +940,18 @@
       .split("\n")
       .filter(line => !/^\s*(?:#{1,6}\s*)?(?:(?:\*\*|__|`)+\s*)?GO_SESSION_TITLE\s*:/i.test(
         line.replace(/\u00a0/g, " ").replace(/\\_/g, "_")))
-      .map(line => line.replace(marker, "").replace(/(?:\*\*|__|`)+\s*(?=(?:\*\*|__|`)+|$)/g, ""))
+      .map(line => line.replace(marker, ""))
       .join("\n")
       .trim();
   }
 
-  function createMessage(message) {
+  function createMessage(message, previousArticle = null) {
     const role = String(message.role).toLowerCase();
+    // Failed runs without generated text store their error as a content fallback.
+    // Display it once; retain the original message for copy/export and persistence.
+    const contentMessage = role === "assistant" && message.error
+      && String(message.content || "").trim() === String(message.error).trim()
+      ? { ...message, content: "" } : message;
     const article = document.createElement("article");
     article.className = `message ${role}`;
     article.dataset.messageId = message.id;
@@ -851,7 +969,8 @@
       const meta = document.createElement("div");
       meta.className = "message-meta";
       const messageTime = timeLabel(message.createdAt || message.updatedAt);
-      meta.textContent = messageTime ? `AI - ${messageTime}` : "AI";
+      const assistantLabel = state.selectedToolAction === "coding" ? "Coding Agent" : "AI";
+      meta.textContent = messageTime ? `${assistantLabel} - ${messageTime}` : assistantLabel;
       const liveStatus = state.messageRunStatus.get(String(message.id));
       if (message.status && !message.tool && !liveStatus && !["completed", "Completed"].includes(message.status)) {
         const status = document.createElement("span");
@@ -859,7 +978,7 @@
         status.textContent = statusLabel(message.status);
         meta.append(" · ", status);
       }
-      if (liveStatus?.status) {
+      if (liveStatus?.status && state.selectedToolAction !== "coding") {
         const spinner = document.createElement("span");
         spinner.className = "message-status-spinner";
         spinner.setAttribute("aria-hidden", "true");
@@ -871,12 +990,20 @@
       body.append(meta);
     }
 
+    const timeline = role === "assistant" && (state.selectedToolAction === "coding" || message.toolSteps?.length)
+      ? createCodingActivity(contentMessage, previousArticle?.querySelector(".coding-timeline")) : null;
+    if (timeline) {
+      body.append(timeline);
+      annotateReadableSpeechBlocks(contentMessage, article, timeline);
+    } else {
     const content = document.createElement("div");
     content.className = "message-content";
     if (["streaming", "Streaming"].includes(message.status)) content.classList.add("stream-cursor");
-    content.append(globalThis.goMarkdown.render(sanitizeVisibleMessageContent(message.content)));
-    annotateReadableSpeechBlocks(message, article, content);
+    content.append(globalThis.goMarkdown.render(sanitizeVisibleMessageContent(contentMessage.content)));
+    if (state.selectedToolAction === "coding") enhanceCodingCodeBlocks(content);
+    annotateReadableSpeechBlocks(contentMessage, article, content);
     body.append(content);
+    }
     if (message.tool) {
       const toolBox = document.createElement("div");
       toolBox.className = `message-tool-box message-tool-box--${String(message.tool.status || "").toLowerCase()}`;
@@ -886,6 +1013,17 @@
     }
     const artifactItems = Array.isArray(message.artifacts) ? message.artifacts : [];
     if (artifactItems.length) body.append(createArtifactList(artifactItems));
+    if (role === "assistant" && message.error) {
+      const error = document.createElement("div");
+      error.className = "message-error";
+      error.setAttribute("role", "note");
+      const heading = document.createElement("strong");
+      heading.textContent = "Lauf beendet";
+      const detail = document.createElement("p");
+      detail.textContent = String(message.error);
+      error.append(heading, detail);
+      body.append(error);
+    }
     body.append(createMessageFooter(message, article));
 
     article.append(body);
@@ -1016,6 +1154,201 @@
       : model;
   }
 
+  function codingToolLabel(value) {
+    const name = String(value || "");
+    return ({
+      "coding.list": "Projekt erkunden",
+      "coding.read": "Datei lesen",
+      "coding.search": "Code durchsuchen",
+      "coding.write": "Datei schreiben",
+      "coding.edit": "Datei bearbeiten",
+      "coding.command": "Befehl ausführen",
+      "coding.gitDiff": "Änderungen prüfen",
+      "coding.patch": "Änderung anwenden",
+      "coding.applyPatch": "Änderung anwenden",
+      "coding.run": "Befehl ausführen",
+      "coding.exec": "Befehl ausführen",
+      "coding.searchHistory": "Chatverlauf durchsuchen",
+      "coding.searchKnowledge": "Dokumentwissen durchsuchen",
+      "coding.renderHtml": "HTML-Vorschau erstellen",
+      "web.search": "Im Web suchen",
+      "web.fetch": "Quelle lesen",
+      "web.deepResearch": "Quellen recherchieren"
+    })[name] || name.replace(/^(?:coding|web)\./, "").replace(/([a-z])([A-Z])/g, "$1 $2") || "Werkzeug";
+  }
+
+  function codingStepState(value) {
+    const status = String(value || "running").toLowerCase();
+    return ["completed", "failed", "cancelled", "interrupted", "denied", "running", "pending"].includes(status)
+      ? status : "running";
+  }
+
+  function normalizeCodingStep(tool) {
+    return { ...tool, id: String(tool.id), kind: "tool", tool: String(tool.tool),
+      label: codingToolLabel(tool.tool), status: codingStepState(tool.status),
+      detail: String(tool.detail || ""), previewHtml: codingPreviewHtml(tool) };
+  }
+
+  function recordCodingActivity(payload) {
+    if (state.selectedToolAction !== "coding" || !payload?.messageId
+      || payload.sessionId && String(payload.sessionId) !== String(state.activeSessionId)) return;
+    const messageId = String(payload.messageId);
+    let steps = state.codingActivity.get(messageId);
+    if (!steps) {
+      steps = [];
+      state.codingActivity.set(messageId, steps);
+      if (state.codingActivity.size > 100) state.codingActivity.delete(state.codingActivity.keys().next().value);
+    }
+    const tool = payload.toolStep;
+    if (tool?.id && tool.tool) {
+      const existing = steps.find(item => item.id === String(tool.id) && item.kind === "tool");
+      const next = normalizeCodingStep(tool);
+      if (existing) {
+        const newer = !existing.updatedAt || !next.updatedAt || Date.parse(next.updatedAt) >= Date.parse(existing.updatedAt);
+        const regressesTerminal = !["running", "pending"].includes(existing.status) && ["running", "pending"].includes(next.status);
+        if (newer && !regressesTerminal) Object.assign(existing, next);
+      } else steps.push(next);
+    } else if (payload.runStatus) {
+      const previous = steps.at(-1);
+      const phase = { id: "current-phase", kind: "phase", label: String(payload.runStatus), status: "running",
+        detail: cleanStatusMetadata(payload.runDetail) };
+      if (previous?.kind === "phase") Object.assign(previous, phase);
+      else steps.push(phase);
+    }
+  }
+
+  function createCodingActivity(message, previousTimeline = null) {
+    const steps = mergeCodingToolSteps(message).filter(step => step.kind === "tool");
+    const live = isTerminalMessageStatus(message.status) ? null : state.messageRunStatus.get(String(message.id));
+    if (!steps.length && !live?.status) return null;
+    const sessionId = state.activeSessionId;
+    return globalThis.goCodingTimeline.render(message, steps, {
+      codingToolStepsExpanded: state.codingToolStepsExpanded,
+      previousTimeline,
+      renderMarkdown: text => globalThis.goMarkdown.render(text),
+      enhanceCodeBlocks: enhanceCodingCodeBlocks,
+      sanitizeText: sanitizeVisibleMessageContent,
+      liveStatus: live ? { status: live.status, detail: cleanStatusMetadata(live.detail) } : null,
+      onPreview: (messageId, stepId) => { if (state.activeSessionId === sessionId) openCodingPreview(messageId, stepId); }
+    });
+  }
+
+  function mergeCodingToolSteps(message) {
+    // Stored order survives reconnects where only the newest live step is known.
+    const steps = (Array.isArray(message.toolSteps) ? message.toolSteps : [])
+      .filter(tool => tool?.id && tool.tool).map(normalizeCodingStep);
+    for (const live of state.codingActivity.get(String(message.id)) || []) {
+      if (live.kind !== "tool") continue;
+      const existing = steps.find(step => step.id === live.id);
+      if (!existing) { steps.push({ ...live }); continue; }
+      const storedTerminal = !["running", "pending"].includes(existing.status);
+      const liveTerminal = !["running", "pending"].includes(live.status);
+      if (storedTerminal && !liveTerminal) continue;
+      if (existing.updatedAt && live.updatedAt && Date.parse(existing.updatedAt) > Date.parse(live.updatedAt)) continue;
+      if (!storedTerminal || liveTerminal && (!existing.updatedAt || !live.updatedAt || Date.parse(live.updatedAt) >= Date.parse(existing.updatedAt))) {
+        // Legacy terminal snapshots are authoritative when neither event has a clock.
+        if (!(storedTerminal && liveTerminal && !existing.updatedAt && !live.updatedAt)) Object.assign(existing, live);
+      }
+    }
+    return steps;
+  }
+  function codingPreviewHtml(step) {
+    return step?.tool === "coding.renderHtml" && step.status === "completed"
+      && typeof step.previewHtml === "string" && step.previewHtml.trim() && step.previewHtml.length <= 16000
+      ? step.previewHtml : null;
+  }
+
+  function closeCodingPreview() {
+    const dialog = state.codingPreviewDialog;
+    state.codingPreviewDialog = null;
+    if (dialog) {
+      dialog.close();
+      dialog.remove();
+    }
+  }
+
+  function openCodingPreview(messageId, stepId) {
+    closeCodingPreview();
+    const dialog = document.createElement("dialog");
+    dialog.className = "coding-preview-dialog";
+    dialog.setAttribute("aria-label", "HTML-Vorschau");
+    const header = document.createElement("div");
+    header.className = "coding-preview-dialog__header";
+    const title = document.createElement("strong");
+    title.textContent = "HTML-Vorschau";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "Schließen";
+    close.addEventListener("click", closeCodingPreview);
+    header.append(title, close);
+    const frame = document.createElement("iframe");
+    frame.title = "Isolierte HTML-Vorschau ohne Netzwerkzugriff";
+    frame.setAttribute("sandbox", "allow-scripts");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    // The native resource handler loads the persisted result. Never inject model HTML into GO's document.
+    frame.src = `https://go-coding-preview.local/coding/${encodeURIComponent(messageId)}/${encodeURIComponent(stepId)}`;
+    dialog.append(header, frame);
+    dialog.addEventListener("close", () => {
+      if (state.codingPreviewDialog === dialog) state.codingPreviewDialog = null;
+      dialog.remove();
+    });
+    state.codingPreviewDialog = dialog;
+    // Kept outside messageList so streamed tokens cannot reload the interactive frame.
+    document.body.append(dialog);
+    dialog.showModal();
+  }
+
+  function enhanceCodingCodeBlocks(content) {
+    for (const block of content.querySelectorAll(".code-block")) {
+      const header = block.querySelector(".code-header");
+      const code = block.querySelector("pre code");
+      if (!header || !code || !/^(diff|patch)$/i.test(header.firstChild?.textContent.trim() || "")) continue;
+      const source = code.textContent;
+      const lines = source.split("\n");
+      let added = 0;
+      let removed = 0;
+      code.replaceChildren();
+      lines.forEach((line, index) => {
+        const row = document.createElement("span");
+        let kind = "context";
+        if (/^(?:diff |index |--- |\+\+\+ |@@)/.test(line)) kind = "header";
+        else if (line.startsWith("+")) { kind = "added"; added += 1; }
+        else if (line.startsWith("-")) { kind = "removed"; removed += 1; }
+        row.className = `diff-line diff-line--${kind}`;
+        row.textContent = line;
+        code.append(row);
+        if (index < lines.length - 1) code.append(document.createTextNode("\n"));
+      });
+      block.classList.add("code-block--diff");
+      const counts = document.createElement("span");
+      counts.className = "code-diff-counts";
+      counts.textContent = `+${added} −${removed}`;
+      counts.setAttribute("aria-label", `${added} hinzugefügte und ${removed} entfernte Zeilen`);
+      header.insertBefore(counts, header.lastChild);
+    }
+  }
+
+  function renderCodingWorkspace() {
+    const coding = state.selectedToolAction === "coding";
+    elements.appShell.classList.toggle("coding-mode", coding);
+    elements.prompt.placeholder = coding ? "Änderung beschreiben oder Frage zum Projekt stellen …" : "Nachricht eingeben …";
+    elements.codingWorkspaceName.textContent = state.codingWorkspacePath
+      ? state.codingWorkspacePath.split(/[\\/]/).filter(Boolean).pop() : "";
+    elements.codingWorkspaceName.hidden = !state.codingWorkspacePath;
+    elements.codingWorkspace.classList.toggle("active", Boolean(state.codingWorkspacePath));
+    elements.codingWorkspace.title = state.codingWorkspacePath
+      ? `Workspace: ${state.codingWorkspacePath}\nOrdner wechseln` : "Workspace auswählen und Coding starten";
+    elements.codingWorkspace.setAttribute("aria-label", state.codingWorkspacePath
+      ? `Workspace ${state.codingWorkspacePath} wechseln` : "Workspace auswählen und Coding starten");
+    elements.codingWorkspace.disabled = state.isRunning || !state.activeSessionId;
+  }
+
+  function pickCodingWorkspace() {
+    if (state.activeSessionId && !state.isRunning) {
+      post("coding.pickWorkspace", { sessionId: state.activeSessionId });
+    }
+  }
+
   function runStatusText(liveStatus) {
     const status = String(liveStatus?.status || "").trim();
     const detail = cleanStatusMetadata(liveStatus?.detail);
@@ -1128,7 +1461,7 @@
       }
     } catch (error) {
       state.waitingForCapture = false;
-      if (state.pendingCaptureRequest?.prompt) elements.prompt.value = state.pendingCaptureRequest.prompt;
+      if (state.pendingCaptureRequest?.prompt) setPromptValue(state.pendingCaptureRequest.prompt);
       state.pendingCaptureRequest = null;
       if (state.selectedToolAction === action) selectToolAction(null, false);
       showToast(microphoneErrorMessage(error), true);
@@ -1136,6 +1469,7 @@
   }
 
   function renderContext() {
+    renderCodingWorkspace();
     elements.activeTools.replaceChildren();
     elements.documents.replaceChildren();
 
@@ -1360,6 +1694,7 @@
   }
 
   function renderStatus() {
+    renderCodingWorkspace();
     // Speech playback is an independent activity. The composer stop button only
     // cancels the current AI run; playback has its own chip
     // controls so sending/aborting a prompt cannot interrupt it.
@@ -1714,6 +2049,7 @@
     state.voiceTurn = null;
     renderContext();
     if (!prompt) return;
+    chatScroll.jump(false);
     clearTimeout(draftTimer);
     draftTimer = 0;
     pendingDraft = null;
@@ -1723,7 +2059,7 @@
       documentIds: state.documents.map(item => item.id),
       toolAction: state.selectedToolAction
     });
-    elements.prompt.value = "";
+    setPromptValue("");
   }
 
   function appendVoiceDictation(baseText, transcript) {
@@ -1796,7 +2132,7 @@
     turn.stableText = String(stableText || "").trim();
     turn.provisionalText = String(provisionalText || "").trim();
     turn.renderedValue = appendVoiceDictation(turn.baseText, text);
-    elements.prompt.value = turn.renderedValue;
+    setPromptValue(turn.renderedValue);
     if (isFinal) state.voiceTurn = null;
     scheduleDraftSave();
     if (isFinal || Date.now() - turn.draftSavedAt >= 1500) {
@@ -1820,12 +2156,12 @@
     const turn = state.voiceTurn;
     if (!turn || (turnId && String(turn.turnId) !== String(turnId))) return;
     if (elements.prompt.value === turn.renderedValue) {
-      elements.prompt.value = turn.baseText;
+      setPromptValue(turn.baseText);
     } else {
       const suffix = appendVoiceDictation(turn.baseText, turn.text)
         .slice(turn.baseText.length);
       if (suffix && elements.prompt.value.endsWith(suffix)) {
-        elements.prompt.value = elements.prompt.value.slice(0, -suffix.length);
+        setPromptValue(elements.prompt.value.slice(0, -suffix.length));
       }
     }
     state.voiceTurn = null;
@@ -1849,6 +2185,7 @@
     const selected = document.querySelector(`.service-option[data-tool-action="${state.selectedToolAction || ""}"] span`);
     elements.toolsButton.title = selected ? `Aktiv: ${selected.textContent}` : "Tools";
     renderContext();
+    if (!state.messages.length) renderMessages(false);
     if (persist && state.activeSessionId) {
       const selectedIsPersistent = persistentToolActions.has(state.selectedToolAction);
       const explicitlyClearedPersistent = !state.selectedToolAction && persistentToolActions.has(previous);
@@ -1901,6 +2238,7 @@
         || String(left.status || "") !== String(right.status || "")
         || String(left.updatedAt || "") !== String(right.updatedAt || "")
         || String(left.content || "") !== String(right.content || "")
+        || String(left.error || "") !== String(right.error || "")
         || (Array.isArray(left.artifacts) ? left.artifacts.length : 0)
           !== (Array.isArray(right.artifacts) ? right.artifacts.length : 0)) {
         return true;
@@ -1917,6 +2255,7 @@
     const previousSessionId = state.activeSessionId;
     const nextSessionId = payload.activeSessionId || null;
     const sessionChanged = previousSessionId !== nextSessionId;
+    if (sessionChanged) closeCodingPreview();
     const nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
     const currentSessionMessagesChanged = !sessionChanged
       && conversationMessagesDiffer(state.messages, nextMessages);
@@ -1937,6 +2276,8 @@
     }
     state.isRunning = Boolean(payload.isRunning);
     state.model = payload.model || null;
+    state.codingWorkspacePath = payload.codingWorkspacePath || null;
+    state.codingToolStepsExpanded = Boolean(payload.codingToolStepsExpanded);
     if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
     if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
     state.contextWasTruncated = Boolean(payload.contextWasTruncated);
@@ -1959,7 +2300,11 @@
       try { globalThis.localStorage.setItem(sidebarStorageKey, collapsed ? "1" : "0"); }
       catch { /* WebView storage is optional. */ }
     }
-    elements.prompt.value = payload.draft || "";
+    // Same-session snapshots can race the draft debounce or its asynchronous host save.
+    // Keep the live composer authoritative until another session is opened.
+    if (sessionChanged) {
+      setPromptValue(payload.draft || "");
+    }
     renderSessions();
     renderSessionPin();
     renderMessages(currentSessionMessagesChanged);
@@ -2022,6 +2367,7 @@
 
   function applyConversationSnapshot(payload) {
     if (!payload || String(payload.activeSessionId || "") !== String(state.activeSessionId || "")) return;
+    state.codingToolStepsExpanded = Boolean(payload.codingToolStepsExpanded);
     const nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
     const messagesChanged = conversationMessagesDiffer(state.messages, nextMessages);
     state.messages = nextMessages;
@@ -2097,6 +2443,7 @@
           detail: payload.runDetail || null,
           model: payload.model || state.model || null
         });
+        recordCodingActivity({ ...payload, messageId: payload.message?.id, runStatus: state.runStatus });
         renderMessages(true);
         renderSessions();
         renderStatus();
@@ -2133,21 +2480,10 @@
         renderSessions();
         renderMessages(false);
         renderStatus();
-        if (type === "chat.completed"
-          && isVoiceControlActive()
-          && payload.message?.content
-          && payload.message.content.trim() !== "Der Text wurde vorgelesen.") {
-          state.voicePlaybackPending = true;
-          syncVoiceCaptureSuspension();
-          post("microphone.speak", {
-            text: payload.message.content,
-            messageId: payload.message.id,
-            sessionId: payload.message.sessionId
-          });
-        } else {
-          state.voicePlaybackPending = false;
-          syncVoiceCaptureSuspension();
-        }
+        // Native incremental playback already owns the spoken prefixes and final
+        // remainder. Never submit the whole completed answer for a second read.
+        state.voicePlaybackPending = false;
+        syncVoiceCaptureSuspension();
         if (type === "chat.failed") showToast(payload.error || "Die Antwort ist fehlgeschlagen.", true);
         else setTimeout(() => {
           if (!state.isRunning) {
@@ -2188,7 +2524,7 @@
       case "capture.cancelled": {
         const action = String(payload?.action || "");
         if (state.pendingCaptureRequest?.prompt) {
-          elements.prompt.value = state.pendingCaptureRequest.prompt;
+          setPromptValue(state.pendingCaptureRequest.prompt);
           scheduleDraftSave();
         }
         state.pendingCaptureRequest = null;
@@ -2223,6 +2559,7 @@
             && !isTerminalMessageStatus(statusMessage?.status));
 
         if (acceptsRunStatus) {
+          recordCodingActivity(payload);
           if (payload.model) state.model = payload.model;
           if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
           if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
@@ -2418,7 +2755,7 @@
         state.voiceFrequency = 0;
         state.voiceDominantHz = 0;
         if (state.waitingForCapture && state.pendingCaptureRequest?.prompt) {
-          elements.prompt.value = state.pendingCaptureRequest.prompt;
+          setPromptValue(state.pendingCaptureRequest.prompt);
           scheduleDraftSave();
         }
         state.pendingCaptureRequest = null;
@@ -2457,6 +2794,7 @@
   byId("collapse-sessions").addEventListener("click", () => document.body.classList.remove("sessions-open"));
 
   elements.prompt.addEventListener("input", () => {
+    resizePrompt();
     scheduleDraftSave();
   });
   elements.prompt.addEventListener("keydown", event => {
@@ -2466,6 +2804,7 @@
     }
   });
   elements.send.addEventListener("click", submitPrompt);
+  elements.codingWorkspace.addEventListener("click", pickCodingWorkspace);
   elements.stop.addEventListener("click", () => {
     post("chat.cancel", {});
   });
@@ -2694,6 +3033,16 @@
     clone.querySelector(".avatar")?.remove();
     clone.querySelector(".message-meta")?.remove();
     clone.querySelector(".message-footer")?.remove();
+    clone.querySelectorAll(".coding-live-phase").forEach(phase => phase.remove());
+    const sourceDisclosures = [...source.querySelectorAll(".coding-step__disclosure")];
+    clone.querySelectorAll(".coding-step__disclosure").forEach((step, index) => {
+      // cloneNode copies neither lazy factories nor toggle listeners. Populate
+      // the export clone directly without opening or changing the live chat.
+      const original = sourceDisclosures[index];
+      if (!step.querySelector(".coding-step__content") && original?._codingCreateContent)
+        step.append(original._codingCreateContent());
+      step.open = true;
+    });
     clone.querySelectorAll("button").forEach(button => button.remove());
     clone.querySelectorAll(".message-status-spinner").forEach(spinner => spinner.remove());
     clone.querySelectorAll(".stream-cursor").forEach(content => content.classList.remove("stream-cursor"));
@@ -2765,5 +3114,15 @@
   globalThis.goFinishMessagePdf = finishBookPdf;
   globalThis.addEventListener("pagehide", flushDraft);
   globalThis.addEventListener("beforeunload", flushDraft);
+  globalThis.addEventListener("resize", schedulePromptResize);
+  globalThis.visualViewport?.addEventListener("resize", schedulePromptResize);
+  if (globalThis.ResizeObserver) {
+    const promptLayoutObserver = new ResizeObserver(schedulePromptResize);
+    for (const node of [elements.chatPane, elements.chatHeader, elements.composerRegion, elements.prompt]) {
+      promptLayoutObserver.observe(node);
+    }
+  }
+  document.fonts?.ready.then(schedulePromptResize);
+  schedulePromptResize();
   post("app.ready", {});
 })();

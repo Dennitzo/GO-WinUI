@@ -365,6 +365,7 @@ public sealed class StagedWebResearchPipelineTests
         Assert.Equal(expectedName, tool.Name);
         Assert.True(request.RequireToolCall);
         Assert.Equal(expectedName, request.RequiredToolName);
-        Assert.True(request.DisableReasoning);
+        Assert.False(request.DisableReasoning);
+        Assert.Null(request.MaximumOutputTokens);
     }
 }

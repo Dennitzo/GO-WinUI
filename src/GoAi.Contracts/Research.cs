@@ -1,13 +1,16 @@
 namespace GoAi.Contracts;
 
-public sealed record WebSearchRequest(string Query, int MaximumResults = 10, string? Language = "de-DE");
+public sealed record WebSearchRequest(string Query, int MaximumResults = 10, string? Language = "de-DE", string? Profile = null);
 
 public sealed record WebSearchResponse(
     string Query,
     IReadOnlyList<WebSearchResult> Results,
     string Provider,
     bool IsFallback,
-    DateTimeOffset RetrievedAt);
+    DateTimeOffset RetrievedAt,
+    IReadOnlyList<SearchEngineFailure>? EngineFailures = null);
+
+public sealed record SearchEngineFailure(string Engine, string Reason);
 
 public sealed record WebSearchResult(
     string Title,

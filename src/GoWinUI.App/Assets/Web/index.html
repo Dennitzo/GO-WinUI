@@ -3,10 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://go-preview.local data: blob:; media-src 'self' https://go-preview.local; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://go-preview.local data: blob:; media-src 'self' https://go-preview.local; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; frame-src https://go-coding-preview.local; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
   <title>GO AI Assistent</title>
   <link rel="stylesheet" href="vendor/katex/0.16.10/katex.min.css">
-  <link rel="stylesheet" href="styles.css?v=20260826-1">
+  <link rel="stylesheet" href="styles.css?v=20260912-4">
+  <link rel="stylesheet" href="coding-timeline.css?v=20260912-4">
 </head>
 <body>
   <div id="app-shell" class="app-shell">
@@ -43,7 +44,7 @@
           <button id="open-sessions" class="icon-button mobile-only" type="button" aria-label="Sitzungen öffnen">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
-          <h1>AI Assistent</h1>
+          <h1 id="chat-heading">AI Assistent</h1>
         </div>
         <div class="header-actions">
           <button id="pin-session" class="pdf-chip" type="button" title="Sitzung anpinnen" aria-label="Sitzung anpinnen">Sitzung anpinnen</button>
@@ -56,6 +57,9 @@
       </section>
 
       <section class="composer-region" aria-label="Nachricht verfassen">
+        <button id="scroll-to-latest" class="scroll-to-latest" type="button" title="Zur aktuellen Nachricht" aria-label="Zur aktuellen Nachricht und automatisch folgen" aria-controls="message-scroll" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16m-6-6 6 6 6-6"/></svg>
+        </button>
         <section id="live-caption" class="live-caption" aria-live="polite" hidden>
           <header class="live-caption__header">
             <div>
@@ -72,7 +76,7 @@
           <div id="document-chips" class="document-chips"></div>
           <div id="composer-speech-status" class="composer-speech-status" role="status" aria-live="polite" hidden>
             <span class="composer-speech-status__spinner" aria-hidden="true"></span>
-            <strong>Denkt nach</strong>
+            <strong>Vorlesen</strong>
             <span id="composer-speech-detail"></span>
             <button id="composer-speech-pause" class="composer-speech-status__pause" type="button" title="Pausieren" aria-label="Pausieren" disabled>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path id="composer-speech-pause-icon" d="M8 5v14M16 5v14"/></svg>
@@ -102,6 +106,7 @@
                   <button class="service-option" type="button" role="menuitem" data-tool-action="imageAnalysis"><span>Bild analysieren</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="imageGeneration"><span>Bild erstellen</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="bricsCad"><span>BricsCAD</span></button>
+                  <button class="service-option" type="button" role="menuitem" data-tool-action="coding"><span>Coding</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="audiobook"><span>Hörbuch erstellen</span></button>
                   <button id="start-live-captions" class="service-option" type="button" role="menuitem" data-tool-immediate="liveCaption.start"><span>Live-Untertitel</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="translation"><span>Übersetzen</span></button>
@@ -116,6 +121,11 @@
               <button id="open-workflows" class="tool-button" type="button" title="Workflow wählen">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
                 <span id="workflows-button-label">Workflows</span>
+              </button>
+              <button id="coding-workspace" class="tool-button workspace-button" type="button" title="Workspace für den Coding-Agenten auswählen">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/></svg>
+                <span>Workspace</span>
+                <span id="coding-workspace-name" class="workspace-button__name" hidden></span>
               </button>
 
               <div id="context-meter" class="context-meter" title="Kontext: 0 von 0 Tokens" role="img" aria-label="Kontext zu 0 Prozent belegt">
@@ -138,7 +148,6 @@
             </div>
           </div>
         </div>
-        <p class="composer-note">AI kann Fehler machen. Prüfe wichtige Angaben und Dokumentquellen.</p>
       </section>
     </main>
   </div>
@@ -231,7 +240,9 @@
   <script src="vendor/katex/0.16.10/katex.min.js?v=20260814-3"></script>
   <script src="bridge.js?v=20260821-2"></script>
   <script src="voice.js?v=20260822-2"></script>
-  <script src="markdown.js?v=20260821-1"></script>
-  <script src="app.js?v=20260826-1"></script>
+  <script src="markdown.js?v=20260911-9"></script>
+  <script src="coding-timeline.js?v=20260912-4"></script>
+  <script src="chat-scroll.js?v=20260912-4"></script>
+  <script src="app.js?v=20260912-4"></script>
 </body>
 </html>

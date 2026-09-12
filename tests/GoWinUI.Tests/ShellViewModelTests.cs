@@ -70,7 +70,7 @@ public sealed class ShellViewModelTests
         Assert.All(viewModel.AiServices, static item => Assert.False(string.IsNullOrWhiteSpace(item.Glyph)));
         Assert.Equal(viewModel.AiServices.Count, viewModel.AiServices.Select(static item => item.Glyph).Distinct().Count());
         Assert.Equal(
-            "General AI - gpt-oss-120b",
+            "General AI - lokale Modelle",
             viewModel.AiServices.Single(static item => item.Key == "general").ToolTipText);
         Assert.All(viewModel.AiServices, static item => Assert.False(item.IsActive));
         Assert.All(viewModel.AiServices, static item => Assert.True(item.IsIdle));
@@ -97,7 +97,7 @@ public sealed class ShellViewModelTests
             now,
             ActiveWorkloads:
             [
-                new("lease-general", "llm-general", "gpt-oss-120b", "LM Studio", "run-1", now),
+                new("lease-general", "llm-general", "gpt-oss-120b", "llama.cpp", "run-1", now),
                 new("lease-speech", "live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT", "caption-1", now),
             ]));
 
@@ -143,10 +143,10 @@ public sealed class ShellViewModelTests
 
     private static ModelStatusSnapshot ReadyModels() => new(
         true,
-        "http://host.docker.internal:1234",
+        "http://host.docker.internal:8081",
         [
-            new("gpt-oss-120b", "general", true, true, "loaded", 131_072),
-            new("Qwen3-VL", "vision", true, false, "available", 262_144),
+            new("gpt-oss-120b", "general", true, true, "loaded", 32_768),
+            new("Qwen3-VL", "vision", true, false, "available", 32_768),
         ],
         DateTimeOffset.UtcNow);
 

@@ -53,25 +53,11 @@ function Resolve-GoDockerCommand {
     throw 'Docker Desktop command was not found. Install or start Docker Desktop.'
 }
 
-function Resolve-GoLmStudioCommand {
-    $command = Get-Command lms -ErrorAction SilentlyContinue
-    if ($null -ne $command) {
-        return $command.Source
-    }
-
-    $candidate = Join-Path $env:USERPROFILE '.lmstudio\bin\lms.exe'
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-        return $candidate
-    }
-
-    throw 'LM Studio CLI was not found. Install LM Studio and initialize its CLI once.'
-}
-
 function Get-GoAiStackDefaults {
     param(
         [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'GO-AI-Stack'),
         [string] $ModelRoot,
-        [string] $LmStudioModelRoot
+        [string] $NativeModelRoot
     )
 
     $resolvedDataRoot = [IO.Path]::GetFullPath($DataRoot)
@@ -81,16 +67,16 @@ function Get-GoAiStackDefaults {
     else {
         [IO.Path]::GetFullPath($ModelRoot)
     }
-    $resolvedLmStudioModelRoot = if ([string]::IsNullOrWhiteSpace($LmStudioModelRoot)) {
-        Join-Path $env:USERPROFILE '.lmstudio\models'
+    $resolvedNativeModelRoot = if ([string]::IsNullOrWhiteSpace($NativeModelRoot)) {
+        Join-Path $env:USERPROFILE '.cache\huggingface\hub'
     }
     else {
-        [IO.Path]::GetFullPath($LmStudioModelRoot)
+        [IO.Path]::GetFullPath($NativeModelRoot)
     }
     return [pscustomobject]@{
         DataRoot = $resolvedDataRoot
         ModelRoot = $resolvedModelRoot
-        LmStudioModelRoot = [IO.Path]::GetFullPath($resolvedLmStudioModelRoot)
+        NativeModelRoot = [IO.Path]::GetFullPath($resolvedNativeModelRoot)
         ComposeFile = Resolve-GoRepositoryPath -RelativePath 'deploy\go-ai\compose.yaml'
         EnvironmentFile = Join-Path $resolvedDataRoot 'stack.env'
     }
@@ -100,18 +86,48 @@ function Write-GoAiStackEnvironment {
     param(
         [Parameter(Mandatory = $true)] $Paths,
         [string] $ServerIp = '192.168.0.67',
-        [string] $ImageVersion = '1.0.0'
+        [string] $ImageVersion = '1.0.0',
+        [Alias('CodingModelRoot')][string] $NativeModelRoot
     )
-
+    if ([string]::IsNullOrWhiteSpace($NativeModelRoot)) { $NativeModelRoot = $Paths.NativeModelRoot }
     New-Item -ItemType Directory -Path $Paths.DataRoot -Force | Out-Null
     $content = @(
         "GO_AI_DATA_ROOT=$($Paths.DataRoot -replace '\\','/')"
         "GO_AI_MODEL_ROOT=$($Paths.ModelRoot -replace '\\','/')"
+        "GO_AI_NATIVE_MODEL_ROOT=$($NativeModelRoot -replace '\\','/')"
+        "GO_AI_CODING_MODEL_ROOT=$($NativeModelRoot -replace '\\','/')"
+        'GO_AI_MODEL_RUNTIME_URL=http://host.docker.internal:8081'
         "GO_AI_EXPECTED_LAN_IP=$ServerIp"
         "GO_AI_PUBLIC_URL=http://${ServerIp}:8080"
         "GO_AI_IMAGE_VERSION=$ImageVersion"
     ) -join "`n"
     [IO.File]::WriteAllText($Paths.EnvironmentFile, $content + "`n", [Text.UTF8Encoding]::new($false))
+}
+
+function Resolve-GoNativeModelFile {
+    param([Parameter(Mandatory = $true)][string] $NativeModelRoot,
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Revision,
+        [Parameter(Mandatory = $true)][string] $FileName)
+    if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or $Revision -notmatch '^[a-fA-F0-9]{40}$') {
+        throw 'A native model cache entry requires a pinned Hugging Face repository and revision.'
+    }
+    $root = [IO.Path]::GetFullPath($NativeModelRoot).TrimEnd('\', '/')
+    $snapshot = Join-Path $root ('models--' + $Repository.Replace('/', '--') + '\snapshots\' + $Revision)
+    $destination = [IO.Path]::GetFullPath((Join-Path $snapshot $FileName))
+    if (-not $destination.StartsWith($snapshot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The model filename escapes its pinned native snapshot directory.'
+    }
+    return $destination
+}
+
+function Get-GoNativeModelCatalog {
+    param([Parameter(Mandatory = $true)][string] $NativeModelRoot)
+    $python = Join-Path $env:USERPROFILE '.unsloth\studio\unsloth_studio\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { $python = (Assert-GoCommand -Name 'python.exe').Source }
+    $json = & $python (Resolve-GoRepositoryPath -RelativePath 'workers\coding\catalog.py') --model-root $NativeModelRoot --list-models
+    if ($LASTEXITCODE -ne 0) { throw 'The native model catalog could not be read.' }
+    return @($json | ConvertFrom-Json)
 }
 
 function Invoke-GoAiCompose {

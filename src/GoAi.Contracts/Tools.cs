@@ -36,6 +36,16 @@ public sealed record ToolDescriptor(
 
 public static class ClientToolNames
 {
+    public const string CodingList = "coding.list";
+    public const string CodingSearch = "coding.search";
+    public const string CodingRead = "coding.read";
+    public const string CodingWrite = "coding.write";
+    public const string CodingEdit = "coding.edit";
+    public const string CodingCommand = "coding.command";
+    public const string CodingGitDiff = "coding.gitDiff";
+    public const string CodingSearchHistory = "coding.searchHistory";
+    public const string CodingSearchKnowledge = "coding.searchKnowledge";
+    public const string CodingRenderHtml = "coding.renderHtml";
     public const string DocumentRead = "document.read";
     public const string DocumentCreate = "document.create";
     public const string DocumentsList = "documents.list";

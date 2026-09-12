@@ -1,5 +1,7 @@
 using GoAi.Contracts;
+using GoAi.Server.Core.Coding;
 using GoAi.Server.Core.Models;
+using GoAi.Server.Core.Research;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -18,7 +20,11 @@ public sealed class AgentToolCatalog
 
     public IReadOnlyList<AgentToolSpec> GetAvailableTools(RunRequest request)
     {
-        var requestedServerTools = request.AllowedServerTools ?? DefaultServerTools;
+        var requestedServerTools = request.AllowedServerTools ?? (request.Mode == RunMode.Coding ? [] : DefaultServerTools);
+        if (requestedServerTools.Contains(CodingDeepResearchPipeline.ToolName, StringComparer.Ordinal)
+            && (request.Mode != RunMode.Coding || !requestedServerTools.Contains("web.search", StringComparer.Ordinal)
+                || !requestedServerTools.Contains("web.fetch", StringComparer.Ordinal)))
+            throw new ArgumentException("web.deepResearch requires Coding mode and explicit web.search/web.fetch permission.");
         var names = new HashSet<string>(StringComparer.Ordinal);
         foreach (var name in requestedServerTools)
         {
@@ -29,6 +35,10 @@ public sealed class AgentToolCatalog
             names.Add(name);
         }
         var capabilities = request.ClientCapabilities ?? [];
+        if (request.Mode == RunMode.Coding && HasCapability(capabilities, "coding"))
+        {
+            names.UnionWith(CodingToolCatalog.CreateTools().Select(static tool => tool.Name));
+        }
         if (HasCapability(capabilities, "documentIo"))
         {
             names.UnionWith([ClientToolNames.DocumentRead, ClientToolNames.DocumentCreate]);
@@ -143,8 +153,18 @@ public sealed class AgentToolCatalog
 
     private static void ValidateToolSpecific(string name, JsonElement value)
     {
+        if (name.StartsWith("coding.", StringComparison.Ordinal))
+        {
+            CodingToolCatalog.Validate(name, value);
+            return;
+        }
         switch (name)
         {
+            case CodingDeepResearchPipeline.ToolName:
+                RequireString(value, "task", 1, 4_000);
+                OptionalInteger(value, "maximumSearches", 2, 3);
+                OptionalInteger(value, "maximumSources", 2, 6);
+                break;
             case "web.fetch":
                 RequireString(value, "url", 1, 2_048);
                 OptionalString(value, "query", 1, 512);
@@ -216,6 +236,9 @@ public sealed class AgentToolCatalog
                 RequireString(value, "query", 1, 500);
                 OptionalInteger(value, "maximumResults", 1, 20);
                 OptionalString(value, "language", 2, 16);
+                if (name == "web.search" && value.TryGetProperty("profile", out var searchProfile)
+                    && (searchProfile.ValueKind != JsonValueKind.String || !SearxngSearchProfiles.IsValid(searchProfile.GetString())))
+                    throw new ArgumentException("web.search profile must be auto, general, python, web or dotnet.");
                 break;
             case "media.inspect":
             case "media.analyze":
@@ -266,9 +289,12 @@ public sealed class AgentToolCatalog
     {
         var tools = new[]
         {
-            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Formuliere query in der Sprache des aktuellen Nutzerprompts und setze language passend; ohne eindeutige Sprache gilt de-DE.", ToolRiskClass.ReadOnly, SearchSchema()),
+            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Formuliere query in der Sprache des aktuellen Nutzerprompts und setze language passend; ohne eindeutige Sprache gilt de-DE. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern. Diese Profile wählen passende Engines innerhalb derselben SearXNG-Instanz, ohne Anbieter-Fallback. Bei gemeldeten Engine-Sperren (429/CAPTCHA) dieselben Engines nicht sofort erneut abfragen; direkte bekannte Originalquellen können mit web.fetch geprüft werden.", ToolRiskClass.ReadOnly, WebSearchSchema()),
             Server("youtube.search", "Suche YouTube; ohne API-Key wird ein sichtbar gekennzeichneter SearXNG-Fallback verwendet.", ToolRiskClass.ReadOnly, SearchSchema()),
             Server("web.fetch", "Durchsuche eine öffentliche HTTP(S)-Quelle SSRF-geschützt nach konkreten Phrasen. Bevorzuge queries und bündele bis zu acht unabhängig zu suchende Phrasen in einem Abruf. Zurückgegeben werden ausschließlich begrenzte Trefferfenster aus Webseiten, PDF-, DOCX- und RTF-Dokumenten, niemals die gesamte Quelle. Ohne Suchphrase liefert das Werkzeug nur eine kurze Vorschau und fordert eine gezielte Wiederholung an. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, WebFetchSchema()),
+            Server(CodingDeepResearchPipeline.ToolName, "Recherchiere komplexe Coding-Fragen autonom: plane mehrere Teilfragen, suche über SearXNG, prüfe Originalquellen und liefere eine belegte Synthese mit Quellen und Unsicherheiten. Nutze dies für Architekturvergleiche, aktuelle API-/Versionsfragen oder widersprüchliche Informationen. Für eine einzelne Frage reichen web.search und web.fetch. Task enthält nur die öffentliche technische Frage, keine Zugangsdaten oder lokalen Dateiinhalte. Grenzen: 2–3 geplante Suchfragen mit höchstens einer verkürzten Wiederholung bei leeren Treffern, 2–6 Quellen, maximal 8 Modellturns, insgesamt 9 Webaufrufe und 7 Minuten innerhalb des verbleibenden Laufbudgets.", ToolRiskClass.ReadOnly, Parse("""
+                {"type":"object","properties":{"task":{"type":"string","minLength":1,"maxLength":4000},"maximumSearches":{"type":"integer","minimum":2,"maximum":3,"default":3,"description":"Anzahl geplanter Suchfragen; bei leeren Treffern höchstens eine kürzere Wiederholung je Frage innerhalb des gemeinsamen Webbudgets."},"maximumSources":{"type":"integer","minimum":2,"maximum":6,"default":4}},"required":["task"],"additionalProperties":false}
+                """)),
             Server("media.inspect", "Extrahiere sichere Metadaten, Audio und zeitcodierte Frames eines Uploads.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem Vision-Modell.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("image.generate", "Erzeuge Bilder mit Z-Image-Turbo.", ToolRiskClass.ReadOnly, ImageSchema()),
@@ -282,10 +308,10 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.DocumentsReadPages, "Lese einen konkreten Seitenbereich eines Sitzungsdokuments als zitierfähigen Originalbeleg.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"documentId":{"type":"string"},"startPage":{"type":"integer","minimum":1},"endPage":{"type":"integer","minimum":1}},"required":["documentId","startPage","endPage"],"additionalProperties":false}""")),
             Client(ClientToolNames.BricsCadGeometryQuery, "Lese freigegebene BricsCAD-Geometrie.", ToolRiskClass.ReadOnly, CadSchema()),
             Client(ClientToolNames.BricsCadMeasure, "Führe eine lesende BricsCAD-Messung aus.", ToolRiskClass.ReadOnly, CadSchema()),
-            Client(ClientToolNames.BricsCadMove, "Schlage eine bestätigungspflichtige BricsCAD-Verschiebung vor.", ToolRiskClass.CadMutation, CadSchema()),
-            Client(ClientToolNames.BricsCadAction, "Schlage eine bestätigungspflichtige BricsCAD-Aktion vor.", ToolRiskClass.CadMutation, CadSchema()),
+            Client(ClientToolNames.BricsCadMove, "Führe eine typisierte BricsCAD-Verschiebung automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
+            Client(ClientToolNames.BricsCadAction, "Führe eine typisierte BricsCAD-Aktion automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
         };
-        return tools.ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
+        return tools.Concat(CodingToolCatalog.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
     }
 
     private static AgentToolSpec Server(string name, string description, ToolRiskClass risk, JsonElement schema) =>
@@ -303,6 +329,10 @@ public sealed class AgentToolCatalog
 
     private static JsonElement SearchSchema() => Parse("""
         {"type":"object","properties":{"query":{"type":"string","description":"Kurze Suchanfrage in der Sprache des aktuellen Nutzerprompts; technische Eigennamen unveraendert lassen."},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string","description":"BCP-47-Suchsprache passend zum aktuellen Prompt; Standard de-DE."}},"required":["query"],"additionalProperties":false}
+        """);
+
+    private static JsonElement WebSearchSchema() => Parse("""
+        {"type":"object","properties":{"query":{"type":"string","description":"Kurze präzise Suchanfrage; technische API-Namen unverändert lassen."},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string"},"profile":{"type":"string","enum":["auto","general","python","web","dotnet"],"description":"Passende Engines derselben lokalen SearXNG-Instanz; technische Profile brauchen nur 2–4 präzise Suchbegriffe."}},"required":["query"],"additionalProperties":false}
         """);
 
     private static JsonElement WebFetchSchema() => Parse("""

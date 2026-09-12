@@ -23,6 +23,8 @@ public interface IChatRepository
         Guid id,
         PersistentToolAction? action,
         CancellationToken cancellationToken = default);
+    Task SetCodingWorkspacePathAsync(Guid id, string? path, CancellationToken cancellationToken = default);
+    Task SetCodingWorkspacePathAsync(Guid id, string? path, bool activateCoding, CancellationToken cancellationToken = default);
     Task SetPinnedAsync(Guid id, bool isPinned, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ChatMessage>> ListMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<ChatMessage?> GetMessageAsync(Guid messageId, CancellationToken cancellationToken = default);
@@ -41,7 +43,9 @@ public interface IChatRepository
     Task<int> DeleteEmptyTerminalMessagesAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
     Task ResetMessageForRetryAsync(Guid messageId, CancellationToken cancellationToken = default);
     Task UpdateMessageAsync(Guid messageId, string content, MessageStatus status, string? errorMessage = null, CancellationToken cancellationToken = default);
+    Task UpdateMessageWithToolStepsAsync(Guid messageId, string content, MessageStatus status, IReadOnlyList<AssistantToolStep> toolSteps, CancellationToken cancellationToken = default);
     Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<AssistantToolStep>> SaveToolStepAsync(Guid messageId, AssistantToolStep toolStep, CancellationToken cancellationToken = default);
     Task<SessionContextPreparation?> GetSessionContextPreparationAsync(string cacheKey, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<SessionContextPreparation>> ListSessionContextPreparationsAsync(
         Guid sessionId,

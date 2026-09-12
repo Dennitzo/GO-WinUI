@@ -15,12 +15,15 @@ public sealed class GoAiClient : IDisposable
     private readonly HttpClient _httpClient;
     private readonly JsonSerializerOptions _jsonOptions = GoAiProtocol.CreateJsonOptions();
     private readonly bool _ownsHttpClient;
+    private readonly TimeSpan _streamIdleTimeout;
     private bool _disposed;
 
-    public GoAiClient(HttpClient httpClient, string? clientId = null, bool ownsHttpClient = false)
+    public GoAiClient(HttpClient httpClient, string? clientId = null, bool ownsHttpClient = false, TimeSpan? streamIdleTimeout = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _ownsHttpClient = ownsHttpClient;
+        _streamIdleTimeout = streamIdleTimeout ?? TimeSpan.FromSeconds(90);
+        if (_streamIdleTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(streamIdleTimeout));
         _httpClient.DefaultRequestHeaders.Remove(GoAiHeaders.ClientId);
         _httpClient.DefaultRequestHeaders.TryAddWithoutValidation(
             GoAiHeaders.ClientId,
@@ -54,6 +57,9 @@ public sealed class GoAiClient : IDisposable
 
     public Task<ModelStatusSnapshot> GetModelStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<ModelStatusSnapshot>("v1/models/status", cancellationToken);
+
+    public Task<CodingModelCatalogResponse> GetCodingModelsAsync(CancellationToken cancellationToken = default) =>
+        GetAsync<CodingModelCatalogResponse>("v1/models/coding", cancellationToken);
 
     public Task<GpuStatusSnapshot> GetGpuStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<GpuStatusSnapshot>("v1/gpu/status", cancellationToken);
@@ -305,7 +311,19 @@ public sealed class GoAiClient : IDisposable
         var data = new StringBuilder();
         while (!cancellationToken.IsCancellationRequested)
         {
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            // Heartbeats arrive every 15 seconds even during long inference.
+            // Bound silence, never the lifetime of the job; the caller reconnects
+            // with its persisted event cursor if a half-open connection stalls.
+            string? line;
+            using (var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                idle.CancelAfter(_streamIdleTimeout);
+                try { line = await reader.ReadLineAsync(idle.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new IOException("Der Ereignisstream hat keine Heartbeats mehr geliefert. Die Verbindung muss wiederhergestellt werden.");
+                }
+            }
             if (line is null)
             {
                 break;

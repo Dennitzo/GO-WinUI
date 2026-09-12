@@ -49,7 +49,13 @@ public sealed class StorageCleanupService : BackgroundService
             delete.CommandText = """
                 DELETE FROM uploads WHERE expires_at <= $now;
                 DELETE FROM artifacts WHERE expires_at <= $now;
-                DELETE FROM client_tool_proposals WHERE expires_at <= $now;
+                DELETE FROM client_tool_proposals
+                WHERE expires_at <= $now AND NOT EXISTS (
+                    SELECT 1 FROM run_checkpoints checkpoint
+                    JOIN runs run ON run.run_id = checkpoint.run_id
+                    WHERE run.state IN ('Queued', 'Running', 'WaitingForClient')
+                      AND json_extract(checkpoint.checkpoint_json, '$.pendingProposalId') = client_tool_proposals.proposal_id
+                );
                 DELETE FROM runs
                 WHERE updated_at <= $historyCutoff
                   AND state IN ('Completed', 'Failed', 'Cancelled', 'Interrupted');

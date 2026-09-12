@@ -5,20 +5,21 @@ using GoAi.Contracts;
 using GoWinUI.BricsCad.Protocol;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
+using GoWinUI.Core.Coding;
 
 namespace GoWinUI.App.Services;
 
 /// <summary>
-/// Executes the bounded client tools used by General AI: session documents and
-/// the optional BricsCAD bridge. Workspace filesystem and process execution are
-/// intentionally not exposed by the desktop client.
+/// Executes session document and optional BricsCAD tools, plus Coding tools
+/// bound to the active run's selected project. Valid tools execute automatically
+/// under the user's standing authorization, including local processes and CAD mutations.
 /// </summary>
 public sealed class LocalToolBroker(
     GoAiConnectionService connection,
-    ToolConfirmationService confirmation,
     IBricsCadBridgeHost bricsCad,
     IDocumentIngestor documents,
-    LocalDocumentToolService documentTools)
+    LocalDocumentToolService documentTools,
+    IChatRepository chats)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
@@ -29,16 +30,44 @@ public sealed class LocalToolBroker(
         ToolProposal proposal,
         Guid sessionId,
         Guid? assistantMessageId,
+        string? codingWorkspacePath = null,
+        Func<CodingCommandProgress, Task>? commandProgress = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ValidateProposal(proposal);
-            if (!await confirmation.ConfirmAsync(proposal, cancellationToken).ConfigureAwait(false))
+            var coding = proposal.Name.StartsWith("coding.", StringComparison.Ordinal);
+            if (coding && string.IsNullOrWhiteSpace(codingWorkspacePath))
             {
-                return Result(proposal, "rejected", new { rejected = true }, message: "Vom Nutzer abgelehnt.");
+                throw new InvalidOperationException("Dieser Lauf hat keinen ausgewählten Coding-Projektordner.");
             }
 
+            if (coding)
+            {
+                if (proposal.Name == "coding.searchHistory")
+                    return Result(proposal, "completed", await CodingSessionTools.SearchHistoryAsync(chats, sessionId, assistantMessageId,
+                        proposal.Arguments.GetProperty("query").GetString()!, CodingResultLimit(proposal.Arguments), cancellationToken).ConfigureAwait(false));
+                if (proposal.Name == "coding.searchKnowledge")
+                {
+                    var query = proposal.Arguments.GetProperty("query").GetString()!;
+                    var knowledge = await SearchDocumentsAsync(sessionId, JsonSerializer.SerializeToElement(new { query, maximumCharacters = 7_000 }),
+                        cancellationToken).ConfigureAwait(false);
+                    return Result(proposal, "completed", CodingSessionTools.BoundKnowledgeResult(
+                        JsonSerializer.SerializeToElement(knowledge, JsonOptions), query, CodingResultLimit(proposal.Arguments)));
+                }
+                if (proposal.Name == "coding.renderHtml")
+                    return Result(proposal, "completed", CodingSessionTools.RenderReceipt(proposal.Arguments));
+                var codingResult = await new LocalCodingToolExecutor(codingWorkspacePath!, commandProgress)
+                    .ExecuteAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false);
+                if (codingResult.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
+                {
+                    return Result(proposal, "failed", codingResult, "client.coding_tool_failed",
+                        "Das Coding-Werkzeug meldete einen Fehler. Details stehen im Werkzeugergebnis.");
+                }
+                return Result(proposal, "completed", codingResult);
+            }
             var payload = proposal.Name switch
             {
                 ClientToolNames.DocumentRead => await documentTools.ReadAsync(
@@ -83,6 +112,8 @@ public sealed class LocalToolBroker(
         }
     }
 
+    private static int CodingResultLimit(JsonElement arguments) => arguments.TryGetProperty("maximumResults", out var maximum) ? maximum.GetInt32() : 5;
+
     internal static void ValidateProposal(ToolProposal proposal, DateTimeOffset? currentTime = null)
     {
         ArgumentNullException.ThrowIfNull(proposal);
@@ -107,6 +138,10 @@ public sealed class LocalToolBroker(
 
         var expectedRisk = proposal.Name switch
         {
+            "coding.list" or "coding.search" or "coding.read" or "coding.gitDiff"
+                or "coding.searchHistory" or "coding.searchKnowledge" or "coding.renderHtml" => ToolRiskClass.ReadOnly,
+            "coding.write" or "coding.edit" => ToolRiskClass.LocalMutation,
+            "coding.command" => ToolRiskClass.Process,
             ClientToolNames.DocumentRead or ClientToolNames.DocumentsList
                 or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages
                 or ClientToolNames.BricsCadGeometryQuery or ClientToolNames.BricsCadMeasure => ToolRiskClass.ReadOnly,
@@ -123,6 +158,17 @@ public sealed class LocalToolBroker(
         var arguments = proposal.Arguments;
         switch (proposal.Name)
         {
+            case "coding.searchHistory":
+            case "coding.searchKnowledge":
+                ValidateProperties(arguments, ["query"], ["query", "maximumResults"]);
+                ValidateString(arguments, "query", 1, 512);
+                ValidateOptionalInteger(arguments, "maximumResults", 1, 8);
+                break;
+            case "coding.renderHtml":
+                ValidateProperties(arguments, ["code"], ["code", "title"]);
+                ValidateString(arguments, "code", 1, 16_000);
+                ValidateOptionalString(arguments, "title", 1, 100);
+                break;
             case ClientToolNames.DocumentRead:
                 ValidateProperties(
                     arguments,

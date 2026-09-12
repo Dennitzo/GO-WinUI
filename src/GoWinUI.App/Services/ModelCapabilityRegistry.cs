@@ -3,7 +3,7 @@ using GoAi.Contracts;
 namespace GoWinUI.App.Services;
 
 /// <summary>
-/// Holds the last model catalog committed by the gateway. LM Studio remains
+/// Holds the last native model catalog committed by the gateway. The runtime remains
 /// authoritative; the registry only lets WebView and request creation use the
 /// same capability snapshot without another network roundtrip.
 /// </summary>
@@ -33,7 +33,7 @@ public sealed class ModelCapabilityRegistry
             if (_models.TryGetValue((id.ToLowerInvariant(), role.ToLowerInvariant()), out var model))
             {
                 var efforts = model.ReasoningEfforts ?? [];
-                return new ModelReasoningProfile("lmstudio-native", efforts, model.DefaultReasoningEffort);
+                return new ModelReasoningProfile("llama.cpp-native", efforts, model.DefaultReasoningEffort);
             }
         }
         return ModelReasoningProfiles.Resolve(modelId, role);

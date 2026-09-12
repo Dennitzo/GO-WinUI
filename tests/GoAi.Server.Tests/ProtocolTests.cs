@@ -1,4 +1,4 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Policies;
 using GoAi.Server.Core.Status;
@@ -10,22 +10,48 @@ namespace GoAi.Server.Tests;
 public sealed class ProtocolTests
 {
     [Fact]
-    public void TgaPoliciesRemainValidUtf8GermanText()
+    public void GeneralPoliciesRemainValidUtf8GermanText()
     {
-        Assert.Contains("für die TGA-Fachplanung", TgaAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
-        Assert.Contains("keine technische Titelzeile", TgaAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
-        Assert.DoesNotContain("Ã", TgaAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
-        Assert.DoesNotContain("Ã", TgaAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
-        Assert.Contains("eintausendfünfhundert bis", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
-        Assert.Contains("jede Zahl als natürlich ausgeschriebenes deutsches Wort", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
-        Assert.Contains("zwei Prozent", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
-        Assert.Contains("CONTINUATION_ANCHOR", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
-        Assert.Contains("unbegrenzt fortlaufende Serie", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
-        Assert.Contains("mindestens eine klar ausgearbeitete Hauptfigur", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
-        Assert.Contains("noch nicht eingetretenen Serienhandlungen", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
-        Assert.Contains("Der Beginn eines neuen AI-Laufs ist", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
-        Assert.Contains("tatsächlich ein neues Kapitel beginnt", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
-        Assert.Contains("# Kapitel eins – Titel", TgaAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("allgemeine KI-Assistent", GeneralAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
+        Assert.Contains("setze kein bestimmtes Fachgebiet voraus", GeneralAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
+        Assert.DoesNotContain("TGA", GeneralAgentPolicies.GeneralCoordinator, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("keine technische Titelzeile", GeneralAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
+        Assert.DoesNotContain("Ã", GeneralAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
+        Assert.DoesNotContain("Ã", GeneralAgentPolicies.FinalResponseContract, StringComparison.Ordinal);
+        Assert.Contains("eintausendfünfhundert bis", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("jede Zahl als natürlich ausgeschriebenes deutsches Wort", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("zwei Prozent", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("CONTINUATION_ANCHOR", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("unbegrenzt fortlaufende Serie", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("mindestens eine klar ausgearbeitete Hauptfigur", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("noch nicht eingetretenen Serienhandlungen", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("Der Beginn eines neuen AI-Laufs ist", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("tatsächlich ein neues Kapitel beginnt", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+        Assert.Contains("# Kapitel eins – Titel", GeneralAgentPolicies.AudiobookAuthor, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Erkläre Rekursion mit einem Python-Beispiel.")]
+    [InlineData("Überarbeite diesen Romanabsatz.")]
+    [InlineData("Plane eine Geburtstagsfeier.")]
+    public void GeneralConversationPolicyTakesItsSubjectFromTheUserAndPreservesTheirText(string prompt)
+    {
+        var request = new RunRequest(GoAiProtocol.Version, RunMode.General, [new("user", [new("text", prompt)])]);
+        var policy = GeneralAgentPolicies.ForConversation("general", request, []);
+        Assert.Contains("aus dem aktuellen", policy, StringComparison.Ordinal);
+        Assert.Contains("Nutzerauftrag", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("TGA", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Heizung, Lüftung", policy, StringComparison.Ordinal);
+        Assert.Equal(prompt, request.Messages[0].Content[0].Text);
+    }
+
+    [Fact]
+    public void DefaultMediaPromptsDescribeTheProvidedContentWithoutAnIndustryPreset()
+    {
+        Assert.Contains("anhand seines Inhalts", GeneralAgentPolicies.DefaultTranscriptAnalysis, StringComparison.Ordinal);
+        Assert.Contains("tatsächlichen Inhalt", GeneralAgentPolicies.DefaultMediaAnalysis, StringComparison.Ordinal);
+        Assert.Contains("sichtbaren Vorgänge", GeneralAgentPolicies.DefaultVideoAnalysis, StringComparison.Ordinal);
+        Assert.DoesNotContain("Planung", GeneralAgentPolicies.DefaultMediaAnalysis, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -71,7 +97,7 @@ public sealed class ProtocolTests
 
         var general = Assert.Single(snapshot.Models, static model => model.Role == "general");
         Assert.Equal(["low", "medium", "high"], general.ReasoningEfforts);
-        Assert.Equal("medium", general.DefaultReasoningEffort);
+        Assert.Equal("high", general.DefaultReasoningEffort);
 
         Assert.DoesNotContain(snapshot.Models, static model => model.Role == "code");
 

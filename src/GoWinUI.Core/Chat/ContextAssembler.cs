@@ -12,8 +12,8 @@ public sealed class ContextAssembler : IContextAssembler
     private const int MaxPageCharacters = 7_000;
     private const int MaximumHistoryTokens = 16_384;
     private const int MaximumSingleHistoryMessageTokens = 4_096;
-    private const int MinimumOutputTokens = 1_024;
-    private const int MaximumOutputTokens = 8_192;
+    private const int MinimumOutputReserve = 1_024;
+    private const int MaximumOutputReserve = 8_192;
     private const string PromptTruncationMarker =
         "\n\n[... Eingabe für das Modellfenster gekürzt ...]\n\n";
     private const string ContextTruncationMarker =
@@ -30,8 +30,10 @@ public sealed class ContextAssembler : IContextAssembler
         ArgumentException.ThrowIfNullOrWhiteSpace(request.UserPrompt);
 
         var contextLength = Math.Max(2_048, request.ContextLength);
-        var maximumOutputTokens = Math.Clamp(contextLength / 8, MinimumOutputTokens, MaximumOutputTokens);
-        var inputBudget = contextLength - maximumOutputTokens;
+        // Reserve room while assembling input; this is not an output cap.
+        // Generation can use the entire remaining model window.
+        var outputReserve = Math.Clamp(contextLength / 8, MinimumOutputReserve, MaximumOutputReserve);
+        var inputBudget = contextLength - outputReserve;
         var pageSelection = FindRequestedPageRange(request.UserPrompt);
         var (documentText, documentWasTruncated) = BuildDocumentContext(request.DocumentPages, pageSelection);
         var hasDocumentContext = documentText.Length > 0;
@@ -105,7 +107,7 @@ public sealed class ContextAssembler : IContextAssembler
                 policyReferences);
         }
 
-        var retained = new Stack<LmChatMessage>();
+        var retained = new Stack<LocalChatMessage>();
         var baseTokens = systemTokens + EstimateTokens(envelopeJson);
         var historyBudget = Math.Min(MaximumHistoryTokens, Math.Max(0, inputBudget - baseTokens));
         var retainedHistoryTokens = 0;
@@ -150,7 +152,7 @@ public sealed class ContextAssembler : IContextAssembler
             wasTruncated,
             policyReferences);
 
-        var messages = new List<LmChatMessage>(retained.Count + 2)
+        var messages = new List<LocalChatMessage>(retained.Count + 2)
         {
             new(ChatRole.System, systemText),
         };
@@ -167,7 +169,7 @@ public sealed class ContextAssembler : IContextAssembler
                 : null,
             envelopeJson,
             policyReferences,
-            maximumOutputTokens);
+            Math.Max(1, contextLength - estimated));
     }
 
     private static string BuildEnvelopeJson(
@@ -181,15 +183,15 @@ public sealed class ContextAssembler : IContextAssembler
         IReadOnlyList<string> policyReferences)
     {
         var routeName = hasDocuments ? GeneralChatPolicies.DocumentRoute : GeneralChatPolicies.GeneralRoute;
-        var capabilityProfile = hasDocuments ? "tga-document" : "tga-general";
+        var capabilityProfile = hasDocuments ? "document" : "general";
         var route = new Dictionary<string, object?>
         {
             ["schema"] = GeneralChatPolicies.RouterSchema,
             ["route"] = routeName,
             ["capabilityProfile"] = capabilityProfile,
             ["reason"] = hasDocuments
-                ? "TGA-Fachplanung mit Dokumentkontext"
-                : "Allgemeine TGA-Fachplanung",
+                ? "Nutzeranfrage mit Dokumentkontext"
+                : "Allgemeine Assistenz zum Nutzerauftrag",
             ["mode"] = "general",
         };
         var modePolicy = new Dictionary<string, object?>
@@ -241,20 +243,16 @@ public sealed class ContextAssembler : IContextAssembler
             ["modePolicy"] = modePolicy,
             ["domainProfile"] = new Dictionary<string, object?>
             {
-                ["name"] = "TGA-Fachplanung",
+                ["name"] = "Allgemeine Assistenz",
                 ["application"] = "GO",
-                ["applicationNameIsNotProgrammingLanguage"] = true,
+                ["userTopicDefinesFocus"] = true,
                 ["focus"] = new[]
                 {
-                    "Heizung",
-                    "Kälte",
-                    "Lüftung",
-                    "Sanitär",
-                    "Elektro",
-                    "Gebäudeautomation/MSR",
-                    "Energie",
-                    "Brandschutzschnittstellen",
-                    "Planungskoordination",
+                    "Code",
+                    "Wissen",
+                    "Schreiben",
+                    "Analyse",
+                    "Planung",
                 },
             },
             ["policyRefs"] = policyReferences,

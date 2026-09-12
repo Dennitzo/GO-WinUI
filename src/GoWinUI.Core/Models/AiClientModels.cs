@@ -21,6 +21,7 @@ public enum PromptTriggerAction
     LiveCaptions,
     LiveTranslation,
     Audiobook,
+    Coding,
 }
 
 public enum PromptTriggerMatchMode
@@ -93,7 +94,8 @@ public sealed record GoAiRunRecord(
     string? SelectedModel,
     string? ErrorCode,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? WorkspacePath = null);
 
 public sealed record ClientToolExecutionRecord(
     string ProposalId,

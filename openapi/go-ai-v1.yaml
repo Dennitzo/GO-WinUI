@@ -9,7 +9,7 @@ servers:
   - url: http://192.168.0.67:8080
 security: []
 x-go-agent-protocol-v3:
-  description: Code wird ausschließlich als normales Ergebnis eines Lese-Toolaufrufs im Modellverlauf geführt.
+  description: GO führt Clientwerkzeuge aus. Coding verwendet einen sitzungsgebundenen Windows-Projektordner und native llama.cpp-Inferenz über das Docker-Gateway.
 paths:
   /v1/health/live:
     get:
@@ -52,15 +52,26 @@ paths:
                 $ref: "#/components/schemas/CapabilitySnapshot"
   /v1/models/status:
     get:
-      summary: Docker-Modellstatus abrufen
+      summary: Status der nativen lokalen AI-Modelle abrufen
       operationId: getModelStatus
       responses:
         "200":
-          description: Status des von LM Studio bereitgestellten Modellruntimes.
+          description: Status des nativen Windows-llama.cpp-Routers mit den lokal in Unsloth verfügbaren Modellen.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ModelStatusSnapshot"
+  /v1/models/coding:
+    get:
+      summary: Lokale Coding-GGUF-Modelle der nativen Windows-Runtime abrufen
+      operationId: getCodingModels
+      responses:
+        "200":
+          description: Erkannte lokale Modelle und Erreichbarkeit des nativen llama.cpp-Modellrouters. Ein erreichbarer Katalog bedeutet noch nicht, dass ein Modell geladen wurde.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodingModelCatalogResponse"
   /v1/gpu/status:
     get:
       summary: GPU- und Warteschlangenstatus abrufen
@@ -789,6 +800,10 @@ components:
                 maximum: 20
               language:
                 type: string
+              profile:
+                type: string
+                enum: [auto, general, python, web, dotnet]
+                description: Optionales Engine-Profil innerhalb derselben lokalen SearXNG-Instanz. Kein anderer Provider und keine versteckten Wiederholungen. Technische Profile bevorzugen kurze API-Suchbegriffe; ohne Profil bleibt die allgemeine Suche erhalten.
   responses:
     Problem:
       description: Standardisierte ProblemDetails-Antwort.
@@ -817,11 +832,23 @@ components:
       type: object
       additionalProperties: false
       required: [protocolVersion, mode, messages]
+      allOf:
+        - if:
+            properties:
+              mode:
+                const: coding
+            required: [mode]
+          then:
+            required: [clientCapabilities]
+            properties:
+              clientCapabilities:
+                contains:
+                  const: coding
       properties:
         protocolVersion:
           const: "1.0"
         mode:
-          enum: [auto, general]
+          enum: [auto, general, coding]
         messages:
           type: array
           minItems: 1
@@ -844,12 +871,19 @@ components:
           type: array
           maxItems: 16
           items:
-            enum: [bricscad, screenCapture, documents, documentIo]
+            enum: [bricscad, screenCapture, documents, documentIo, pdf, coding]
         allowedServerTools:
           type: array
           maxItems: 32
+          description: >-
+            Coding can select web.search, web.fetch and web.deepResearch autonomously.
+            web.deepResearch requires Coding mode and both web.search and web.fetch in this list.
+            Its arguments are task (1-4000 characters), maximumSearches (2-3, default 3),
+            maximumSources (2-6, default 4). Research is limited to 8 model turns, 9 web calls
+            and 420 seconds within the remaining run budget. Results retain verified source URLs,
+            verbatim evidence, uncertainties and provider=searxng/isFallback=false.
           items:
-            enum: [web.search, web.fetch, youtube.search, media.inspect, media.analyze, image.generate, math.evaluate, context.embed, context.retrieve]
+            enum: [web.search, web.fetch, web.deepResearch, youtube.search, media.inspect, media.analyze, image.generate, math.evaluate, context.embed, context.retrieve]
         limits:
           $ref: "#/components/schemas/RunLimits"
         sessionId:
@@ -859,9 +893,14 @@ components:
           type: string
           minLength: 1
           maxLength: 512
+        preferredCodingModelId:
+          description: Exakte Modell-ID aus /v1/models/coding. Wird im Coding-Modus verwendet; ohne Angabe gilt ein konfiguriertes Coding-Standardmodell, falls vorhanden. Der autorisierte Projektordner bleibt im Desktop-Client und ist kein Request-Feld.
+          type: string
+          minLength: 1
+          maxLength: 512
         reasoningEffort:
-          description: Vom ausgewählten Modell tatsächlich unterstützte Reasoning-Stufe.
-          enum: [none, minimal, low, medium, high, xhigh]
+          description: Unterstützte Reasoning-Stufe des ausgewählten Modells. Ohne Angabe, mit null oder auto gilt die höchste unterstützte Stufe (GPT-OSS high, Qwen3.8 xhigh); Modelle ohne Thinking erhalten keinen erfundenen Reasoning-Parameter. Explizite niedrigere unterstützte Stufen bleiben wirksam.
+          enum: [null, auto, none, minimal, low, medium, high, xhigh]
         documentContext:
           $ref: "#/components/schemas/DocumentContextDescriptor"
         sessionContext:
@@ -1015,17 +1054,17 @@ components:
       additionalProperties: false
       properties:
         maximumOutputTokens:
-          type: integer
+          description: Optionale Obergrenze. Ohne Angabe oder mit null wird der gesamte nach exakter nativer Promptzählung verbleibende geladene Modellkontext genutzt; Reasoning und Antwort teilen dieses Budget. Der Host reserviert einen Slot-Token und berücksichtigt Werkzeugdefinitionen und Medien. Keine globale 4096/8192/65536-Token-Grenze.
+          type: [integer, "null"]
           minimum: 1
-          maximum: 65536
         maximumContextTokens:
-          type: integer
-          minimum: 1024
-          maximum: 262144
+          description: Optionale Kontextobergrenze. Ohne Angabe oder mit null wird das aktuelle Modellmaximum genutzt. Der native Runtime-Fit kann den tatsächlich geladenen Kontext an den verfügbaren Speicher anpassen; dieser ist verbindlich.
+          type: [integer, "null"]
+          minimum: 2048
         timeoutSeconds:
-          type: integer
-          minimum: 30
-          maximum: 14400
+          description: "Gesamtlaufzeit ab createdAt. Coding: 0 oder null/fehlend bedeutet unbegrenzt; positive Werte ab 30 sind optional. Andere Modi: 30–14400, ohne Angabe 1800 Sekunden. Einzelne Verbindungs- und Werkzeug-Stallgrenzen bleiben unabhängig bestehen."
+          type: [integer, "null"]
+          minimum: 0
     RunAccepted:
       type: object
       additionalProperties: false
@@ -1051,7 +1090,7 @@ components:
         state:
           enum: [queued, running, waitingForClient, completed, failed, cancelled, interrupted]
         mode:
-          enum: [auto, general, code]
+          enum: [auto, general, coding]
         selectedModel:
           type: string
         sessionTitle:
@@ -1172,6 +1211,9 @@ components:
           format: date-time
         errorCode:
           type: string
+        errorMessage:
+          type: [string, "null"]
+          description: Konkrete, begrenzte Diagnose des nativen Windows-llama-Endpunkts; leer bei erfolgreicher Erkennung.
     ModelRuntimeStatus:
       type: object
       additionalProperties: false
@@ -1205,6 +1247,26 @@ components:
           type: string
         quantization:
           type: string
+    CodingModelCatalogResponse:
+      type: object
+      additionalProperties: false
+      required: [models, modelRoot, runtimeReachable, updatedAt]
+      properties:
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelRuntimeStatus"
+        modelRoot:
+          type: string
+          description: Konfigurierter Windows-Modellordner zur Anzeige; GGUF-Dateien werden direkt vom nativen llama.cpp-Modellrouter gelesen.
+        runtimeReachable:
+          type: boolean
+        message:
+          type: [string, "null"]
+          description: Diagnose bei nicht erreichbarer Runtime oder fehlenden vollständigen GGUF-Sprachmodellen.
+        updatedAt:
+          type: string
+          format: date-time
     GpuStatusSnapshot:
       type: object
       additionalProperties: false
@@ -1425,6 +1487,21 @@ components:
         retrievedAt:
           type: string
           format: date-time
+        engineFailures:
+          type: array
+          maxItems: 8
+          description: Bei teilweise erfolgreichen SearXNG-Antworten gemeldete Engine-Störungen. Ohne Treffer führen gemeldete Engine-Störungen zu HTTP 503 mit web.search.engines_unavailable statt zu einer scheinbar erfolgreichen leeren Antwort.
+          items:
+            type: object
+            additionalProperties: false
+            required: [engine, reason]
+            properties:
+              engine:
+                type: string
+                maxLength: 64
+              reason:
+                type: string
+                maxLength: 160
     WebSearchResult:
       type: object
       additionalProperties: false

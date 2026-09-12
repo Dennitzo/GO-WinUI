@@ -58,11 +58,13 @@ public static class GoAiServerHostExtensions
             provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ModelRuntimeClient>>()));
         services.AddHttpClient<WorkerApiClient>();
         services.AddSingleton<RunProcessor>();
+        services.AddSingleton<ClientToolDeadlineService>();
         if (includeHostedServices)
         {
             services.AddHostedService<ServerInitializationService>();
             services.AddHostedService<SharedModelWarmupService>();
             services.AddHostedService(static provider => provider.GetRequiredService<RunProcessor>());
+            services.AddHostedService(static provider => provider.GetRequiredService<ClientToolDeadlineService>());
             services.AddHostedService<StorageCleanupService>();
             services.AddHostedService(static provider => provider.GetRequiredService<LiveCaptionService>());
         }

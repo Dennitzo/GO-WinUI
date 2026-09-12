@@ -393,8 +393,8 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
         CancellationToken cancellationToken)
     {
         var instruction = """
-            Erstelle ausschließlich ein kompaktes, promptbezogenes Evidenzdossier für einen nachfolgenden TGA-Assistenzlauf.
-            Bewahre technische Zahlen, Einheiten, Normbezeichnungen, Einschränkungen und widersprüchliche Angaben.
+            Erstelle ausschließlich ein kompaktes, promptbezogenes Evidenzdossier für einen nachfolgenden Assistenzlauf.
+            Bewahre relevante Fakten, Namen, Zahlen, Einheiten, Quellenangaben, Einschränkungen und widersprüchliche Angaben.
             Jede Aussage muss unmittelbar eine Quelle im Format [Dateiname, S. 12] tragen.
             Erfinde nichts und gib keine allgemeine Begrüßung aus. Gliedere nach relevanten Teilfragen und nenne Informationslücken.
             """;
@@ -415,7 +415,7 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
             [new RunMessage("user", parts)],
             ClientCapabilities: [],
             Limits: new RunLimits(
-                MaximumOutputTokens: Math.Clamp(documentBudget / 4, 2_048, 8_192),
+                MaximumOutputTokens: null,
                 MaximumContextTokens: contextLength,
                 TimeoutSeconds: 3_600),
             SessionId: sessionId.ToString("D"),
@@ -497,7 +497,7 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
                 [new RunMessage("user", parts)],
                 ClientCapabilities: [],
                 Limits: new RunLimits(
-                    MaximumOutputTokens: Math.Clamp((targetCharacters + 5) / 6, 64, 8_192),
+                    MaximumOutputTokens: null,
                     MaximumContextTokens: contextLength,
                     TimeoutSeconds: 3_600),
                 SessionId: sessionId.ToString("D"),

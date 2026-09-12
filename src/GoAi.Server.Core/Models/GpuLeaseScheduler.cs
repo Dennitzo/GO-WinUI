@@ -1,14 +1,14 @@
-using GoAi.Server.Core.Data;
+﻿using GoAi.Server.Core.Data;
 using GoAi.Server.Core.Runtime;
 
 namespace GoAi.Server.Core.Models;
 
 public sealed class GpuLeaseScheduler : IDisposable
 {
-    // LM Studio workloads share one guarded lane. Exclusive workloads acquire
+    // native llama workloads share one guarded lane. Exclusive workloads acquire
     // that entire lane. The resident speech stack runs in a separate, bounded
     // lane so Whisper, ECAPA and Supertonic remain usable during long AI runs.
-    private const int SharedCapacity = 3;
+    private const int SharedCapacity = 1;
     private const int SpeechCapacity = 3;
     private readonly SemaphoreSlim _slots = new(SharedCapacity, SharedCapacity);
     private readonly SemaphoreSlim _admissionGate = new(1, 1);

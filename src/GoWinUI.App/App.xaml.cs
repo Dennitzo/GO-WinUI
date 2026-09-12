@@ -76,6 +76,7 @@ public partial class App : Application
                 services.AddSingleton<BricsCadBridgeLifecycle>();
                 services.AddHostedService(static provider => provider.GetRequiredService<BricsCadBridgeLifecycle>());
                 services.AddSingleton<SettingsCoordinator>();
+                services.AddSingleton<NativeModelRuntimeService>();
                 services.AddSingleton<GoAiConnectionService>();
                 services.AddSingleton<ModelCapabilityRegistry>();
                 services.AddSingleton<SystemAudioCaptionService>();
@@ -93,7 +94,6 @@ public partial class App : Application
                 services.AddSingleton<LogsViewModel>();
                 services.AddSingleton<SettingsViewModel>();
                 services.AddSingleton<MainWindow>();
-                services.AddSingleton<ToolConfirmationService>();
                 services.AddSingleton<DocumentContextPreparationService>();
                 services.AddSingleton<SessionContextPreparationService>();
                 services.AddSingleton<DocumentPdfExporter>();

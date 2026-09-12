@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace GoAi.Server.Core.Models;
 
-internal sealed record ModelPreparation(string InstanceId, bool WasAlreadyLoaded);
+internal sealed record ModelPreparation(string InstanceId, bool WasAlreadyLoaded, int ContextLength = 0);
 
 public sealed record ModelRuntimeProgress(
     string State,
@@ -59,4 +59,19 @@ public sealed class ModelGenerationTerminatedException(
     public string ProviderCode { get; } = string.IsNullOrWhiteSpace(providerCode)
         ? "unknown"
         : providerCode.Trim();
+}
+
+public sealed class ModelProviderRequestException(string phase, int attempts, Exception innerException)
+    : HttpRequestException(CreateMessage(phase, attempts, innerException), innerException,
+        (innerException as HttpRequestException)?.StatusCode)
+{
+    public string Phase { get; } = phase;
+
+    private static string CreateMessage(string phase, int attempts, Exception exception)
+    {
+        var operation = phase switch { "token_counting" => "Prompt-Tokenzählung", "model_selection" => "Modellerkennung", "model_loading" => "Modellvorbereitung", _ => "Modellanfrage" };
+        var detail = exception.Message[..Math.Min(exception.Message.Length, 1000)];
+        detail = string.Concat(detail.Select(static character => char.IsControl(character) ? ' ' : character)).Trim();
+        return $"Die Verbindung zum nativen Windows-llama-Modell ist bei der {operation} nach {attempts} Versuchen fehlgeschlagen. {detail}";
+    }
 }

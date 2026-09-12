@@ -491,28 +491,40 @@
 
   function normalizeMarkdownStructure(text) {
     const protectedSource = protectMarkdownSegments(String(text || ""));
-    return restoreSegments(normalizeLooseMarkdownTables(protectedSource.text), protectedSource.segments);
+    const prose = protectedSource.text.replace(/<\s*br\s*\/?\s*>/gi, "\n");
+    return restoreSegments(normalizeLooseMarkdownTables(prose), protectedSource.segments);
+  }
+
+  function openingCodeFence(line) {
+    return /^(`{3,})([^`]*)$/.exec(line);
+  }
+
+  function closesCodeFence(line, length) {
+    const match = /^(`{3,})[ \t]*$/.exec(line);
+    return Boolean(match && match[1].length >= length);
   }
 
   function normalizeMarkdownOutsideCodeFences(text) {
     const lines = String(text || "").split("\n");
     const output = [];
     let markdown = [];
-    let inFence = false;
+    let fenceLength = 0;
     const flushMarkdown = () => {
       if (!markdown.length) return;
       output.push(...normalizeMarkdownStructure(markdown.join("\n")).split("\n"));
       markdown = [];
     };
     for (const line of lines) {
-      if (line.startsWith("```")) {
-        if (!inFence) flushMarkdown();
+      if (fenceLength) {
         output.push(line);
-        inFence = !inFence;
-      } else if (inFence) {
-        output.push(line);
+        if (closesCodeFence(line, fenceLength)) fenceLength = 0;
       } else {
-        markdown.push(line);
+        const opening = openingCodeFence(line);
+        if (opening) {
+          flushMarkdown();
+          output.push(line);
+          fenceLength = opening[1].length;
+        } else markdown.push(line);
       }
     }
     flushMarkdown();
@@ -549,7 +561,7 @@
   function render(markdown) {
     const root = document.createDocumentFragment();
     const normalized = normalizeMarkdownOutsideCodeFences(
-      String(markdown || "").replace(/<\s*br\s*\/?\s*>/gi, "\n").replace(/\r\n?/g, "\n")
+      String(markdown || "").replace(/\r\n?/g, "\n")
     );
     const lines = normalized.split("\n");
     const paragraph = [];
@@ -565,12 +577,13 @@
         continue;
       }
 
-      if (line.startsWith("```")) {
+      const openingFence = openingCodeFence(line);
+      if (openingFence) {
         appendParagraph(root, paragraph);
-        const language = line.slice(3).trim();
+        const language = openingFence[2].trim();
         const content = [];
         index += 1;
-        while (index < lines.length && !lines[index].startsWith("```")) content.push(lines[index++]);
+        while (index < lines.length && !closesCodeFence(lines[index], openingFence[1].length)) content.push(lines[index++]);
         if (index < lines.length) index += 1;
         root.append(createCodeBlock(language, content.join("\n")));
         continue;

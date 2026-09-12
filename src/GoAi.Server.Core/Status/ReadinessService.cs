@@ -1,4 +1,4 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Models;
 using GoAi.Server.Core.Runtime;
@@ -28,31 +28,26 @@ public sealed class ReadinessService
         return await GetSnapshotAsync(modelStatus, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<HealthSnapshot> GetSnapshotAsync(
+    public Task<HealthSnapshot> GetSnapshotAsync(
         ModelStatusSnapshot modelStatus,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(modelStatus);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(CreateSnapshot(modelStatus));
+    }
+
+    private HealthSnapshot CreateSnapshot(ModelStatusSnapshot modelStatus)
+    {
         if (!modelStatus.ProviderReachable)
         {
             return NotReady(
-                $"LM Studio ist über {_options.ModelRuntimeUri} nicht erreichbar.",
-                "LM Studio starten und den lokalen Server auf 0.0.0.0:1234 freigeben.");
+                $"native llama ist über {_options.ModelRuntimeUri} nicht erreichbar.",
+                "Den nativen GO-Llama-Prozess starten und Port 8081 für das Docker-Gateway freigeben.");
         }
 
-        var requiredModelIds = new HashSet<string>([_options.GeneralModelId], StringComparer.OrdinalIgnoreCase);
-        var missingRequired = modelStatus.Models
-            .Where(model => requiredModelIds.Contains(model.Id))
-            .Where(static model => !model.Downloaded)
-            .Select(static model => model.Id)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (missingRequired.Length > 0)
-        {
-            return NotReady(
-                "Erforderliche Modelle fehlen: " + string.Join(", ", missingRequired),
-                "Den LM-Studio-Modellkatalog unter .lmstudio\\models prüfen.");
-        }
+        if (!modelStatus.Models.Any(static model => model.Role == "general" && model.Downloaded))
+            return NotReady("Kein lokales Sprachmodell verfügbar.", "Unsloth-Modellordner und nativen llama-Katalog prüfen.");
 
         var selectableModels = modelStatus.Models
             .Where(static model => model.Role == "general")

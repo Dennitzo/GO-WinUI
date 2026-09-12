@@ -39,10 +39,9 @@ public sealed class ServerInitializationService : IHostedService
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
-        // The gateway does not own model processes. Restarting only this
-        // container must preserve resident LLM and speech workers. Stopping
-        // their Compose containers releases all RAM and VRAM deterministically.
-        _runtime.SetGatewayState("Beendet", "Gateway beendet; Modellcontainer werden von Docker verwaltet.");
+        // The gateway does not own the native Windows llama server or worker lifetimes.
+        // Restarting this container preserves independently managed model and speech processes.
+        _runtime.SetGatewayState("Beendet", "Gateway beendet; native Modellruntime und Docker-Worker werden unabhängig verwaltet.");
         return Task.CompletedTask;
     }
 }

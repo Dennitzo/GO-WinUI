@@ -26,6 +26,7 @@ internal static class GatewayEndpoints
         endpoints.MapGet("/v1/health/ready", WriteReadyHealthAsync);
         endpoints.MapGet("/v1/capabilities", WriteCapabilitiesAsync);
         endpoints.MapGet("/v1/models/status", WriteModelStatusAsync);
+        endpoints.MapGet("/v1/models/coding", WriteCodingModelStatusAsync);
         endpoints.MapGet("/v1/gpu/status", WriteGpuStatusAsync);
         endpoints.MapGet("/v1/services/status", WriteServiceStatusAsync);
         endpoints.MapPost("/v1/context/embeddings", CreateEmbeddingsAsync);
@@ -91,6 +92,12 @@ internal static class GatewayEndpoints
     {
         var runtime = context.RequestServices.GetRequiredService<ModelRuntimeClient>();
         await WriteJsonAsync(context, await runtime.GetStatusAsync(context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    private static async Task WriteCodingModelStatusAsync(HttpContext context)
+    {
+        var runtime = context.RequestServices.GetRequiredService<ModelRuntimeClient>();
+        await WriteJsonAsync(context, await runtime.GetCodingModelsAsync(context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     private static async Task WriteGpuStatusAsync(HttpContext context)
@@ -302,11 +309,10 @@ internal static class GatewayEndpoints
         }
 
         var processor = context.RequestServices.GetRequiredService<RunProcessor>();
-        if (!processor.Cancel(runId))
-        {
-            await repository.AppendEventAsync(runId, RunEventTypes.RunCancelled, new { reason = "client" }, context.RequestAborted).ConfigureAwait(false);
-            await repository.UpdateStateAsync(runId, RunState.Cancelled, errorCode: "run.cancelled", cancellationToken: context.RequestAborted).ConfigureAwait(false);
-        }
+        // Persist cancellation before signalling the in-memory worker: it may be
+        // between its last native error and scheduling a durable retry.
+        _ = await repository.CancelAsync(runId, context.RequestAborted).ConfigureAwait(false);
+        _ = processor.Cancel(runId);
 
         context.Response.StatusCode = StatusCodes.Status202Accepted;
     }

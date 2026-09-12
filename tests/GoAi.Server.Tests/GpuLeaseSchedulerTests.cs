@@ -1,4 +1,4 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using GoAi.Server.Core.Audio;
 using GoAi.Server.Core.Models;
 using GoAi.Server.Core.Runtime;
@@ -83,7 +83,7 @@ public sealed class GpuLeaseSchedulerTests
     }
 
     [Theory]
-    [InlineData("llm-general", "gpt-oss-120b", "LM Studio")]
+    [InlineData("llm-general", "gpt-oss-120b", "native llama")]
     [InlineData("live-caption", "Sprache wird live transkribiert", "Docker · Whisper STT")]
     [InlineData("text-to-speech", "Antwort wird vorgelesen", "Docker · ausgewählte Sprachausgabe · GPU 1")]
     [InlineData("image-generation", "Bild wird erstellt", "Docker · Image")]

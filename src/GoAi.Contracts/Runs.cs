@@ -6,6 +6,7 @@ public enum RunMode
 {
     Auto,
     General,
+    Coding,
 }
 
 public enum ConversationProfile
@@ -54,7 +55,8 @@ public sealed record RunRequest(
     DocumentContextDescriptor? DocumentContext = null,
     SessionContextDescriptor? SessionContext = null,
     ConversationProfile? ConversationProfile = null,
-    string? ReasoningEffort = null);
+    string? ReasoningEffort = null,
+    string? PreferredCodingModelId = null);
 
 public sealed record DocumentContextDescriptor(
     DocumentContextMode Mode,
@@ -147,7 +149,7 @@ public static class RunEventTypes
     public const string RunCancelled = "run.cancelled";
 }
 
-public sealed record TextDeltaEvent(string Delta);
+public sealed record TextDeltaEvent(string Delta, int? ReplaceFrom = null);
 
 public sealed record ModelSelectedEvent(string ModelId, string Role, bool IsFallback = false);
 
@@ -171,7 +173,8 @@ public sealed record ModelGenerationEvent(
     string? FailureKind = null,
     bool? ToolArgumentsJsonComplete = null,
     int? ContentCharacters = null,
-    bool? FinishObserved = null);
+    bool? FinishObserved = null,
+    int? ElapsedSeconds = null);
 
 public sealed record ContextChangedEvent(
     int EstimatedInputTokens,
@@ -191,8 +194,8 @@ public sealed record QueueChangedEvent(int Position, int Waiting, string Lane = 
 public sealed record RunCompletedEvent(
     string? SessionTitle,
     string? ModelId,
-    int InputTokens,
-    int OutputTokens,
+    long InputTokens,
+    long OutputTokens,
     IReadOnlyList<string>? ArtifactIds = null);
 
 public sealed record RunFailedEvent(string ErrorCode, string Message, bool Retryable);

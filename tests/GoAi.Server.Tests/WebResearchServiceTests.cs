@@ -1,4 +1,4 @@
-using DocumentFormat.OpenXml;
+﻿using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using GoAi.Contracts;
@@ -17,6 +17,30 @@ namespace GoAi.Server.Tests;
 
 public sealed class WebResearchServiceTests
 {
+    [Fact]
+    public void HtmlInlineMarkupPreservesExactApiNamesForTargetedFetch()
+    {
+        const string html = "<h2>Timeouts</h2><p><code><span>asyncio.</span><span>timeout</span></code> cancels the current task.</p>"
+            + "<p>Use <strong>TaskGroup</strong> for subtasks.</p><script>fake timeout evidence</script>";
+        var text = WebResearchService.ExtractFetchedContent(System.Text.Encoding.UTF8.GetBytes(html), "text/html", "utf-8");
+        Assert.Equal("Timeouts asyncio.timeout cancels the current task. Use TaskGroup for subtasks.", text);
+        var response = new WebFetchResponse("https://docs.python.org/3/library/asyncio-task.html", "text/html", text, true, DateTimeOffset.UtcNow, []);
+        using var arguments = JsonDocument.Parse("""{"query":"asyncio.timeout"}""");
+        var result = AgentToolExecutor.CreateTargetedFetchResult(response, arguments.RootElement);
+        Assert.True(result.Found);
+        Assert.Contains("asyncio.timeout cancels the current task.", Assert.Single(result.Matches).Text, StringComparison.Ordinal);
+        Assert.Empty(result.MissingQueries);
+    }
+
+    [Fact]
+    public void HtmlBlockAndTableBoundariesRemainSeparatedWhileInlineEntitiesStayLiteral()
+    {
+        const string html = "<p>one</p><p>two<br>three</p><table><tr><td>A</td><td>B</td></tr></table>"
+            + "<p><code><span>x</span>&lt;<span>y</span></code> &amp; z</p><style>.fake { content: 'evidence'; }</style>";
+        var text = WebResearchService.ExtractFetchedContent(System.Text.Encoding.UTF8.GetBytes(html), "text/html", "utf-8");
+        Assert.Equal("one two three A B x<y & z", text);
+    }
+
     [Fact]
     public void FetchUsesBrowserCompatibleRequestHeaders()
     {
@@ -188,15 +212,15 @@ public sealed class WebResearchServiceTests
             Options.Create(new GoAiServerOptions { YouTubeApiKey = "secret-youtube-key" }));
 
         var response = await service.SearchAsync(
-            new WebSearchRequest("TGA Planung", 5, "de-DE"),
+            new WebSearchRequest("Wissenschaft einfach erklärt", 5, "de-DE"),
             youtubeFallback: true);
 
         Assert.Equal("youtube-data-api-v3", response.Provider);
         Assert.False(response.IsFallback);
         var result = Assert.Single(response.Results);
-        Assert.Equal("TGA & Einführung", result.Title);
+        Assert.Equal("Wissen & Einführung", result.Title);
         Assert.Equal("https://www.youtube.com/watch?v=video-1", result.Url);
-        Assert.Equal("Fachkanal", result.Source);
+        Assert.Equal("Wissenskanal", result.Source);
         Assert.Equal("1:02", result.Duration);
         Assert.Equal(2, handler.RequestCount);
     }
@@ -238,7 +262,7 @@ public sealed class WebResearchServiceTests
             Assert.Equal("secret-youtube-key", Assert.Single(request.Headers.GetValues("X-Goog-Api-Key")));
             var json = request.RequestUri.AbsolutePath.EndsWith("/search", StringComparison.Ordinal)
                 ? """
-                  {"items":[{"id":{"videoId":"video-1"},"snippet":{"title":"TGA &amp; Einführung","description":"Planungswissen","channelTitle":"Fachkanal","publishedAt":"2026-08-13T12:00:00Z","thumbnails":{"high":{"url":"https://example.invalid/high.jpg"}}}}]}
+                  {"items":[{"id":{"videoId":"video-1"},"snippet":{"title":"Wissen &amp; Einführung","description":"Grundlagenwissen","channelTitle":"Wissenskanal","publishedAt":"2026-08-13T12:00:00Z","thumbnails":{"high":{"url":"https://example.invalid/high.jpg"}}}}]}
                   """
                 : """
                   {"items":[{"id":"video-1","contentDetails":{"duration":"PT1M2S"}}]}

@@ -143,6 +143,7 @@ public sealed class GoAiDatabase : IDisposable
             FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS ix_run_events_run_id_id ON run_events(run_id, id);
+        CREATE INDEX IF NOT EXISTS ix_run_events_proposal ON run_events(run_id, event_type, json_extract(data_json, '$.proposalId'));
         CREATE TABLE IF NOT EXISTS client_tool_results (
             proposal_id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
@@ -163,6 +164,12 @@ public sealed class GoAiDatabase : IDisposable
             run_id TEXT PRIMARY KEY,
             checkpoint_json TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS run_provider_retries (
+            run_id TEXT PRIMARY KEY,
+            attempt INTEGER NOT NULL,
+            next_attempt_at TEXT NULL,
             FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS uploads (

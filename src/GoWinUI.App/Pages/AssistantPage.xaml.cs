@@ -2,6 +2,7 @@ using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
 using GoAi.Contracts;
 using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -35,12 +36,19 @@ public sealed partial class AssistantPage : Page, IDisposable
     internal const double PdfBookMarginRightInches = 20d / 25.4d;
     internal const double PdfBookMarginBottomInches = 24d / 25.4d;
     internal const double PdfBookMarginLeftInches = 24d / 25.4d;
+    internal const string CodingPreviewResponseHeaders = "Content-Type: text/html; charset=utf-8\r\n"
+        + "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+        + "Permissions-Policy: camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=(), usb=(), serial=()\r\n"
+        + "Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        + "img-src data: blob:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; "
+        + "frame-ancestors https://go.local; sandbox allow-scripts\r\n";
 
     private readonly AssistantCoordinator _coordinator;
     private readonly GoAiAssistantService _goAi;
     private readonly SettingsCoordinator _settings;
     private readonly ShellViewModel _shell;
     private readonly IChatArtifactRepository _artifacts;
+    private readonly IChatRepository _chats;
     private readonly IBinaryObjectStore _blobs;
     private readonly SystemAudioCaptionService _liveCaptions;
     private readonly MicrophoneTranscriptionService _microphone;
@@ -77,6 +85,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         _settings = App.Current.GetService<SettingsCoordinator>();
         _shell = App.Current.GetService<ShellViewModel>();
         _artifacts = App.Current.GetService<IChatArtifactRepository>();
+        _chats = App.Current.GetService<IChatRepository>();
         _blobs = App.Current.GetService<IBinaryObjectStore>();
         _liveCaptions = App.Current.GetService<SystemAudioCaptionService>();
         _microphone = App.Current.GetService<MicrophoneTranscriptionService>();
@@ -136,6 +145,11 @@ public sealed partial class AssistantPage : Page, IDisposable
             var userDataFolder = Path.Combine(App.Current.DataDirectory, "WebView2");
             initializationStage = "WebView2-Umgebung";
             await _bridge.InitializeAsync(webRoot, userDataFolder, _previews.CacheRoot);
+            webView.CoreWebView2.AddWebResourceRequestedFilter(
+                "https://go-coding-preview.local/coding/*", CoreWebView2WebResourceContext.All,
+                CoreWebView2WebResourceRequestSourceKinds.All);
+            webView.CoreWebView2.WebResourceRequested += OnCodingPreviewResourceRequested;
+            webView.CoreWebView2.FrameNavigationStarting += OnCodingFrameNavigationStarting;
             initializationStage = "Navigation";
             webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
             _bridge.NavigateToApp();
@@ -223,6 +237,8 @@ public sealed partial class AssistantPage : Page, IDisposable
         if (_assistantWebView?.CoreWebView2 is { } core)
         {
             core.NavigationCompleted -= OnNavigationCompleted;
+            core.WebResourceRequested -= OnCodingPreviewResourceRequested;
+            core.FrameNavigationStarting -= OnCodingFrameNavigationStarting;
         }
 
         if (_bridge is not null)
@@ -356,6 +372,24 @@ public sealed partial class AssistantPage : Page, IDisposable
 
             switch (args.Envelope.Type)
             {
+                case "coding.pickWorkspace":
+                    if (_goAi.IsRunning)
+                    {
+                        throw new InvalidOperationException("Beende zuerst den laufenden Auftrag, bevor du den Projektordner wechselst.");
+                    }
+                    var codingSessionId = args.Envelope.Payload.GetProperty("sessionId").GetGuid();
+                    var folderPicker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+                    folderPicker.FileTypeFilter.Add("*");
+                    InitializePicker(folderPicker);
+                    var codingFolder = await folderPicker.PickSingleFolderAsync();
+                    if (codingFolder is not null)
+                    {
+                        await CommitCodingWorkspaceAsync(_chatBridgeGate, () => _goAi.IsRunning,
+                            token => _coordinator.SetCodingWorkspacePathAsync(codingSessionId, codingFolder.Path, token),
+                            _lifetime?.Token ?? CancellationToken.None);
+                        await bridge.PostAsync("state.snapshot", await _coordinator.BuildSnapshotAsync(), args.Envelope.RequestId);
+                    }
+                    break;
                 case "document.pick":
                     await PickDocumentAsync(args.Envelope, bridge);
                     break;
@@ -527,6 +561,27 @@ public sealed partial class AssistantPage : Page, IDisposable
             {
                 await SetShellAiStateAsync(false);
             }
+        }
+    }
+
+    internal static async Task CommitCodingWorkspaceAsync(
+        SemaphoreSlim chatGate,
+        Func<bool> isRunning,
+        Func<CancellationToken, Task> commit,
+        CancellationToken cancellationToken = default)
+    {
+        // Acquire only after the picker closes. A pending/active chat must not observe a half-applied workspace change.
+        const string busyMessage = "Beende zuerst den laufenden Auftrag, bevor du den Projektordner wechselst.";
+        if (!await chatGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException(busyMessage);
+        try
+        {
+            if (isRunning()) throw new InvalidOperationException(busyMessage);
+            await commit(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            chatGate.Release();
         }
     }
 
@@ -1404,6 +1459,72 @@ public sealed partial class AssistantPage : Page, IDisposable
         return await dialog.ShowAsync() == ContentDialogResult.Primary
             ? selector.SelectedItem as DesktopCaptureTarget
             : null;
+    }
+
+    internal static bool TryParseCodingPreviewUri(string value, out Guid messageId, out string stepId)
+    {
+        messageId = Guid.Empty;
+        stepId = string.Empty;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps || !uri.IsDefaultPort
+            || !string.Equals(uri.Host, "go-coding-preview.local", StringComparison.OrdinalIgnoreCase)
+            || uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0)
+        {
+            return false;
+        }
+        var parts = uri.AbsolutePath.Split('/');
+        if (parts.Length != 4 || parts[1] != "coding" || !Guid.TryParseExact(parts[2], "D", out messageId))
+        {
+            return false;
+        }
+        stepId = Uri.UnescapeDataString(parts[3]);
+        return stepId.Length is > 0 and <= 256 && !stepId.Any(character => char.IsControl(character) || character is '/' or '\\');
+    }
+
+    internal static async Task<string?> GetCodingPreviewHtmlAsync(
+        IChatRepository chats, Guid activeSessionId, string requestUri, CancellationToken cancellationToken)
+    {
+        if (activeSessionId == Guid.Empty || !TryParseCodingPreviewUri(requestUri, out var messageId, out var stepId)
+            || await chats.GetMessageAsync(messageId, cancellationToken) is not { Role: ChatRole.Assistant } message
+            || message.SessionId != activeSessionId)
+        {
+            return null;
+        }
+        var step = message.ToolSteps?.FirstOrDefault(item => item.Id == stepId
+            && item.Tool == "coding.renderHtml" && item.Status == "completed");
+        return step?.PreviewHtml is { Length: > 0 and <= 16000 } html && !string.IsNullOrWhiteSpace(html) ? html : null;
+    }
+
+    private static void OnCodingFrameNavigationStarting(CoreWebView2 sender, CoreWebView2NavigationStartingEventArgs args)
+    {
+        // CSP does not reliably block location.href. A preview may never navigate to the app, files or network.
+        args.Cancel = !TryParseCodingPreviewUri(args.Uri, out _, out _);
+    }
+
+    private async void OnCodingPreviewResourceRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs args)
+    {
+        var deferral = args.GetDeferral();
+        try
+        {
+            var sessionId = _settings.Current.ActiveSessionId;
+            var html = !_disposed && args.Request.Method == "GET" && sessionId is { } activeSessionId
+                ? await GetCodingPreviewHtmlAsync(_chats, activeSessionId, args.Request.Uri, _lifetime?.Token ?? CancellationToken.None)
+                : null;
+            if (_disposed || _settings.Current.ActiveSessionId != sessionId) html = null;
+            args.Response = sender.Environment.CreateWebResourceResponse(
+                new MemoryStream(html is null ? [] : Encoding.UTF8.GetBytes(html)).AsRandomAccessStream(),
+                html is null ? 404 : 200, html is null ? "Not Found" : "OK", CodingPreviewResponseHeaders);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "coding.preview");
+            args.Response = sender.Environment.CreateWebResourceResponse(
+                new MemoryStream().AsRandomAccessStream(), 404, "Not Found", CodingPreviewResponseHeaders);
+        }
+        finally
+        {
+            deferral.Complete();
+        }
     }
 
     private async void OnArtifactResourceRequested(

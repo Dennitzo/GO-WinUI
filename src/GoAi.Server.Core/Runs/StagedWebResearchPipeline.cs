@@ -13,7 +13,6 @@ internal sealed class StagedWebResearchPipeline
     private const int MaximumFetchedSources = 6;
     private const int MaximumFetchAttempts = 8;
     private const int MaximumTaskCharacters = 12_000;
-    private const int SynthesisOutputTokens = 4_096;
     private const int MinimumCompactionBlockCharacters = 12_000;
     private const int MaximumCompactionBlockCharacters = 180_000;
     private const int MaximumCompactionPasses = 8;
@@ -22,7 +21,8 @@ internal sealed class StagedWebResearchPipeline
     public static bool IsRequested(
         RunRequest request,
         IReadOnlyList<AgentToolSpec> tools) =>
-        request.AllowedServerTools is { } requested
+        request.Mode != RunMode.Coding
+        && request.AllowedServerTools is { } requested
         && requested.Contains("web.search", StringComparer.Ordinal)
         && requested.Contains("web.fetch", StringComparer.Ordinal)
         && tools.Any(static tool => tool.Name == "web.search")
@@ -79,10 +79,10 @@ internal sealed class StagedWebResearchPipeline
                     modelRole,
                     CreateSearchMessages(normalizedTask, preferredLanguage),
                     [searchTool.ToLmDefinition()],
-                    1_024,
+                    null,
                     RequireToolCall: true,
                     RequiredToolName: searchTool.Name,
-                    DisableReasoning: true),
+                    DisableReasoning: false),
                 cancellationToken).ConfigureAwait(false);
             searchCall = NormalizeSearchCall(
                 RequireSingleToolCall(searchResponse, searchTool.Name),
@@ -154,10 +154,10 @@ internal sealed class StagedWebResearchPipeline
                         modelRole,
                         CreateFetchMessages(normalizedTask, remaining, fetched, preferredLanguage),
                         [fetchTool.ToLmDefinition()],
-                        1_024,
+                        null,
                         RequireToolCall: true,
                         RequiredToolName: fetchTool.Name,
-                        DisableReasoning: true),
+                        DisableReasoning: false),
                     cancellationToken).ConfigureAwait(false);
                 fetchCall = RequireSingleToolCall(fetchResponse, fetchTool.Name);
             }
@@ -312,7 +312,9 @@ internal sealed class StagedWebResearchPipeline
         string task,
         IReadOnlyList<WebSearchResult> candidates,
         IReadOnlyList<FetchedResearchSource> fetched,
-        string preferredLanguage)
+        string preferredLanguage,
+        bool allowOriginalUrls = false,
+        IReadOnlyList<string>? attemptedUrls = null)
     {
         var builder = new StringBuilder()
             .AppendLine("Nutzerauftrag:")
@@ -335,13 +337,25 @@ internal sealed class StagedWebResearchPipeline
                 builder.Append("- ").AppendLine(source.Url);
             }
         }
+        if (attemptedUrls is { Count: > 0 })
+        {
+            builder.AppendLine().AppendLine("Bereits versuchte URLs (auch erfolglose Abrufe; nicht erneut wählen):");
+            foreach (var url in attemptedUrls) builder.Append("- ").AppendLine(url);
+        }
 
         return
         [
             new(
                 "system",
-                "Waehle aus der angegebenen SearXNG-Liste genau eine fachlich relevante, noch nicht abgerufene Quelle. "
-                + "Rufe das einzige angebotene Werkzeug web.fetch genau einmal mit exakt dieser URL und einer konkreten, relevanten Suchphrase in query auf. "
+                (allowOriginalUrls
+                    ? "Wähle genau eine fachlich relevante, noch nicht versuchte Originalquelle. Nutze die SearXNG-Treffer zur Orientierung. "
+                        + "Du darfst auch die bekannte öffentliche URL einer offiziellen Originaldokumentation oder eines Repositories direkt vorschlagen, "
+                        + "wenn sie nicht in den Suchtreffern steht. Der Vorschlag ist noch kein Beleg: nur erfolgreich abgerufene Textstellen dürfen verwendet werden. "
+                        + "Prüfe pro URL alle relevanten Aspekte gemeinsam: bei mehreren API-Namen auf derselben Dokumentationsseite verwende queries "
+                        + "mit bis zu vier getrennten kurzen Begriffen (z. B. [\"wait_for\",\"asyncio.timeout\",\"TaskGroup\"]). "
+                        + "URL-Fragmente sind keine unterschiedlichen Quellen; wähle danach eine andere Originalquelle für die Gegenprüfung. "
+                    : "Waehle aus der angegebenen SearXNG-Liste genau eine fachlich relevante, noch nicht abgerufene Quelle. ")
+                + "Rufe das einzige angebotene Werkzeug web.fetch genau einmal mit dieser URL und einer konkreten, relevanten Suchphrase in query auf. "
                 + "Der Agent erhaelt nur begrenzte Trefferfenster, niemals den vollstaendigen Seiteninhalt. "
                 + $"Bewerte die Relevanz fuer den {LanguageDisplayName(preferredLanguage)} Nutzerauftrag. "
                 + "Erfinde keine URL und antworte nicht mit Fliesstext."),
@@ -413,7 +427,7 @@ internal sealed class StagedWebResearchPipeline
                                 index + 1,
                                 blocks.Count),
                             [],
-                            SynthesisOutputTokens,
+                            null,
                             RequireToolCall: false,
                             RequiredToolName: null,
                             DisableReasoning: false),
@@ -450,7 +464,7 @@ internal sealed class StagedWebResearchPipeline
                 modelRole,
                 CreateSynthesisMessages(task, search, preparedEvidence, preferredLanguage),
                 [],
-                SynthesisOutputTokens,
+                null,
                 RequireToolCall: false,
                 RequiredToolName: null,
                 DisableReasoning: false),
@@ -503,14 +517,14 @@ internal sealed class StagedWebResearchPipeline
         string preferredLanguage,
         int contextLength)
     {
-        var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, SynthesisOutputTokens);
+        var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, null);
         return ContextPlanner.EstimateTokens(
             CreateSynthesisMessages(task, search, evidence, preferredLanguage)) <= budget;
     }
 
     private static int CalculateCompactionBlockCharacters(int contextLength)
     {
-        var inputTokens = ContextPlanner.ComputeInputTokenBudget(contextLength, SynthesisOutputTokens);
+        var inputTokens = ContextPlanner.ComputeInputTokenBudget(contextLength, null);
         return Math.Clamp(
             inputTokens * 2,
             MinimumCompactionBlockCharacters,
@@ -881,7 +895,7 @@ internal sealed record StagedWebResearchModelRequest(
     string ModelRole,
     IReadOnlyList<LmChatMessage> Messages,
     IReadOnlyList<LmToolDefinition> Tools,
-    int MaximumOutputTokens,
+    int? MaximumOutputTokens,
     bool RequireToolCall,
     string? RequiredToolName,
     bool DisableReasoning);

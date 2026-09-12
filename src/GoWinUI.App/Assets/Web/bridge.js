@@ -8,7 +8,7 @@
     "document.remove", "workflow.list", "workflow.insert", "workflow.create",
     "workflow.update", "workflow.delete",
     "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
-    "attachment.remove",
+    "attachment.remove", "coding.pickWorkspace",
     "artifact.save", "artifact.preview", "artifact.open", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
     "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
     "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.toggleSpeechPause", "microphone.stop", "microphone.cancel",

@@ -1,4 +1,4 @@
-using GoAi.Server.Core.Configuration;
+﻿using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Models;
 using GoAi.Server.Core.Runs;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -11,26 +11,29 @@ namespace GoAi.Server.Tests;
 
 public sealed class ModelRuntimeClientTests
 {
+    private const string NativeGeneralId = "coding/gpt-oss-120b~test";
+    private const string NativeQwenId = "coding/qwen3.8-27b~test";
+    private const string NativeCoderId = "coding/qwen3-coder-next~test";
     private static readonly string[] RequiredPath = ["path"];
     private static readonly string[] RequiredName = ["name"];
     private static readonly string[] RequiredOperation = ["operation"];
 
     [Fact]
-    public async Task InstalledLmStudioCatalogIsMappedToGoRoles()
+    public async Task InstalledNativeRuntimeCatalogIsMappedToGoRoles()
     {
-        var handler = new LmStudioHandler();
+        var handler = new NativeRuntimeHandler();
         using var client = CreateClient(new HttpClient(handler));
 
         var status = await client.GetStatusAsync();
 
         Assert.True(status.ProviderReachable);
         Assert.Contains(status.Models, model =>
-            model.Id == LmStudioModelCatalog.Qwen38Id
+            model.Id == NativeQwenId
             && model.Role == "general"
             && model.Downloaded
             && model.ContextTokens == 262_144);
         Assert.Contains(status.Models, model =>
-            model.Id == "gpt-oss-120b"
+            model.Id == NativeGeneralId
             && model.Role == "general"
             && model.Loaded);
     }
@@ -38,7 +41,7 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task AlreadyLoadedModelUsesInstanceIdWithoutReload()
     {
-        var handler = new LmStudioHandler(returnToolCall: true);
+        var handler = new NativeRuntimeHandler(returnToolCall: true);
         using var client = CreateClient(new HttpClient(handler));
         var schema = JsonSerializer.SerializeToElement(new
         {
@@ -59,7 +62,7 @@ public sealed class ModelRuntimeClientTests
         Assert.Equal("fs.readText", Assert.Single(result.ToolCalls).Name);
         Assert.Empty(handler.ModelOperations);
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
-        Assert.Equal("general-instance", body.RootElement.GetProperty("model").GetString());
+        Assert.Equal(NativeGeneralId, body.RootElement.GetProperty("model").GetString());
         Assert.True(body.RootElement.GetProperty("stream").GetBoolean());
         Assert.True(body.RootElement.GetProperty("stream_options").GetProperty("include_usage").GetBoolean());
         Assert.False(body.RootElement.GetProperty("parallel_tool_calls").GetBoolean());
@@ -87,7 +90,7 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Fact]
-    public void HashlessLmStudioToolAliasResolvesOnlyWhenUnambiguous()
+    public void HashlessNativeRuntimeToolAliasResolvesOnlyWhenUnambiguous()
     {
         var webFetch = ModelRuntimeClient.ToTransportToolName("web.fetch");
         var tools = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -109,7 +112,7 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Fact]
-    public void HashlessLmStudioReasoningEnvelopeResolvesToLogicalToolName()
+    public void HashlessNativeRuntimeReasoningEnvelopeResolvesToLogicalToolName()
     {
         var tools = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -127,7 +130,7 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Fact]
-    public void FragmentedQwen38ReasoningEnvelopeResolvesLikeLmStudioOutput()
+    public void FragmentedQwen38ReasoningEnvelopeResolvesLikeNativeRuntimeOutput()
     {
         var tools = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -181,64 +184,62 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Fact]
-    public void NativeLmStudioCatalogParsesCapabilitiesWithoutKnownModelIds()
+    public void NativeCatalogParsesInstalledRolesWithoutKnownModelAliases()
     {
         using var document = JsonDocument.Parse("""
-            {"models":[{"key":"publisher/future-model","type":"llm","display_name":"Future Model","architecture":"future","quantization":{"name":"Q8_0"},"max_context_length":196608,"capabilities":{"vision":true,"trained_for_tool_use":true,"reasoning":{"allowed_options":["off","low","high"],"default":"high"}},"loaded_instances":[]}]}
+            {"data":[{"id":"vision/future-model-Q8_0~123","status":{"value":"loaded"}},{"id":"hf/network-model","status":{"value":"unloaded"}}]}
             """);
-
         var model = Assert.Single(ModelRuntimeClient.ReadRuntimeModels(document.RootElement));
-
-        Assert.Equal("publisher/future-model", model.Id);
-        Assert.Equal(196_608, model.MaximumContextLength);
+        Assert.Equal("vision/future-model-Q8_0~123", model.Id);
+        Assert.Equal(32_768, model.MaximumContextLength);
+        Assert.Equal(model.Id, model.InstanceId);
         Assert.True(model.SupportsTools);
         Assert.True(model.SupportsVision);
-        Assert.Equal(["none", "low", "high"], model.ReasoningEfforts);
-        Assert.Equal("high", model.DefaultReasoningEffort);
-        Assert.Equal("Q8_0", model.Quantization);
+        Assert.Equal(["none"], model.ReasoningEfforts);
+        Assert.Equal("none", model.DefaultReasoningEffort);
     }
 
     [Fact]
-    public async Task Qwen38SwitchUsesDynamicLmStudioKeyWithoutInventingReasoningSupport()
+    public async Task Qwen38SwitchUsesDynamicNativeRuntimeKeyWithoutInventingReasoningSupport()
     {
-        var handler = new LmStudioHandler(returnToolCall: false);
+        var handler = new NativeRuntimeHandler(returnToolCall: false);
         using var client = CreateClient(new HttpClient(handler));
 
         _ = await client.CompleteChatAsync(
-            LmStudioModelCatalog.Qwen38Id,
+            NativeModelCatalog.Qwen38Id,
             [new LmChatMessage("user", "Prüfe das Projekt.")],
             [],
             modelRole: "general",
             reasoningEffort: "none");
 
         Assert.Equal(2, handler.ModelOperations.Count);
-        Assert.Equal("unload:general-instance", handler.ModelOperations[0]);
-        Assert.Equal("load:qwen3.8-27b:262144", handler.ModelOperations[1]);
+        Assert.Equal("unload:" + NativeGeneralId, handler.ModelOperations[0]);
+        Assert.Equal("load:" + NativeQwenId, handler.ModelOperations[1]);
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
-        Assert.Equal("qwen-instance", body.RootElement.GetProperty("model").GetString());
+        Assert.Equal(NativeQwenId, body.RootElement.GetProperty("model").GetString());
         Assert.False(body.RootElement.TryGetProperty("reasoning_effort", out _));
-        Assert.False(body.RootElement.TryGetProperty("chat_template_kwargs", out _));
+        Assert.False(body.RootElement.GetProperty("chat_template_kwargs").GetProperty("enable_thinking").GetBoolean());
     }
 
     [Fact]
     public async Task CompletedModelLoadIsRecoveredAfterTransientLoadChannelFailure()
     {
-        var handler = new LmStudioHandler(transientLoadChannelFailure: true);
+        var handler = new NativeRuntimeHandler(transientLoadChannelFailure: true);
         using var client = CreateClient(new HttpClient(handler));
 
         var instance = await client.EnsureModelLoadedAsync(
-            LmStudioModelCatalog.Qwen3CoderNextQ8Id,
-            262_144);
+            NativeModelCatalog.Qwen3CoderNextQ8Id,
+            32_768);
 
-        Assert.Equal("coder-instance", instance);
+        Assert.Equal(NativeCoderId, instance);
         Assert.Equal(1, handler.ModelOperations.Count(operation =>
-            operation == "load:qwen3-coder-next:262144"));
+            operation == "load:" + NativeCoderId));
     }
 
     [Fact]
     public async Task Qwen38RequiredToolTurnUsesConservativeCatalogFallback()
     {
-        var handler = new LmStudioHandler(returnToolCall: true);
+        var handler = new NativeRuntimeHandler(returnToolCall: true);
         using var client = CreateClient(new HttpClient(handler));
         var schema = JsonSerializer.SerializeToElement(new
         {
@@ -248,7 +249,7 @@ public sealed class ModelRuntimeClientTests
         });
 
         _ = await client.CompleteChatAsync(
-            LmStudioModelCatalog.Qwen38Id,
+            NativeModelCatalog.Qwen38Id,
             [new LmChatMessage("user", "Wähle das Werkzeug.")],
             [new LmToolDefinition("go.selectTool", "Werkzeug wählen", schema)],
             modelRole: "general",
@@ -258,13 +259,13 @@ public sealed class ModelRuntimeClientTests
 
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
         Assert.False(body.RootElement.TryGetProperty("reasoning_effort", out _));
-        Assert.False(body.RootElement.TryGetProperty("chat_template_kwargs", out _));
+        Assert.False(body.RootElement.GetProperty("chat_template_kwargs").GetProperty("enable_thinking").GetBoolean());
     }
 
     [Fact]
     public async Task CompleteReasoningToolEnvelopeIsConvertedToValidatedNativeCall()
     {
-        var handler = new LmStudioHandler(reasoningToolCall: true);
+        var handler = new NativeRuntimeHandler(reasoningToolCall: true);
         using var client = CreateClient(new HttpClient(handler));
         var schema = JsonSerializer.SerializeToElement(new
         {
@@ -274,7 +275,7 @@ public sealed class ModelRuntimeClientTests
         });
 
         var result = await client.CompleteChatAsync(
-            LmStudioModelCatalog.Qwen38Id,
+            NativeModelCatalog.Qwen38Id,
             [new LmChatMessage("user", "Untersuche den Workspace.")],
             [new LmToolDefinition("workspace.inspect", "Workspace untersuchen", schema)],
             modelRole: "general",
@@ -308,9 +309,9 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Fact]
-    public async Task LmStudioMessageOrderCoalescesInitialSystemAndConvertsLateSystemGuidance()
+    public async Task NativeRuntimeMessageOrderCoalescesInitialSystemAndConvertsLateSystemGuidance()
     {
-        var handler = new LmStudioHandler(returnToolCall: false);
+        var handler = new NativeRuntimeHandler(returnToolCall: false);
         using var client = CreateClient(new HttpClient(handler));
 
         _ = await client.CompleteChatAsync(
@@ -343,11 +344,11 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task QwenCoderNextRejectsUnsupportedReasoningEffort()
     {
-        var handler = new LmStudioHandler(returnToolCall: false);
+        var handler = new NativeRuntimeHandler(returnToolCall: false);
         using var client = CreateClient(new HttpClient(handler));
 
         _ = await Assert.ThrowsAsync<InvalidOperationException>(() => client.CompleteChatAsync(
-            LmStudioModelCatalog.Qwen3CoderNextQ8Id,
+            NativeModelCatalog.Qwen3CoderNextQ8Id,
             [new LmChatMessage("user", "Prüfe das Projekt.")],
             [],
             modelRole: "general",
@@ -359,11 +360,11 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task Qwen38CanDisableThinkingWithoutSendingAnInvalidEffort()
     {
-        var handler = new LmStudioHandler(returnToolCall: false);
+        var handler = new NativeRuntimeHandler(returnToolCall: false);
         using var client = CreateClient(new HttpClient(handler));
 
         _ = await client.CompleteChatAsync(
-            LmStudioModelCatalog.Qwen38Id,
+            NativeModelCatalog.Qwen38Id,
             [new LmChatMessage("user", "Antworte direkt.")],
             [],
             modelRole: "general",
@@ -371,13 +372,13 @@ public sealed class ModelRuntimeClientTests
 
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
         Assert.False(body.RootElement.TryGetProperty("reasoning_effort", out _));
-        Assert.False(body.RootElement.TryGetProperty("chat_template_kwargs", out _));
+        Assert.False(body.RootElement.GetProperty("chat_template_kwargs").GetProperty("enable_thinking").GetBoolean());
     }
 
     [Fact]
     public async Task StreamingTurnReportsFinalUsageWithoutPrivateSlotsEndpoint()
     {
-        var handler = new LmStudioHandler(returnToolCall: false);
+        var handler = new NativeRuntimeHandler(returnToolCall: false);
         using var client = CreateClient(new HttpClient(handler));
         var progress = new List<ModelRuntimeProgress>();
 
@@ -402,7 +403,7 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task VisibleTextFragmentsAreForwardedBeforeTheBufferedResultCompletes()
     {
-        var handler = new LmStudioHandler(streamingText: true);
+        var handler = new NativeRuntimeHandler(streamingText: true);
         using var client = CreateClient(new HttpClient(handler));
         var progress = new List<ModelRuntimeProgress>();
 
@@ -443,7 +444,7 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task StreamingToolFragmentsAreBufferedAndValidatedBeforeReturning()
     {
-        var handler = new LmStudioHandler(streamingToolCall: true);
+        var handler = new NativeRuntimeHandler(streamingToolCall: true);
         using var client = CreateClient(new HttpClient(handler));
         var schema = JsonSerializer.SerializeToElement(new
         {
@@ -477,7 +478,7 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task CompleteStreamingToolJsonSurvivesMissingDoneFrameWithoutRetry()
     {
-        var handler = new LmStudioHandler(
+        var handler = new NativeRuntimeHandler(
             streamingToolCall: true,
             completeToolWithoutDone: true);
         using var client = CreateClient(new HttpClient(handler));
@@ -510,7 +511,7 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task StructuredToolOnlyKeepsACompleteToolCallAndDiscardsIncidentalFreeText()
     {
-        var handler = new LmStudioHandler(
+        var handler = new NativeRuntimeHandler(
             streamingToolCall: true,
             completeToolWithoutDone: true,
             streamingToolWithFreeText: true);
@@ -545,7 +546,7 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task TransientInferenceFailureIsRetriedAtMostTwiceBeforeToolExecution()
     {
-        var handler = new LmStudioHandler(returnToolCall: false, transientChatFailures: 2);
+        var handler = new NativeRuntimeHandler(returnToolCall: false, transientChatFailures: 2);
         using var client = CreateClient(new HttpClient(handler));
 
         var result = await client.CompleteChatAsync(
@@ -560,7 +561,7 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task PrematureStreamingToolJsonIsDiagnosedAndRetriedBeforeExecution()
     {
-        var handler = new LmStudioHandler(
+        var handler = new NativeRuntimeHandler(
             streamingToolCall: true,
             prematureStreamingFailures: 2);
         using var client = CreateClient(new HttpClient(handler));
@@ -606,7 +607,7 @@ public sealed class ModelRuntimeClientTests
     [Fact]
     public async Task PrematureStreamingToolJsonExhaustionHasStableProviderCode()
     {
-        var handler = new LmStudioHandler(
+        var handler = new NativeRuntimeHandler(
             streamingToolCall: true,
             prematureStreamingFailures: 3);
         using var client = CreateClient(new HttpClient(handler));
@@ -639,6 +640,30 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TransportFailureBeforeResponseReportsItsRealPhaseInsteadOfIncompleteToolCall(bool tokenCounting)
+    {
+        var handler = new NativeRuntimeHandler(transientChatFailures: tokenCounting ? 0 : 3, tokenCountingFailures: tokenCounting ? 3 : 0);
+        using var client = CreateClient(new HttpClient(handler));
+
+        var exception = await Assert.ThrowsAsync<ModelProviderRequestException>(() =>
+            client.CompleteChatAsync("gpt-oss-120b", [new LmChatMessage("user", "Prüfe das Projekt.")], []));
+
+        Assert.Equal(tokenCounting ? "token_counting" : "generation", exception.Phase);
+        Assert.Contains(tokenCounting ? "Prompt-Tokenzählung" : "Modellanfrage", exception.Message);
+        Assert.Contains("nach 3 Versuchen", exception.Message);
+        Assert.DoesNotContain("Tool-Call", exception.Message);
+        Assert.Equal(3, handler.TokenCountingAttempts);
+        Assert.Equal(tokenCounting ? 0 : 3, handler.ChatAttempts);
+        if (tokenCounting)
+        {
+            Assert.Equal(HttpStatusCode.InternalServerError, exception.StatusCode);
+            Assert.Contains("proxy error: Failed to read connection", exception.Message);
+        }
+    }
+
+    [Theory]
     [InlineData(System.Net.HttpStatusCode.RequestTimeout, true)]
     [InlineData(System.Net.HttpStatusCode.TooManyRequests, true)]
     [InlineData(System.Net.HttpStatusCode.ServiceUnavailable, true)]
@@ -657,12 +682,12 @@ public sealed class ModelRuntimeClientTests
         http,
         Options.Create(new GoAiServerOptions
         {
-            ModelRuntimeUri = new Uri("http://lmstudio.test:1234", UriKind.Absolute),
+            ModelRuntimeUri = new Uri("http://native.test:8081", UriKind.Absolute),
             GeneralModelId = "gpt-oss-120b",
         }),
         NullLogger<ModelRuntimeClient>.Instance);
 
-    private sealed class LmStudioHandler(
+    private sealed class NativeRuntimeHandler(
         bool returnToolCall = false,
         int transientChatFailures = 0,
         bool streamingToolCall = false,
@@ -671,15 +696,16 @@ public sealed class ModelRuntimeClientTests
         bool reasoningToolCall = false,
         bool streamingText = false,
         bool transientLoadChannelFailure = false,
-        bool streamingToolWithFreeText = false) : HttpMessageHandler
+        bool streamingToolWithFreeText = false,
+        int tokenCountingFailures = 0) : HttpMessageHandler
     {
-        private string? _loadedKey = "gpt-oss-120b";
-        private string? _loadedInstance = "general-instance";
+        private string? _loadedKey = NativeGeneralId;
 
         public List<string> ChatBodies { get; } = [];
         public List<string> ModelOperations { get; } = [];
         public List<string> RequestPaths { get; } = [];
         public int ChatAttempts { get; private set; }
+        public int TokenCountingAttempts { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -687,17 +713,25 @@ public sealed class ModelRuntimeClientTests
         {
             var path = request.RequestUri?.AbsolutePath ?? string.Empty;
             RequestPaths.Add(path);
-            if (request.Method == HttpMethod.Get && path == "/api/v1/models")
+            if (path == "/props") return Json("{\"default_generation_settings\":{\"n_ctx\":32768}}");
+            if (path == "/v1/chat/completions/input_tokens")
+            {
+                TokenCountingAttempts++;
+                if (TokenCountingAttempts <= tokenCountingFailures)
+                    return new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("proxy error: Failed to read connection") };
+                return Json("{\"input_tokens\":100}");
+            }
+            if (request.Method == HttpMethod.Get && path == "/v1/models")
             {
                 return Json(JsonSerializer.Serialize(new
                 {
-                    models = new object[]
+                    data = new object[]
                     {
-                        Model("gpt-oss-120b", 131_072),
-                        Model("qwen3.8-27b", 262_144),
-                        Model("qwen3-coder-next", 262_144),
-                        Model("qwen3-vl-30b-a3b-instruct", 262_144),
-                        Model("text-embedding-bge-m3", 8_192),
+                        Model("gpt-oss-120b"),
+                        Model("qwen3.8-27b"),
+                        Model("qwen3-coder-next"),
+                        Model("qwen3-vl-30b-a3b-instruct"),
+                        Model("text-embedding-bge-m3"),
                     },
                 }));
             }
@@ -705,27 +739,20 @@ public sealed class ModelRuntimeClientTests
             var body = request.Content is null
                 ? string.Empty
                 : await request.Content.ReadAsStringAsync(cancellationToken);
-            if (request.Method == HttpMethod.Post && path == "/api/v1/models/unload")
+            if (request.Method == HttpMethod.Post && path == "/models/unload")
             {
                 using var operation = JsonDocument.Parse(body);
-                var instance = operation.RootElement.GetProperty("instance_id").GetString();
+                var instance = operation.RootElement.GetProperty("model").GetString();
                 ModelOperations.Add("unload:" + instance);
                 _loadedKey = null;
-                _loadedInstance = null;
                 return Json("{\"success\":true}");
             }
-            if (request.Method == HttpMethod.Post && path == "/api/v1/models/load")
+            if (request.Method == HttpMethod.Post && path == "/models/load")
             {
                 using var operation = JsonDocument.Parse(body);
                 var requestedModel = operation.RootElement.GetProperty("model").GetString();
-                var context = operation.RootElement.GetProperty("context_length").GetInt32();
-                (_loadedKey, _loadedInstance) = requestedModel switch
-                {
-                    "qwen3.8-27b" => ("qwen3.8-27b", "qwen-instance"),
-                    "qwen3-coder-next" => ("qwen3-coder-next", "coder-instance"),
-                    _ => (requestedModel, "loaded-instance"),
-                };
-                ModelOperations.Add($"load:{requestedModel}:{context}");
+                _loadedKey = requestedModel;
+                ModelOperations.Add($"load:{requestedModel}");
                 if (transientLoadChannelFailure)
                 {
                     return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
@@ -733,7 +760,7 @@ public sealed class ModelRuntimeClientTests
                         Content = new StringContent("runtime channel restarted", Encoding.UTF8, "text/plain"),
                     };
                 }
-                return Json(JsonSerializer.Serialize(new { instance_id = _loadedInstance }));
+                return Json("{\"success\":true}");
             }
             if (request.Method == HttpMethod.Post && path == "/v1/chat/completions")
             {
@@ -806,21 +833,16 @@ public sealed class ModelRuntimeClientTests
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
 
-        private object Model(string key, int maximumContextLength) => new
+        private object Model(string key)
         {
-            key,
-            max_context_length = maximumContextLength,
-            loaded_instances = string.Equals(_loadedKey, key, StringComparison.OrdinalIgnoreCase)
-                ? new object[]
-                {
-                    new
-                    {
-                        id = _loadedInstance,
-                        config = new { context_length = maximumContextLength },
-                    },
-                }
-                : [],
-        };
+            var id = key switch
+            {
+                "text-embedding-bge-m3" => "embedding/bge-m3~test",
+                "qwen3-vl-30b-a3b-instruct" => "vision/qwen3-vl-30b-a3b-instruct~test",
+                _ => "coding/" + key + "~test",
+            };
+            return new { id, status = new { value = _loadedKey == id ? "loaded" : "unloaded" } };
+        }
 
         private static HttpResponseMessage Json(string json) => new(HttpStatusCode.OK)
         {

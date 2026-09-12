@@ -14,7 +14,13 @@ public sealed class GoAiServerOptions
 
     public int GatewayPort { get; set; } = 8080;
 
-    public Uri ModelRuntimeUri { get; set; } = new("http://host.docker.internal:1234", UriKind.Absolute);
+    public Uri ModelRuntimeUri { get; set; } = new("http://host.docker.internal:8081", UriKind.Absolute);
+
+    public string CodingModelRoot { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "huggingface", "hub");
+
+    public string CodingModelId { get; set; } = string.Empty;
+
+    public int CodingContextLength { get; set; } = ModelContextProfiles.Qwen38Maximum;
 
     public Uri SearxngUri { get; set; } = new("http://searxng:8080", UriKind.Absolute);
 
@@ -43,6 +49,10 @@ public sealed class GoAiServerOptions
     public int MaximumModelRounds { get; set; } = 12;
 
     public int MaximumToolCalls { get; set; } = 30;
+
+    public int CodingMaximumModelRounds { get; set; }
+
+    public int CodingMaximumToolCalls { get; set; }
 
     /// <summary>
     /// Optional shared data root mounted into the media workers. This is normally

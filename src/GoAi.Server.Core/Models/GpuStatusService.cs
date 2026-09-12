@@ -1,4 +1,4 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using System.Diagnostics;
 using System.Globalization;
 
@@ -85,18 +85,18 @@ public sealed class GpuStatusService
 
     internal static (string DisplayName, string Runtime) DescribeWorkload(string workload) => workload switch
     {
-        "llm-general" => ("gpt-oss-120b", "LM Studio"),
+        "llm-general" => ("gpt-oss-120b", "native llama"),
         "speech-to-text" => ("Audio wird transkribiert", "Docker · Whisper STT"),
         "live-caption" => ("Sprache wird live transkribiert", "Docker · Whisper STT"),
         "live-caption-warmup" => ("Sprachmodell wird vorbereitet", "Docker · Whisper STT"),
-        "caption-translation" => ("Live-Untertitel werden übersetzt", "LM Studio · gpt-oss-120b"),
+        "caption-translation" => ("Live-Untertitel werden übersetzt", "native llama · gpt-oss-120b"),
         "text-to-speech" => ("Antwort wird vorgelesen", "Docker · ausgewählte Sprachausgabe · GPU 1"),
         "image-generation" => ("Bild wird erstellt", "Docker · Image"),
         "media-analysis" => ("Medien werden analysiert", "Docker · Media"),
-        "vision" => ("Bild wird analysiert", "LM Studio · Vision"),
-        "audio-analysis" => ("Audio wird analysiert", "Docker + LM Studio"),
-        "video-audio-fusion" => ("Video und Audio werden zusammengeführt", "LM Studio · gpt-oss-120b"),
-        "embedding" => ("Kontext wird indiziert", "LM Studio · Embeddings"),
+        "vision" => ("Bild wird analysiert", "native llama · Vision"),
+        "audio-analysis" => ("Audio wird analysiert", "Docker + native llama"),
+        "video-audio-fusion" => ("Video und Audio werden zusammengeführt", "native llama · gpt-oss-120b"),
+        "embedding" => ("Kontext wird indiziert", "native llama · Embeddings"),
         "web-search" => ("Websuche wird ausgeführt", "Docker · SearXNG"),
         "youtube-search" => ("YouTube wird durchsucht", "YouTube API / SearXNG"),
         "web-fetch" => ("Webquelle wird geladen", "Docker · Gateway"),

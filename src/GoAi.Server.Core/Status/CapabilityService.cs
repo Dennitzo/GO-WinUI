@@ -29,8 +29,7 @@ public sealed class CapabilityService
         }
 
         var status = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
-        var dynamicModels = status.Models.Count > 0
-            ? status.Models.Select(static model => new ModelCapability(
+        var dynamicModels = status.Models.Select(static model => new ModelCapability(
                 model.Id,
                 model.Role,
                 model.ContextTokens,
@@ -38,8 +37,7 @@ public sealed class CapabilityService
                 model.SupportsVision,
                 false,
                 model.ReasoningEfforts,
-                model.DefaultReasoningEffort)).ToArray()
-            : null;
+                model.DefaultReasoningEffort)).ToArray();
         return CreateSnapshot(dynamicModels);
     }
 
@@ -54,10 +52,20 @@ public sealed class CapabilityService
             CreateModelCapability(_options.EmbeddingModelId, "embedding", _options.EmbeddingContextLength, false, false),
         ],
         [
-            "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
+            "web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze",
             "image.generate", "math.evaluate", "context.embed", "context.retrieve",
         ],
         [
+            ClientToolNames.CodingList,
+            ClientToolNames.CodingSearch,
+            ClientToolNames.CodingRead,
+            ClientToolNames.CodingWrite,
+            ClientToolNames.CodingEdit,
+            ClientToolNames.CodingCommand,
+            ClientToolNames.CodingGitDiff,
+            ClientToolNames.CodingSearchHistory,
+            ClientToolNames.CodingSearchKnowledge,
+            ClientToolNames.CodingRenderHtml,
             ClientToolNames.DocumentRead,
             ClientToolNames.DocumentCreate,
             ClientToolNames.DocumentsList,

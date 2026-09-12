@@ -16,7 +16,4 @@
     <PackageReference Include="PdfPig" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
   </ItemGroup>
-  <ItemGroup>
-    <EmbeddedResource Include="Resources\Workflows\*.json" />
-  </ItemGroup>
 </Project>

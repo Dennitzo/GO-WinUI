@@ -1,4 +1,4 @@
-using GoAi.Contracts;
+﻿using GoAi.Contracts;
 using GoAi.Server.Core.Runs;
 using System.Text.Json;
 
@@ -138,7 +138,7 @@ public sealed class AgentToolCatalogTests
         var catalog = new AgentToolCatalog();
         var tools = catalog.GetAvailableTools(CreateRequest(null));
         var search = catalog.Resolve("web.search", tools);
-        using var arguments = JsonDocument.Parse("""{"query":"TGA","unexpected":true}""");
+        using var arguments = JsonDocument.Parse("""{"query":"Wissenschaft","unexpected":true}""");
 
         Assert.Throws<ArgumentException>(() => catalog.Validate(search, arguments.RootElement));
         Assert.Throws<InvalidOperationException>(() => catalog.Resolve("shell.execute", tools));

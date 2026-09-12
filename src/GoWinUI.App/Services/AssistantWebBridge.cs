@@ -17,7 +17,7 @@ public sealed class AssistantWebBridge : IDisposable
     private static readonly HashSet<string> AllowedIncomingTypes = new(StringComparer.Ordinal)
     {
         "app.ready", "conversation.refresh", "chat.send", "chat.cancel", "session.create", "session.open",
-        "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick",
+        "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick", "coding.pickWorkspace",
         "document.remove", "attachment.remove", "workflow.list", "workflow.insert", "workflow.create",
         "workflow.update", "workflow.delete",
         "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",

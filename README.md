@@ -1,6 +1,6 @@
 # GO
 
-GO ist eine lokale WinUI-3-Anwendung mit AI-Chat, Dokumentkontext, SQLite-Workflows und Projektverwaltung. Der Client verbindet sich mit dem Docker-Gateway im privaten LAN; LLM-, Vision- und Embeddingmodelle werden auf dem GPU-Host von LM Studio verwaltet. Cloud-Anbieter gehören nicht zur Laufzeitarchitektur.
+GO ist eine lokale WinUI-3-Anwendung mit AI-Chat, Coding-Agent, Dokumentkontext, SQLite-Workflows und Projektverwaltung. Der Client verbindet sich mit dem Docker-Gateway im privaten LAN; General-, Coding-, Vision- und Embeddingmodelle laufen im nativen Windows-llama.cpp-Server aus Unsloth. Er liest die vorhandenen Modelle direkt aus dem lokalen Hugging-Face-Cache. Cloud-Anbieter gehören nicht zur Laufzeitarchitektur.
 
 ## Funktionen
 
@@ -8,7 +8,8 @@ GO ist eine lokale WinUI-3-Anwendung mit AI-Chat, Dokumentkontext, SQLite-Workfl
 - modularer, vollständig lokal gebündelter WebView2-Assistent mit Sitzungen, Markdown, Code, Tabellen, KaTeX, Anhängen, Workflows, Reasoning-Auswahl, Kontextanzeige, Stop und PDF-Export
 - direktes, schlüsselloses HTTP-Protokoll zum Docker-Gateway mit Run-Events, Abbruch, Checkpoints, Kontextbudget und Crash-Recovery
 - persistenter Dokumentkontext für PDF, DOCX sowie Text-, Markup- und Quellcodeformate; PDF-Seitenauswahl und verständliche Ablehnung leerer Scan-PDFs
-- zwei eingebaute allgemeine Barebone-Workflows sowie anlegbare, editierbare, klonbare und revisionsgesicherte Benutzerworkflows
+- eine zunächst leere Workflow-Bibliothek mit anlegbaren, editierbaren, klonbaren und revisionsgesicherten Benutzerworkflows
+- Coding-Modus mit eigenem Modell, Projektordner pro Sitzung, Datei-/Such-/Diff-Werkzeugen, automatischen Prüfbefehlen und gestreamtem Fortschritt
 - lokale Projekte, Checklisten und Assets einschließlich Chunking, Deduplizierung, Vorschau, externer Arbeitskopie, erkanntem Reimport und Thumbnail
 - flüchtige, inhaltsredigierte App-/DB-/AI-/WebView-/BricsCAD-Logs und manuelle, prüfsummengeschützte `.gobackup`-Backups
 - technisch getrennte BricsCAD-V26-Bridge mit dynamischem Loopback-Port, gegenseitiger Authentifizierung und dem bestehenden 39-Fähigkeiten-Vertrag
@@ -33,7 +34,7 @@ Die lokale Client-SQLite ist die einzige Wahrheit für Chats, Dokumente, Workflo
 - Windows 10 Version 2004 (Build 19041) oder neuer, x64
 - WebView2 Evergreen Runtime
 - erreichbarer GO-AI-Hybrid-Stack im privaten LAN; Standardadresse `http://192.168.0.67:8080`
-- auf dem GPU-Server LM Studio samt lokalem Modellkatalog und Server auf Port `1234`
+- auf dem Windows-GPU-Host Unsloths nativer `llama-server.exe`, ein Python-Interpreter und lokale GGUF-Modelle; der verwaltete Router nutzt Port `8081`
 - .NET SDK 10.0.302 nur zum Bauen
 - optional BricsCAD V26 samt Managed SDK zum Bauen und Laden des Plugins
 
@@ -69,10 +70,17 @@ Serverbetrieb, Modellpfade, Deployment und Live-Abnahme sind in [GO-AI-SERVER.md
 
 1. Auf dem GPU-Server `windows\start-ai-stack.ps1` ausführen.
 2. `GO.exe` starten und unter **Einstellungen** die Serveradresse prüfen.
-3. Dokumente im Composer anhängen oder im Workflow-Overlay einen allgemeinen Workflow als Kontext wählen.
+3. **General AI Modell** und **Coding AI Modell** unabhängig auswählen. Über **Workspace** im Promptfenster einen Projektordner zuordnen und Coding starten oder Dokumente für General im Composer anhängen.
 4. Backups vor externen Änderungen über **Einstellungen** erzeugen. Ein Restore prüft Manifest, Hashes, Datenbankintegrität und Schemaversion und sichert zuerst den aktuellen Zustand.
 
 GO startet pro Windows-Benutzer nur einmal. Weitere Starts aktivieren das bestehende Fenster. Die allgemeine Chatpipeline kennt die BricsCAD-Bridge absichtlich nicht und kann keine CAD-Aktionen auslösen.
+
+Im Coding-Modus kann das lokale Modell selbstständig die vorhandene SearXNG-Websuche
+und mehrstufige Deep Research nutzen. Beide Modi verwenden denselben Chatheader ohne
+Modellangaben. Die Arbeitsansicht zeigt den Workspace und aufklappbare
+Werkzeugschritte mit Datei-Diffs, Ergebnissen und dauerhaft gespeicherten
+Statusdaten. Die Nachrichtenfooter bleiben erhalten. Details und nachprüfbare
+Abnahmeläufe stehen in [Coding-Validierung](docs/CODING-AGENT-VALIDATION.md).
 
 ## v1-Abgrenzungen
 

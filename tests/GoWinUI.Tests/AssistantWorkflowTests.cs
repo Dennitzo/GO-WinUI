@@ -13,15 +13,13 @@ namespace GoWinUI.Tests;
 public sealed class AssistantWorkflowTests
 {
     [Fact]
-    public void LiveModelTokensUseOneCounterForTheCurrentModelRun()
+    public void LiveModelTokensKeepPromptAndGeneratedCountsForTheCurrentModelRun()
     {
-        var activeRunTokens = 0;
-        var hasRunStarted = false;
+        var counter = new GoAiAssistantService.ModelTokenProgressState();
 
         var started = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent("generationStarted"),
-            ref activeRunTokens,
-            ref hasRunStarted);
+            counter);
         var firstTurn = GoAiAssistantService.FormatModelTokenProgress(new ModelGenerationEvent(
             "tokenProgress",
             PromptProgress: 0.75,
@@ -29,26 +27,22 @@ public sealed class AssistantWorkflowTests
             ProcessedPromptTokens: 900,
             GeneratedTokens: 42,
             TokensPerSecond: 17.25),
-            ref activeRunTokens,
-            ref hasRunStarted);
+            counter);
         var selectedTool = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent("toolSelected", "fs.readText"),
-            ref activeRunTokens,
-            ref hasRunStarted);
+            counter);
         var nextTurn = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent("generationStarted"),
-            ref activeRunTokens,
-            ref hasRunStarted);
+            counter);
         var secondTurn = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent("tokenProgress", GeneratedTokens: 8),
-            ref activeRunTokens,
-            ref hasRunStarted);
+            counter);
 
         Assert.Equal("0 Token", started);
-        Assert.Equal("942 Token", firstTurn);
-        Assert.Equal("942 Token", selectedTool);
+        Assert.Equal("900 Kontexttoken · ca. 42 erzeugte Token", firstTurn);
+        Assert.Equal("900 Kontexttoken · ca. 42 erzeugte Token", selectedTool);
         Assert.Equal("0 Token", nextTurn);
-        Assert.Equal("8 Token", secondTurn);
+        Assert.Equal("ca. 8 erzeugte Token", secondTurn);
         Assert.DoesNotContain("Prompt", secondTurn, StringComparison.Ordinal);
         Assert.DoesNotContain("Token/s", secondTurn, StringComparison.Ordinal);
     }
@@ -56,21 +50,18 @@ public sealed class AssistantWorkflowTests
     [Fact]
     public void LiveModelTokensPreferLlamaCurrentTokensForModelsWithoutReasoning()
     {
-        var activeRunTokens = 0;
-        var hasRunStarted = false;
+        var counter = new GoAiAssistantService.ModelTokenProgressState();
 
         _ = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent("generationStarted"),
-            ref activeRunTokens,
-            ref hasRunStarted);
+            counter);
         var promptEvaluation = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent(
                 "tokenProgress",
                 ProcessedPromptTokens: 13_331,
                 GeneratedTokens: 0,
                 CurrentTokens: 13_331),
-            ref activeRunTokens,
-            ref hasRunStarted);
+            counter);
 
         Assert.Equal($"{13_331:N0} Token", promptEvaluation);
         Assert.NotEqual("0 Token", promptEvaluation);
@@ -79,20 +70,17 @@ public sealed class AssistantWorkflowTests
     [Fact]
     public void LiveModelTokensDeriveLlamaCurrentTokensFromOlderGatewayEvents()
     {
-        var activeRunTokens = 0;
-        var hasRunStarted = false;
+        var counter = new GoAiAssistantService.ModelTokenProgressState();
 
         _ = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent("generationStarted"),
-            ref activeRunTokens,
-            ref hasRunStarted);
+            counter);
         var promptEvaluation = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent(
                 "tokenProgress",
                 ProcessedPromptTokens: 13_331,
                 GeneratedTokens: 0),
-            ref activeRunTokens,
-            ref hasRunStarted);
+            counter);
 
         Assert.Equal($"{13_331:N0} Token", promptEvaluation);
     }
@@ -145,10 +133,10 @@ public sealed class AssistantWorkflowTests
         Assert.InRange(AssistantPage.PdfA4HeightInches, 11.692, 11.693);
         Assert.InRange(AssistantPage.PdfBookMarginLeftInches, .944, .946);
         Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
-        Assert.Contains("styles.css?v=20260826-1", html, StringComparison.Ordinal);
-        Assert.Contains("markdown.js?v=20260821-1", html, StringComparison.Ordinal);
+        Assert.Contains("styles.css?v=20260912-2", html, StringComparison.Ordinal);
+        Assert.Contains("markdown.js?v=20260911-9", html, StringComparison.Ordinal);
         Assert.Contains("voice.js?v=20260822-2", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260826-1", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260912-3", html, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
@@ -436,7 +424,7 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void ToolsMenuLeavesReasoningAtTheLmStudioModelDefault()
+    public void ToolsMenuLeavesReasoningAtTheNativeModelDefault()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
@@ -452,7 +440,7 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void SettingsExposeOnlyTheGeneralModelSelector()
+    public void SettingsExposeIndependentGeneralAndCodingModelSelectors()
     {
         var settingsPage = File.ReadAllText(Path.Combine(
             FindRepositoryRoot(),
@@ -470,9 +458,12 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("Header=\"General AI Modell\"", settingsPage, StringComparison.Ordinal);
         Assert.Contains("ViewModel.Models", settingsPage, StringComparison.Ordinal);
         Assert.Contains("ViewModel.SelectedGeneralModelItem", settingsPage, StringComparison.Ordinal);
-        Assert.DoesNotContain("Coding AI Modell", settingsPage, StringComparison.Ordinal);
-        Assert.DoesNotContain("SelectedCodingModel", settingsViewModel, StringComparison.Ordinal);
-        Assert.True(SettingsViewModel.IsTerminalOnlyModel("qwen3-coder-next"));
+        Assert.Contains("Header=\"Coding AI Modell\"", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.SelectedCodingModelItem", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("GetCodingModelsAsync", settingsViewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsTerminalOnlyModel", settingsViewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("LM Studio", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("native Unsloth-Laufzeit", settingsPage, StringComparison.Ordinal);
         Assert.DoesNotContain("status = await SaveAsync(cancellationToken);", settingsViewModel, StringComparison.Ordinal);
     }
 
@@ -561,7 +552,7 @@ public sealed class AssistantWorkflowTests
             "MicrophoneTranscriptionService.cs"));
 
         Assert.Contains("function updateVoiceDictation(", app, StringComparison.Ordinal);
-        Assert.Contains("elements.prompt.value = turn.renderedValue", app, StringComparison.Ordinal);
+        Assert.Contains("setPromptValue(turn.renderedValue)", app, StringComparison.Ordinal);
         Assert.Contains("nextRevision <= turn.lastRevision", app, StringComparison.Ordinal);
         Assert.Contains("turn.manuallyConfirmed = true", app, StringComparison.Ordinal);
         Assert.Contains("payload?.isFinal && payload?.sendPrompt", app, StringComparison.Ordinal);
@@ -1249,17 +1240,30 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void ComposerClearsOneShotToolsButKeepsEveryPersistentSessionToolAfterTerminalRunState()
+    public void ComposerKeepsLiveDraftAndPersistentSessionToolsAcrossHostUpdates()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("new Set([\"bricsCad\", \"audiobook\"])", app, StringComparison.Ordinal);
+        Assert.Contains("new Set([\"bricsCad\", \"audiobook\", \"coding\"])", app, StringComparison.Ordinal);
         Assert.Contains("!persistentToolActions.has(state.selectedToolAction)", app, StringComparison.Ordinal);
         Assert.Contains("clearCompletedOneShotToolAction();", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.completed\":", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.cancelled\":", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.failed\":", app, StringComparison.Ordinal);
+
+        // A Coding chip or project-folder snapshot may arrive before session.draft is saved.
+        // Only opening another session may replace the live text, including a cleared draft.
+        var snapshotBlock = app[
+            app.IndexOf("function applySnapshot(payload)", StringComparison.Ordinal)..
+            app.IndexOf("function renderSessionPin()", StringComparison.Ordinal)];
+        var draftAssignments = System.Text.RegularExpressions.Regex.Matches(
+            snapshotBlock,
+            @"setPromptValue\(");
+        Assert.Single(draftAssignments.Cast<System.Text.RegularExpressions.Match>());
+        Assert.Matches(
+            @"if \(sessionChanged\)\s*\{\s*setPromptValue\(payload\.draft \|\| """"\);\s*\}",
+            snapshotBlock);
     }
 
     [Fact]
@@ -1719,8 +1723,10 @@ public sealed class AssistantWorkflowTests
         await settings.InitializeAsync();
         var recentActivity = CreateRecentActivity(settings);
         var coordinator = CreateCoordinator(environment, settings, recentActivity);
-        var workflows = await environment.Get<IWorkflowRepository>().ListAsync();
-        var workflow = workflows[0];
+        var now = DateTimeOffset.UtcNow;
+        var workflow = await environment.Get<IWorkflowRepository>().CreateAsync(new(
+            Guid.Empty, "workflow-test", "Test-Workflow", "Beschreibung", "Allgemein", "Testkontext",
+            "{\"schema\":\"go.general.workflow.v1\",\"blocks\":[]}", false, 0, now, now));
         using var payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(new { workflowId = workflow.Id }));
         var envelope = new WebBridgeEnvelope(
             AssistantWebBridge.ProtocolVersion,
