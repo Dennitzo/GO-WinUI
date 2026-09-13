@@ -397,6 +397,16 @@
     syncDisclosure(event.currentTarget || event.target);
   }
 
+  function expandsChangesByDefault(step) {
+    // Open mutations before the first receipt arrives so their live preview is
+    // immediately visible. Replacements, added files and deletions are all
+    // represented by these tools' unified patches, including /dev/null sides.
+    if (["coding.edit", "coding.write", "coding.gitDiff"].includes(step.tool)) return true;
+    const output = json(step.outputJson);
+    return Boolean(typeof output?.diff === "string" ? output.diff : output?.diff?.stdout)
+      || Boolean(output?.stagedDiff?.stdout);
+  }
+
   function renderStep(step, index, message, options, previous) {
     const pending = !terminalStates.has(String(step.status).toLowerCase());
     const status = terminalStates.has(String(message.status).toLowerCase()) && pending ? "interrupted" : String(step.status || "running").toLowerCase();
@@ -413,7 +423,8 @@
     section.setAttribute("aria-label", `Schritt ${index + 1}: ${label}`);
     const disclosure = node("details", "coding-step__disclosure");
     const previousDisclosure = previous?.querySelector(".coding-step__disclosure");
-    if (previousDisclosure ? previousDisclosure.hasAttribute("open") : options.codingToolStepsExpanded === true) {
+    if (previousDisclosure ? previousDisclosure.hasAttribute("open")
+      : expandsChangesByDefault(step) || options.codingToolStepsExpanded === true) {
       disclosure.setAttribute("open", "");
     }
     const title = node("summary", "coding-step__title");
@@ -436,6 +447,69 @@
       onPreview: options.onPreview };
     const messageId = String(message.id);
     disclosure._codingCreateContent = () => stepContent(step, status, messageId, contentOptions);
+    disclosure.addEventListener("toggle", disclosureToggled);
+    syncDisclosure(disclosure);
+    section.append(disclosure);
+    return section;
+  }
+
+  function renderReasoning(step, message, options, previous) {
+    const pending = !terminalStates.has(String(step.status).toLowerCase());
+    const status = terminalStates.has(String(message.status).toLowerCase()) && pending
+      ? "interrupted" : String(step.status || "running").toLowerCase();
+    const active = !terminalStates.has(status);
+    const input = json(step.inputJson);
+    const round = Number.isSafeInteger(input?.round) && input.round > 0 ? input.round : null;
+    const compaction = input?.phase === "compaction";
+    const text = String(step.detail || "");
+    const section = node("section", `coding-reasoning coding-reasoning--${status}`);
+    section.dataset.stepId = String(step.id);
+    section.dataset.timelineKey = `tool-${step.id}`;
+    // Model reasoning is a separate display channel, never answer narration or
+    // a real execution. In particular, it must not enter read-aloud selection.
+    section.dataset.speechExclude = "true";
+    section.setAttribute("aria-label", ["Denkprozess", round ? `Runde ${round}` : "", compaction ? "Kontextverdichtung" : ""].filter(Boolean).join(" · "));
+    const signature = [status, round, text, compaction];
+    section._codingSignature = signature;
+    if (previous?._codingSignature?.every((value, i) => value === signature[i])) {
+      section._codingKeep = previous;
+      return section;
+    }
+
+    const disclosure = node("details", "coding-step__disclosure coding-reasoning__disclosure");
+    const previousDisclosure = previous?.querySelector(".coding-reasoning__disclosure");
+    if (!previousDisclosure || previousDisclosure.hasAttribute("open")) disclosure.setAttribute("open", "");
+    const title = node("summary", "coding-reasoning__title");
+    const indicator = node("span", active ? "coding-reasoning__indicator message-status-spinner" : "coding-reasoning__indicator",
+      active ? "" : status === "completed" ? "✓" : "·");
+    indicator.setAttribute("aria-hidden", "true");
+    const name = node("strong", "coding-reasoning__name", "Denkprozess");
+    title.append(indicator, name);
+    if (round) title.append(node("span", "coding-reasoning__round", `Runde ${round}`));
+    if (compaction) title.append(node("span", "coding-reasoning__round coding-reasoning__phase", "Kontextverdichtung"));
+    const state = node("span", "coding-reasoning__status", active ? "Denkt nach" : statusLabels[status]);
+    state.setAttribute("role", "status");
+    state.setAttribute("aria-live", "polite");
+    const chevron = node("span", "coding-step__chevron", "›");
+    chevron.setAttribute("aria-hidden", "true");
+    title.append(state, chevron);
+    // Only the closed preview is shortened. The expanded text retains every
+    // received paragraph and code block, without an inner scroll container.
+    const preview = text.trim().split(/\r?\n/).filter(line => line.trim()).at(-1) || "Gedanken werden empfangen …";
+    title.append(node("span", "coding-reasoning__preview", preview.replace(/\s+/g, " ").slice(0, 180)));
+    disclosure.append(title);
+    const renderMarkdown = options.renderMarkdown, enhanceCodeBlocks = options.enhanceCodeBlocks;
+    disclosure._codingCreateContent = () => {
+      const content = node("div", "coding-step__content coding-reasoning__content");
+      const body = node("div", "message-content coding-reasoning__body");
+      body.setAttribute("aria-live", "off");
+      if (text.trim()) {
+        body.append(renderMarkdown(text));
+        enhanceCodeBlocks?.(body);
+      } else body.append(node("p", "coding-note", active ? "Gedanken werden empfangen …" : "Kein Denktext empfangen."));
+      content.append(body);
+      return content;
+    };
     disclosure.addEventListener("toggle", disclosureToggled);
     syncDisclosure(disclosure);
     section.append(disclosure);
@@ -465,13 +539,17 @@
       options.enhanceCodeBlocks?.(block);
       timeline.append(block);
     }
-    steps.filter(step => step.kind !== "phase").forEach((step, index) => {
+    let executionIndex = 0;
+    steps.filter(step => step.kind !== "phase").forEach(step => {
       if (Number.isInteger(step.contentOffset)) {
         const end = Math.max(offset, Math.min(content.length, step.contentOffset));
         narration(content.slice(offset, end), `text-before-${step.id}`);
         offset = end;
       }
-      timeline.append(renderStep(step, index, message, options, previousByKey.get(`tool-${step.id}`)));
+      const previous = previousByKey.get(`tool-${step.id}`);
+      timeline.append(step.tool === "assistant.reasoning"
+        ? renderReasoning(step, message, options, previous)
+        : renderStep(step, executionIndex++, message, options, previous));
     });
     const active = !terminalStates.has(String(message.status).toLowerCase());
     narration(content.slice(offset), "text-tail", active && !steps.some(step => !terminalStates.has(String(step.status).toLowerCase())));

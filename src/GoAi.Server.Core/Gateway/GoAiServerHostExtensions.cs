@@ -74,23 +74,25 @@ public static class GoAiServerHostExtensions
 
     public static IHostBuilder ConfigureGoAiServer(
         this IHostBuilder builder,
-        Action<GoAiServerOptions>? configure = null)
+        Action<GoAiServerOptions>? configure = null,
+        bool includeHostedServices = true,
+        IPAddress? listenAddress = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
         var options = new GoAiServerOptions();
         configure?.Invoke(options);
 
-        builder.ConfigureServices(services => services.AddGoAiServerServices(options, includeHostedServices: true));
+        builder.ConfigureServices(services => services.AddGoAiServerServices(options, includeHostedServices));
 
         builder.ConfigureWebHostDefaults(webBuilder =>
         {
             webBuilder.SuppressStatusMessages(true);
             webBuilder.UseKestrel(kestrel =>
             {
-                kestrel.ListenAnyIP(options.GatewayPort, listen =>
-                {
-                    listen.Protocols = HttpProtocols.Http1;
-                });
+                if (listenAddress is null)
+                    kestrel.ListenAnyIP(options.GatewayPort, listen => listen.Protocols = HttpProtocols.Http1);
+                else
+                    kestrel.Listen(listenAddress, options.GatewayPort, listen => listen.Protocols = HttpProtocols.Http1);
                 kestrel.Limits.MaxRequestBodySize = GoAiProtocol.UploadChunkSize + (128 * 1024);
                 kestrel.AddServerHeader = false;
             });

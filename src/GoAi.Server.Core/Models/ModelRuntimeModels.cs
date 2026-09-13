@@ -1,4 +1,5 @@
 using System.Text.Json;
+using GoAi.Contracts;
 
 namespace GoAi.Server.Core.Models;
 
@@ -19,7 +20,8 @@ public sealed record ModelRuntimeProgress(
     bool? ToolArgumentsJsonComplete = null,
     int? ContentCharacters = null,
     bool? FinishObserved = null,
-    string? ContentDelta = null);
+    string? ContentDelta = null,
+    string? ReasoningDelta = null);
 
 public sealed record LmChatMessage(
     string Role,
@@ -37,7 +39,17 @@ public sealed record LmChatResult(
     int InputTokens,
     int OutputTokens,
     bool HadReasoning = false,
-    int ReasoningTokens = 0);
+    int ReasoningTokens = 0,
+    ModelTurnMetrics? Metrics = null);
+
+public sealed class ModelEmptyResponseException(bool hadReasoning, int attempts)
+    : InvalidOperationException(hadReasoning
+        ? $"Das lokale Modell hat nach {attempts} aufeinanderfolgenden Anfragen nur Denktext geliefert, aber keinen Antworttext oder vollständigen Werkzeugaufruf. Bereits ausgeführte Änderungen und der Arbeitsstand bleiben gespeichert. Der Lauf kann fortgesetzt werden."
+        : $"Das lokale Modell hat nach {attempts} aufeinanderfolgenden Anfragen keinen Antworttext oder vollständigen Werkzeugaufruf geliefert. Bereits ausgeführte Änderungen und der Arbeitsstand bleiben gespeichert. Der Lauf kann fortgesetzt werden.")
+{
+    public bool HadReasoning { get; } = hadReasoning;
+    public int Attempts { get; } = attempts;
+}
 
 public sealed class ModelContextLengthException(
     string modelId,

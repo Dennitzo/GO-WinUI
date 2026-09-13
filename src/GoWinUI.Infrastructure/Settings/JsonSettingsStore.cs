@@ -120,6 +120,10 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             SelectedCodingModel = string.IsNullOrWhiteSpace(settings.SelectedCodingModel) ? null : settings.SelectedCodingModel.Trim(),
             CodingWorkspacePath = string.IsNullOrWhiteSpace(settings.CodingWorkspacePath) ? null : settings.CodingWorkspacePath.Trim(),
             ReasoningEffort = NormalizeReasoningEffort(settings.Version, settings.ReasoningEffort),
+            ReasoningEffortsByModel = (settings.ReasoningEffortsByModel ?? [])
+                .Where(item => item.Key.Length <= 1024 && !item.Key.Any(char.IsControl)
+                    && item.Value is { Length: > 0 and <= 32 } && item.Value.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-'))
+                .GroupBy(item => item.Key.ToLowerInvariant()).ToDictionary(group => group.Key, group => group.Last().Value.ToLowerInvariant(), StringComparer.OrdinalIgnoreCase),
             AccentColor = accentColor,
             BackgroundColor = backgroundColor,
             NavigationPaneWidth = Math.Clamp(settings.NavigationPaneWidth, 280, 520),

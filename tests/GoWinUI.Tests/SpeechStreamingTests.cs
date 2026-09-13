@@ -6,6 +6,45 @@ namespace GoWinUI.Tests;
 
 public sealed class SpeechStreamingTests
 {
+    [Theory]
+    [InlineData("Ich prüfe jetzt die Datei.", "Ich prüfe jetzt die Datei.")]
+    [InlineData("**Zuerst** prüfe ich die Datei.", "Zuerst prüfe ich die Datei.")]
+    [InlineData("\n### Zunächst prüfe ich die Datei.", "Zunächst prüfe ich die Datei.")]
+    public async Task CodingTokenStreamPreservesTheFirstWordThroughTheActualSpeechPlan(string narration, string expected)
+    {
+        var initial = Message();
+        var synthesisText = new ConcurrentQueue<string>();
+        using var spoken = new SemaphoreSlim(0);
+        using var session = new SpeechStreamingSession(initial, (text, _) =>
+        {
+            // Follow the same normalization and segmentation as SpeakCoreAsync.
+            var units = SpeechSourceSegmentation.CreateUnits(text);
+            var segments = SpeechSourceSegmentation.CreateDirectSegments(units,
+                MicrophoneTranscriptionService.PrepareSpeechText(text));
+            foreach (var segment in segments) synthesisText.Enqueue(segment.Text);
+            spoken.Release();
+            return Task.CompletedTask;
+        });
+        var reasoning = new AssistantToolStep("thinking", "assistant.reasoning", "running", "INTERNAL_REASONING");
+        session.Observe(new(GoAiAssistantUpdateKind.Status, initial, ToolStep: reasoning));
+        for (var length = 1; length <= narration.Length; length++)
+        {
+            var partial = initial with { Content = narration[..length] };
+            session.Observe(new(GoAiAssistantUpdateKind.Delta, partial));
+            session.Observe(new(GoAiAssistantUpdateKind.Status, partial, ToolStep: reasoning));
+        }
+        Assert.Empty(synthesisText);
+        var final = initial with { Content = narration };
+        var tool = new AssistantToolStep("read", "coding.read", "running", "TOOL_DETAIL");
+        session.Observe(new(GoAiAssistantUpdateKind.Status, final, ToolStep: tool));
+        Assert.True(await spoken.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(expected, Assert.Single(synthesisText));
+        session.Observe(new(GoAiAssistantUpdateKind.Completed, final));
+        await session.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(expected, Assert.Single(synthesisText));
+        Assert.Null(session.Failure);
+    }
+
     [Fact]
     public async Task AssistantTextPlaysDuringTwoDeltasWithoutAMicrophoneSessionAndFinishesOnlyTheRemainingText()
     {

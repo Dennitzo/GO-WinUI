@@ -14,14 +14,24 @@ internal static partial class CodingSessionTools
         var messages = await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false);
         var currentIndex = assistantMessageId is null ? -1 : messages.ToList().FindIndex(message => message.Id == assistantMessageId);
         // Exclude the current turn's prompt as well as the streaming answer: neither is recalled history.
-        var history = currentIndex > 0 ? messages.Take(currentIndex - 1) : messages;
-        var matches = history.Where(message => message.Status == MessageStatus.Completed
-                && message.Content.Contains(query, StringComparison.OrdinalIgnoreCase))
-            .TakeLast(Math.Clamp(maximumResults, 1, 8))
-            .Select(message => new
+        var history = assistantMessageId is null ? messages : messages.Take(Math.Max(0, currentIndex - 1));
+        var terms = QueryTermsRegex().Matches(query).Select(match => match.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(32).ToArray();
+        var matches = history.Where(message => message.Role is ChatRole.User or ChatRole.Assistant
+                && message.Status is not (MessageStatus.Pending or MessageStatus.Streaming))
+            .Select(message => new { Message = message, Text = message.Role == ChatRole.Assistant
+                ? GoAiAssistantService.CodingHistoryEvidence(message) : message.Content })
+            .Select(item => new { item.Message, item.Text, Score =
+                (!string.IsNullOrWhiteSpace(query) && item.Text.Contains(query, StringComparison.OrdinalIgnoreCase) ? 100 : 0)
+                + terms.Count(term => item.Text.Contains(term, StringComparison.OrdinalIgnoreCase)) })
+            .Where(item => item.Score > 0).OrderByDescending(item => item.Score).ThenByDescending(item => item.Message.CreatedAt)
+            .Take(Math.Clamp(maximumResults, 1, 8))
+            .OrderBy(item => item.Message.CreatedAt)
+            .Select(item => new
             {
-                messageId = message.Id, role = message.Role.ToString().ToLowerInvariant(), message.CreatedAt,
-                text = MatchWindow(message.Content, query), citation = $"Nachricht {message.Id:D}",
+                messageId = item.Message.Id, role = item.Message.Role.ToString().ToLowerInvariant(), item.Message.CreatedAt,
+                status = item.Message.Status.ToString().ToLowerInvariant(),
+                text = KnowledgeExcerpt(item.Text, query, 1_600).Text, citation = $"Nachricht {item.Message.Id:D}",
             }).ToArray();
         return new { scope = "current-session", isUntrusted = true, query, matches };
     }

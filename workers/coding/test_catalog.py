@@ -68,8 +68,11 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(command[command.index("--sleep-idle-seconds") + 1], "-1")
         self.assertEqual(command.count("--sleep-idle-seconds"), 1)
         self.assertEqual(command[command.index("--models-max") + 1], "1")
-        self.assertEqual(command[command.index("--fit") + 1], "on")
-        self.assertEqual(command[command.index("--fit-target") + 1], "2048")
+        self.assertNotIn("--fit", command)  # CLI values override model-specific trial settings.
+        self.assertNotIn("--n-gpu-layers", command)
+        preset.parent.mkdir(parents=True, exist_ok=True)
+        catalog.write_presets(self.root, preset)
+        self.assertIn("fit = on\nfit-target = 2048", preset.read_text())
         self.assertIn("--no-models-autoload", command)
 
     def test_every_child_role_inherits_disabled_sleep_from_the_generated_preset(self):
@@ -170,10 +173,23 @@ class CatalogTests(unittest.TestCase):
         gguf(self.root / "Qwen3.8.gguf", architecture="qwen35", context=262144, template=template)
         target = self.root / "models.ini"
         models = catalog.write_presets(self.root, target)
-        self.assertEqual(models[0]["reasoning"], {"enabled": True, "effort": "xhigh", "budget": -1})
+        self.assertEqual(models[0]["reasoning"], {"enabled": True, "effort": "xhigh", "budget": -1,
+                             "levels": ["none", "xhigh", "medium", "low"], "mode": "llama-native"})
         text = target.read_text()
         self.assertIn("reasoning = on\nreasoning-effort = xhigh", text)
         self.assertIn("reasoning-budget = -1", text)
+
+    def test_future_model_exports_declared_levels_without_name_rules(self):
+        gguf(self.root / "future.gguf", template="{% if reasoning_strength in ['low', 'high', 'custom_level'] %}{% endif %}")
+        target = self.root / "models.ini"
+        catalog.write_presets(self.root, target)
+        text = target.read_text()
+        self.assertIn("go-reasoning-levels:low|high|custom_level", text)
+        self.assertIn("go-reasoning-default:high", text)
+
+    def test_boolean_template_exposes_only_toggle_and_unknown_retains_auto(self):
+        self.assertEqual(catalog.reasoning_profile({"tokenizer.chat_template": "{% if enable_thinking %}"})["levels"], ["none", "on"])
+        self.assertEqual(catalog.reasoning_profile({"tokenizer.chat_template": "{{ messages }}"})["levels"], [])
 
     def test_gpt_oss_high_and_instruct_without_reasoning_are_distinct(self):
         gguf(self.root / "gpt.gguf", architecture="gpt-oss", context=131072, template="{{ reasoning_effort|default('medium') }}")

@@ -18,6 +18,11 @@ internal sealed class SpeechStreamingSession : IDisposable
 
     public SpeechStreamingSession(ChatMessage initialMessage, Func<string, CancellationToken, Task> play,
         CancellationToken cancellationToken = default)
+        : this(initialMessage, play, null, null, cancellationToken) { }
+
+    public SpeechStreamingSession(ChatMessage initialMessage, Func<string, CancellationToken, Task> play,
+        Func<CancellationToken, Task>? waitForResume, IDisposable? playbackLifetime = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(initialMessage);
         ArgumentNullException.ThrowIfNull(play);
@@ -26,7 +31,7 @@ internal sealed class SpeechStreamingSession : IDisposable
         _buffer = new(initialMessage.Content);
         _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _token = _cancellation.Token;
-        Completion = PlayQueuedAsync(play);
+        Completion = PlayQueuedAsync(play, waitForResume, playbackLifetime);
     }
 
     public Guid MessageId { get; }
@@ -44,7 +49,8 @@ internal sealed class SpeechStreamingSession : IDisposable
             Cancel();
             return;
         }
-        var flushSentence = update.Kind == GoAiAssistantUpdateKind.Status && update.ToolStep is not null;
+        var flushSentence = update.Kind == GoAiAssistantUpdateKind.Status
+            && update.ToolStep is { Tool: not GoAiAssistantService.ReasoningStepTool };
         if (update.Kind is not (GoAiAssistantUpdateKind.Delta or GoAiAssistantUpdateKind.Completed) && !flushSentence) return;
         lock (_gate)
         {
@@ -75,7 +81,8 @@ internal sealed class SpeechStreamingSession : IDisposable
         }
     }
 
-    private async Task PlayQueuedAsync(Func<string, CancellationToken, Task> play)
+    private async Task PlayQueuedAsync(Func<string, CancellationToken, Task> play,
+        Func<CancellationToken, Task>? waitForResume, IDisposable? playbackLifetime)
     {
         try
         {
@@ -83,6 +90,8 @@ internal sealed class SpeechStreamingSession : IDisposable
             {
                 while (_queue.Reader.TryRead(out var text))
                 {
+                    _token.ThrowIfCancellationRequested();
+                    if (waitForResume is not null) await waitForResume(_token).ConfigureAwait(false);
                     _token.ThrowIfCancellationRequested();
                     HasPlayed = true;
                     await play(text, _token).ConfigureAwait(false);
@@ -98,6 +107,7 @@ internal sealed class SpeechStreamingSession : IDisposable
         }
         finally
         {
+            playbackLifetime?.Dispose();
             _cancellation.Dispose();
         }
     }

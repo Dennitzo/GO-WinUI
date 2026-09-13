@@ -146,6 +146,21 @@ try {
     }
     Write-Host "Native model runtime support verified: $runtimeContentDirectory"
 
+    # Inspect the bundle that the executable actually extracted, so an outdated
+    # WebView UI cannot pass a publish check merely because GO starts.
+    $sourceWebRoot = Resolve-GoRepositoryPath -RelativePath 'src\GoWinUI.App\Assets\Web'
+    $sourceWebFiles = @(Get-ChildItem -LiteralPath $sourceWebRoot -Recurse -File)
+    foreach ($sourceWebFile in $sourceWebFiles) {
+        $relativeWebPath = $sourceWebFile.FullName.Substring($sourceWebRoot.Length).TrimStart('\', '/')
+        $bundledWebFile = Join-Path (Join-Path $runtimeContentDirectory 'Assets\Web') $relativeWebPath
+        if (-not (Test-Path -LiteralPath $bundledWebFile -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $sourceWebFile.FullName -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $bundledWebFile -Algorithm SHA256).Hash) {
+            throw "Runtime smoke failed; bundled WebView asset differs from the current source: $relativeWebPath"
+        }
+    }
+    Write-Host "Current WebView assets verified in running bundle: $($sourceWebFiles.Count) files"
+
     if (-not $process.CloseMainWindow() -or -not $process.WaitForExit(5000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         $process.WaitForExit(5000) | Out-Null

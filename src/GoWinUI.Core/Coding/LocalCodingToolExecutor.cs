@@ -15,18 +15,23 @@ public sealed class LocalCodingToolExecutor
     private static readonly HashSet<string> IgnoredDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
         ".git", ".vs", ".venv", "venv", "node_modules", "bin", "obj", "__pycache__", ".next", "dist",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".cache", "htmlcov", "unsloth-tmp",
     };
+    private static readonly string[] IgnoredDirectoryPatterns = ["*.egg-info", "pytest-of-*", "pytest-<digits>"];
     private readonly string _root;
     private readonly string _rootPrefix;
     private readonly Func<CodingCommandProgress, Task>? _commandProgress;
+    private readonly CodingRunEvidenceStore.CodingEvidenceCapture? _evidence;
     private readonly StringComparison _pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
-    public LocalCodingToolExecutor(string workspaceRoot, Func<CodingCommandProgress, Task>? commandProgress = null)
+    public LocalCodingToolExecutor(string workspaceRoot, Func<CodingCommandProgress, Task>? commandProgress = null,
+        CodingRunEvidenceStore.CodingEvidenceCapture? evidence = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRoot);
         _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspaceRoot));
         _rootPrefix = Path.EndsInDirectorySeparator(_root) ? _root : _root + Path.DirectorySeparatorChar;
         _commandProgress = commandProgress;
+        _evidence = evidence;
         if (!Directory.Exists(_root)) throw new DirectoryNotFoundException("Der Coding-Projektordner existiert nicht.");
         RejectReparsePoints(_root);
     }
@@ -46,6 +51,7 @@ public sealed class LocalCodingToolExecutor
             "coding.gitDiff" => await GitDiffAsync(arguments, cancellationToken).ConfigureAwait(false),
             _ => throw new ArgumentException($"Unbekanntes Coding-Werkzeug: {toolName}."),
         };
+        _evidence?.SetResult(result);
         if (result.GetRawText().Length <= MaximumOutputCharacters) return result;
         var raw = result.GetRawText();
         return Serialize(new
@@ -66,14 +72,31 @@ public sealed class LocalCodingToolExecutor
         var entries = new List<object>();
         var totalCharacters = 0;
         var truncated = false;
-        foreach (var path in EnumerateFiles(directory, cancellationToken))
+        var includeGenerated = IsExplicitGeneratedPath(directory);
+        foreach (var path in EnumerateFiles(directory, cancellationToken, includeGenerated))
         {
             var relative = Relative(path);
             if (entries.Count == maximum || totalCharacters + relative.Length > 8_000) { truncated = true; break; }
             entries.Add(new { path = relative, bytes = new FileInfo(path).Length });
             totalCharacters += relative.Length;
         }
-        return Serialize(new { entries, truncated, ignoredDirectories = IgnoredDirectories.Order().ToArray() });
+        var environment = DescribeEnvironment();
+        JsonElement Result() => Serialize(new
+        {
+            entries, truncated, ordering = "source-first", includedGeneratedPath = includeGenerated,
+            ignoredDirectories = includeGenerated ? Array.Empty<string>() : IgnoredDirectories.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+            ignoredDirectoryPatterns = includeGenerated ? Array.Empty<string>() : IgnoredDirectoryPatterns,
+            environment,
+        });
+        var result = Result();
+        // Preserve the usable structured list when entry metadata exceeds the wire budget.
+        while (entries.Count > 0 && result.GetRawText().Length > MaximumOutputCharacters)
+        {
+            entries.RemoveAt(entries.Count - 1);
+            truncated = true;
+            result = Result();
+        }
+        return result;
     }
 
     private async Task<JsonElement> SearchAsync(JsonElement args, CancellationToken cancellationToken)
@@ -85,7 +108,8 @@ public sealed class LocalCodingToolExecutor
         var outputSize = 0;
         var searchedFiles = 0;
         var truncated = false;
-        foreach (var path in EnumerateFiles(root, cancellationToken))
+        var includeGenerated = IsExplicitGeneratedPath(root);
+        foreach (var path in EnumerateFiles(root, cancellationToken, includeGenerated))
         {
             if (++searchedFiles > 5_000) { truncated = true; break; }
             var bytes = await TryReadTextFileAsync(path, cancellationToken).ConfigureAwait(false);
@@ -108,7 +132,9 @@ public sealed class LocalCodingToolExecutor
             }
             if (truncated) break;
         }
-        return Serialize(new { query, matches, searchedFiles, truncated });
+        return Serialize(new { query, matches, searchedFiles, truncated, includedGeneratedPath = includeGenerated,
+            ignoredDirectories = includeGenerated ? Array.Empty<string>() : IgnoredDirectories.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+            ignoredDirectoryPatterns = includeGenerated ? Array.Empty<string>() : IgnoredDirectoryPatterns });
     }
 
     private async Task<JsonElement> ReadAsync(JsonElement args, CancellationToken cancellationToken)
@@ -200,6 +226,7 @@ public sealed class LocalCodingToolExecutor
             }
         }
         var receipt = Receipt("applied", diff.Text, diff.Truncated, progressError);
+        _evidence?.SetResult(receipt);
         // Full bounded UI output was delivered above. Keep the model receipt within its existing
         // JSON budget, with hashes and applied state intact, and explicitly mark omitted diff data.
         return receipt.GetRawText().Length <= MaximumOutputCharacters ? receipt
@@ -259,9 +286,14 @@ public sealed class LocalCodingToolExecutor
             throw new ArgumentException("arguments muss ein Array mit höchstens 64 Argumenten sein.");
         var arguments = values.EnumerateArray().Select(value => value.ValueKind == JsonValueKind.String && value.GetString()!.Length <= 4_000
             ? value.GetString()! : throw new ArgumentException("Ungültiges Programmargument.")).ToArray();
-        var directory = ResolvePath(OptionalString(args, "workingDirectory") ?? ".");
+        var directory = ResolveCommandWorkingDirectory(OptionalString(args, "workingDirectory") ?? ".");
+        if (!Directory.Exists(directory)) throw new DirectoryNotFoundException($"Der Arbeitsordner existiert nicht: {directory}");
+        var resolvedExecutable = ResolveExecutable(executable, directory);
         var seconds = Integer(args, "timeoutSeconds", 0, 0, int.MaxValue);
-        return Serialize(await RunProcessAsync(executable, arguments, directory, seconds, cancellationToken, _commandProgress).ConfigureAwait(false));
+        var result = await RunProcessAsync(resolvedExecutable, arguments, directory, seconds, cancellationToken, _commandProgress).ConfigureAwait(false);
+        return Serialize(new { result.Success, result.ExitCode, result.TimedOut, result.Stdout, result.Stderr, result.Truncated,
+            result.ElapsedMilliseconds, executable = resolvedExecutable, workingDirectory = directory,
+            executableResolution = Path.IsPathFullyQualified(resolvedExecutable) ? "absolute-path" : "native-PATH" });
     }
 
     private async Task<JsonElement> GitDiffAsync(JsonElement args, CancellationToken cancellationToken)
@@ -279,7 +311,15 @@ public sealed class LocalCodingToolExecutor
                 stdout = progress.Stdout, stderr = progress.Stderr, diffTruncated = progress.Truncated }).GetRawText(),
         });
         var status = await RunProcessAsync("git", ["-c", "core.fsmonitor=false", "--literal-pathspecs", "--no-optional-locks", "status", "--short", "--untracked-files=normal", "--ignore-submodules=all", "--", pathspec], directory, 30, cancellationToken, GitProgress("git-status")).ConfigureAwait(false);
-        if (status.ExitCode != 0) return Serialize(status);
+        if (status.ExitCode != 0)
+        {
+            var notRepository = status.Stderr.Contains("not a git repository", StringComparison.OrdinalIgnoreCase);
+            return Serialize(new { status.Success, status.ExitCode, status.TimedOut, status.Stdout, status.Stderr,
+                status.Truncated, status.ElapsedMilliseconds,
+                errorCode = notRepository ? "coding.git_not_repository" : "coding.git_status_failed",
+                message = notRepository ? "Im Zielordner ist kein Git-Repository verfügbar. Dateiwerkzeuge und die tatsächlichen Änderungs-Diffs von coding.write/edit bleiben nutzbar."
+                    : "Git-Status fehlgeschlagen; die ursprüngliche Fehlerausgabe und der Exitcode sind enthalten." });
+        }
         var diff = await RunProcessAsync("git", ["-c", "core.fsmonitor=false", "--literal-pathspecs", "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "HEAD", "--", pathspec], directory, 30, cancellationToken, GitProgress("git-diff")).ConfigureAwait(false);
         CodingCommandResult? stagedDiff = null;
         // Before the first commit, HEAD does not exist. Report both staged additions
@@ -292,7 +332,7 @@ public sealed class LocalCodingToolExecutor
         return Serialize(new { success = status.Success && diff.Success && stagedDiff?.Success != false, status, diff, stagedDiff, note = "Unversionierte Dateien erscheinen im Status; ihr Inhalt ist nicht Bestandteil von git diff." });
     }
 
-    private static async Task<CodingCommandResult> RunProcessAsync(string executable, string[] arguments, string directory, int seconds,
+    private async Task<CodingCommandResult> RunProcessAsync(string executable, string[] arguments, string directory, int seconds,
         CancellationToken cancellationToken, Func<CodingCommandProgress, Task>? commandProgress = null)
     {
         var startInfo = new ProcessStartInfo(executable) { WorkingDirectory = directory, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
@@ -322,8 +362,8 @@ public sealed class LocalCodingToolExecutor
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var outputBuffer = new CommandOutputBuffer(4_000);
         var errorBuffer = new CommandOutputBuffer(2_000);
-        var stdout = DrainAsync(process.StandardOutput, outputBuffer, timeout.Token);
-        var stderr = DrainAsync(process.StandardError, errorBuffer, timeout.Token);
+        var stdout = DrainAsync(process.StandardOutput, outputBuffer, "stdout", timeout.Token);
+        var stderr = DrainAsync(process.StandardError, errorBuffer, "stderr", timeout.Token);
         using var progressCancellation = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
         var deadline = seconds == 0 ? Task.CompletedTask
             : CancelCommandAfterAsync(timeout, seconds, progressCancellation.Token);
@@ -419,14 +459,17 @@ public sealed class LocalCodingToolExecutor
         }
     }
 
-    private static async Task<(string Text, bool Truncated)> DrainAsync(StreamReader reader, CommandOutputBuffer output, CancellationToken cancellationToken)
+    private async Task<(string Text, bool Truncated)> DrainAsync(StreamReader reader, CommandOutputBuffer output, string stream, CancellationToken cancellationToken)
     {
         var buffer = new char[2_048];
         try
         {
             int count;
             while ((count = await reader.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false)) > 0)
+            {
                 output.Append(buffer.AsSpan(0, count));
+                _evidence?.Append(stream, new string(buffer, 0, count));
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         return output.Snapshot();
@@ -461,7 +504,56 @@ public sealed class LocalCodingToolExecutor
         }
     }
 
-    private static IEnumerable<string> EnumerateFiles(string root, CancellationToken cancellationToken)
+    private static string ResolveExecutable(string executable, string workingDirectory)
+    {
+        var fullyQualified = Path.IsPathFullyQualified(executable);
+        if (!fullyQualified && (Path.IsPathRooted(executable) || executable.Contains(':')))
+            throw new ArgumentException("Programmdateipfade müssen vollständig absolut oder relativ zum Arbeitsordner sein.");
+        if (!fullyQualified && !executable.Contains(Path.DirectorySeparatorChar) && !executable.Contains(Path.AltDirectorySeparatorChar)) return executable;
+        // Programs may reside outside the project, just like absolute executables.
+        // Keep file-tool boundaries separate from native process path resolution.
+        var path = Path.GetFullPath(executable, workingDirectory);
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"Die Programmdatei '{executable}' fehlt im Arbeitsordner '{workingDirectory}'. Geprüfter absoluter Pfad: '{path}'. Ein vorhandener .venv-Ordner allein bestätigt keinen installierten Interpreter.", path);
+        return path;
+    }
+
+    private object DescribeEnvironment()
+    {
+        var pythonPath = OperatingSystem.IsWindows() ? ".venv/Scripts/python.exe" : ".venv/bin/python";
+        return new
+        {
+            operatingSystem = OperatingSystem.IsWindows() ? "Windows" : OperatingSystem.IsLinux() ? "Linux" : OperatingSystem.IsMacOS() ? "macOS" : "unknown",
+            commandExecution = "direct executable plus argument array; no implicit shell",
+            relativeExecutableBase = "workingDirectory (defaults to the selected project)",
+            virtualEnvironmentDirectoryExists = Directory.Exists(Path.Combine(_root, ".venv")),
+            virtualEnvironmentPython = pythonPath,
+            virtualEnvironmentPythonExists = File.Exists(Path.Combine(_root, pythonPath)),
+            gitMetadataAtProjectRoot = Directory.Exists(Path.Combine(_root, ".git")) || File.Exists(Path.Combine(_root, ".git")),
+        };
+    }
+
+    private bool IsExplicitGeneratedPath(string path) => Path.GetRelativePath(_root, path)
+        .Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(IsIgnoredDirectory);
+
+    private static bool IsIgnoredDirectory(string name) => IgnoredDirectories.Contains(name)
+        || name.EndsWith(".egg-info", StringComparison.OrdinalIgnoreCase)
+        || name.StartsWith("pytest-of-", StringComparison.OrdinalIgnoreCase)
+        || name.StartsWith("pytest-", StringComparison.OrdinalIgnoreCase) && name.Length > 7 && name.AsSpan(7).IndexOfAnyExceptInRange('0', '9') < 0;
+
+    private static int DirectoryPriority(string path)
+    {
+        var name = Path.GetFileName(path);
+        if (name.Equals("src", StringComparison.OrdinalIgnoreCase) || name.Equals("source", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("app", StringComparison.OrdinalIgnoreCase) || name.Equals("lib", StringComparison.OrdinalIgnoreCase)
+            || File.Exists(Path.Combine(path, "__init__.py"))) return 0;
+        if (name.Equals("tests", StringComparison.OrdinalIgnoreCase) || name.Equals("test", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("docs", StringComparison.OrdinalIgnoreCase) || name.Equals("scripts", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("experiments", StringComparison.OrdinalIgnoreCase)) return 1;
+        return 2;
+    }
+
+    private static IEnumerable<string> EnumerateFiles(string root, CancellationToken cancellationToken, bool includeGenerated = false)
     {
         if (File.Exists(root)) { yield return root; yield break; }
         var pending = new Stack<string>();
@@ -471,6 +563,7 @@ public sealed class LocalCodingToolExecutor
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (++visited > 10_000) throw new InvalidDataException("Die Suche überschreitet 10.000 Verzeichnisse. Grenze path auf ein Unterverzeichnis ein.");
+            var children = new List<string>();
             foreach (var entry in Directory.EnumerateFileSystemEntries(directory).Order(StringComparer.OrdinalIgnoreCase))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -478,11 +571,25 @@ public sealed class LocalCodingToolExecutor
                 if (attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
                 if (attributes.HasFlag(FileAttributes.Directory))
                 {
-                    if (!IgnoredDirectories.Contains(Path.GetFileName(entry))) pending.Push(entry);
+                    if (includeGenerated || !IsIgnoredDirectory(Path.GetFileName(entry))) children.Add(entry);
                 }
                 else yield return entry;
             }
+            // Stack traversal reverses insertion order. Push later/noisier folders
+            // first so source packages and their nested modules are visited first.
+            foreach (var child in children.OrderByDescending(DirectoryPriority).ThenByDescending(static path => path, StringComparer.OrdinalIgnoreCase))
+                pending.Push(child);
         }
+    }
+
+    private string ResolveCommandWorkingDirectory(string directory)
+    {
+        if (directory.Length > 1_024 || directory.Any(char.IsControl))
+            throw new UnauthorizedAccessException("Der Arbeitsordner enthält ungültige Zeichen oder ist zu lang.");
+        // Models may repeat the selected absolute workspace. Convert only a fully
+        // qualified command cwd; the existing file-path containment and link guards
+        // still reject siblings, parent paths, drive-relative paths and junctions.
+        return ResolvePath(Path.IsPathFullyQualified(directory) ? Path.GetRelativePath(_root, directory) : directory);
     }
 
     private string ResolvePath(string relative, bool mutation = false)

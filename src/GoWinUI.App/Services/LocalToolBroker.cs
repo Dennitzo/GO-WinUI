@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -23,6 +24,7 @@ public sealed class LocalToolBroker(
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
+    private static readonly SearchValues<char> EvidenceIdCharacters = SearchValues.Create("0123456789abcdef");
 
     public bool IsBricsCadAvailable => bricsCad.IsConnected;
 
@@ -32,6 +34,7 @@ public sealed class LocalToolBroker(
         Guid? assistantMessageId,
         string? codingWorkspacePath = null,
         Func<CodingCommandProgress, Task>? commandProgress = null,
+        CodingRunEvidenceStore? evidenceStore = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -46,6 +49,23 @@ public sealed class LocalToolBroker(
 
             if (coding)
             {
+                if (evidenceStore is not null && (evidenceStore.SessionId != sessionId || evidenceStore.RootRunId != proposal.RunId))
+                    throw new UnauthorizedAccessException("Der Werkzeugbelegspeicher gehört nicht zu dieser Sitzung und diesem Lauf.");
+                if (proposal.Name == "coding.readOutput")
+                {
+                    var store = evidenceStore ?? throw new InvalidOperationException("Für diesen Lauf ist kein Werkzeugbelegspeicher verfügbar.");
+                    var args = proposal.Arguments;
+                    return Result(proposal, "completed", await store.ReadOutputAsync(args.GetProperty("evidenceId").GetString()!,
+                        args.TryGetProperty("stream", out var stream) ? stream.GetString()! : "stdout",
+                        args.TryGetProperty("offset", out var offset) ? offset.GetInt32() : 0,
+                        args.TryGetProperty("maximumCharacters", out var characters) ? characters.GetInt32() : 4000, cancellationToken).ConfigureAwait(false));
+                }
+                if (proposal.Name == "coding.searchRunEvidence")
+                {
+                    var store = evidenceStore ?? throw new InvalidOperationException("Für diesen Lauf ist kein Werkzeugbelegspeicher verfügbar.");
+                    return Result(proposal, "completed", await store.SearchRunEvidenceAsync(proposal.Arguments.GetProperty("query").GetString()!,
+                        proposal.Arguments.TryGetProperty("maximumResults", out var maximum) ? maximum.GetInt32() : 8, cancellationToken).ConfigureAwait(false));
+                }
                 if (proposal.Name == "coding.searchHistory")
                     return Result(proposal, "completed", await CodingSessionTools.SearchHistoryAsync(chats, sessionId, assistantMessageId,
                         proposal.Arguments.GetProperty("query").GetString()!, CodingResultLimit(proposal.Arguments), cancellationToken).ConfigureAwait(false));
@@ -59,8 +79,15 @@ public sealed class LocalToolBroker(
                 }
                 if (proposal.Name == "coding.renderHtml")
                     return Result(proposal, "completed", CodingSessionTools.RenderReceipt(proposal.Arguments));
-                var codingResult = await new LocalCodingToolExecutor(codingWorkspacePath!, commandProgress)
+                using var evidence = evidenceStore?.BeginStep(proposal.ProposalId, proposal.Name, proposal.Arguments);
+                var codingResult = await new LocalCodingToolExecutor(codingWorkspacePath!, commandProgress, evidence)
                     .ExecuteAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false);
+                if (evidence is not null)
+                {
+                    var enriched = JsonNode.Parse(codingResult.GetRawText())!.AsObject();
+                    enriched["evidence"] = JsonSerializer.SerializeToNode(evidence.Reference, JsonOptions);
+                    codingResult = JsonSerializer.SerializeToElement(enriched, JsonOptions);
+                }
                 if (codingResult.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
                 {
                     return Result(proposal, "failed", codingResult, "client.coding_tool_failed",
@@ -101,6 +128,15 @@ public sealed class LocalToolBroker(
         {
             throw;
         }
+        catch (FileNotFoundException exception) when (proposal.Name == ClientToolNames.CodingReadOutput)
+        {
+            return Result(proposal, "failed", new
+            {
+                evidenceId = proposal.Arguments.GetProperty("evidenceId").GetString(),
+                available = false,
+                retryable = false,
+            }, "client.evidence_unavailable", exception.Message);
+        }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             return Result(
@@ -139,7 +175,8 @@ public sealed class LocalToolBroker(
         var expectedRisk = proposal.Name switch
         {
             "coding.list" or "coding.search" or "coding.read" or "coding.gitDiff"
-                or "coding.searchHistory" or "coding.searchKnowledge" or "coding.renderHtml" => ToolRiskClass.ReadOnly,
+                or "coding.searchHistory" or "coding.searchKnowledge" or "coding.renderHtml"
+                or "coding.readOutput" or "coding.searchRunEvidence" => ToolRiskClass.ReadOnly,
             "coding.write" or "coding.edit" => ToolRiskClass.LocalMutation,
             "coding.command" => ToolRiskClass.Process,
             ClientToolNames.DocumentRead or ClientToolNames.DocumentsList
@@ -158,6 +195,21 @@ public sealed class LocalToolBroker(
         var arguments = proposal.Arguments;
         switch (proposal.Name)
         {
+            case "coding.readOutput":
+                ValidateProperties(arguments, ["evidenceId"], ["evidenceId", "stream", "offset", "maximumCharacters"]);
+                var evidenceId = ValidateString(arguments, "evidenceId", 35, 35);
+                if (!evidenceId.StartsWith("ev-", StringComparison.Ordinal) || evidenceId.AsSpan(3).ContainsAnyExcept(EvidenceIdCharacters))
+                    throw new InvalidDataException("Die Belegkennung ist ungültig.");
+                if (arguments.TryGetProperty("stream", out _) && ValidateString(arguments, "stream", 1, 6) is not ("stdout" or "stderr" or "input" or "result"))
+                    throw new InvalidDataException("Der Belegkanal ist ungültig.");
+                ValidateOptionalInteger(arguments, "offset", 0, int.MaxValue);
+                ValidateOptionalInteger(arguments, "maximumCharacters", 1, 8000);
+                break;
+            case "coding.searchRunEvidence":
+                ValidateProperties(arguments, ["query"], ["query", "maximumResults"]);
+                ValidateString(arguments, "query", 1, 512);
+                ValidateOptionalInteger(arguments, "maximumResults", 1, 20);
+                break;
             case "coding.searchHistory":
             case "coding.searchKnowledge":
                 ValidateProperties(arguments, ["query"], ["query", "maximumResults"]);

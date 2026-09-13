@@ -34,10 +34,14 @@ public sealed class AgentToolCatalog
             }
             names.Add(name);
         }
+        if (names.Contains(CodingWorkingStateTools.PlanTool))
+            throw new ArgumentException("Coding state tools are selected by coding capabilities/options, not server-tool permissions.");
         var capabilities = request.ClientCapabilities ?? [];
         if (request.Mode == RunMode.Coding && HasCapability(capabilities, "coding"))
         {
-            names.UnionWith(CodingToolCatalog.CreateTools().Select(static tool => tool.Name));
+            names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => tool.Name is not ("coding.readOutput" or "coding.searchRunEvidence")
+                || HasCapability(capabilities, "coding.evidence")).Select(static tool => tool.Name));
+            names.Add(CodingWorkingStateTools.PlanTool);
         }
         if (HasCapability(capabilities, "documentIo"))
         {
@@ -153,6 +157,11 @@ public sealed class AgentToolCatalog
 
     private static void ValidateToolSpecific(string name, JsonElement value)
     {
+        if (name == CodingWorkingStateTools.PlanTool)
+        {
+            CodingWorkingStateTools.Validate(value);
+            return;
+        }
         if (name.StartsWith("coding.", StringComparison.Ordinal))
         {
             CodingToolCatalog.Validate(name, value);
@@ -289,7 +298,7 @@ public sealed class AgentToolCatalog
     {
         var tools = new[]
         {
-            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Formuliere query in der Sprache des aktuellen Nutzerprompts und setze language passend; ohne eindeutige Sprache gilt de-DE. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern. Diese Profile wählen passende Engines innerhalb derselben SearXNG-Instanz, ohne Anbieter-Fallback. Bei gemeldeten Engine-Sperren (429/CAPTCHA) dieselben Engines nicht sofort erneut abfragen; direkte bekannte Originalquellen können mit web.fetch geprüft werden.", ToolRiskClass.ReadOnly, WebSearchSchema()),
+            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Für allgemeine Fragen formuliere query in der Sprache des aktuellen Nutzerprompts und setze language passend; ohne eindeutige Sprache gilt de-DE. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern zu genau einem Aspekt, beginnend mit dem exakten API-Namen. Keine Sammelabfragen mit allen Teilproblemen. Technische Profile suchen sprachübergreifend, damit auch englische Originaldokumentation gefunden wird; die Antwort bleibt deutsch. Diese Profile wählen passende Engines innerhalb derselben SearXNG-Instanz, ohne Anbieter-Fallback, und lassen vorübergehend gesperrte Engines aus. Bei leeren Treffern verkürze die nächste Abfrage auf API und einen Aspekt oder prüfe direkte bekannte Originalquellen mit web.fetch. Wiederhole gesperrte Engines nicht unmittelbar.", ToolRiskClass.ReadOnly, WebSearchSchema()),
             Server("youtube.search", "Suche YouTube; ohne API-Key wird ein sichtbar gekennzeichneter SearXNG-Fallback verwendet.", ToolRiskClass.ReadOnly, SearchSchema()),
             Server("web.fetch", "Durchsuche eine öffentliche HTTP(S)-Quelle SSRF-geschützt nach konkreten Phrasen. Bevorzuge queries und bündele bis zu acht unabhängig zu suchende Phrasen in einem Abruf. Zurückgegeben werden ausschließlich begrenzte Trefferfenster aus Webseiten, PDF-, DOCX- und RTF-Dokumenten, niemals die gesamte Quelle. Ohne Suchphrase liefert das Werkzeug nur eine kurze Vorschau und fordert eine gezielte Wiederholung an. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, WebFetchSchema()),
             Server(CodingDeepResearchPipeline.ToolName, "Recherchiere komplexe Coding-Fragen autonom: plane mehrere Teilfragen, suche über SearXNG, prüfe Originalquellen und liefere eine belegte Synthese mit Quellen und Unsicherheiten. Nutze dies für Architekturvergleiche, aktuelle API-/Versionsfragen oder widersprüchliche Informationen. Für eine einzelne Frage reichen web.search und web.fetch. Task enthält nur die öffentliche technische Frage, keine Zugangsdaten oder lokalen Dateiinhalte. Grenzen: 2–3 geplante Suchfragen mit höchstens einer verkürzten Wiederholung bei leeren Treffern, 2–6 Quellen, maximal 8 Modellturns, insgesamt 9 Webaufrufe und 7 Minuten innerhalb des verbleibenden Laufbudgets.", ToolRiskClass.ReadOnly, Parse("""
@@ -311,7 +320,7 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.BricsCadMove, "Führe eine typisierte BricsCAD-Verschiebung automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
             Client(ClientToolNames.BricsCadAction, "Führe eine typisierte BricsCAD-Aktion automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
         };
-        return tools.Concat(CodingToolCatalog.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
+        return tools.Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
     }
 
     private static AgentToolSpec Server(string name, string description, ToolRiskClass risk, JsonElement schema) =>

@@ -3,6 +3,30 @@
 .coding-timeline .coding-narration { margin: 18px 0 24px; }
 .coding-timeline .coding-narration:first-child { margin-top: 0; }
 .coding-timeline .coding-narration:last-child { margin-bottom: 6px; }
+.coding-reasoning { min-width: 0; margin: 18px 0 24px; border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)); border-left: 3px solid color-mix(in srgb, var(--accent) 75%, var(--border)); border-radius: 12px; background: linear-gradient(115deg, color-mix(in srgb, var(--accent) 5%, var(--surface)), var(--surface)); }
+.coding-reasoning--running, .coding-reasoning--pending { box-shadow: 0 2px 20px -10px color-mix(in srgb, var(--accent) 35%, transparent); }
+.coding-reasoning__title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; padding: 11px 14px; list-style: none; cursor: pointer; border-radius: 9px; }
+.coding-reasoning__title::-webkit-details-marker { display: none; }
+.coding-reasoning__title:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.coding-reasoning__title:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.coding-reasoning__indicator { display: inline-grid; flex: none; place-content: center; width: 14px; height: 14px; color: var(--accent); font-size: 13px; }
+.coding-reasoning__indicator.message-status-spinner { width: 12px; height: 12px; margin: 0; }
+.coding-reasoning__name { color: var(--accent); font-size: 13px; font-weight: 600; }
+.coding-reasoning__round { padding: 1px 6px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.coding-reasoning__status { margin-left: auto; color: var(--muted); font-size: 11px; }
+.coding-reasoning__disclosure[open] > .coding-reasoning__title .coding-step__chevron { transform: rotate(90deg); }
+.coding-reasoning__preview { flex-basis: 100%; min-width: 0; padding-left: 22px; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.coding-reasoning__disclosure[open] .coding-reasoning__preview { display: none; }
+.coding-timeline .coding-reasoning__content { padding: 2px 16px 15px; max-height: none; overflow: visible; }
+.coding-timeline .coding-reasoning__body { width: 100%; color: color-mix(in srgb, var(--text) 92%, var(--muted)); font-size: 13px; line-height: 1.8; }
+.coding-reasoning__body > :first-child { margin-top: 0; }
+.coding-reasoning__body > :last-child { margin-bottom: 0; }
+.coding-reasoning__body li { margin-block: 5px; padding-left: 2px; }
+.coding-reasoning__body li::marker { color: var(--accent); }
+.coding-reasoning__body strong { color: var(--text); }
+.coding-reasoning__body .code-block pre, .coding-reasoning__body .code-block pre code { max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
+.coding-reasoning--failed .coding-reasoning__status { color: var(--danger); }
+.coding-reasoning--cancelled .coding-reasoning__status, .coding-reasoning--interrupted .coding-reasoning__status { color: var(--warning); }
 .coding-timeline .coding-step { position: relative; min-width: 0; margin: 18px 0 24px; padding: 0 0 0 36px; border: 0; }
 .coding-timeline .coding-step::before { content: ""; position: absolute; left: 12px; top: 30px; bottom: 0; width: 1px; height: auto; border-radius: 0; background: var(--border); }
 .coding-timeline .coding-step__disclosure { min-width: 0; }
@@ -71,6 +95,9 @@ a.coding-result__title { color: var(--accent); }
 .coding-live-phase__detail { font-size: 11px; }
 .coding-mode .message-scroll { overflow-anchor: none; }
 @media (max-width: 620px) {
+  .coding-reasoning__title { gap: 7px; padding: 10px; }
+  .coding-timeline .coding-reasoning__content { padding-inline: 12px; }
+  .coding-reasoning__body { font-size: 12px; }
   .coding-timeline .coding-step { padding-left: 30px; }
   .coding-diff__header { flex-wrap: wrap; gap: 7px; padding-inline: 9px; }
   .coding-diff__identity { flex-basis: 55%; }
@@ -79,8 +106,35 @@ a.coding-result__title { color: var(--accent); }
   .coding-fact { flex-wrap: wrap; gap: 2px 6px; }
   .coding-facts dd { margin-bottom: 4px; }
 }
+@media (prefers-reduced-motion: reduce) {
+  .coding-reasoning__indicator.message-status-spinner { animation: none; }
+}
 @media print {
+  /* PDF pages are white even when the live app uses a dark theme. Keep the
+     complete tool body, metadata and semantic status colors readable on paper. */
+  .pdf-book .coding-timeline {
+    --text: #171717;
+    --muted: #444444;
+    --bg: #ffffff;
+    --surface: #f3f3f3;
+    --surface-hover: #eeeeee;
+    --surface-raised: #f7f7f7;
+    --border: #b8b8b8;
+    --accent: #174a79;
+    --success: #145b2b;
+    --danger: #8c1d18;
+    --warning: #745000;
+    color: var(--text);
+    color-scheme: only light;
+  }
+  .pdf-book .coding-diff__number { opacity: 1; }
+  .pdf-book .diff-line--added { color: #145b2b !important; background: #e7f3eb !important; }
+  .pdf-book .diff-line--removed { color: #8c1d18 !important; background: #f9eaea !important; }
+  .pdf-book .diff-line--header { color: #174a79 !important; background: #edf2f7 !important; }
+  .pdf-book .code-diff-counts { color: #145b2b !important; }
   .coding-copy, .coding-live-phase { display: none; }
+  .coding-reasoning { box-shadow: none; break-inside: auto; }
+  .coding-reasoning__title { break-after: avoid; }
   .coding-step__chevron { display: none; }
   .coding-step, .coding-output, .coding-diff { break-inside: auto; }
   .coding-step__title, .coding-diff__header, .coding-output__header { break-after: avoid; }

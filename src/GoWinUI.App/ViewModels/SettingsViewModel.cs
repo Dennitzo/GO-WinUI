@@ -534,3 +534,4 @@ public sealed partial class SettingsViewModel(
             || enabledLabel.Contains(query, StringComparison.OrdinalIgnoreCase);
     }
 }
+

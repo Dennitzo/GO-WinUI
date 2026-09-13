@@ -9,6 +9,8 @@ public sealed class SettingsCoordinator(ISettingsStore store) : IDisposable
 
     public AppSettings Current { get; private set; } = new();
 
+    public string DataDirectory => Path.GetDirectoryName(Path.GetFullPath(store.SettingsPath))!;
+
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);

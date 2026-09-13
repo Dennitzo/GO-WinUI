@@ -62,7 +62,7 @@ public static partial class GermanSpeechTextNormalizer
             return string.Empty;
         }
 
-        var text = value;
+        var text = GermanSpeechAbbreviations.Expand(value);
         text = DisplayDollarMathRegex().Replace(text, static match => SpeakDelimited(match.Groups[1].Value));
         text = DisplayBracketMathRegex().Replace(text, static match => SpeakDelimited(match.Groups[1].Value));
         text = InlineParenthesisMathRegex().Replace(text, static match => SpeakDelimited(match.Groups[1].Value));

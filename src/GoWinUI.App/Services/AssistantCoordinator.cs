@@ -1,6 +1,7 @@
 using GoAi.Contracts;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Chat;
+using GoWinUI.Core.Coding;
 using GoWinUI.Core.Models;
 using System.Globalization;
 using System.Text;
@@ -40,6 +41,7 @@ public sealed class AssistantCoordinator(
         if (!Directory.Exists(fullPath)) throw new DirectoryNotFoundException("Der Coding-Projektordner existiert nicht.");
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die ausgewählte Coding-Sitzung wurde nicht gefunden.");
+        await CodingWorkspaceGit.EnsureRepositoryAsync(fullPath, cancellationToken).ConfigureAwait(false);
         await chats.SetCodingWorkspacePathAsync(session.Id, fullPath, activateCoding: true, cancellationToken).ConfigureAwait(false);
     }
 
@@ -241,8 +243,11 @@ public sealed class AssistantCoordinator(
             contextWasTruncated = context.WasTruncated,
             contextNotice = context.TruncationNotice,
             selectedToolAction = PersistentToolActionName(session.PersistentToolAction),
+            reasoningModelId = selectedModel,
+            reasoningRole = isCodingSession ? "coding" : "general",
             codingWorkspacePath = session.CodingWorkspacePath,
             codingToolStepsExpanded = settings.Current.CodingToolStepsExpanded,
+            changesSummary = goAi is null ? null : await goAi.GetChangesSummaryAsync(session.Id, messages, cancellationToken).ConfigureAwait(false),
             isSessionPaneOpen = settings.Current.IsAssistantSessionPaneOpen,
         };
     }
@@ -258,6 +263,7 @@ public sealed class AssistantCoordinator(
             activeSessionId = sessionId,
             conversationRevision = conversation.Session.ConversationRevision,
             codingToolStepsExpanded = settings.Current.CodingToolStepsExpanded,
+            changesSummary = goAi is null ? null : await goAi.GetChangesSummaryAsync(sessionId, conversation.Messages, cancellationToken).ConfigureAwait(false),
             messages = conversation.Messages.Select(message => ToMessageDto(
                 message,
                 conversation.Artifacts.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
@@ -371,6 +377,36 @@ public sealed class AssistantCoordinator(
                     envelope.RequestId,
                     cancellationToken).ConfigureAwait(false);
                 break;
+            case "reasoning.get":
+            case "reasoning.set":
+            {
+                if (goAi is null) throw new InvalidOperationException("AI-Verbindung ist nicht verfügbar.");
+                var role = GetOptionalString(envelope.Payload, "role", 16) ?? "general";
+                if (role is not ("coding" or "general")) throw new ArgumentException("Unbekannte Modellrolle.");
+                var modelId = GetOptionalString(envelope.Payload, "modelId", 512) ?? "";
+                var selectedId = role == "coding" ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
+                if (modelId != selectedId) throw new InvalidOperationException("Die Modellauswahl hat sich geändert. Öffne Reasoning erneut.");
+                var options = await goAi.GetReasoningOptionsAsync(modelId, role, cancellationToken).ConfigureAwait(false);
+                if (envelope.Type == "reasoning.set")
+                {
+                    EnsureContextCanChange();
+                    if (modelId != (role == "coding" ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel))
+                        throw new InvalidOperationException("Das ausgewählte Modell hat sich während der Prüfung geändert.");
+                    var effort = GetOptionalString(envelope.Payload, "effort", 32) ?? "auto";
+                    if (effort != "auto" && (!options.Available || !options.Levels.Contains(effort)))
+                        throw new ArgumentException("Diese Reasoning-Stufe wird vom ausgewählten Modell nicht unterstützt.");
+                    await settings.UpdateAsync(current =>
+                    {
+                        var choices = new Dictionary<string, string>(current.ReasoningEffortsByModel, StringComparer.OrdinalIgnoreCase);
+                        var key = GoAiAssistantService.ReasoningKey(modelId, role);
+                        if (effort == "auto") choices.Remove(key); else choices[key] = effort;
+                        return current with { ReasoningEffortsByModel = choices };
+                    }, cancellationToken).ConfigureAwait(false);
+                    options = options with { Selected = effort };
+                }
+                await emit("reasoning.snapshot", options, envelope.RequestId);
+                break;
+            }
             case "chat.send":
                 await SendChatAsync(envelope, emit, cancellationToken);
                 break;
@@ -587,6 +623,7 @@ public sealed class AssistantCoordinator(
         }
 
         await chats.DeleteSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        await CleanupDeletedCodingChangesAsync([sessionId]).ConfigureAwait(false);
         if (settings.Current.ActiveSessionId == sessionId)
         {
             await settings.UpdateAsync(current => current with { ActiveSessionId = null }, cancellationToken).ConfigureAwait(false);
@@ -610,7 +647,10 @@ public sealed class AssistantCoordinator(
         }
 
         var activeSessionId = settings.Current.ActiveSessionId;
+        var previousSessions = await chats.ListSessionsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         var deletedCount = await chats.DeleteUnpinnedSessionsAsync(cancellationToken).ConfigureAwait(false);
+        if (deletedCount > 0)
+            await CleanupDeletedCodingChangesAsync(previousSessions.Select(static session => session.Id)).ConfigureAwait(false);
 
         if (activeSessionId is { } currentActiveSessionId
             && await chats.GetSessionAsync(currentActiveSessionId, cancellationToken).ConfigureAwait(false) is null)
@@ -628,6 +668,27 @@ public sealed class AssistantCoordinator(
 
         _ = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
+    }
+
+    private async Task CleanupDeletedCodingChangesAsync(IEnumerable<Guid> candidateSessionIds)
+    {
+        // Re-read after the committed deletion: a session pinned concurrently
+        // with bulk clearing must keep both its history and its baseline cache.
+        var remaining = (await chats.ListSessionsAsync(cancellationToken: CancellationToken.None).ConfigureAwait(false))
+            .Select(static session => session.Id).ToHashSet();
+        foreach (var sessionId in candidateSessionIds.Where(id => !remaining.Contains(id)))
+        {
+            try { await CodingChangesMonitor.DeleteSessionStorageAsync(settings.DataDirectory, sessionId).ConfigureAwait(false); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                System.Diagnostics.Trace.TraceWarning("Die gelöschte Sitzung {0} hinterließ einen nicht löschbaren Änderungscache: {1}", sessionId, exception.Message);
+            }
+            try { await CodingRunEvidenceStore.DeleteSessionAsync(settings.DataDirectory, sessionId).ConfigureAwait(false); }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+            {
+                System.Diagnostics.Trace.TraceWarning("Die gelöschte Sitzung {0} hinterließ nicht löschbare Werkzeugbelege: {1}", sessionId, exception.Message);
+            }
+        }
     }
 
     private async Task SendChatAsync(
@@ -862,6 +923,12 @@ public sealed class AssistantCoordinator(
         Func<string, object, string?, Task> emit,
         string requestId)
     {
+        if (update.Kind == GoAiAssistantUpdateKind.FileChangesChanged)
+        {
+            if (update.ChangesSummary is { } summary)
+                await emit("coding.changes", summary, requestId).ConfigureAwait(false);
+            return;
+        }
         goAi?.ObserveAutomaticSpeech(update,
             speech => emit("speech.status", new
             {

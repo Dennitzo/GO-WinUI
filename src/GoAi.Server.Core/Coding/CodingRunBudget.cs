@@ -1,4 +1,5 @@
 using GoAi.Server.Core.Configuration;
+using GoAi.Server.Core.Models;
 
 namespace GoAi.Server.Core.Coding;
 
@@ -18,6 +19,17 @@ internal sealed record CodingRunBudget(int ModelRounds, int ToolCalls)
     internal bool ShouldWarn(long rounds, long tools) => ModelRounds > 0 && ModelRounds - rounds <= WarningRounds || ToolCalls > 0 && ToolCalls - tools <= WarningRounds;
 
     internal static int Remaining(int limit, long used) => limit == 0 ? int.MaxValue : (int)Math.Clamp(limit - used, 0, int.MaxValue);
+
+    internal void ApplyInstruction(List<LmChatMessage> messages, long rounds, long tools)
+    {
+        // Remove markers from recovered checkpoints too. The native templates
+        // turn trailing system messages into user turns; an unchanged unlimited
+        // budget must not look like a new request that needs acknowledgement.
+        messages.RemoveAll(static message => message.Role == "system"
+            && message.Content?.StartsWith(PromptMarker, StringComparison.Ordinal) == true);
+        if (ModelRounds == 0 && ToolCalls == 0) return;
+        messages.Add(new LmChatMessage("system", Instruction(rounds, tools)));
+    }
 
     internal string Instruction(long rounds, long tools) => $"{PromptMarker}\n"
         + $"Arbeitsbudget: {(ModelRounds == 0 ? "unbegrenzte" : Remaining(ModelRounds, rounds).ToString(System.Globalization.CultureInfo.InvariantCulture))} Modellrunden und {(ToolCalls == 0 ? "unbegrenzte" : Remaining(ToolCalls, tools).ToString(System.Globalization.CultureInfo.InvariantCulture))} Werkzeugaufrufe. "

@@ -4,6 +4,53 @@ namespace GoWinUI.Tests;
 
 public sealed class NativeModelRuntimeServiceTests
 {
+    [Fact]
+    public async Task ShutdownStopsOnceAndPreventsRestart()
+    {
+        var stops = 0;
+        var starts = 0;
+        using var service = new NativeModelRuntimeService(_ => true, _ => Task.FromResult(true),
+            _ => { starts++; return Task.CompletedTask; }, stop: _ => { stops++; return Task.CompletedTask; });
+        var gateway = new Uri("http://localhost:8080");
+        await service.EnsureStartedAsync(gateway, CancellationToken.None);
+        service.BeginShutdown();
+        await Task.WhenAll(service.StopAsync(gateway), service.StopAsync(gateway),
+            service.EnsureStartedAsync(gateway, CancellationToken.None));
+        Assert.Equal(1, stops);
+        Assert.Equal(0, starts);
+    }
+
+    [Fact]
+    public async Task ShutdownWaitsForPendingStart()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var running = false;
+        using var service = new NativeModelRuntimeService(_ => true, _ => Task.FromResult(running), async _ =>
+        {
+            entered.SetResult();
+            await release.Task;
+            running = true;
+        }, stop: _ => { running = false; return Task.CompletedTask; });
+        var gateway = new Uri("http://localhost:8080");
+        var start = service.EnsureStartedAsync(gateway, CancellationToken.None);
+        await entered.Task;
+        var stop = service.StopAsync(gateway);
+        Assert.False(stop.IsCompleted);
+        release.SetResult();
+        await Task.WhenAll(start, stop);
+        await service.EnsureStartedAsync(gateway, CancellationToken.None);
+        Assert.False(running);
+    }
+
+    [Fact]
+    public async Task RemoteGatewayIsNotStopped()
+    {
+        using var service = new NativeModelRuntimeService(uri => uri.IsLoopback, _ => Task.FromResult(true),
+            _ => Task.CompletedTask, stop: _ => throw new InvalidOperationException("Must not stop remote runtime"));
+        await service.StopAsync(new Uri("http://external.example:8080"));
+    }
+
     [Theory]
     [InlineData("http://127.0.0.1:8080", true)]
     [InlineData("http://localhost:8080", true)]

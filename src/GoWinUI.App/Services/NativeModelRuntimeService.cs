@@ -12,6 +12,9 @@ public sealed class NativeModelRuntimeService : IDisposable
     private readonly Func<CancellationToken, Task<bool>> _probe;
     private readonly Func<CancellationToken, Task> _start;
     private readonly Func<DateTimeOffset> _now;
+    private readonly Func<CancellationToken, Task> _stop;
+    private int _stopping;
+    private bool _stopped;
     private DateTimeOffset _nextProbe;
     private Exception? _lastFailure;
 
@@ -20,16 +23,18 @@ public sealed class NativeModelRuntimeService : IDisposable
 
     internal NativeModelRuntimeService(Func<Uri, bool> isLocalGateway,
         Func<CancellationToken, Task<bool>> probe, Func<CancellationToken, Task> start,
-        Func<DateTimeOffset>? now = null)
+        Func<DateTimeOffset>? now = null, Func<CancellationToken, Task>? stop = null)
     {
         _isLocalGateway = isLocalGateway;
         _probe = probe;
         _start = start;
+        _stop = stop ?? (token => RunInstalledRuntimeAsync("Stop", token));
         _now = now ?? (() => DateTimeOffset.UtcNow);
     }
 
     public async Task EnsureStartedAsync(Uri gateway, CancellationToken cancellationToken)
     {
+        if (Volatile.Read(ref _stopping) != 0) return;
         // Publish smoke checks use an isolated data profile and must not start shared AI services.
         if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GO_SMOKE_INSTANCE_KEY"))
             || !_isLocalGateway(gateway)) return;
@@ -37,6 +42,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (Volatile.Read(ref _stopping) != 0) return;
             if (_now() < _nextProbe)
             {
                 if (_lastFailure is not null)
@@ -58,6 +64,23 @@ public sealed class NativeModelRuntimeService : IDisposable
             _lastFailure = exception;
             _nextProbe = _now().AddSeconds(10);
             throw;
+        }
+        finally { _gate.Release(); }
+    }
+
+    public void BeginShutdown() => Interlocked.Exchange(ref _stopping, 1);
+
+    public async Task StopAsync(Uri gateway, CancellationToken cancellationToken = default)
+    {
+        BeginShutdown();
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GO_SMOKE_INSTANCE_KEY"))
+            || !_isLocalGateway(gateway)) return;
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_stopped) return;
+            await _stop(cancellationToken).ConfigureAwait(false);
+            _stopped = true;
         }
         finally { _gate.Release(); }
     }
@@ -86,12 +109,14 @@ public sealed class NativeModelRuntimeService : IDisposable
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return false; }
     }
 
-    private static async Task StartInstalledRuntimeAsync(CancellationToken cancellationToken)
+    private static Task StartInstalledRuntimeAsync(CancellationToken cancellationToken) => RunInstalledRuntimeAsync("Start", cancellationToken);
+
+    private static async Task RunInstalledRuntimeAsync(string action, CancellationToken cancellationToken)
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var stateDirectory = Path.Combine(userProfile, ".go-winui", "native-runtime");
         // Use stable paths instead of the single-file extraction directory. The supervisor remains
-        // available to the Docker gateway after GO closes and across application updates.
+        // identifiable for shutdown and across application updates.
         var supportDirectory = Path.Combine(stateDirectory, "support");
         foreach (var relative in new[] { Path.Combine("windows", "manage-coding-llama.ps1"), Path.Combine("workers", "coding", "catalog.py") })
         {
@@ -121,7 +146,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         // PowerShell launcher exits. Never wait for its process-lifetime stdout EOF.
         var errorFile = Path.Combine(stateDirectory, "startup-" + Guid.NewGuid().ToString("N") + ".error.txt");
         foreach (var argument in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
-            Path.Combine(supportDirectory, "windows", "manage-coding-llama.ps1"), "-Action", "Start", "-StateDirectory", stateDirectory,
+            Path.Combine(supportDirectory, "windows", "manage-coding-llama.ps1"), "-Action", action, "-StateDirectory", stateDirectory,
             "-ModelRoot", ResolveModelRoot(userProfile), "-ErrorFile", errorFile }) info.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = info };
         if (!process.Start()) throw new InvalidOperationException("Der Starthelfer für Windows llama.cpp konnte nicht gestartet werden.");
@@ -134,13 +159,13 @@ public sealed class NativeModelRuntimeService : IDisposable
             // own process tree and is discovered on the next probe.
             if (!process.HasExited) process.Kill();
             if (cancellationToken.IsCancellationRequested) throw;
-            throw new InvalidOperationException($"Windows llama.cpp startet nicht innerhalb von 45 Sekunden. Diagnose: {Path.Combine(stateDirectory, "stderr.log")}");
+            throw new InvalidOperationException($"Windows llama.cpp: Aktion {action} wurde nicht innerhalb von 45 Sekunden beendet. Diagnose: {Path.Combine(stateDirectory, "stderr.log")}");
         }
         if (process.ExitCode != 0)
         {
             var error = File.Exists(errorFile) ? (await File.ReadAllTextAsync(errorFile, cancellationToken).ConfigureAwait(false)).Trim()
                 : $"Starthelfer beendet mit Exitcode {process.ExitCode}. Diagnose: {Path.Combine(stateDirectory, "stderr.log")}";
-            throw new InvalidOperationException($"Windows llama.cpp konnte nicht gestartet werden: {error}");
+            throw new InvalidOperationException($"Windows llama.cpp: Aktion {action} fehlgeschlagen: {error}");
         }
     }
 

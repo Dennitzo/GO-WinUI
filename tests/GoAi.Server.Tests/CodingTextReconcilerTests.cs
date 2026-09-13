@@ -70,6 +70,56 @@ public sealed class CodingTextReconcilerTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task ReasoningRetryReplacesTheSameRoundWithoutLeakingIntoAnswer(bool diverge)
+    {
+        using var harness = new Harness(diverge, streamReasoning: true);
+        var runId = await harness.CreateRunAsync();
+        await harness.Processor.ProcessAsync(runId, CancellationToken.None);
+        var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
+        var reasoning = events.Where(item => item.Type == RunEventTypes.ReasoningDelta).ToArray();
+        Assert.Equal(harness.Handler.FinalReasoning, ProjectReasoning(reasoning));
+        Assert.Equal(2, reasoning.Count(item => item.Data.TryGetProperty("replaceFrom", out var replace) && replace.ValueKind == JsonValueKind.Number && replace.GetInt32() == 0));
+        Assert.All(reasoning, item => Assert.Equal(2, item.Data.GetProperty("round").GetInt32()));
+        Assert.Equal("completed", reasoning[^1].Data.GetProperty("state").GetString());
+        Assert.Equal(Harness.Previous + harness.Handler.FinalText, CodingTextReconciler.Project(events));
+    }
+
+    [Fact]
+    public async Task ReasoningRecoveryUsesJournalAndReplacesOnlyTheInterruptedRound()
+    {
+        using var harness = new Harness(diverge: true, streamReasoning: true);
+        harness.Handler.HoldRetry = true;
+        var runId = await harness.CreateRunAsync();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var interrupted = harness.Processor.ProcessAsync(runId, stop.Token);
+        await harness.Handler.RetryEntered.Task.WaitAsync(stop.Token);
+        await stop.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => interrupted);
+        Assert.Equal(NativeHandler.FirstReasoning,
+            ProjectReasoning(await harness.Repository.GetEventsAfterAsync(runId, 0)));
+        harness.Handler.HoldRetry = false;
+        await harness.Processor.ProcessAsync(runId, CancellationToken.None);
+        var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
+        Assert.Equal(harness.Handler.FinalReasoning, ProjectReasoning(events));
+        Assert.Equal(Harness.Previous + harness.Handler.FinalText, CodingTextReconciler.Project(events));
+        Assert.Equal("completed", events.Last(item => item.Type == RunEventTypes.ReasoningDelta).Data.GetProperty("state").GetString());
+    }
+
+    private static string ProjectReasoning(IEnumerable<RunEvent> events)
+    {
+        var text = "";
+        foreach (var item in events.Where(item => item.Type == RunEventTypes.ReasoningDelta))
+        {
+            if (item.Data.TryGetProperty("replaceFrom", out var offset) && offset.ValueKind == JsonValueKind.Number)
+                text = text[..offset.GetInt32()];
+            text += item.Data.GetProperty("delta").GetString();
+        }
+        return text;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task RecoveryReadsTheJournalAfterThePersistedTurnBoundaryWithoutReplayingPreviousText(bool diverge)
     {
         using var harness = new Harness(diverge);
@@ -107,10 +157,10 @@ public sealed class CodingTextReconcilerTests
         internal RunRepository Repository { get; }
         internal RunProcessor Processor { get; }
 
-        internal Harness(bool diverge)
+        internal Harness(bool diverge, bool streamReasoning = false)
         {
             _context.Options.ModelRuntimeUri = new Uri("http://native.test");
-            Handler = new(diverge);
+            Handler = new(diverge, streamReasoning);
             _http = new(Handler);
             var runtime = new ModelRuntimeClient(_http, _context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
             var services = new ServiceCollection();
@@ -145,12 +195,14 @@ public sealed class CodingTextReconcilerTests
         }
     }
 
-    private sealed class NativeHandler(bool diverge) : HttpMessageHandler
+    private sealed class NativeHandler(bool diverge, bool streamReasoning) : HttpMessageHandler
     {
         internal const string ModelId = "coding/RetryFixture-Q4~abc123";
         internal const string FirstText = "Ich prüfe die nächste Funktion und ihre Aufrufstellen sorgfältig. Die bisherige Annahme ist noch unbestätigt und bleibt deshalb vorläufig.";
+        internal const string FirstReasoning = "## Prüfplan\n\nZuerst die Datei lesen.\nDann gezielt ändern.";
         private static readonly string[] ModelTags = ["go-context-train:32768"];
         internal string FinalText { get; } = diverge ? "Die neue Prüfung zeigt einen anderen Zusammenhang. Die Antwort wurde anhand der Datei korrigiert." : FirstText + " Die Prüfung ist jetzt abgeschlossen.";
+        internal string FinalReasoning { get; } = diverge ? "## Korrigierter Plan\n\nDie Ursache ist nun bestätigt." : FirstReasoning + "\nJetzt testen.";
         internal int ChatCalls { get; private set; }
         internal bool HoldRetry { get; set; }
         internal TaskCompletionSource RetryEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -169,6 +221,13 @@ public sealed class CodingTextReconcilerTests
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             }
             var incomplete = ChatCalls == 1;
+            var reasoningFrames = "";
+            if (streamReasoning)
+            {
+                var reasoning = incomplete ? FirstReasoning : FinalReasoning;
+                reasoningFrames = "data: " + JsonSerializer.Serialize(new { choices = new[] { new { delta = new { reasoning_content = reasoning[..5] } } } }) + "\n\n"
+                    + "data: " + JsonSerializer.Serialize(new { choices = new[] { new { delta = new { reasoning = reasoning[5..] } } } }) + "\n\n";
+            }
             var frame = JsonSerializer.Serialize(new
             {
                 choices = new[] { new { index = 0, delta = new { content = incomplete ? FirstText : FinalText }, finish_reason = incomplete ? null : "stop" } },
@@ -176,7 +235,7 @@ public sealed class CodingTextReconcilerTests
             });
             return new(HttpStatusCode.OK)
             {
-                Content = new StringContent("data: " + frame + "\n\n" + (incomplete ? "" : "data: [DONE]\n\n"), Encoding.UTF8, "text/event-stream"),
+                Content = new StringContent(reasoningFrames + "data: " + frame + "\n\n" + (incomplete ? "" : "data: [DONE]\n\n"), Encoding.UTF8, "text/event-stream"),
             };
         }
 

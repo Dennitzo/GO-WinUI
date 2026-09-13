@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import csv
 import hashlib
 import json
 import os
@@ -17,6 +18,10 @@ import struct
 import subprocess
 import sys
 import threading
+import time
+import urllib.request
+import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SHARD = re.compile(r"^(.*)-([0-9]{5})-of-([0-9]{5})\.gguf$", re.IGNORECASE)
 NON_TEXT = re.compile(r"(?:^|[-_./])(?:mmproj|ggml-vocab|embedding|embed|asr|whisper|clip|vae|diffusion)(?:[-_./]|$)", re.IGNORECASE)
@@ -145,16 +150,22 @@ def reasoning_profile(metadata):
     """Only select effort values supported by this model's actual template."""
     template = metadata.get("tokenizer.chat_template", "")
     architecture = metadata.get("general.architecture", "")
-    if architecture == "gpt-oss" and "reasoning_effort" in template:
-        # GPT-OSS was trained with low/medium/high (not xhigh or max).
-        return {"enabled": True, "effort": "high", "budget": -1}
+    levels = []
+    for match in re.finditer(r"(?:resolved_)?reasoning_(?:effort|strength)\s+(?:not\s+)?in\s*[\[(]([^\])]{1,512})[\])]", template):
+        levels.extend(re.findall(r"['\"]([a-z][a-z0-9_-]{0,31})['\"]", match.group(1)))
+    levels = list(dict.fromkeys(levels))
+    if not levels and (architecture == "gpt-oss" or "gpt-oss" in metadata.get("general.name", "").lower()) and "reasoning_effort" in template:
+        levels = ["low", "medium", "high"]
+    if levels:
+        if "enable_thinking" in template and "none" not in levels:
+            levels.insert(0, "none")
+        highest = next((level for level in ("max", "ultra", "xhigh", "high", "medium", "low", "minimal") if level in levels), None)
+        return {"enabled": True, "effort": highest, "budget": -1, "levels": levels, "mode": "llama-native"}
     if "enable_thinking" in template:
-        # Current Unsloth Qwen3.8 templates explicitly enumerate supported levels.
-        supported = re.search(r"resolved_reasoning_effort\s+not\s+in\s*\(([^)]{1,256})\)", template)
-        levels = re.findall(r"['\"]([a-z]+)['\"]", supported.group(1)) if supported else []
-        highest = next((level for level in ("max", "xhigh", "high", "medium", "low", "minimal") if level in levels), None)
-        return {"enabled": True, "effort": highest, "budget": -1}
-    return {"enabled": None, "effort": None, "budget": -1}
+        return {"enabled": True, "effort": None, "budget": -1, "levels": ["none", "on"], "mode": "llama-toggle"}
+    if "<think>" in template or "<|channel>analysis" in template:
+        return {"enabled": None, "effort": None, "budget": -1, "levels": ["on"], "mode": "llama-fixed"}
+    return {"enabled": None, "effort": None, "budget": -1, "levels": [], "mode": "automatic"}
 
 
 def discover_models(root):
@@ -218,15 +229,61 @@ def discover(root):
     return [(model["id"], model["path"]) for model in discover_models(root) if model["role"] == "general"]
 
 
-def write_presets(root, target):
+def german_reasoning_template(template):
+    """Localize recognized instructions without adding synthetic model output."""
+    marker = "{%- if add_generation_prompt %}"
+    position = template.rfind(marker)
+    thinking = "{{- '<think>\\n' }}"
+    if position < 0 or thinking not in template[position:]:
+        return None
+    instruction = "Analysiere auf Deutsch und beginne unmittelbar mit dem fachlichen Inhalt. Kuendige weder die Sprache noch deinen Denkprozess an."
+    localized = template.replace("{%- set reasoning_instructions = '' %}",
+        "{%- set reasoning_instructions = '" + instruction + "' %}")
+    translations = {
+        "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.":
+            "Die Denkleistung ist auf xhigh gesetzt. Denke die Aufgabe sorgfaeltig auf Deutsch durch, pruefe wesentliche Annahmen und plausible Alternativen. Priorisiere Korrektheit, Konsistenz und Klarheit der Abschlussantwort.",
+        "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.":
+            "Die Denkleistung ist auf low gesetzt. Denke kurz und zielgerichtet auf Deutsch und gelange ohne unnoetige Ausfuehrungen zum Ergebnis."
+    }
+    for original, translated in translations.items():
+        localized = localized.replace("'" + original + "'", "'" + translated + " " + instruction + "'")
+    return localized if localized != template else None
+
+
+def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto"):
     models = discover_models(root)
-    lines = ["version = 1", "", "[*]", "load-on-startup = false", "stop-timeout = 10", "sleep-idle-seconds = -1", ""]
+    lines = ["version = 1", "", "[*]", "load-on-startup = false", "stop-timeout = 10", "sleep-idle-seconds = -1",
+             "fit = on", f"fit-target = {fit_target}", "fit-ctx = 4096", f"n-gpu-layers = {gpu_layers}", ""]
     for model in models:
         model_id, path = model["id"], model["path"]
         if any(char in str(path) for char in "\r\n"):
             continue
-        lines += [f"[{model_id}]", f"model = {path.as_posix()}",
-                  f"tags = go-context-train:{model['context']},go-context-policy:{model['contextPolicy']}"]
+        tags = f"go-context-train:{model['context']},go-context-policy:{model['contextPolicy']}"
+        if managed_gpu:
+            tags += ",go-gpu-policy:single-preferred-v1"
+        if model["role"] != "embedding":
+            profile = model["reasoning"]
+            tags += f",go-reasoning-mode:{profile['mode']},go-reasoning-levels:{'|'.join(profile['levels'])}"
+            default = profile["effort"] or ("on" if "on" in profile["levels"] else "none" if profile["levels"] == ["none"] else "auto")
+            tags += f",go-reasoning-default:{default}"
+        lines += [f"[{model_id}]", f"model = {path.as_posix()}", f"tags = {tags}"]
+        if model["role"] != "embedding":
+            metadata = model_metadata(path, allow_metadata_only=True) or {}
+            localized = german_reasoning_template(metadata.get("tokenizer.chat_template", ""))
+            if localized:
+                template_dir = Path(target).parent / "templates"
+                template_dir.mkdir(parents=True, exist_ok=True)
+                template_path = template_dir / (hashlib.sha256(localized.encode()).hexdigest()[:24] + ".jinja")
+                if not template_path.exists():
+                    template_path.write_text(localized, encoding="utf-8")
+                lines += [f"chat-template-file = {template_path.as_posix()}"]
+        placement = (placements or {}).get(model_id)
+        if placement:
+            lines += [f"device = {placement}", "split-mode = none", "main-gpu = 0", "n-gpu-layers = 999", "fit = off"]
+            if model["role"] != "embedding":
+                lines += [f"ctx-size = {model['context']}"]
+            if model["role"] == "vision":
+                lines += [f"mmproj-device = {placement}"]
         if model["role"] == "embedding":
             lines += [f"ctx-size = {model['context']}", "embedding = true", f"pooling = {model['pooling']}", f"batch-size = {model['context']}",
                       f"ubatch-size = {model['context']}", "cache-type-k = f16", "cache-type-v = f16", "flash-attn = off"]
@@ -288,14 +345,156 @@ def create_windows_job(process):
     return kernel, job
 
 
+def gpu_inventory():
+    """Match CUDA's PCI_BUS_ID ordering to physical nvidia-smi indices."""
+    try:
+        result = subprocess.run(["nvidia-smi", "--query-gpu=index,pci.bus_id,memory.free", "--format=csv,noheader,nounits"],
+                                capture_output=True, text=True, timeout=10,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0, check=True)
+        rows = sorted(csv.reader(result.stdout.splitlines()), key=lambda row: row[1].strip())
+        return [{"index": int(row[0]), "device": f"CUDA{position}", "free": int(row[2]) * 1024 * 1024}
+                for position, row in enumerate(rows)]
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return []
+
+
+def model_file_bytes(model):
+    path = model["path"]
+    match = SHARD.match(path.name)
+    paths = [path] if not match else [path.with_name(f"{match[1]}-{part:05d}-of-{int(match[3]):05d}.gguf")
+                                    for part in range(1, int(match[3]) + 1)]
+    if model.get("projector"):
+        paths.append(model["projector"])
+    return sum(item.stat().st_size for item in paths)
+
+
+def choose_single_gpu(model, devices, reserve_mib=2048):
+    # This is only admission to a real full-context allocation trial, not a KV
+    # memory estimate. Unknown architectures are validated by llama itself.
+    minimum = model_file_bytes(model) + int(reserve_mib) * 1024 ** 2
+    candidates = [gpu for gpu in devices if gpu["free"] >= minimum]
+    prefer_one = "qwen3.8-27b" in model["id"].lower()
+    candidates.sort(key=lambda gpu: (prefer_one and gpu["index"] == 1, gpu["free"], gpu["index"] == 1), reverse=True)
+    return candidates[0]["device"] if candidates else None
+
+
+class GpuLoadManager:
+    """Only changes presets while their model is unloaded; never on live refresh."""
+    def __init__(self, root, preset, state, port, fit_target="2048", gpu_layers="auto"):
+        self.root, self.preset, self.state, self.port = root, preset, state, port
+        self.fit_target, self.gpu_layers = fit_target, gpu_layers
+        self.placements = {}
+        self.lock = threading.RLock()
+
+    def refresh(self):
+        with self.lock:
+            return write_presets(self.root, self.preset, self.placements, managed_gpu=True,
+                                 fit_target=self.fit_target, gpu_layers=self.gpu_layers)
+
+    def router(self, path, body=None):
+        request = urllib.request.Request(f"http://127.0.0.1:{self.port}/{path}",
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.load(response)
+
+    def record(self, model, device, outcome, detail=None):
+        with (self.state / "gpu-placement.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"time": time.time(), "model": model, "device": device or "multi-gpu-auto",
+                                     "outcome": outcome, "detail": detail}) + "\n")
+
+    def load(self, model_id):
+        with self.lock:
+            models = self.refresh()
+            model = next((item for item in models if item["id"] == model_id), None)
+            if model is None:
+                raise ValueError("Model is not in the local catalog")
+            current = self.router("v1/models")["data"]
+            active = [item for item in current if item.get("status", {}).get("value") in ("loaded", "loading", "sleeping")]
+            if any(item["id"] != model_id for item in active):
+                raise ValueError("Unload the previous model before selecting GPU placement")
+            if active:
+                return {"success": True, "reused": True}
+            device = choose_single_gpu(model, gpu_inventory(), self.fit_target)
+            deadline = time.monotonic() + 280
+            for attempt in range(2):
+                self.placements[model_id] = device
+                self.refresh()
+                self.router("v1/models?reload=1")
+                logs = [self.state / "llama.stderr.log", self.state / "llama.stdout.log"]
+                offsets = {log: log.stat().st_size if log.exists() else 0 for log in logs}
+                self.record(model_id, device, "loading")
+                self.router("models/load", {"model": model_id})
+                while time.monotonic() < deadline:
+                    item = next(item for item in self.router("v1/models")["data"] if item["id"] == model_id)
+                    status = item.get("status", {})
+                    if status.get("value") in ("loaded", "sleeping") and not status.get("failed"):
+                        self.record(model_id, device, "loaded")
+                        return {"success": True, "device": device, "fallback": attempt > 0}
+                    if status.get("failed") or status.get("value") == "failed":
+                        break
+                    time.sleep(0.25)
+                else:
+                    try:
+                        self.router("models/unload", {"model": model_id})
+                    finally:
+                        self.record(model_id, device, "timeout")
+                    raise TimeoutError("Native model load exceeded its time limit")
+                failure = ""
+                for log, offset in offsets.items():
+                    if log.exists():
+                        with log.open("rb") as stream:
+                            stream.seek(offset)
+                            failure += stream.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
+                memory_failure = re.search(r"out of memory|cudaMalloc.*failed|failed to allocate|unable to allocate|CUDA error.*memory", failure, re.I)
+                self.record(model_id, device, "failed", failure[-4000:])
+                if not device or attempt or not memory_failure:
+                    raise RuntimeError("Native model load failed; see gpu-placement.jsonl and llama.stderr.log")
+                # A failed router child has already exited, releasing its CUDA
+                # allocations. Reloading the changed preset joins that child.
+                device = None
+            raise RuntimeError("GPU load attempts exhausted")
+
+
+def start_gpu_control(manager, host, port):
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if self.path != "/models/load" or not 0 < length <= 2048:
+                    raise ValueError("Invalid GPU control request")
+                body = json.loads(self.rfile.read(length))
+                result = manager.load(body["model"])
+                status = 200
+            except Exception as error:
+                result, status = {"error": str(error)}, 500
+            encoded = json.dumps(result).encode()
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        def log_message(self, *_):
+            pass
+    server = ThreadingHTTPServer((host, port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
 def runtime_environment(source, state_directory):
     environment = dict(source, HF_HUB_OFFLINE="1", LLAMA_CACHE=str(state_directory / "cache"))
     # A parent shell's fixed context would bypass the model-maximum fitting policy.
     # No unrelated user environment or process is changed.
     for key in ("LLAMA_ARG_CTX_SIZE", "LLAMA_ARG_KV_UNIFIED_PER_SLOT", "LLAMA_ARG_FIT_CTX",
                 "LLAMA_ARG_N_PREDICT", "LLAMA_ARG_THINK_BUDGET", "LLAMA_ARG_REASONING_EFFORT",
-                "LLAMA_ARG_REASONING", "LLAMA_ARG_CHAT_TEMPLATE_KWARGS"):
+                "LLAMA_ARG_REASONING", "LLAMA_ARG_CHAT_TEMPLATE_KWARGS", "LLAMA_ARG_DEVICE", "LLAMA_ARG_SPLIT_MODE",
+                "LLAMA_ARG_MAIN_GPU", "LLAMA_ARG_TENSOR_SPLIT", "LLAMA_ARG_N_GPU_LAYERS", "LLAMA_ARG_FIT",
+                "LLAMA_ARG_FIT_TARGET", "CUDA_VISIBLE_DEVICES"):
         environment.pop(key, None)
+    environment["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     return environment
 
 
@@ -305,9 +504,7 @@ def runtime_command(binary, preset, host, port, fit_target, gpu_layers):
     # the manager still unloads the owned model on actual workload/model switches.
     return [str(binary), "--host", host, "--port", str(port),
             "--models-preset", str(preset), "--models-max", "1", "--no-models-autoload",
-            "--parallel", "1", "--jinja", "--no-webui",
-            "--fit", "on", "--fit-target", str(fit_target), "--fit-ctx", "4096",
-            "--n-gpu-layers", gpu_layers, "--sleep-idle-seconds", "-1"]
+            "--parallel", "1", "--jinja", "--no-webui", "--sleep-idle-seconds", "-1"]
 
 
 def main():
@@ -333,13 +530,15 @@ def main():
     preset = state_directory / "models.ini"
     stop_file = state_directory / "stop.requested"
     stop_file.unlink(missing_ok=True)
-    write_presets(root, preset)
+    gpu_manager = GpuLoadManager(root, preset, state_directory, args.port, args.fit_target, args.gpu_layers)
+    gpu_manager.refresh()
+    control = start_gpu_control(gpu_manager, args.host, args.port + 1)
     stopped = threading.Event()
 
     def refresh():
         while not stopped.wait(10):
             try:
-                write_presets(root, preset)
+                gpu_manager.refresh()
             except OSError as error:
                 print(f"Native catalog refresh failed: {error}", file=sys.stderr, flush=True)
 
@@ -376,6 +575,8 @@ def main():
         return process.wait()
     finally:
         stopped.set()
+        control.shutdown()
+        control.server_close()
         if job:
             job[0].CloseHandle(job[1])
         runtime_stdout.close()

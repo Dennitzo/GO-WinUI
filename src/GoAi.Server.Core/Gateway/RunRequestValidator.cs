@@ -13,6 +13,7 @@ public static class RunRequestValidator
         "documentIo",
         "pdf",
         "coding",
+        "coding.evidence",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
@@ -44,6 +45,11 @@ public static class RunRequestValidator
             && (request.Mode != RunMode.General || request.AllowedServerTools is not { Count: 0 }))
         {
             throw new ArgumentException("Audiobook runs require general mode and an explicit empty server-tool allow-list.");
+        }
+        if (request.CodingOptions is { } codingOptions)
+        {
+            if (request.Mode != RunMode.Coding || codingOptions.ReasoningPolicy is not ("maximum" or "adaptive"))
+                throw new ArgumentException("Coding options contain an unsupported policy.");
         }
         if (request.ConversationProfile == ConversationProfile.ContextPreparation
             && (request.Mode != RunMode.General
@@ -198,7 +204,7 @@ public static class RunRequestValidator
             var reasoningRole = request.Mode == RunMode.Coding ? "coding" : "general";
             var reasoningProfile = ModelReasoningProfiles.Resolve(reasoningModelId, reasoningRole);
             if (string.IsNullOrWhiteSpace(reasoningModelId)
-                || reasoningEffort.Length > 16
+                || reasoningEffort.Length > 32
                 || reasoningEffort.Any(char.IsControl)
                 || (!reasoningProfile.Supports(reasoningEffort)
                     && !IsReasoningEffortName(reasoningEffort)))
@@ -261,6 +267,6 @@ public static class RunRequestValidator
     private static bool IsLowerHex(string value) => value.All(static character =>
         character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
-    private static bool IsReasoningEffortName(string value) => value.Trim().ToLowerInvariant() is
-        "none" or "off" or "on" or "minimal" or "low" or "medium" or "high" or "xhigh";
+    private static bool IsReasoningEffortName(string value) => value.Length is > 0 and <= 32
+        && char.IsAsciiLetter(value[0]) && value.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-');
 }

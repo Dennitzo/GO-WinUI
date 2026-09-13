@@ -17,6 +17,7 @@ public sealed class AssistantWebBridge : IDisposable
     private static readonly HashSet<string> AllowedIncomingTypes = new(StringComparer.Ordinal)
     {
         "app.ready", "conversation.refresh", "chat.send", "chat.cancel", "session.create", "session.open",
+        "reasoning.get", "reasoning.set",
         "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick", "coding.pickWorkspace",
         "document.remove", "attachment.remove", "workflow.list", "workflow.insert", "workflow.create",
         "workflow.update", "workflow.delete",
@@ -33,7 +34,8 @@ public sealed class AssistantWebBridge : IDisposable
         "workflow.changed", "workflow.draft", "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
         "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
         "microphone.changed", "microphone.transcript", "artifact.previewReady", "host.error",
-        "conversation.snapshot", "conversation.messageCommitted",
+        "conversation.snapshot", "conversation.messageCommitted", "coding.changes",
+        "reasoning.snapshot",
     };
     private static readonly HashSet<string> ReadableBlockKinds = new(StringComparer.Ordinal)
     {

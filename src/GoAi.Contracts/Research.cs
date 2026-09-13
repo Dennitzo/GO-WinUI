@@ -8,7 +8,10 @@ public sealed record WebSearchResponse(
     string Provider,
     bool IsFallback,
     DateTimeOffset RetrievedAt,
-    IReadOnlyList<SearchEngineFailure>? EngineFailures = null);
+    IReadOnlyList<SearchEngineFailure>? EngineFailures = null,
+    string? SearchLanguage = null,
+    IReadOnlyList<string>? SearchedEngines = null,
+    string? SearchGuidance = null);
 
 public sealed record SearchEngineFailure(string Engine, string Reason);
 

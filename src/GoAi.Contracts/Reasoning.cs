@@ -60,9 +60,9 @@ public static class ModelReasoningProfiles
             return new(Qwen3CoderNextFamily, DisabledOnlyEfforts, "none");
         }
 
-        // Unknown/non-reasoning models remain usable and show an explicit
-        // disabled state instead of making the Reasoning section disappear.
-        return new(UnknownFamily, DisabledOnlyEfforts, "none");
+        // Missing metadata is not proof that reasoning is disabled. Unknown
+        // models remain usable with their native defaults until discovered.
+        return new(UnknownFamily, [], null);
     }
 
     public static string? ResolveEffort(string? modelId, string? role, string? requestedEffort) =>

@@ -496,34 +496,36 @@
   }
 
   function openingCodeFence(line) {
-    return /^(`{3,})([^`]*)$/.exec(line);
+    const match = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+    if (!match || (match[2][0] === "`" && match[3].includes("`"))) return null;
+    return { marker: match[2][0], length: match[2].length, indent: match[1].length, language: match[3].trim() };
   }
 
-  function closesCodeFence(line, length) {
-    const match = /^(`{3,})[ \t]*$/.exec(line);
-    return Boolean(match && match[1].length >= length);
+  function closesCodeFence(line, fence) {
+    const match = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+    return Boolean(match && match[1][0] === fence.marker && match[1].length >= fence.length);
   }
 
   function normalizeMarkdownOutsideCodeFences(text) {
     const lines = String(text || "").split("\n");
     const output = [];
     let markdown = [];
-    let fenceLength = 0;
+    let fence = null;
     const flushMarkdown = () => {
       if (!markdown.length) return;
       output.push(...normalizeMarkdownStructure(markdown.join("\n")).split("\n"));
       markdown = [];
     };
     for (const line of lines) {
-      if (fenceLength) {
+      if (fence) {
         output.push(line);
-        if (closesCodeFence(line, fenceLength)) fenceLength = 0;
+        if (closesCodeFence(line, fence)) fence = null;
       } else {
         const opening = openingCodeFence(line);
         if (opening) {
           flushMarkdown();
           output.push(line);
-          fenceLength = opening[1].length;
+          fence = opening;
         } else markdown.push(line);
       }
     }
@@ -545,6 +547,7 @@
     const pre = document.createElement("pre");
     const code = document.createElement("code");
     code.textContent = content;
+    globalThis.goCodeHighlight?.appendTo(code, content, language);
     pre.append(code);
     block.append(header, pre);
     return block;
@@ -580,10 +583,16 @@
       const openingFence = openingCodeFence(line);
       if (openingFence) {
         appendParagraph(root, paragraph);
-        const language = openingFence[2].trim();
+        const language = openingFence.language;
         const content = [];
         index += 1;
-        while (index < lines.length && !closesCodeFence(lines[index], openingFence[1].length)) content.push(lines[index++]);
+        while (index < lines.length && !closesCodeFence(lines[index], openingFence)) {
+          const codeLine = lines[index++];
+          // Up to three leading spaces belong to the Markdown fence. Remove
+          // only that prefix; relative program indentation remains unchanged.
+          const indent = Math.min(openingFence.indent, /^ */.exec(codeLine)[0].length);
+          content.push(codeLine.slice(indent));
+        }
         if (index < lines.length) index += 1;
         root.append(createCodeBlock(language, content.join("\n")));
         continue;

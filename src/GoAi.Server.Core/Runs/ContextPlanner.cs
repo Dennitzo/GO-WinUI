@@ -1,5 +1,5 @@
 using GoAi.Server.Core.Models;
-using System.Text.Json;
+using GoAi.Server.Core.Coding;
 
 namespace GoAi.Server.Core.Runs;
 
@@ -14,7 +14,6 @@ public static class ContextPlanner
 {
     private const int CharactersPerEstimatedToken = 3;
     private const int PerMessageTokenOverhead = 32;
-    private const int MaximumHistoricalToolArgumentCharacters = 16_384;
 
     public static ContextPlan Prepare(
         IReadOnlyList<LmChatMessage> source,
@@ -25,10 +24,12 @@ public static class ContextPlanner
         ArgumentNullException.ThrowIfNull(source);
         var budget = ComputeInputTokenBudget(contextLength, maximumOutputTokens);
         var conversation = CompactRepeatedConversationMessages(source, out var conversationCompacted);
-        var messages = conversation.Select(CompactHistoricalToolArguments).ToArray();
+        var messages = CodingEvidenceContext.CompactCompletedCalls(conversation).ToArray();
         var compacted = conversationCompacted || !messages.SequenceEqual(conversation);
         var latestUserIndex = Array.FindLastIndex(messages, static message =>
-            string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase));
+            string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)
+            && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true
+            && message.Content?.StartsWith(CodingContextCompactor.MemoryMarker, StringComparison.Ordinal) != true);
 
         if (allowLossyCompaction && EstimateTokens(messages) > budget)
         {
@@ -128,26 +129,6 @@ public static class ContextPlanner
         var estimated = (characters + CharactersPerEstimatedToken - 1) / CharactersPerEstimatedToken
             + (long)messages.Count * PerMessageTokenOverhead;
         return estimated >= int.MaxValue ? int.MaxValue : (int)estimated;
-    }
-
-    private static LmChatMessage CompactHistoricalToolArguments(LmChatMessage message)
-    {
-        if (message.ToolCalls is not { Count: > 0 }
-            || message.ToolCalls.All(static call => call.Arguments.GetRawText().Length <= MaximumHistoricalToolArgumentCharacters))
-        {
-            return message;
-        }
-        var calls = message.ToolCalls.Select(call => call.Arguments.GetRawText().Length <= MaximumHistoricalToolArgumentCharacters
-            ? call
-            : call with
-            {
-                Arguments = JsonSerializer.SerializeToElement(new
-                {
-                    compacted = true,
-                    originalCharacters = call.Arguments.GetRawText().Length,
-                }),
-            }).ToArray();
-        return message with { ToolCalls = calls };
     }
 
     private static List<LmChatMessage> CompactRepeatedConversationMessages(

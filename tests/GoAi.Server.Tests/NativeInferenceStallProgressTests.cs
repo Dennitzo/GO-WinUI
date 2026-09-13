@@ -19,11 +19,13 @@ public sealed class NativeInferenceStallProgressTests
         tracker.Observe(new ModelRuntimeProgress("tokenProgress", GeneratedTokens: 8));
         tracker.Observe(new ModelRuntimeProgress("tokenProgress", GeneratedTokens: 16));
         tracker.Observe(new ModelRuntimeProgress("contentDelta", ContentDelta: "visible text"));
-        Assert.Equal(4, renewals);
+        tracker.Observe(new ModelRuntimeProgress("reasoningDelta", ReasoningDelta: "visible reasoning"));
+        tracker.Observe(new ModelRuntimeProgress("reasoningDelta", ReasoningDelta: ""));
+        Assert.Equal(5, renewals);
         tracker.Observe(new ModelRuntimeProgress("generationRetry"));
-        Assert.Equal(4, renewals);
+        Assert.Equal(5, renewals);
         tracker.Observe(new ModelRuntimeProgress("promptProcessing", ProcessedPromptTokens: 100));
         tracker.Observe(new ModelRuntimeProgress("tokenProgress", GeneratedTokens: 1));
-        Assert.Equal(6, renewals);
+        Assert.Equal(7, renewals);
     }
 }

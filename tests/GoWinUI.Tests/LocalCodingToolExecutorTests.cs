@@ -14,6 +14,8 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     private static readonly string[] VerifyFileCommandArguments = ["-NoProfile", "-NonInteractive", "-Command", "if ([IO.File]::ReadAllText('design file.txt') -cne \"Header`nvalue = 2`nFooter`n\") { exit 7 }; [Console]::Write('FILE_VERIFIED')"];
     private static readonly string[] ProgressCommandArguments = ["-NoProfile", "-NonInteractive", "-Command", "[Console]::Write('EARLY_STDOUT'); [Console]::Error.Write('EARLY_STDERR'); 1..8 | ForEach-Object { Start-Sleep -Milliseconds 200; [Console]::Write('tick') }; [Console]::Write('FINAL_STDOUT')"];
     private static readonly string[] LargeProgressCommandArguments = ["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::Write('Grüße € 日本語' + ('x' * 16000) + 'STDOUT_TAIL'); [Console]::Error.Write(('y' * 9000) + 'STDERR_TAIL'); Start-Sleep -Milliseconds 1600"];
+    private static readonly string[] RelativeExecutableArguments = ["/d", "/c", "echo RELATIVE_EXECUTABLE_OK & cd"];
+    private static readonly string[] SourceFirstPaths = ["README.md", "freqai/engine.py", "freqai/__init__.py", "tests/test_engine.py"];
     private readonly string _root = Path.Combine(Path.GetTempPath(), "go-coding-tests-" + Guid.NewGuid().ToString("N"));
     private readonly LocalCodingToolExecutor _executor;
 
@@ -513,6 +515,218 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SourcePackagesPrecedeBulkDataWhenTheStructuredListHitsItsOutputBudget()
+    {
+        foreach (var path in SourceFirstPaths)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(_root, path))!);
+            await File.WriteAllTextAsync(Path.Combine(_root, path), "SOURCE_NEEDLE");
+        }
+        Directory.CreateDirectory(Path.Combine(_root, "data"));
+        Directory.CreateDirectory(Path.Combine(_root, "unsloth-tmp", "pytest-of-AMD", "pytest-9"));
+        for (var index = 0; index < 180; index++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(_root, "data", $"{index:D3}-{new string('d', 32)}.txt"), "DATA_NEEDLE");
+            await File.WriteAllTextAsync(Path.Combine(_root, "unsloth-tmp", "pytest-of-AMD", "pytest-9", $"cache-{index:D3}.txt"), "CACHE_NEEDLE");
+        }
+
+        var list = await Execute("coding.list", new { maximumEntries = 200 });
+        var paths = list.GetProperty("entries").EnumerateArray().Select(entry => entry.GetProperty("path").GetString()!).ToArray();
+        Assert.Equal(SourceFirstPaths, paths.Take(SourceFirstPaths.Length));
+        Assert.True(paths.Length > SourceFirstPaths.Length);
+        Assert.True(list.GetProperty("truncated").GetBoolean());
+        Assert.True(list.GetRawText().Length <= LocalCodingToolExecutor.MaximumOutputCharacters);
+        Assert.Equal("source-first", list.GetProperty("ordering").GetString());
+        Assert.DoesNotContain(paths, path => path.StartsWith("unsloth-tmp/", StringComparison.Ordinal));
+        Assert.Contains(list.GetProperty("ignoredDirectories").EnumerateArray(), value => value.GetString() == "unsloth-tmp");
+        Assert.Contains(list.GetProperty("ignoredDirectoryPatterns").EnumerateArray(), value => value.GetString() == "pytest-<digits>");
+
+        var search = await Execute("coding.search", new { query = "NEEDLE", maximumResults = 4 });
+        Assert.Equal(SourceFirstPaths, search.GetProperty("matches").EnumerateArray().Select(match => match.GetProperty("path").GetString()));
+        Assert.True(search.GetProperty("truncated").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("unsloth-tmp/pytest-of-AMD/pytest-9")]
+    [InlineData(".pytest_cache/v/cache")]
+    [InlineData(".venv/Scripts")]
+    [InlineData("freqai_wave_memory.egg-info")]
+    [InlineData("pytest-of-AMD/pytest-9")]
+    [InlineData("pytest-9")]
+    public async Task GeneratedPathsAreExcludedByDefaultButExplicitListSearchAndReadRemainAvailable(string generatedPath)
+    {
+        var path = generatedPath + "/evidence.txt";
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(_root, path))!);
+        await File.WriteAllTextAsync(Path.Combine(_root, path), "ACTUAL_CACHE_EVIDENCE");
+        Assert.Empty((await Execute("coding.list", new { })).GetProperty("entries").EnumerateArray());
+        Assert.Empty((await Execute("coding.search", new { query = "ACTUAL_CACHE_EVIDENCE" })).GetProperty("matches").EnumerateArray());
+
+        var targetedList = await Execute("coding.list", new { path = generatedPath.Split('/')[0] });
+        Assert.Equal(path, Assert.Single(targetedList.GetProperty("entries").EnumerateArray()).GetProperty("path").GetString());
+        Assert.True(targetedList.GetProperty("includedGeneratedPath").GetBoolean());
+        Assert.Empty(targetedList.GetProperty("ignoredDirectories").EnumerateArray());
+        Assert.Empty(targetedList.GetProperty("ignoredDirectoryPatterns").EnumerateArray());
+        var targetedFile = await Execute("coding.list", new { path });
+        Assert.Equal(path, Assert.Single(targetedFile.GetProperty("entries").EnumerateArray()).GetProperty("path").GetString());
+        var targetedSearch = await Execute("coding.search", new { path = generatedPath, query = "ACTUAL_CACHE_EVIDENCE" });
+        Assert.Equal(path, Assert.Single(targetedSearch.GetProperty("matches").EnumerateArray()).GetProperty("path").GetString());
+        var read = await Execute("coding.read", new { path });
+        Assert.Contains("ACTUAL_CACHE_EVIDENCE", read.GetProperty("content").GetString()!, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("pytest-plugin")]
+    [InlineData("results")]
+    [InlineData("runtime")]
+    public async Task UserArtifactsAndNonCachePytestDirectoriesAreStillListed(string directory)
+    {
+        Directory.CreateDirectory(Path.Combine(_root, directory));
+        await File.WriteAllTextAsync(Path.Combine(_root, directory, "evidence.txt"), "retained");
+        var result = await Execute("coding.list", new { });
+        Assert.Equal(directory + "/evidence.txt", Assert.Single(result.GetProperty("entries").EnumerateArray()).GetProperty("path").GetString());
+    }
+
+    [Fact]
+    public async Task EnvironmentReportsAMissingVenvInterpreterAndCommandNamesItsExactMissingPath()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, ".venv", "Scripts"));
+        var listing = await Execute("coding.list", new { });
+        var environment = listing.GetProperty("environment");
+        Assert.Equal("Windows", environment.GetProperty("operatingSystem").GetString());
+        Assert.True(environment.GetProperty("virtualEnvironmentDirectoryExists").GetBoolean());
+        Assert.False(environment.GetProperty("virtualEnvironmentPythonExists").GetBoolean());
+        Assert.False(environment.GetProperty("gitMetadataAtProjectRoot").GetBoolean());
+        Assert.Equal(".venv/Scripts/python.exe", environment.GetProperty("virtualEnvironmentPython").GetString());
+        var error = await Assert.ThrowsAsync<FileNotFoundException>(() => Execute("coding.command", new
+        {
+            executable = ".venv/Scripts/python.exe", arguments = Array.Empty<string>(),
+        }));
+        Assert.Equal(Path.Combine(_root, ".venv", "Scripts", "python.exe"), error.FileName);
+        Assert.Contains("Geprüfter absoluter Pfad", error.Message, StringComparison.Ordinal);
+        Assert.Contains(".venv-Ordner allein", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("tools/fixture-cmd.exe", "project")]
+    [InlineData("../tools/fixture-cmd.exe", "project/nested")]
+    [InlineData("../../shared/fixture-cmd.exe", "project/nested")]
+    public async Task RelativeExecutableUsesTheExplicitWorkingDirectoryAndCanReachSharedPrograms(string executable, string workingDirectory)
+    {
+        // The selected project is nested inside the owned fixture. Shared programs
+        // are allowed outside that project, just like absolute executable paths.
+        var project = Path.Combine(_root, "project");
+        var directory = Path.GetFullPath(Path.Combine(_root, workingDirectory));
+        Directory.CreateDirectory(directory);
+        var fullExecutable = Path.GetFullPath(executable, directory);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullExecutable)!);
+        File.Copy(Path.Combine(Environment.SystemDirectory, "cmd.exe"), fullExecutable);
+        var executor = new LocalCodingToolExecutor(project);
+        var result = await executor.ExecuteAsync("coding.command", JsonSerializer.SerializeToElement(new
+        {
+            executable, workingDirectory = Path.GetRelativePath(project, directory),
+            arguments = RelativeExecutableArguments, timeoutSeconds = 15,
+        }));
+        Assert.True(result.GetProperty("success").GetBoolean(), result.GetRawText());
+        Assert.Equal(0, result.GetProperty("exitCode").GetInt32());
+        Assert.Contains("RELATIVE_EXECUTABLE_OK", result.GetProperty("stdout").GetString()!, StringComparison.Ordinal);
+        Assert.Contains(directory, result.GetProperty("stdout").GetString()!, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(fullExecutable, result.GetProperty("executable").GetString());
+        Assert.Equal(directory, result.GetProperty("workingDirectory").GetString());
+        Assert.Equal("absolute-path", result.GetProperty("executableResolution").GetString());
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("nested folder")]
+    [InlineData("nested folder/../nested folder")]
+    public async Task AbsoluteCommandWorkingDirectoryUsesTheSelectedWorkspaceOrItsChild(string relative)
+    {
+        var absolute = Path.Combine(_root, relative);
+        var expected = Path.GetFullPath(absolute);
+        Directory.CreateDirectory(expected);
+        var result = await Execute("coding.command", new
+        {
+            executable = "cmd.exe", workingDirectory = absolute,
+            arguments = RelativeExecutableArguments, timeoutSeconds = 15,
+        });
+        Assert.True(result.GetProperty("success").GetBoolean(), result.GetRawText());
+        Assert.Equal(expected, result.GetProperty("workingDirectory").GetString());
+        Assert.Contains(expected, result.GetProperty("stdout").GetString()!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("RELATIVE_EXECUTABLE_OK", result.GetProperty("stdout").GetString()!, StringComparison.Ordinal);
+        var file = Path.Combine(expected, "relative-only.txt");
+        await File.WriteAllTextAsync(file, "file tools keep their relative-path contract");
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => Execute("coding.read", new { path = file }));
+    }
+
+    [Theory]
+    [InlineData(".")]
+    [InlineData("project-neighbor")]
+    [InlineData("outside")]
+    [InlineData("project/../project-neighbor")]
+    public async Task AbsoluteCommandWorkingDirectoryCannotEscapeToAParentOrSibling(string relative)
+    {
+        var project = Path.Combine(_root, "project");
+        Directory.CreateDirectory(project);
+        var directory = Path.Combine(_root, relative);
+        Directory.CreateDirectory(Path.GetFullPath(directory));
+        var executor = new LocalCodingToolExecutor(project);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => executor.ExecuteAsync("coding.command",
+            JsonSerializer.SerializeToElement(new
+            {
+                executable = "must-not-start-missing-program.exe", arguments = Array.Empty<string>(), workingDirectory = directory,
+            })));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AbsoluteCommandWorkingDirectoryStillRejectsJunctions(bool targetOutsideProject)
+    {
+        var project = Path.Combine(_root, "project");
+        Directory.CreateDirectory(project);
+        var target = Path.Combine(targetOutsideProject ? _root : project, "target");
+        Directory.CreateDirectory(target);
+        var link = Path.Combine(project, "linked");
+        // These two paths are generated inside this test's exact private fixture.
+        var start = new ProcessStartInfo("cmd.exe")
+        {
+            Arguments = $"/d /c mklink /J \"{link}\" \"{target}\"",
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        using var process = Process.Start(start)!;
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(process.ExitCode == 0, await process.StandardOutput.ReadToEndAsync() + await process.StandardError.ReadToEndAsync());
+            var executor = new LocalCodingToolExecutor(project);
+            var error = await Assert.ThrowsAsync<UnauthorizedAccessException>(() => executor.ExecuteAsync("coding.command",
+                JsonSerializer.SerializeToElement(new
+                {
+                    executable = "must-not-start-missing-program.exe", arguments = Array.Empty<string>(), workingDirectory = link,
+                })));
+            Assert.Contains("Symlinks", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); }
+            if (Directory.Exists(link) && File.GetAttributes(link).HasFlag(FileAttributes.ReparsePoint))
+                Directory.Delete(link, recursive: false);
+        }
+    }
+
+    [Fact]
+    public async Task GitDiffWithoutARepositoryKeepsTheRealErrorAndExplainsAvailableFileTools()
+    {
+        var result = await Execute("coding.gitDiff", new { });
+        Assert.False(result.GetProperty("success").GetBoolean());
+        Assert.NotEqual(0, result.GetProperty("exitCode").GetInt32());
+        Assert.Equal("coding.git_not_repository", result.GetProperty("errorCode").GetString());
+        Assert.Contains("not a git repository", result.GetProperty("stderr").GetString()!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("coding.write/edit", result.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(Path.Combine(_root, ".git")));
+    }
+
+    [Fact]
     public async Task SearchSkipsLegacyEncodingAndDirectReadExplainsIt()
     {
         await File.WriteAllBytesAsync(Path.Combine(_root, "a-legacy.txt"), [0x63, 0x61, 0x66, 0xe9]);
@@ -548,6 +762,8 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         Assert.False(result.GetProperty("success").GetBoolean());
         Assert.True(result.GetProperty("truncated").GetBoolean());
         Assert.Contains("FINAL_DIAGNOSTIC", result.GetProperty("stdout").GetString()!, StringComparison.Ordinal);
+        Assert.Equal("powershell.exe", result.GetProperty("executable").GetString());
+        Assert.Equal("native-PATH", result.GetProperty("executableResolution").GetString());
         Assert.True(result.GetRawText().Length <= LocalCodingToolExecutor.MaximumOutputCharacters);
     }
 

@@ -13,6 +13,7 @@ namespace GoAi.Server.Tests;
 public sealed class SearxngSearchTests
 {
     private const string Unavailable = """{"results":[],"unresponsive_engines":[["brave","HTTP error 429"],["duckduckgo","CAPTCHA"],["google","unusual traffic"]]}""";
+    private static readonly string[] HealthyPythonEngines = ["google cse", "stackoverflow"];
 
     [Fact]
     public async Task HttpSuccessWithBlockedEnginesIsAConcreteFailureWithoutHiddenRetryOrFallback()
@@ -44,13 +45,19 @@ public sealed class SearxngSearchTests
         Assert.Equal("HTTP error 429", Assert.Single(search.EngineFailures!).Reason);
         Assert.Equal(1, handler.Calls);
         Assert.DoesNotContain("categories=", handler.LastUri!.Query, StringComparison.Ordinal);
-        Assert.Contains("engines=discuss.python,stackoverflow", Uri.UnescapeDataString(handler.LastUri.Query), StringComparison.Ordinal);
+        Assert.Contains("engines=google cse,brave,stackoverflow", Uri.UnescapeDataString(handler.LastUri.Query), StringComparison.Ordinal);
     }
 
     [Theory]
-    [InlineData("auto", "Python asyncio TaskGroup", "discuss.python,stackoverflow")]
-    [InlineData("web", "iframe sandbox allow-scripts", "mdn,microsoft learn")]
-    [InlineData("auto", "C# Task cancellation", "microsoft learn,stackoverflow")]
+    [InlineData("auto", "Python asyncio TaskGroup", "google cse,brave,stackoverflow")]
+    [InlineData("auto", "ProcessPoolExecutor multiprocessing", "google cse,brave,stackoverflow")]
+    [InlineData("auto", "numpy threadpoolctl", "google cse,brave,stackoverflow")]
+    [InlineData("auto", "ThreadPoolExecutor initializer", "google cse,brave,stackoverflow")]
+    [InlineData("auto", "scipy.fft set_workers", "google cse,brave,stackoverflow")]
+    [InlineData("auto", "cupy shared memory", "google cse,brave,stackoverflow")]
+    [InlineData("auto", "pytorch spawn CUDA", "google cse,brave,stackoverflow")]
+    [InlineData("web", "iframe sandbox allow-scripts", "google cse,brave,mdn,microsoft learn")]
+    [InlineData("auto", "C# Task cancellation", "google cse,brave,microsoft learn,stackoverflow")]
     public async Task TechnicalProfilesSelectOnlyAllowlistedLocalSearxngEngines(string profile, string query, string engines)
     {
         using var handler = new SearchHandler("""{"results":[],"unresponsive_engines":[]}""");
@@ -62,6 +69,105 @@ public sealed class SearxngSearchTests
         Assert.Equal(1, handler.Calls);
         Assert.Contains("engines=" + engines, Uri.UnescapeDataString(handler.LastUri!.Query), StringComparison.Ordinal);
         Assert.DoesNotContain("categories=", handler.LastUri.Query, StringComparison.Ordinal);
+        Assert.Contains("language=all", handler.LastUri.Query, StringComparison.Ordinal);
+        Assert.Equal("all", search.SearchLanguage);
+        Assert.Equal(engines.Split(','), search.SearchedEngines);
+    }
+
+    [Theory]
+    [InlineData("notnumpy custom library")]
+    [InlineData("multiprocessingXYZ architecture")]
+    [InlineData("scipyish API")]
+    public void AutoProfileDoesNotInferPythonFromSubstrings(string query)
+    {
+        Assert.Equal("general", SearxngSearchProfiles.Select(query));
+        Assert.Equal("de-DE", SearxngSearchProfiles.SearchLanguage("auto", query, "de-DE"));
+        Assert.Null(SearxngSearchProfiles.Engines("auto", query));
+    }
+
+    [Theory]
+    [InlineData(null, "de-DE", "de-DE")]
+    [InlineData("general", "fr-FR", "fr-FR")]
+    [InlineData("python", "de-DE", "all")]
+    [InlineData("auto", "de-DE", "all")]
+    public async Task TechnicalSourcesAreNotRestrictedToTheChatLanguageAndQueryIsPreserved(string? profile, string language, string expectedLanguage)
+    {
+        const string query = "CUDA Python multiprocessing spawn shared memory cupy worker processes GPU";
+        using var handler = new SearchHandler("""{"results":[],"unresponsive_engines":[]}""");
+        var search = await Service(handler).SearchAsync(new(query, Language: language, Profile: profile), false);
+        Assert.Equal(query, search.Query);
+        Assert.Equal(expectedLanguage, search.SearchLanguage);
+        Assert.Contains("q=" + query, Uri.UnescapeDataString(handler.LastUri!.Query), StringComparison.Ordinal);
+        Assert.Contains("language=" + expectedLanguage, handler.LastUri.Query, StringComparison.Ordinal);
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Fact]
+    public async Task NextTechnicalSearchSkipsRateLimitedEngineAndRetainsConcreteDiagnostics()
+    {
+        using var handler = new SearchHandler(
+            """{"results":[],"unresponsive_engines":[["brave","too many requests"]]}""",
+            """{"results":[{"title":"Multiprocessing","url":"https://docs.python.org/3/library/multiprocessing.html","engine":"google cse"}],"unresponsive_engines":[]}""");
+        var service = Service(handler);
+        var initial = await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false);
+        Assert.Empty(initial.Results);
+        Assert.Equal("brave", Assert.Single(initial.EngineFailures!).Engine);
+        Assert.NotNull(initial.SearchGuidance);
+        var result = await service.SearchAsync(new("CUDA multiprocessing spawn", Profile: "python"), false);
+        Assert.Single(result.Results);
+        Assert.Equal("searxng", result.Provider);
+        Assert.False(result.IsFallback);
+        Assert.Equal(2, handler.Calls);
+        Assert.Equal(HealthyPythonEngines, result.SearchedEngines);
+        Assert.DoesNotContain("brave", handler.LastUri!.Query, StringComparison.Ordinal);
+        var failure = Assert.Single(result.EngineFailures!);
+        Assert.Equal("brave", failure.Engine);
+        Assert.Contains("ausgelassen", failure.Reason, StringComparison.Ordinal);
+        Assert.Contains("too many requests", failure.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExpiredEngineCooldownIsReevaluatedAndDoesNotPermanentlyRemoveSearchEngines()
+    {
+        using var handler = new SearchHandler("""{"results":[],"unresponsive_engines":[["brave","HTTP error 429"]]}""");
+        var clock = new TestTimeProvider();
+        var service = new WebResearchService(new TestClientFactory(handler), Options.Create(new GoAiServerOptions()), clock);
+        await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false);
+        clock.Now += TimeSpan.FromMinutes(3);
+        await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false);
+        Assert.Contains("brave", handler.LastUri!.Query, StringComparison.Ordinal);
+        Assert.Equal(2, handler.Calls);
+    }
+
+    [Fact]
+    public async Task HealthyEmptyResultsWithSkippedEngineRemainRefinableInsteadOfClaimingAnOutage()
+    {
+        using var handler = new SearchHandler(
+            """{"results":[],"unresponsive_engines":[["brave","too many requests"]]}""",
+            """{"results":[],"unresponsive_engines":[]}""");
+        var service = Service(handler);
+        await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false);
+        var result = await service.SearchAsync(new("CUDA multiprocessing spawn", Profile: "python"), false);
+        Assert.Empty(result.Results);
+        Assert.Equal(HealthyPythonEngines, result.SearchedEngines);
+        Assert.Equal("brave", Assert.Single(result.EngineFailures!).Engine);
+        Assert.Contains("API-Namen", result.SearchGuidance!, StringComparison.Ordinal);
+        Assert.Equal("searxng", result.Provider);
+        Assert.False(result.IsFallback);
+        Assert.DoesNotContain("brave", handler.LastUri!.Query, StringComparison.Ordinal);
+        Assert.Equal(2, handler.Calls);
+    }
+
+    [Fact]
+    public async Task FullyBlockedProfileDoesNotIssueAnotherNetworkRequest()
+    {
+        using var handler = new SearchHandler("""{"results":[],"unresponsive_engines":[["google cse","HTTP error 429"],["brave","too many requests"],["stackoverflow","CAPTCHA"]]}""");
+        var service = Service(handler);
+        await Assert.ThrowsAsync<SearxngEngineUnavailableException>(() => service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false));
+        var exception = await Assert.ThrowsAsync<SearxngEngineUnavailableException>(() => service.SearchAsync(new("CUDA multiprocessing spawn", Profile: "python"), false));
+        Assert.Equal(3, exception.Failures.Count);
+        Assert.All(exception.Failures, failure => Assert.Contains("ausgelassen", failure.Reason, StringComparison.Ordinal));
+        Assert.Equal(1, handler.Calls);
     }
 
     [Fact]
@@ -115,7 +221,13 @@ public sealed class SearxngSearchTests
         public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
     }
 
-    private sealed class SearchHandler(string response) : HttpMessageHandler
+    private sealed class TestTimeProvider : TimeProvider
+    {
+        internal DateTimeOffset Now { get; set; } = new(2026, 9, 12, 0, 0, 0, TimeSpan.Zero);
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    private sealed class SearchHandler(params string[] responses) : HttpMessageHandler
     {
         internal int Calls { get; private set; }
         internal Uri? LastUri { get; private set; }
@@ -124,7 +236,7 @@ public sealed class SearxngSearchTests
             cancellationToken.ThrowIfCancellationRequested();
             Calls++;
             LastUri = request.RequestUri;
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(response, Encoding.UTF8, "application/json") });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(responses[Math.Min(Calls - 1, responses.Length - 1)], Encoding.UTF8, "application/json") });
         }
     }
 }

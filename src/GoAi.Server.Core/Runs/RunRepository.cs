@@ -546,6 +546,8 @@ public sealed class RunRepository
             """;
         command.Parameters.AddWithValue("$event", RunEventTypes.RunCancelled);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.CommandText = "UPDATE client_tool_proposals SET expires_at = $now WHERE run_id = $run;";
+        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         _notifier.Notify(runId);
         return true;
@@ -681,10 +683,12 @@ public sealed class RunRepository
         await using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO run_checkpoints(run_id, checkpoint_json, updated_at)
-            VALUES($run, $json, $updated)
+            SELECT $run, $json, $updated WHERE EXISTS (
+                SELECT 1 FROM runs WHERE run_id = $run AND state IN ('Queued','Running','WaitingForClient','Interrupted'))
             ON CONFLICT(run_id) DO UPDATE SET
                 checkpoint_json = excluded.checkpoint_json,
-                updated_at = excluded.updated_at;
+                updated_at = excluded.updated_at
+            WHERE EXISTS (SELECT 1 FROM runs WHERE run_id = $run AND state IN ('Queued','Running','WaitingForClient','Interrupted'));
             """;
         command.Parameters.AddWithValue("$run", runId);
         command.Parameters.AddWithValue("$json", JsonSerializer.Serialize(checkpoint, _database.JsonOptions));
@@ -761,15 +765,26 @@ public sealed class RunRepository
         catch (JsonException)
         {
             var root = JsonNode.Parse(json)?.AsObject();
-            if (root is null
-                || !string.Equals(root["mode"]?.GetValue<string>(), "code", StringComparison.OrdinalIgnoreCase))
+            if (root is null) throw;
+            var changed = false;
+            if (string.Equals(root["mode"]?.GetValue<string>(), "code", StringComparison.OrdinalIgnoreCase))
             {
-                throw;
+                root["mode"] = "general";
+                _ = root.Remove("preferredCodeModelId");
+                changed = true;
             }
-
-            root["mode"] = "general";
-            // Legacy coding payloads may still contain this field; normalize it away while recovering stored runs.
-            _ = root.Remove("preferredCodeModelId");
+            // Stored requests remain readable after feature removal. This does
+            // not permit retired options or capabilities on new API requests.
+            if (root["codingOptions"] is JsonObject coding)
+            {
+                changed |= coding.Remove("specialists");
+                changed |= coding.Remove("maximumSpecialists");
+            }
+            if (root["clientCapabilities"] is JsonArray capabilities)
+                for (var index = capabilities.Count - 1; index >= 0; index--)
+                    if (string.Equals(capabilities[index]?.GetValue<string>(), "coding.agents", StringComparison.OrdinalIgnoreCase))
+                    { capabilities.RemoveAt(index); changed = true; }
+            if (!changed) throw;
             return JsonSerializer.Deserialize<RunRequest>(root.ToJsonString(), options);
         }
     }

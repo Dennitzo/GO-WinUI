@@ -141,7 +141,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             // Change residency only when the selected model actually needs loading. A resumed tool round reuses it.
             foreach (var loaded in runtimeModels.Where(model => model.Id != selected.Id && model.State is "loaded" or "loading" or "sleeping"))
                 await UnloadRuntimeInstanceAsync(loaded.Id, timeout.Token).ConfigureAwait(false);
-            try { await LoadRuntimeModelAsync(selected.Id, timeout.Token).ConfigureAwait(false); }
+            try { await LoadRuntimeModelAsync(selected.Id, timeout.Token, selected.ManagedGpuPlacement).ConfigureAwait(false); }
             catch (Exception exception) when (IsTransientInferenceFailure(exception) && !timeout.IsCancellationRequested)
             {
                 // A dropped load response can follow a successful native allocation. Reconcile once before retrying anything.
@@ -228,7 +228,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             throw new ArgumentException("Coding requires an installed model from the Coding model catalog.", nameof(modelId));
         }
+        var turnClock = Stopwatch.StartNew();
         await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var queueMilliseconds = turnClock.Elapsed.TotalMilliseconds;
         try
         {
             // The preset chooses the model's maximum that fits. A request limit is
@@ -244,7 +246,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             var body = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["model"] = preparation.InstanceId,
-                ["messages"] = NormalizeMessageOrderForNativeRuntime(messages)
+                ["messages"] = PrepareLanguageBoundMessages(messages)
                     .Select(ToOpenAiMessage)
                     .ToArray(),
                 // Stream progress and text immediately. A tool is executed only
@@ -327,7 +329,11 @@ public sealed partial class ModelRuntimeClient : IDisposable
                         cancellationToken).ConfigureAwait(false);
                 }
             }
-            return result;
+            return result with { Metrics = (result.Metrics ?? new ModelTurnMetrics()) with
+            {
+                RuntimeQueueMilliseconds = queueMilliseconds,
+                TotalMilliseconds = turnClock.Elapsed.TotalMilliseconds,
+            } };
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -413,7 +419,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             ["stream"] = false,
             ["messages"] = new object[]
             {
-                new { role = "system", content = "Analysiere ausschließlich die bereitgestellten Medien fachlich. Erfinde keine sichtbaren Details." },
+                new { role = "system", content = CodingAgentPolicy.ReasoningLanguagePrompt + "\n\nAnalysiere ausschließlich die bereitgestellten Medien fachlich. Erfinde keine sichtbaren Details." },
                 new { role = "user", content = content.ToArray() },
             },
         };
@@ -455,7 +461,11 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 props.EnsureSuccessStatusCode();
                 using var properties = await JsonDocument.ParseAsync(await props.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), cancellationToken: cancellationToken).ConfigureAwait(false);
                 var loadedContext = ReadLoadedContextLength(properties.RootElement);
-                models[index] = models[index] with { LoadedContextLength = Math.Min(loadedContext, models[index].MaximumContextLength) };
+                var reasoning = ReadReasoningMetadata(properties.RootElement);
+                models[index] = models[index] with { LoadedContextLength = Math.Min(loadedContext, models[index].MaximumContextLength),
+                    ReasoningEfforts = reasoning?.SupportedEfforts ?? models[index].ReasoningEfforts,
+                    DefaultReasoningEffort = reasoning is null ? models[index].DefaultReasoningEffort : reasoning.DefaultEffort,
+                    ReasoningFamily = reasoning?.Family ?? models[index].ReasoningFamily };
             }
             catch (Exception exception) when (!reconciled && !cancellationToken.IsCancellationRequested
                 && exception is HttpRequestException or JsonException)
@@ -530,9 +540,13 @@ public sealed partial class ModelRuntimeClient : IDisposable
         return models;
     }
 
-    private async Task LoadRuntimeModelAsync(string modelId, CancellationToken cancellationToken)
+    private async Task LoadRuntimeModelAsync(string modelId, CancellationToken cancellationToken, bool managedGpuPlacement = false)
     {
-        using var response = await SendJsonAsync(HttpMethod.Post, "models/load", new { model = modelId }, cancellationToken).ConfigureAwait(false);
+        var path = managedGpuPlacement
+            ? new UriBuilder(_options.ModelRuntimeUri) { Port = _options.ModelRuntimeUri.Port + 1, Path = "/models/load", Query = "" }.Uri.AbsoluteUri
+            : "models/load";
+        using var response = await SendJsonAsync(HttpMethod.Post, path, new { model = modelId }, cancellationToken,
+            bufferContent: managedGpuPlacement).ConfigureAwait(false);
     }
 
     private async Task UnloadRuntimeInstanceAsync(string modelId, CancellationToken cancellationToken)
@@ -552,6 +566,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
     {
         Exception? last = null;
         string? protocolRepairTool = null;
+        double tokenCountingMilliseconds = 0;
         const int maximumAttempts = 3;
         for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
@@ -561,21 +576,26 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 var unbudgetedBody = protocolRepairTool is null
                     ? body
                     : CreateToolProtocolRepairBody(body, protocolRepairTool);
-                var requestBody = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, cancellationToken).ConfigureAwait(false);
+                var countingClock = Stopwatch.StartNew();
+                Dictionary<string, object?> requestBody;
+                try { requestBody = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, cancellationToken).ConfigureAwait(false); }
+                finally { tokenCountingMilliseconds += countingClock.Elapsed.TotalMilliseconds; }
                 requestPhase = "generation";
+                var requestClock = Stopwatch.StartNew();
                 using var response = await SendJsonAsync(
                     HttpMethod.Post,
                     completionEndpoint ?? "v1/chat/completions",
                     requestBody,
                     cancellationToken).ConfigureAwait(false);
-                return await ParseStreamingChatResponseAsync(
+                var result = await ParseStreamingChatResponseAsync(
                     response,
                     transportToolNames,
                     nativeProgress,
                     structuredToolOnly,
                     body.TryGetValue("parallel_tool_calls", out var parallelCalls) && parallelCalls is true
                         ? CodingRunBudget.MaximumNativeCallsPerTurn : 1,
-                    cancellationToken).ConfigureAwait(false);
+                    requestClock, cancellationToken).ConfigureAwait(false);
+                return result with { Metrics = (result.Metrics ?? new ModelTurnMetrics()) with { TokenCountingMilliseconds = tokenCountingMilliseconds } };
             }
             catch (Exception exception) when (
                 IsTransientInferenceFailure(exception)
@@ -664,6 +684,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         Func<ModelRuntimeProgress, CancellationToken, ValueTask>? nativeProgress,
         bool structuredToolOnly,
         int maximumToolCalls,
+        Stopwatch requestClock,
         CancellationToken cancellationToken)
     {
         var mediaType = response.Content.Headers.ContentType?.MediaType;
@@ -673,6 +694,14 @@ public sealed partial class ModelRuntimeClient : IDisposable
             {
                 using var document = JsonDocument.Parse(
                     await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+                if (nativeProgress is not null
+                    && document.RootElement.TryGetProperty("choices", out var choices)
+                    && choices.ValueKind == JsonValueKind.Array && choices.GetArrayLength() > 0
+                    && choices[0].TryGetProperty("message", out var message)
+                    && ReadReasoningDelta(message) is { Length: > 0 } reasoning)
+                {
+                    await nativeProgress(new ModelRuntimeProgress("reasoningDelta", ReasoningDelta: reasoning), cancellationToken).ConfigureAwait(false);
+                }
                 return ParseChatResult(document.RootElement, transportToolNames, structuredToolOnly, maximumToolCalls);
             }
             catch (JsonException exception)
@@ -686,9 +715,12 @@ public sealed partial class ModelRuntimeClient : IDisposable
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: false);
-        var accumulator = new StreamingChatAccumulator(structuredToolOnly, maximumToolCalls);
+        var accumulator = new StreamingChatAccumulator(structuredToolOnly, maximumToolCalls, requestClock);
         var eventData = new StringBuilder();
         var progressClock = Stopwatch.StartNew();
+        var reasoningClock = Stopwatch.StartNew();
+        var pendingReasoning = new StringBuilder();
+        var reasoningReported = false;
         var lastReportedFragments = 0;
 
         try
@@ -721,6 +753,13 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 exception is JsonException ? "invalid_sse_json" : "stream_read_error",
                 accumulator.CreateSnapshot(transportToolNames),
                 exception);
+        }
+        finally
+        {
+            // Preserve the tail even when the provider ends, disconnects or is
+            // cancelled before the next display interval. This is journal data,
+            // not another inference operation.
+            await FlushReasoningAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
         if (!accumulator.Done && !accumulator.FinishObserved)
@@ -778,6 +817,15 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     ProcessedPromptTokens: processed), cancellationToken).ConfigureAwait(false);
             }
             var contentDelta = accumulator.Add(chunk.RootElement);
+            // Capture every provider fragment, but limit durable UI updates to a
+            // readable cadence. Token-progress throttling must never discard text.
+            if (nativeProgress is not null && accumulator.LastReasoningDelta is { Length: > 0 } reasoningDelta)
+            {
+                pendingReasoning.Append(reasoningDelta);
+            }
+            if (!reasoningReported || reasoningClock.Elapsed >= TimeSpan.FromMilliseconds(180)
+                || !string.IsNullOrEmpty(contentDelta) || accumulator.FinishObserved)
+                await FlushReasoningAsync(cancellationToken).ConfigureAwait(false);
             if (!structuredToolOnly && nativeProgress is not null && !string.IsNullOrEmpty(contentDelta))
             {
                 await nativeProgress(
@@ -811,10 +859,33 @@ public sealed partial class ModelRuntimeClient : IDisposable
                         : accumulator.GeneratedFragments),
                 cancellationToken).ConfigureAwait(false);
         }
+
+        async Task FlushReasoningAsync(CancellationToken token)
+        {
+            if (nativeProgress is null || pendingReasoning.Length == 0) return;
+            var delta = pendingReasoning.ToString();
+            pendingReasoning.Clear();
+            reasoningReported = true;
+            reasoningClock.Restart();
+            await nativeProgress(new ModelRuntimeProgress("reasoningDelta", ReasoningDelta: delta), token).ConfigureAwait(false);
+        }
     }
 
-    private sealed class StreamingChatAccumulator(bool structuredToolOnly, int maximumToolCalls)
+    private static string? ReadReasoningDelta(JsonElement message)
     {
+        if (message.ValueKind != JsonValueKind.Object) return null;
+        // Native llama.cpp normally uses reasoning_content. Some compatible
+        // templates use reasoning instead; prefer one field to avoid duplication.
+        if (message.TryGetProperty("reasoning_content", out var content)
+            && content.ValueKind == JsonValueKind.String && content.GetString() is { Length: > 0 } text)
+            return text;
+        return message.TryGetProperty("reasoning", out var alternate) && alternate.ValueKind == JsonValueKind.String
+            ? alternate.GetString() : null;
+    }
+
+    private sealed class StreamingChatAccumulator(bool structuredToolOnly, int maximumToolCalls, Stopwatch requestClock)
+    {
+        private readonly ModelTurnMeasurement _measurement = new(requestClock);
         private readonly StringBuilder _content = new();
         private readonly StringBuilder _reasoningContent = new();
         private readonly Dictionary<int, StreamingToolCall> _toolCalls = [];
@@ -826,6 +897,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         public bool HadReasoning { get; private set; }
         public bool FinishObserved { get; private set; }
         public bool Done { get; set; }
+        public string? LastReasoningDelta { get; private set; }
 
         public StreamingAttemptSnapshot CreateSnapshot(IReadOnlyDictionary<string, string> transportToolNames)
         {
@@ -852,6 +924,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
 
         public string? Add(JsonElement root)
         {
+            LastReasoningDelta = null;
+            _measurement.Observe(root);
             if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
             {
                 InputTokens = ReadInt(usage, "prompt_tokens", "input_tokens");
@@ -881,13 +955,15 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 return null;
             }
             var contentDelta = AppendString(delta, "content", _content);
-            if (delta.TryGetProperty("reasoning_content", out var reasoning)
-                && reasoning.ValueKind == JsonValueKind.String
-                && reasoning.GetString() is { Length: > 0 } reasoningText)
+            if (!string.IsNullOrEmpty(contentDelta)) _measurement.ObserveGeneratedFragment();
+            if (ReadReasoningDelta(delta) is { Length: > 0 } reasoningText
+                && (_reasoningContent.Length > 0 || !string.IsNullOrWhiteSpace(reasoningText)))
             {
+                LastReasoningDelta = reasoningText;
                 _reasoningContent.Append(reasoningText);
                 HadReasoning = true;
                 GeneratedFragments++;
+                _measurement.ObserveGeneratedFragment();
             }
             if (!delta.TryGetProperty("tool_calls", out var calls) || calls.ValueKind != JsonValueKind.Array)
             {
@@ -911,8 +987,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 {
                     continue;
                 }
-                AppendString(function, "name", target.Name);
-                AppendString(function, "arguments", target.Arguments);
+                var nameFragment = AppendString(function, "name", target.Name);
+                var argumentsFragment = AppendString(function, "arguments", target.Arguments);
+                if (!string.IsNullOrEmpty(nameFragment) || !string.IsNullOrEmpty(argumentsFragment)) _measurement.ObserveGeneratedFragment();
             }
             return contentDelta;
         }
@@ -956,7 +1033,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 InputTokens,
                 OutputTokens > 0 ? OutputTokens : GeneratedFragments,
                 HadReasoning,
-                ReasoningTokens);
+                ReasoningTokens, _measurement.Build());
         }
 
         public bool TryBuildCompleteToolCall(
@@ -981,7 +1058,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     InputTokens,
                     OutputTokens > 0 ? OutputTokens : GeneratedFragments,
                     HadReasoning,
-                    ReasoningTokens);
+                    ReasoningTokens, _measurement.Build());
                 return true;
             }
 
@@ -1099,11 +1176,14 @@ public sealed partial class ModelRuntimeClient : IDisposable
         HttpMethod method,
         string path,
         object body,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool bufferContent = false)
     {
         using var request = new HttpRequestMessage(method, path)
         {
-            Content = JsonContent.Create(body, options: _json),
+            Content = bufferContent
+                ? new StringContent(JsonSerializer.Serialize(body, _json), Encoding.UTF8, "application/json")
+                : JsonContent.Create(body, options: _json),
         };
         var response = await _httpClient.SendAsync(
             request,
@@ -1178,26 +1258,27 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
         }
         var content = ReadContent(message);
-        var hasReasoningContent = message.TryGetProperty("reasoning_content", out var reasoningContent)
-            && reasoningContent.ValueKind == JsonValueKind.String
-            && !string.IsNullOrWhiteSpace(reasoningContent.GetString());
+        var reasoningContent = ReadReasoningDelta(message);
+        var hasReasoningContent = !string.IsNullOrWhiteSpace(reasoningContent);
         if (calls.Count == 0
             && string.IsNullOrWhiteSpace(content)
             && hasReasoningContent
             && TryParseReasoningToolCall(
-                reasoningContent.GetString()!,
+                reasoningContent!,
                 transportToolNames,
                 out var reasoningCall))
         {
             calls.Add(reasoningCall);
         }
+        var measurement = new ModelTurnMeasurement(Stopwatch.StartNew());
+        measurement.Observe(root);
         return new LmChatResult(
             structuredToolOnly ? null : content,
             calls,
             inputTokens,
             outputTokens,
             hasReasoningContent || reasoningTokens > 0,
-            reasoningTokens);
+            reasoningTokens, measurement.Build());
     }
 
     internal static bool TryParseReasoningToolCall(
@@ -1287,9 +1368,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
 
         var arguments = JsonSerializer.SerializeToElement(parameters);
-        var callHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(block)))
-            .ToLowerInvariant()[..16];
-        call = new LmToolCall($"call-reasoning-{callHash}", logicalName, arguments);
+        // The same arguments in a later turn are a new operation. A content hash
+        // would merge its evidence with an earlier success/failure after compaction.
+        call = new LmToolCall($"call-reasoning-{Guid.NewGuid():N}", logicalName, arguments);
         return true;
     }
 
@@ -1549,12 +1630,24 @@ public sealed partial class ModelRuntimeClient : IDisposable
             return;
         }
 
+        if (profile.Family == "llama-toggle")
+        {
+            body["chat_template_kwargs"] = new Dictionary<string, object?> { ["enable_thinking"] = effort != "none" };
+            if (effort == "none") body["reasoning_effort"] = "none";
+            return;
+        }
+
         if (string.Equals(profile.Family, "llama-native", StringComparison.Ordinal)
             || string.Equals(profile.Family, ModelReasoningProfiles.GptOssFamily, StringComparison.Ordinal))
         {
             body["reasoning_effort"] = string.Equals(effort, "none", StringComparison.OrdinalIgnoreCase)
                 ? "none"
                 : effort;
+            if (profile.Family == "llama-native")
+                body["chat_template_kwargs"] = new Dictionary<string, object?> {
+                    ["enable_thinking"] = effort != "none",
+                    ["reasoning_strength"] = effort
+                };
             return;
         }
 
@@ -1637,9 +1730,12 @@ public sealed partial class ModelRuntimeClient : IDisposable
             var name = id[(id.IndexOf('/') + 1)..];
             var hash = name.LastIndexOf('~');
             if (hash > 0) name = name[..hash];
-            var reasoning = embedding ? new ModelReasoningProfile(ModelReasoningProfiles.UnknownFamily, ["none"], "none") : ModelReasoningProfiles.Resolve(id, vision ? "vision" : "general");
+            var reasoning = embedding ? new ModelReasoningProfile(ModelReasoningProfiles.UnknownFamily, ["none"], "none")
+                : ReadReasoningMetadata(item) ?? ModelReasoningProfiles.Resolve(id, vision ? "vision" : "general");
             models.Add(new RuntimeModel(id, embedding ? "embedding" : "llm", state, state is "loaded" or "sleeping" ? id : null,
-                context, state is "loaded" or "sleeping" ? context : 0, name, null, null, !embedding, vision, reasoning.SupportedEfforts, reasoning.DefaultEffort));
+                context, state is "loaded" or "sleeping" ? context : 0, name, null, null, !embedding, vision, reasoning.SupportedEfforts, reasoning.DefaultEffort, reasoning.Family,
+                item.TryGetProperty("tags", out var gpuTags) && gpuTags.ValueKind == JsonValueKind.Array
+                    && gpuTags.EnumerateArray().Any(tag => tag.ValueKind == JsonValueKind.String && tag.GetString() == "go-gpu-policy:single-preferred-v1")));
         }
         return [.. models];
     }
@@ -1745,7 +1841,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
             : ModelReasoningProfiles.Resolve(modelId, role);
 
     private static ModelReasoningProfile ResolveRuntimeReasoningProfile(RuntimeModel model, string role) =>
-        ModelReasoningProfiles.Resolve(model.Id, role);
+        new(model.ReasoningFamily ?? ModelReasoningProfiles.Resolve(model.Id, role).Family,
+            model.ReasoningEfforts, model.DefaultReasoningEffort);
 
     private ModelStatusSnapshot Cache(ModelStatusSnapshot status)
     {
@@ -1801,5 +1898,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         bool SupportsTools,
         bool SupportsVision,
         IReadOnlyList<string> ReasoningEfforts,
-        string? DefaultReasoningEffort);
+        string? DefaultReasoningEffort,
+        string? ReasoningFamily = null,
+        bool ManagedGpuPlacement = false);
 }

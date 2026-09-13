@@ -56,7 +56,12 @@ public sealed record RunRequest(
     SessionContextDescriptor? SessionContext = null,
     ConversationProfile? ConversationProfile = null,
     string? ReasoningEffort = null,
-    string? PreferredCodingModelId = null);
+    string? PreferredCodingModelId = null,
+    CodingRunOptions? CodingOptions = null);
+
+public sealed record CodingRunOptions(
+    bool UseWorkingState = true,
+    string ReasoningPolicy = "maximum");
 
 public sealed record DocumentContextDescriptor(
     DocumentContextMode Mode,
@@ -139,6 +144,7 @@ public static class RunEventTypes
     public const string ProviderFallback = "provider.fallback";
     public const string ContextChanged = "context.changed";
     public const string TextDelta = "text.delta";
+    public const string ReasoningDelta = "reasoning.delta";
     public const string ServerToolStarted = "server_tool.started";
     public const string ServerToolCompleted = "server_tool.completed";
     public const string ClientToolProposed = "client_tool.proposed";
@@ -147,9 +153,13 @@ public static class RunEventTypes
     public const string RunCompleted = "run.completed";
     public const string RunFailed = "run.failed";
     public const string RunCancelled = "run.cancelled";
+    public const string CodingMetrics = "coding.metrics";
 }
 
 public sealed record TextDeltaEvent(string Delta, int? ReplaceFrom = null);
+
+/// <summary>Provider reasoning is separate from answer text. A new attempt replaces its round/phase at offset zero.</summary>
+public sealed record ReasoningDeltaEvent(string Delta, int Round, string Phase = "main", int? ReplaceFrom = null, string? State = null);
 
 public sealed record ModelSelectedEvent(string ModelId, string Role, bool IsFallback = false);
 
@@ -175,6 +185,27 @@ public sealed record ModelGenerationEvent(
     int? ContentCharacters = null,
     bool? FinishObserved = null,
     int? ElapsedSeconds = null);
+
+/// <summary>Measured values only; unavailable provider counters remain null.</summary>
+public sealed record ModelTurnMetrics(
+    double? RuntimeQueueMilliseconds = null,
+    double? TokenCountingMilliseconds = null,
+    double? PromptMilliseconds = null,
+    double? GenerationMilliseconds = null,
+    double? TimeToFirstTokenMilliseconds = null,
+    double? TotalMilliseconds = null,
+    int? PromptEvaluatedTokens = null,
+    int? CachedPromptTokens = null,
+    int? ReasoningTokens = null,
+    int? InputTokens = null,
+    int? OutputTokens = null);
+
+public sealed record CodingTurnMetricsEvent(
+    long Round,
+    string Phase,
+    ModelTurnMetrics Metrics,
+    string? ReasoningEffort = null,
+    double? QueueMilliseconds = null);
 
 public sealed record ContextChangedEvent(
     int EstimatedInputTokens,

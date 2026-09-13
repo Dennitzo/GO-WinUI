@@ -79,6 +79,7 @@ public sealed partial class GoAiAssistantService
 
     private static string? CompleteToolOutput(AssistantToolStep step, string status, CodingCommandProgress? progress)
     {
+        if (step.Tool == ReasoningStepTool) return step.OutputJson;
         var json = progress is null ? step.OutputJson : SerializeToolProgress(progress);
         if (json is null) return null;
         var values = ReadToolOutputObject(json);

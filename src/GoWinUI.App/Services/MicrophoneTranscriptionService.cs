@@ -83,8 +83,6 @@ public sealed partial class MicrophoneTranscriptionService(
     private bool _starting;
     private bool _stopping;
     private bool _speaking;
-    private bool _canPauseSpeech;
-    private bool _speechPaused;
     private bool _recognizing;
     private bool _disposed;
 
@@ -94,10 +92,10 @@ public sealed partial class MicrophoneTranscriptionService(
 
     public MicrophoneSnapshot Current => new(
         _active,
-        _starting || _stopping || _speaking || _recognizing,
-        _speaking,
-        _canPauseSpeech,
-        _speechPaused,
+        _starting || _stopping || _speaking || _speechPause.IsActive || _recognizing,
+        _speaking || _speechPause.IsActive,
+        _speechPause.IsActive,
+        _speechPause.IsPaused,
         _status,
         _startedAt,
         _error,
@@ -577,12 +575,14 @@ public sealed partial class MicrophoneTranscriptionService(
         await _speechGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         string? speechProvider = null;
         CancellationTokenSource? playbackCancellation = null;
+        IDisposable? speechSession = null;
         try
         {
             if (requireActiveVoiceMode && !_active)
             {
                 return null;
             }
+            speechSession = BeginSpeechSession();
             // Speech synthesis and persistent microphone transcription have
             // independent lifetimes. Never borrow the live-caption client here:
             // turning voice control off must not dispose or stop active TTS.
@@ -605,9 +605,11 @@ public sealed partial class MicrophoneTranscriptionService(
             {
                 _playbackProgress = progress;
                 _activePlaybackSegmentIndex = -1;
+                UpdateSpeechPauseStatus();
             }
             RaiseChanged();
             ActivateMediaTransportControls();
+            await WaitForSpeechResumeAsync(linked.Token).ConfigureAwait(false);
 
             var playbackBatches = SpeechSourceSegmentation.CreatePlaybackBatches(playable);
             var firstBatch = playbackBatches[0];
@@ -618,7 +620,7 @@ public sealed partial class MicrophoneTranscriptionService(
                 progress,
                 new(
                     firstSegment,
-                    SpeechPlaybackState.Buffering,
+                    _speechPause.IsPaused ? SpeechPlaybackState.Paused : SpeechPlaybackState.Buffering,
                     speechProvider,
                     firstBatch.SegmentIndexes)).ConfigureAwait(false);
 
@@ -659,6 +661,7 @@ public sealed partial class MicrophoneTranscriptionService(
             {
                 _status = _recognizing ? "Sprache wird erkannt" : "Ich höre zu";
             }
+            speechSession?.Dispose();
             RaiseChanged();
             _speechGate.Release();
         }
@@ -682,48 +685,42 @@ public sealed partial class MicrophoneTranscriptionService(
         SpeechSegmentPlaybackUpdate? playbackUpdate = null;
         lock (_playbackGate)
         {
-            if (!_speaking || !_canPauseSpeech || _activeOutput is null)
+            if (!_speechPause.IsActive)
             {
                 return Current;
             }
 
             try
             {
-                if (_speechPaused)
+                if (_speechPause.IsPaused)
                 {
-                    _activeOutput.Play();
-                    _speechPaused = false;
-                    _status = _recognizing
-                        ? "AI-Antwort wird vorgelesen · Sprache wird erkannt"
-                        : "AI-Antwort wird vorgelesen";
+                    _activeOutput?.Play();
+                    _speechPause.Toggle();
                     playbackUpdate = new(
                         _activePlaybackSegmentIndex,
-                        SpeechPlaybackState.Playing,
+                        _activeOutput is null ? SpeechPlaybackState.Buffering : SpeechPlaybackState.Playing,
                         _speechProvider,
                         _activePlaybackSegmentIndexes);
                 }
                 else
                 {
-                    _activeOutput.Pause();
-                    _speechPaused = true;
-                    _status = _recognizing
-                        ? "Vorlesen pausiert · Sprache wird erkannt"
-                        : "Vorlesen pausiert";
+                    _activeOutput?.Pause();
+                    _speechPause.Toggle();
                     playbackUpdate = new(
                         _activePlaybackSegmentIndex,
                         SpeechPlaybackState.Paused,
                         _speechProvider,
                         _activePlaybackSegmentIndexes);
                 }
-                progress = _playbackProgress;
-                changed = true;
             }
             catch (ObjectDisposedException)
             {
                 _activeOutput = null;
-                _canPauseSpeech = false;
-                _speechPaused = false;
+                _speechPause.Toggle();
             }
+            UpdateSpeechPauseStatus();
+            progress = _playbackProgress;
+            changed = true;
         }
 
         if (changed)
@@ -1152,7 +1149,11 @@ public sealed partial class MicrophoneTranscriptionService(
         };
         var boundaries = new List<PreparedPlaybackBoundary>(expectedBatches.Length);
         var boundaryGate = new object();
-        long writtenBytes = 0;
+        // Automatic narration opens a new output for each text chunk. Generated
+        // WAVs have only ~40 ms of leading silence, so device startup can mask
+        // their first phoneme. Prime the device without fading or trimming speech.
+        // Include this prefix in boundaries and the completion cursor below.
+        long writtenBytes = PrimeSpeechPlaybackBuffer(buffer);
         var appendedCount = 0;
         var appendCompleted = false;
         string? lastProvider = null;
@@ -1265,11 +1266,7 @@ public sealed partial class MicrophoneTranscriptionService(
         lock (_playbackGate)
         {
             _activeOutput = output;
-            _canPauseSpeech = true;
-            _speechPaused = false;
-            _status = _recognizing
-                ? "AI-Antwort wird vorgelesen · Sprache wird erkannt"
-                : "AI-Antwort wird vorgelesen";
+            UpdateSpeechPauseStatus();
         }
         RaiseChanged();
 
@@ -1277,8 +1274,11 @@ public sealed partial class MicrophoneTranscriptionService(
         var automaticallyPaused = false;
         try
         {
-            output.Play();
-            SetMediaTransportPlaybackState(paused: false);
+            lock (_playbackGate)
+            {
+                if (!_speechPause.IsPaused) output.Play();
+            }
+            SetMediaTransportPlaybackState(_speechPause.IsPaused);
             while (!stopped.Task.IsCompleted)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -1300,17 +1300,17 @@ public sealed partial class MicrophoneTranscriptionService(
                 {
                     activeSegment = current.Part.Index;
                     var snapshotChanged = false;
-                    var playbackStatus = _recognizing
-                        ? "AI-Antwort wird vorgelesen · Sprache wird erkannt"
-                        : "AI-Antwort wird vorgelesen";
+                    SpeechPlaybackState playbackState;
                     lock (_playbackGate)
                     {
                         _activePlaybackSegmentIndex = current.Part.Index;
                         _activePlaybackSegmentIndexes = [current.Part.Index];
+                        var previousStatus = _status;
+                        UpdateSpeechPauseStatus();
                         snapshotChanged = !string.Equals(_speechProvider, current.Provider, StringComparison.Ordinal)
-                            || !string.Equals(_status, playbackStatus, StringComparison.Ordinal);
+                            || !string.Equals(_status, previousStatus, StringComparison.Ordinal);
                         _speechProvider = current.Provider;
-                        _status = playbackStatus;
+                        playbackState = _speechPause.IsPaused ? SpeechPlaybackState.Paused : SpeechPlaybackState.Playing;
                     }
                     // A sentence boundary is carried by speech.progress. Re-emitting
                     // the otherwise unchanged microphone snapshot here caused the
@@ -1324,7 +1324,7 @@ public sealed partial class MicrophoneTranscriptionService(
                         progress,
                         new(
                             current.Part.Index,
-                            SpeechPlaybackState.Playing,
+                            playbackState,
                             current.Provider,
                             [current.Part.Index])).ConfigureAwait(false);
                 }
@@ -1346,25 +1346,25 @@ public sealed partial class MicrophoneTranscriptionService(
                     break;
                 }
 
-                bool userPaused;
                 lock (_playbackGate)
                 {
-                    userPaused = _speechPaused;
-                }
-                if (!allAppended
-                    && !userPaused
-                    && !automaticallyPaused
-                    && buffer.BufferedDuration < TimeSpan.FromMilliseconds(160))
-                {
-                    output.Pause();
-                    automaticallyPaused = true;
-                }
-                else if (automaticallyPaused
-                    && !userPaused
-                    && (buffer.BufferedDuration >= TimeSpan.FromMilliseconds(500) || allAppended))
-                {
-                    output.Play();
-                    automaticallyPaused = false;
+                    // The same lock guards user pause and refill. An automatic
+                    // buffer recovery must never restart an explicitly paused session.
+                    if (!allAppended
+                        && !_speechPause.IsPaused
+                        && !automaticallyPaused
+                        && buffer.BufferedDuration < TimeSpan.FromMilliseconds(160))
+                    {
+                        output.Pause();
+                        automaticallyPaused = true;
+                    }
+                    else if (automaticallyPaused
+                        && !_speechPause.IsPaused
+                        && (buffer.BufferedDuration >= TimeSpan.FromMilliseconds(500) || allAppended))
+                    {
+                        output.Play();
+                        automaticallyPaused = false;
+                    }
                 }
 
                 await Task.WhenAny(
@@ -1386,9 +1386,8 @@ public sealed partial class MicrophoneTranscriptionService(
                 if (ReferenceEquals(_activeOutput, output))
                 {
                     _activeOutput = null;
-                    _canPauseSpeech = false;
-                    _speechPaused = false;
                     _activePlaybackSegmentIndexes = [];
+                    UpdateSpeechPauseStatus();
                 }
             }
             RaiseChanged();
@@ -1407,7 +1406,19 @@ public sealed partial class MicrophoneTranscriptionService(
         }
     }
 
-    private static byte[] ReadPlaybackPcm16(string path)
+    internal static int PrimeSpeechPlaybackBuffer(BufferedWaveProvider buffer)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        if (buffer.BufferedBytes != 0)
+            throw new InvalidOperationException("Der Audio-Vorlauf muss vor dem ersten Sprachabschnitt eingefügt werden.");
+        const int startupMilliseconds = 300;
+        var length = buffer.WaveFormat.AverageBytesPerSecond * startupMilliseconds / 1_000;
+        length -= length % buffer.WaveFormat.BlockAlign;
+        buffer.AddSamples(new byte[length], 0, length);
+        return length;
+    }
+
+    internal static byte[] ReadPlaybackPcm16(string path)
     {
         using var reader = new WaveFileReader(path);
         ValidateAudibleWave(reader);
@@ -1494,7 +1505,8 @@ public sealed partial class MicrophoneTranscriptionService(
         {
             try { _activeOutput?.Stop(); }
             catch (ObjectDisposedException) { }
-            _speechPaused = false;
+            _speechPause.Resume();
+            UpdateSpeechPauseStatus();
         }
         DeactivateMediaTransportControls();
     }

@@ -143,7 +143,17 @@ internal static class CodingDeepResearchPipeline
                     };
                 var selection = await InvokeModelAsync(new(modelId, "coding", selectionMessages, [fetchTool.ToLmDefinition()],
                     null, true, "web.fetch", false)).ConfigureAwait(false);
-                var arguments = RequiredArguments(selection, "web.fetch");
+                JsonElement arguments;
+                try { arguments = RequiredArguments(selection, "web.fetch"); }
+                catch (InvalidDataException) when (candidates.Any(candidate => !attemptedUrls.Contains(NormalizeFetchUrl(candidate.Url))))
+                {
+                    // Preserve usable search evidence if the local model ignores forced tool choice.
+                    // Fetch only an actual search result, never a guessed documentation URL.
+                    var next = candidates.First(candidate => !attemptedUrls.Contains(NormalizeFetchUrl(candidate.Url)));
+                    arguments = JsonSerializer.SerializeToElement(new { url = next.Url,
+                        queries = plan.Select(question => question.Query).Take(4).ToArray() }, Json);
+                    uncertainties.Add("Die Modellauswahl lieferte keinen eindeutigen Quellenaufruf; GO hat den nächsten vorhandenen Suchtreffer für den belegten Abruf ausgewählt.");
+                }
                 var selectedUrl = RequiredText(arguments, "url", 2_048);
                 if (!IsPublicHttpUrl(selectedUrl)) throw new InvalidDataException("Die Quellenauswahl erfordert eine öffentliche HTTP(S)-URL ohne Zugangsdaten.");
                 var attemptUrl = NormalizeFetchUrl(selectedUrl);

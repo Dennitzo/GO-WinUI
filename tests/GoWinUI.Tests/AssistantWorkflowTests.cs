@@ -136,7 +136,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("styles.css?v=20260912-2", html, StringComparison.Ordinal);
         Assert.Contains("markdown.js?v=20260911-9", html, StringComparison.Ordinal);
         Assert.Contains("voice.js?v=20260822-2", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260912-3", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260912-7", html, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);

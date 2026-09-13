@@ -54,11 +54,14 @@ public sealed class CapabilityService
         [
             "web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze",
             "image.generate", "math.evaluate", "context.embed", "context.retrieve",
+            "coding.updatePlan",
         ],
         [
             ClientToolNames.CodingList,
             ClientToolNames.CodingSearch,
             ClientToolNames.CodingRead,
+            ClientToolNames.CodingReadOutput,
+            ClientToolNames.CodingSearchRunEvidence,
             ClientToolNames.CodingWrite,
             ClientToolNames.CodingEdit,
             ClientToolNames.CodingCommand,

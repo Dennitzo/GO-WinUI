@@ -10,12 +10,22 @@ using GoAi.Server.Core.Configuration;
 using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
+using System.Diagnostics;
 
 namespace GoAi.Server.Core.Runs;
 
-public sealed class RunProcessor : BackgroundService
+public sealed partial class RunProcessor : BackgroundService
 {
     internal const int MaximumRequiredToolCallRetries = 1;
+    internal const int MaximumEmptyResponseRetries = 2;
+    private const string EmptyResponseRepairPrompt = """
+        GO: Die letzte Modellantwort endete ohne Antworttext und ohne vollständigen strukturierten Werkzeugaufruf.
+        Eine Überlegung oder Ankündigung im Reasoning-Kanal führt kein Werkzeug aus. Setze die bestehende Aufgabe
+        anhand der bereits gespeicherten Werkzeugergebnisse fort: Liefere jetzt den nächsten vollständigen Aufruf
+        eines angebotenen Werkzeugs oder, wenn die Aufgabe nachweislich erledigt ist, deine normale Abschlussantwort.
+        Bereits erfolgreich ausgeführte Dateiänderungen bleiben angewendet; wiederhole sie nicht. Prüfe offene
+        Arbeitsschritte mit den angebotenen Werkzeugen. Gib Denktext nicht als Abschlussantwort aus.
+        """;
 
     private readonly RunWorkChannel _queue;
     private readonly RunRepository _repository;
@@ -190,6 +200,7 @@ public sealed class RunProcessor : BackgroundService
         CancellationToken cancellationToken)
     {
         var isCoding = request.Mode == RunMode.Coding;
+        if (isCoding) request = request with { CodingOptions = new CodingRunOptions() };
         ModelSelection selection;
         try { selection = await _router.SelectAsync(request, cancellationToken).ConfigureAwait(false); }
         catch (HttpRequestException exception) when (isCoding)
@@ -218,7 +229,8 @@ public sealed class RunProcessor : BackgroundService
                 0,
                 0,
                 0,
-                0);
+                0, WorkingState: isCoding
+                    ? CodingWorkingState.Create(ExtractOriginalTask(request)) : null);
             await _repository.AppendEventAsync(
                 runId,
                 RunEventTypes.QueueChanged,
@@ -244,6 +256,7 @@ public sealed class RunProcessor : BackgroundService
         }
 
         var messages = checkpoint.Messages.ToList();
+        if (isCoding) CodingAgentPolicy.EnsureCurrentInstructions(messages);
         var roundCount = checkpoint.RoundCount;
         var toolCallCount = checkpoint.ToolCallCount;
         var inputTokens = checkpoint.InputTokens;
@@ -254,6 +267,8 @@ public sealed class RunProcessor : BackgroundService
         var pendingToolCallId = checkpoint.PendingToolCallId;
         var selectedToolName = checkpoint.SelectedToolName;
         var requiredToolCallRetryCount = checkpoint.RequiredToolCallRetryCount;
+        var emptyResponseRetryCount = checkpoint.EmptyResponseRetryCount;
+        var incompleteResponseRetryCount = checkpoint.IncompleteResponseRetryCount;
         var budgetWarningIssued = checkpoint.BudgetWarningIssued;
         var completedIds = messages.Where(static message => message.Role == "tool" && message.ToolCallId is not null)
             .Select(static message => message.ToolCallId!).ToHashSet(StringComparer.Ordinal);
@@ -263,6 +278,8 @@ public sealed class RunProcessor : BackgroundService
         var visibleTextLength = checkpoint.VisibleTextLength ?? (isCoding
             ? CodingTextReconciler.Project(await _repository.GetEventsAfterAsync(runId, 0, cancellationToken).ConfigureAwait(false)).Length : 0);
         var streamingTurnStartEventId = checkpoint.StreamingTurnStartEventId;
+        var workingState = checkpoint.WorkingState ?? (isCoding ? CodingWorkingState.Create(ExtractOriginalTask(request)) : null);
+        var activeCallRound = checkpoint.ActiveCallRound;
         if (selectedToolName is not null
             && !availableTools.Any(tool => string.Equals(tool.Name, selectedToolName, StringComparison.Ordinal)))
         {
@@ -361,27 +378,30 @@ public sealed class RunProcessor : BackgroundService
                 while (nextToolIndex < activeCalls.Length)
                 {
                     var call = activeCalls[nextToolIndex];
-                    if (isCoding) CodingLoopGuard.ThrowIfRepeatedFailure(messages, call);
                     AgentToolSpec tool;
                     try
                     {
+                        // Return a recoverable tool receipt instead of aborting the entire run.
+                        // A pending client operation must still be collected exactly once.
+                        if (isCoding && string.IsNullOrWhiteSpace(pendingProposalId))
+                            CodingLoopGuard.ThrowIfRepeatedFailure(messages, call, workingState);
                         tool = _toolCatalog.Resolve(call.Name, availableTools);
                         _toolCatalog.Validate(tool, call.Arguments);
                         if (isCoding && htmlRenderUsed && call.Name == ClientToolNames.CodingRenderHtml)
                             throw new ArgumentException("coding.renderHtml darf höchstens einmal pro Lauf ausgeführt werden; die vorhandene Vorschau bleibt erhalten.");
                         if (isCoding) CodingLoopGuard.ThrowIfRenderAlreadyUsed(messages, call);
                     }
-                    catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
+                    catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException or AgentRunLimitException)
                     {
-                        messages.Add(new LmChatMessage(
-                            "tool",
-                            JsonSerializer.Serialize(new
-                            {
-                                status = "failed",
-                                errorCode = "agent.invalid_tool_call",
-                                message = exception.Message,
-                            }, GoAiProtocol.CreateJsonOptions()),
-                            ToolCallId: call.Id));
+                        var invalidReceipt = JsonSerializer.Serialize(new
+                        {
+                            status = "failed",
+                            errorCode = exception is AgentRunLimitException ? "agent.repeated_tool_failure" : "agent.invalid_tool_call",
+                            message = exception.Message,
+                        }, GoAiProtocol.CreateJsonOptions());
+                        messages.Add(new LmChatMessage("tool", invalidReceipt, ToolCallId: call.Id));
+                        if (workingState is not null)
+                            workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), invalidReceipt);
                         nextToolIndex++;
                         await SaveCheckpointAsync().ConfigureAwait(false);
                         continue;
@@ -402,6 +422,8 @@ public sealed class RunProcessor : BackgroundService
                             "tool",
                             isCoding ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult)) : SerializeClientToolResult(clientResult),
                             ToolCallId: call.Id));
+                        if (workingState is not null)
+                            workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), SerializeClientToolResult(clientResult));
                         if (call.Name == ClientToolNames.CodingRenderHtml) htmlRenderUsed = true;
                         pendingProposalId = null;
                         pendingToolCallId = null;
@@ -418,18 +440,31 @@ public sealed class RunProcessor : BackgroundService
                     if (tool.ServerSide)
                     {
                         var serverToolTarget = CreateServerToolTarget(tool.Name, call.Arguments);
-                        var operationId = CreateServerToolOperationId(runId, "main", roundCount, nextToolIndex, call.Id);
+                        var operationId = CreateServerToolOperationId(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call.Id);
                         await _repository.AppendEventAsync(
                             runId,
                             RunEventTypes.ServerToolStarted,
                             new { tool = tool.Name, toolCallId = operationId, callId = operationId, target = serverToolTarget, arguments = call.Arguments },
                             cancellationToken).ConfigureAwait(false);
                         AgentToolExecutionResult result;
-                        if (tool.Name == CodingDeepResearchPipeline.ToolName)
+                        if (tool.Name == CodingWorkingStateTools.PlanTool)
+                        {
+                            try
+                            {
+                                workingState = CodingWorkingStateReducer.ApplyPlanUpdate(workingState ?? CodingWorkingState.Create(ExtractOriginalTask(request)), call.Arguments);
+                                result = new(CodingWorkingStateTools.CreatePlanReceipt(workingState, call.Arguments), []);
+                            }
+                            catch (ArgumentException exception)
+                            {
+                                result = new(JsonSerializer.SerializeToElement(new { success = false, error = exception.Message }), [],
+                                    Succeeded: false, ErrorCode: "agent.invalid_state_action", ErrorMessage: exception.Message);
+                            }
+                        }
+                        else if (tool.Name == CodingDeepResearchPipeline.ToolName)
                         {
                             var research = await ExecuteCodingDeepResearchAsync(runId, operationId, call.Arguments, selection.ModelId,
                                 contextLength, CodingRunBudget.Remaining(maximumModelRounds, roundCount + 1), CodingRunBudget.Remaining(maximumToolCalls, toolCallCount),
-                                effectiveTools, cancellationToken).ConfigureAwait(false);
+                                effectiveTools, request.ReasoningEffort, cancellationToken).ConfigureAwait(false);
                             roundCount += research.ModelCalls;
                             toolCallCount += research.ToolCalls;
                             inputTokens += research.InputTokens;
@@ -475,6 +510,8 @@ public sealed class RunProcessor : BackgroundService
                             "tool",
                             isCoding ? CodingLoopGuard.BoundToolResult(result.Result.GetRawText()) : result.Result.GetRawText(),
                             ToolCallId: call.Id));
+                        if (workingState is not null && tool.Name != CodingWorkingStateTools.PlanTool)
+                            workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());
                         nextToolIndex++;
                         await SaveCheckpointAsync().ConfigureAwait(false);
                         continue;
@@ -498,6 +535,7 @@ public sealed class RunProcessor : BackgroundService
 
                 activeCalls = null;
                 nextToolIndex = 0;
+                activeCallRound = null;
                 await SaveCheckpointAsync().ConfigureAwait(false);
             }
 
@@ -509,8 +547,12 @@ public sealed class RunProcessor : BackgroundService
             var budgetSummary = isCoding && codingBudget.MustSummarize(roundCount, toolCallCount);
             if (isCoding)
             {
-                messages.RemoveAll(static message => message.Role == "system" && message.Content?.StartsWith(CodingRunBudget.PromptMarker, StringComparison.Ordinal) == true);
-                messages.Add(new LmChatMessage("system", codingBudget.Instruction(roundCount, toolCallCount)));
+                codingBudget.ApplyInstruction(messages, roundCount, toolCallCount);
+                if (workingState is not null)
+                {
+                    messages = CodingEvidenceContext.CompactCompletedCalls(messages).ToList();
+
+                }
                 if (!budgetWarningIssued && codingBudget.ShouldWarn(roundCount, toolCallCount))
                 {
                     const string budgetNotice = "\n\nDas Arbeitsbudget dieses Laufs nähert sich dem Ende. GO reserviert eine abschließende Zusammenfassung der erreichten Ergebnisse und offenen Aufgaben.\n\n";
@@ -521,13 +563,28 @@ public sealed class RunProcessor : BackgroundService
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
             }
+            var effort = _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
             var selectableTools = budgetSummary ? [] : availableTools.ToArray();
             var modelTools = CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding);
             var liveTextGate = new IncrementalVisibleTextGate(enabled: true);
             CodingTextReconciler? codingText = null;
+            var firstReasoningFragment = true;
+            var reasoningPublished = false;
             Func<ModelRuntimeProgress, CancellationToken, ValueTask> nativeProgress =
                 async (progress, token) =>
                 {
+                    if (progress.State == "reasoningDelta")
+                    {
+                        if (isCoding && !string.IsNullOrEmpty(progress.ReasoningDelta))
+                        {
+                            await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
+                                new ReasoningDeltaEvent(progress.ReasoningDelta, (int)Math.Min(roundCount + 1, int.MaxValue),
+                                    ReplaceFrom: firstReasoningFragment ? 0 : null, State: "running"), token).ConfigureAwait(false);
+                            firstReasoningFragment = false;
+                            reasoningPublished = true;
+                        }
+                        return;
+                    }
                     if (string.Equals(progress.State, "contentDelta", StringComparison.Ordinal)
                         && !string.IsNullOrEmpty(progress.ContentDelta))
                     {
@@ -544,6 +601,7 @@ public sealed class RunProcessor : BackgroundService
                     {
                         liveTextGate = new IncrementalVisibleTextGate(enabled: true);
                         codingText?.RestartAttempt();
+                        firstReasoningFragment = true;
                     }
 
                     await _repository.AppendEventAsync(
@@ -568,12 +626,15 @@ public sealed class RunProcessor : BackgroundService
                 };
 
             LmChatResult response;
+            var queueWatch = Stopwatch.StartNew();
+            double queueMilliseconds;
             await using (var lease = await _scheduler.AcquireAsync(
                 isCoding ? "llm-coding" : "llm-general",
                 runId,
                 GpuLeaseMode.Shared,
                 cancellationToken).ConfigureAwait(false))
             {
+                queueMilliseconds = queueWatch.Elapsed.TotalMilliseconds;
                 using var loadingHeartbeatCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var loadingHeartbeat = isCoding
                     ? PublishCodingHeartbeatAsync(runId, roundCount + 1, loadingHeartbeatCancellation.Token, "codingLoading")
@@ -609,19 +670,43 @@ public sealed class RunProcessor : BackgroundService
                 }
                 contextLength = ResolveLoadedContextLength(contextLength, preparation);
                 ContextPlan contextPlan;
-                if (isCoding && !budgetSummary && CodingContextCompactor.Plan(messages, contextLength) is { } compaction)
+                effort = _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
+                if (isCoding && !budgetSummary && CodingContextCompactor.Plan(messages, contextLength, workingState) is { } compaction)
                 {
                     using var compactingCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     var compactingHeartbeat = PublishCodingHeartbeatAsync(runId, roundCount + 1, compactingCancellation.Token, "codingCompacting");
                     LmChatResult condensed;
+                    var summaryEffort = effort;
+                    var firstCompactionReasoningFragment = true;
+                    var compactionReasoningPublished = false;
                     try
                     {
                         condensed = await _modelRuntime.CompleteChatAsync(selection.ModelId, compaction.SummaryRequest, [],
-                            maximumOutputTokens, modelRole: selection.Role, reasoningEffort: request.ReasoningEffort,
+                            maximumOutputTokens, modelRole: selection.Role, reasoningEffort: summaryEffort,
                             requiredContextLength: contextLength,
-                            nativeProgress: (progress, token) => new ValueTask(_repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
-                                new ModelGenerationEvent("codingCompacting", GeneratedTokens: progress.GeneratedTokens, CurrentTokens: progress.CurrentTokens), token)),
+                            nativeProgress: async (progress, token) =>
+                            {
+                                if (progress.State == "reasoningDelta")
+                                {
+                                    if (!string.IsNullOrEmpty(progress.ReasoningDelta))
+                                    {
+                                        await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
+                                            new ReasoningDeltaEvent(progress.ReasoningDelta, (int)Math.Min(roundCount + 1, int.MaxValue),
+                                                Phase: "compaction", ReplaceFrom: firstCompactionReasoningFragment ? 0 : null, State: "running"), token).ConfigureAwait(false);
+                                        firstCompactionReasoningFragment = false;
+                                        compactionReasoningPublished = true;
+                                    }
+                                    return;
+                                }
+                                if (progress.State == "generationRetry") firstCompactionReasoningFragment = true;
+                                await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                                    new ModelGenerationEvent("codingCompacting", GeneratedTokens: progress.GeneratedTokens, CurrentTokens: progress.CurrentTokens), token).ConfigureAwait(false);
+                            },
                             cancellationToken: cancellationToken).ConfigureAwait(false);
+                        if (compactionReasoningPublished)
+                            await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
+                                new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue), Phase: "compaction",
+                                    ReplaceFrom: firstCompactionReasoningFragment ? 0 : null, State: "completed"), cancellationToken).ConfigureAwait(false);
                     }
                     finally
                     {
@@ -634,10 +719,15 @@ public sealed class RunProcessor : BackgroundService
                     outputTokens += condensed.OutputTokens;
                     roundCount++;
                     compactionCount++;
+                    await PublishCodingMetricsAsync(runId, roundCount, "summarization", condensed, summaryEffort, queueMilliseconds, cancellationToken).ConfigureAwait(false);
+                    queueMilliseconds = 0; // The following model turn retains this already acquired lease.
                     budgetSummary = codingBudget.MustSummarize(roundCount, toolCallCount);
-                    if (budgetSummary) modelTools = [];
-                    messages.RemoveAll(static message => message.Role == "system" && message.Content?.StartsWith(CodingRunBudget.PromptMarker, StringComparison.Ordinal) == true);
-                    messages.Add(new LmChatMessage("system", codingBudget.Instruction(roundCount, toolCallCount)));
+                    if (budgetSummary)
+                    {
+                        modelTools = [];
+
+                    }
+                    codingBudget.ApplyInstruction(messages, roundCount, toolCallCount);
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     await _repository.AppendEventAsync(runId, RunEventTypes.ContextChanged,
                         new ContextChangedEvent(ContextPlanner.EstimateTokens(messages), ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens),
@@ -647,7 +737,7 @@ public sealed class RunProcessor : BackgroundService
                 try
                 {
                     contextPlan = ContextPlanner.Prepare(
-                        messages,
+                        WithWorkingState(messages, workingState),
                         contextLength,
                         maximumOutputTokens,
                         allowLossyCompaction: true);
@@ -725,6 +815,9 @@ public sealed class RunProcessor : BackgroundService
                     }
                     var priorTurnEvents = await _repository.GetEventsAfterAsync(runId, streamingTurnStartEventId.Value, cancellationToken).ConfigureAwait(false);
                     codingText = new(visibleTextLength, CodingTextReconciler.Project(priorTurnEvents, visibleTextLength));
+                    reasoningPublished = priorTurnEvents.Any(item => item.Type == RunEventTypes.ReasoningDelta
+                        && item.Data.TryGetProperty("round", out var value) && value.TryGetInt32(out var priorRound)
+                        && priorRound == (int)Math.Min(roundCount + 1, int.MaxValue));
                 }
                 using var heartbeatCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var heartbeat = isCoding ? PublishCodingHeartbeatAsync(runId, roundCount + 1, heartbeatCancellation.Token) : Task.CompletedTask;
@@ -736,12 +829,17 @@ public sealed class RunProcessor : BackgroundService
                         modelTools,
                         maximumOutputTokens,
                         modelRole: selection.Role,
-                        reasoningEffort: request.ReasoningEffort,
+                        reasoningEffort: effort,
                         cancellationToken: cancellationToken,
                         requireToolCall: selectedToolName is not null,
                         requiredToolName: selectedToolName,
                         requiredContextLength: contextLength,
                         nativeProgress: nativeProgress).ConfigureAwait(false);
+                    if (reasoningPublished)
+                        await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
+                            new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue),
+                                ReplaceFrom: firstReasoningFragment ? 0 : null, State: "completed"),
+                            cancellationToken).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -769,6 +867,8 @@ public sealed class RunProcessor : BackgroundService
             roundCount++;
             inputTokens += response.InputTokens;
             outputTokens += response.OutputTokens;
+            if (isCoding)
+                await PublishCodingMetricsAsync(runId, roundCount, workingState?.Phase ?? "main", response, effort, queueMilliseconds, cancellationToken).ConfigureAwait(false);
             if (budgetSummary)
             {
                 if (!liveTextGate.HasStreamed && !string.IsNullOrWhiteSpace(response.Content))
@@ -777,6 +877,52 @@ public sealed class RunProcessor : BackgroundService
                 if (!string.IsNullOrWhiteSpace(response.Content)) messages.Add(new LmChatMessage("assistant", response.Content));
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 throw new AgentRunLimitException(codingBudget.FailureMessage(roundCount, toolCallCount));
+            }
+            if (isCoding && response.ToolCalls.Count == 0 && string.IsNullOrWhiteSpace(response.Content))
+            {
+                // A provider can finish normally after emitting only reasoning. It has
+                // not requested an operation and must not replay previously committed tools.
+                // Persist each completed turn before requesting a corrected response, so
+                // a restart retains both usage and the consecutive protocol-failure count.
+                emptyResponseRetryCount++;
+                if (!messages.Any(message => message.Role == "system" && message.Content == EmptyResponseRepairPrompt))
+                    messages.Add(new LmChatMessage("system", EmptyResponseRepairPrompt));
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                _runtime.WriteLog("Warning", "provider.empty_response",
+                    $"Run {runId}, Runde {roundCount}: Antwort ohne Text/Tool; Reasoning={response.HadReasoning}, aufeinanderfolgende leere Antworten={emptyResponseRetryCount}.");
+                if (emptyResponseRetryCount > MaximumEmptyResponseRetries)
+                    throw new ModelEmptyResponseException(response.HadReasoning, emptyResponseRetryCount);
+                await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                    new ModelGenerationEvent("responseRecovery", Attempt: emptyResponseRetryCount,
+                        FailureKind: response.HadReasoning ? "reasoning_only_response" : "empty_response"),
+                    cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            if (emptyResponseRetryCount > 0)
+            {
+                emptyResponseRetryCount = 0;
+                messages.RemoveAll(message => message.Role == "system" && message.Content == EmptyResponseRepairPrompt);
+                // Tool responses persist the reset together with their pending calls below.
+                if (response.ToolCalls.Count == 0) await SaveCheckpointAsync().ConfigureAwait(false);
+            }
+            if (isCoding && response.ToolCalls.Count == 0 && CodingCompletionGuard.IsActionAnnouncement(response.Content))
+            {
+                incompleteResponseRetryCount++;
+                messages.Add(new LmChatMessage("assistant", response.Content));
+                if (!messages.Any(message => message.Role == "system" && message.Content == CodingCompletionGuard.RepairPrompt))
+                    messages.Add(new LmChatMessage("system", CodingCompletionGuard.RepairPrompt));
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                if (incompleteResponseRetryCount > 2)
+                    throw new AgentRunLimitException("Das Modell hat dreimal nur weitere Arbeit angekündigt, ohne sie auszuführen. Der Auftrag wurde nicht als erledigt markiert. Der Arbeitsstand bleibt für die Fortsetzung erhalten.");
+                await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                    new ModelGenerationEvent("responseRecovery", Attempt: incompleteResponseRetryCount,
+                        FailureKind: "unfinished_action_announcement"), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+            if (incompleteResponseRetryCount > 0)
+            {
+                incompleteResponseRetryCount = 0;
+                messages.RemoveAll(message => message.Role == "system" && message.Content == CodingCompletionGuard.RepairPrompt);
             }
             if (!isCoding && selectedToolName is null && response.ToolCalls.Count > 0)
             {
@@ -869,6 +1015,7 @@ public sealed class RunProcessor : BackgroundService
                 }
                 activeCalls = acceptedCalls.ToArray();
                 nextToolIndex = 0;
+                activeCallRound = roundCount;
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 continue;
             }
@@ -900,7 +1047,12 @@ public sealed class RunProcessor : BackgroundService
                 HtmlRenderUsed: htmlRenderUsed,
                 CompactionCount: compactionCount,
                 VisibleTextLength: visibleTextLength,
-                StreamingTurnStartEventId: streamingTurnStartEventId),
+                StreamingTurnStartEventId: streamingTurnStartEventId,
+                WorkingState: workingState,
+                ActiveCallRound: activeCallRound,
+                ActiveCallsReadOnly: false,
+                EmptyResponseRetryCount: emptyResponseRetryCount,
+                IncompleteResponseRetryCount: incompleteResponseRetryCount),
             cancellationToken);
 
         async Task PublishVisibleDeltaAsync(TextDeltaEvent? delta, CancellationToken token)
@@ -1103,7 +1255,7 @@ public sealed class RunProcessor : BackgroundService
 
     private async Task<CodingDeepResearchExecution> ExecuteCodingDeepResearchAsync(
         string runId, string parentOperationId, JsonElement arguments, string modelId, int contextLength, int remainingModelCalls,
-        int remainingToolCalls, IReadOnlyList<AgentToolSpec> effectiveTools, CancellationToken cancellationToken)
+        int remainingToolCalls, IReadOnlyList<AgentToolSpec> effectiveTools, string? reasoningEffort, CancellationToken cancellationToken)
     {
         var searchTool = _toolCatalog.Resolve("web.search", effectiveTools);
         var fetchTool = _toolCatalog.Resolve("web.fetch", effectiveTools);
@@ -1130,7 +1282,7 @@ public sealed class RunProcessor : BackgroundService
                     var preparation = await _workers.PrepareLmModelWithStatusAsync(modelId, contextLength, null, token).ConfigureAwait(false);
                     contextLength = ResolveLoadedContextLength(contextLength, preparation);
                     // The pipeline's cancellation budget and the common model deadline remain authoritative.
-                    return await ExecuteStagedWebResearchModelAsync(runId, request, null, contextLength, token).ConfigureAwait(false);
+                    return await ExecuteStagedWebResearchModelAsync(runId, request, reasoningEffort, contextLength, token).ConfigureAwait(false);
                 },
                 (call, token) => ExecuteStagedWebResearchToolAsync(runId, call, effectiveTools,
                     CreateServerToolOperationId(runId, parentOperationId, 0, researchToolOrdinal++, call.Id), token),
@@ -1219,7 +1371,7 @@ public sealed class RunProcessor : BackgroundService
         var messages = new List<LmChatMessage>
         {
             new("system", request.Mode == RunMode.Coding
-                ? CodingAgentPolicy.SystemPrompt
+                ? CodingAgentPolicy.ForWorkingState(true)
                 : GeneralAgentPolicies.ForConversation(role, request, effectiveTools)),
         };
         foreach (var message in request.Messages)
@@ -1483,6 +1635,10 @@ public sealed class RunProcessor : BackgroundService
             ModelProviderRequestException transport => (
                 Code: "provider.http_failed",
                 Message: transport.Message,
+                Retryable: true),
+            ModelEmptyResponseException empty => (
+                Code: "provider.empty_response",
+                Message: empty.Message,
                 Retryable: true),
             HttpRequestException => (
                 Code: "provider.http_failed",

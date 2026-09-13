@@ -1,4 +1,5 @@
 using System.Text;
+using GoAi.Contracts;
 
 namespace GoWinUI.App.Services;
 
@@ -87,6 +88,7 @@ internal sealed class SpeechStreamingTextBuffer(string initialContent = "")
             if (character == '\n') return index + 1;
             if (character is '.' or '!' or '?' or '。' or '！' or '？')
             {
+                if (GermanSpeechAbbreviations.IsAbbreviationPeriod(text, index)) continue;
                 var end = index + 1;
                 while (end < text.Length && text[end] is '.' or '!' or '?' or '"' or '\'' or '”' or '“' or '»' or '«' or '*' or '_') end++;
                 if (end < text.Length && char.IsWhiteSpace(text[end])) return end + 1;

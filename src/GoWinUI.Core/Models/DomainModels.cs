@@ -60,7 +60,8 @@ public sealed record AssistantToolStep(
     {
         ArgumentNullException.ThrowIfNull(incoming);
         if (previous is null) return incoming;
-        if (incoming.Status == "running" && previous.Status != "running") return previous;
+        if (incoming.Status == "running" && previous.Status != "running"
+            && incoming.Tool != "assistant.reasoning") return previous;
         if (previous.UpdatedAt is { } previousAt
             && (incoming.UpdatedAt is { } incomingAt && incomingAt < previousAt
                 || incoming.UpdatedAt is null)) return previous;
@@ -298,6 +299,7 @@ public sealed record AppSettings
     // Legacy JSON field retained for backward-compatible deserialization. "auto"
     // uses the gateway's highest supported model-specific reasoning default.
     public string ReasoningEffort { get; init; } = "auto";
+    public Dictionary<string, string> ReasoningEffortsByModel { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     public AppTheme Theme { get; init; } = AppTheme.System;
     public string AccentColor { get; init; } = DefaultAccentColor;
     public string BackgroundColor { get; init; } = DefaultBackgroundColor;

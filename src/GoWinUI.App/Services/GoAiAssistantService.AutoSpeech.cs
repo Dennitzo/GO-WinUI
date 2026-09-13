@@ -41,7 +41,8 @@ public sealed partial class GoAiAssistantService
                         // Live source ranges are deliberately omitted; a chunk is not the
                         // complete message used by the existing read-from-here highlighter.
                         new(text, "AI-Antwort (live)", null, null, update.Message.ContentProfile), token).ConfigureAwait(false);
-                }, _activeCancellation?.Token ?? CancellationToken.None);
+                }, microphone.WaitForSpeechResumeAsync, microphone.BeginSpeechSession(resetPause: true),
+                    _activeCancellation?.Token ?? CancellationToken.None);
                 _automaticSpeechSession = session;
                 _ = ObserveAutomaticSpeechCompletionAsync(session, status);
             }

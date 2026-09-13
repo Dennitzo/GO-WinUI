@@ -309,8 +309,9 @@ public sealed class GoAiClient : IDisposable
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: false);
 
         var data = new StringBuilder();
-        while (!cancellationToken.IsCancellationRequested)
+        while (true)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // Heartbeats arrive every 15 seconds even during long inference.
             // Bound silence, never the lifetime of the job; the caller reconnects
             // with its persisted event cursor if a half-open connection stalls.

@@ -478,6 +478,7 @@ internal static partial class SpeechSourceSegmentation
         for (var index = 0; index < text.Length; index++)
         {
             if (text[index] is not ('.' or '!' or '?')) continue;
+            if (GoAi.Contracts.GermanSpeechAbbreviations.IsAbbreviationPeriod(text, index)) continue;
             var end = index + 1;
             while (end < text.Length && text[end] is '.' or '!' or '?') end++;
             while (end < text.Length && IsSpeechQuotation(text[end])) end++;

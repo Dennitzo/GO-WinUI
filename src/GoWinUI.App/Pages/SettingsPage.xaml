@@ -113,6 +113,9 @@
             Text="{x:Bind ViewModel.CodingModelStatus, Mode=OneWay}"
             TextWrapping="Wrap" />
 
+          <TextBlock FontWeight="SemiBold" Text="Coding · experimentelle Funktionen" />
+
+
         </StackPanel>
       </Border>
 

@@ -158,6 +158,10 @@ public interface IClientToolExecutionRepository
         Guid localRunId,
         string? serverRunId = null,
         CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ClientToolExecutionRecord>> ListIncompleteExecutionsAsync(
+        Guid localRunId,
+        string serverRunId,
+        CancellationToken cancellationToken = default);
     Task<ClientToolExecutionRecord> BeginAsync(ClientToolExecutionRecord execution, CancellationToken cancellationToken = default);
     Task<ClientToolExecutionRecord> CompleteAsync(string proposalId, string resultJson, CancellationToken cancellationToken = default);
     Task MarkSubmittedAsync(string proposalId, CancellationToken cancellationToken = default);

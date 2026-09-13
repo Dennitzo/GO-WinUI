@@ -255,6 +255,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
                 AND status IN ('completed','cancelled','failed','interrupted')
                 AND trim(content)=''
                 AND tool_name IS NULL
+                AND COALESCE(json_array_length(tool_steps_json),0)=0
                 AND NOT EXISTS(SELECT 1 FROM chat_artifacts artifact WHERE artifact.message_id=chat_messages.id)
                 """;
             command.CommandText = $"SELECT COUNT(*) FROM chat_messages WHERE {predicate};";

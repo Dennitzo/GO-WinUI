@@ -1,4 +1,5 @@
 using GoAi.Server.Core.Models;
+using GoAi.Server.Core.Coding;
 
 namespace GoAi.Server.Core.Runs;
 
@@ -18,4 +19,9 @@ public sealed record AgentRunCheckpoint(
     bool HtmlRenderUsed = false,
     long CompactionCount = 0,
     int? VisibleTextLength = null,
-    long? StreamingTurnStartEventId = null);
+    long? StreamingTurnStartEventId = null,
+    CodingWorkingState? WorkingState = null,
+    long? ActiveCallRound = null,
+    bool ActiveCallsReadOnly = false,
+    int EmptyResponseRetryCount = 0,
+    int IncompleteResponseRetryCount = 0);

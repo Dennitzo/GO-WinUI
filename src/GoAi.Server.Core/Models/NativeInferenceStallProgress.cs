@@ -20,7 +20,8 @@ internal sealed class NativeInferenceStallProgress(Action renewDeadline)
         var generated = progress.GeneratedTokens.GetValueOrDefault();
         if (progress.State is "promptProcessing" or "tokenProgress"
             && (prompt > _promptTokens || generated > _generatedTokens)
-            || progress.State == "contentDelta" && !string.IsNullOrEmpty(progress.ContentDelta))
+            || progress.State == "contentDelta" && !string.IsNullOrEmpty(progress.ContentDelta)
+            || progress.State == "reasoningDelta" && !string.IsNullOrEmpty(progress.ReasoningDelta))
             renewDeadline();
         _promptTokens = Math.Max(_promptTokens, prompt);
         _generatedTokens = Math.Max(_generatedTokens, generated);

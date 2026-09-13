@@ -6,6 +6,19 @@ namespace GoWinUI.Tests;
 public sealed class ModelTokenProgressTests
 {
     [Fact]
+    public void EmptyResponseRecoveryIsExplainedWithoutRestartingTheCodingPrompt()
+    {
+        var counter = new GoAiAssistantService.ModelTokenProgressState();
+        var detail = GoAiAssistantService.FormatModelTokenProgress(
+            new("responseRecovery", Attempt: 1, FailureKind: "reasoning_only_response"), counter);
+        Assert.Contains("Arbeitsstand", detail, StringComparison.Ordinal);
+        Assert.True(GoAiAssistantService.IsRetryableServerErrorCode("provider.empty_response"));
+        Assert.False(GoAiAssistantService.ShouldRetryCurrentPrompt(
+            GoWinUI.Core.Models.PromptTriggerAction.Coding,
+            new GoAiRunTerminalException("provider.empty_response", "Keine ausführbare Antwort", true)));
+    }
+
+    [Fact]
     public void NativeFragmentsAdvanceImmediatelyAfterLargePromptProcessing()
     {
         var counter = new GoAiAssistantService.ModelTokenProgressState();

@@ -13,24 +13,25 @@ internal static class CodingUnifiedDiff
     internal sealed record Result(string Text, bool Truncated, int AddedLines, int RemovedLines);
     private sealed record Operation(char Kind, string Line);
 
-    internal static Result Create(string path, byte[]? original, byte[] updated, CancellationToken cancellationToken)
+    internal static Result Create(string path, byte[]? original, byte[]? updated, CancellationToken cancellationToken)
     {
         var encoding = new UTF8Encoding(false, true);
         // Preserve BOM and line endings: the patch describes bytes, not the normalized tool input.
         var before = Lines(original is null ? string.Empty : encoding.GetString(original));
-        var after = Lines(encoding.GetString(updated));
+        var after = Lines(updated is null ? string.Empty : encoding.GetString(updated));
         var operations = Compare(before, after, cancellationToken);
         var additions = operations.Count(static operation => operation.Kind == '+');
         var removals = operations.Count(static operation => operation.Kind == '-');
-        if (additions == 0 && removals == 0 && original is not null) return new(string.Empty, false, 0, 0);
+        if (additions == 0 && removals == 0 && original is not null && updated is not null) return new(string.Empty, false, 0, 0);
 
         var oldPath = QuotePath("a/" + path);
         var newPath = QuotePath("b/" + path);
         var output = new StringBuilder().Append("diff --git ").Append(oldPath).Append(' ').Append(newPath).Append('\n');
         if (original is null) output.Append("new file mode 100644\n");
-        if (operations.Count == 0) return new(output.ToString(), false, 0, 0);
+        else if (updated is null) output.Append("deleted file mode 100644\n");
         output.Append("--- ").Append(original is null ? "/dev/null" : oldPath).Append('\n')
-            .Append("+++ ").Append(newPath).Append('\n');
+            .Append("+++ ").Append(updated is null ? "/dev/null" : newPath).Append('\n');
+        if (operations.Count == 0) return new(output.ToString(), false, 0, 0);
 
         var oldLine = 1;
         var newLine = 1;

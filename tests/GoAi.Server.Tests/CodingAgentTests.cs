@@ -33,11 +33,11 @@ public sealed class CodingAgentTests
     {
         var catalog = new AgentToolCatalog();
         var tools = catalog.GetAvailableTools(Request());
-        Assert.Equal(10, tools.Count);
+        Assert.Equal(11, tools.Count);
         Assert.All(tools, tool => Assert.StartsWith("coding.", tool.Name, StringComparison.Ordinal));
-        Assert.All(tools, tool => Assert.False(tool.ServerSide));
+        Assert.All(tools.Where(tool => tool.Name != "coding.updatePlan"), tool => Assert.False(tool.ServerSide));
         var definitions = RunProcessor.CreateModelToolDefinitions(tools, null, directTools: true);
-        Assert.Equal(10, definitions.Length);
+        Assert.Equal(11, definitions.Length);
         Assert.DoesNotContain(definitions, tool => tool.Name == AgentToolCatalog.SelectorToolName);
         var generalTools = catalog.GetAvailableTools(Request() with { Mode = RunMode.General });
         Assert.DoesNotContain(generalTools, tool => tool.Name.StartsWith("coding.", StringComparison.Ordinal));

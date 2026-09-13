@@ -24,7 +24,7 @@ function harness({ codingToolStepsExpanded = false } = {}) {
     vm.runInContext(fs.readFileSync(path.join(webRoot, script), "utf8"), context, { filename: script });
   const app = fs.readFileSync(path.join(webRoot, "app.js"), "utf8");
   for (const name of ["normalizeCodingStep", "codingToolLabel", "codingStepState", "codingPreviewHtml",
-    "isTerminalMessageStatus", "cleanStatusMetadata", "recordCodingActivity", "mergeCodingToolSteps"]) {
+    "isTerminalMessageStatus", "cleanStatusMetadata", "recordCodingActivity", "mergeCodingToolSteps", "compareReasoningStepUpdates"]) {
     const start = app.indexOf(`  function ${name}(`);
     const end = app.indexOf("\n  function ", start + 1);
     assert.ok(start >= 0 && end > start, `production ${name} exists`);
@@ -95,7 +95,55 @@ test("new disclosures follow the global default while reader choices survive upd
   assert.equal(current.querySelector('[data-step-id="third"] details').hasAttribute("open"), true);
 });
 
-test("one thousand collapsed receipts create only headers and build their exact latest patch on demand", async () => {
+test("file changes default open before their live patch arrives and retain a reader's manual collapse", async () => {
+  const { context, render, document } = harness();
+  const message = answer({ status: "streaming" });
+  const tools = ["coding.edit", "coding.write", "coding.gitDiff"].map((tool, index) =>
+    step({ id: `change-${index}`, tool, status: "running", inputJson: '{"path":"math.py"}' }));
+  const current = render(message, tools);
+  document.body.append(current);
+  assert.equal(current.querySelectorAll("details[open]").length, 3,
+    "the collapsed preference for ordinary tools must not hide code changes");
+  const disclosure = current.querySelector("details");
+  const summary = disclosure.firstChild;
+  disclosure.removeAttribute("open");
+  await disclosure.dispatch("toggle");
+  const patch = "--- a/math.py\n+++ b/math.py\n@@ -1 +1 @@\n-old\n+new\n";
+  const completed = tools.map(tool => ({ ...tool, status: "completed",
+    outputJson: JSON.stringify({ success: true, diff: patch }) }));
+  context.goCodingTimeline.reconcile(current, render(answer(), completed, { previousTimeline: current }));
+  assert.equal(current.querySelector("details"), disclosure);
+  assert.equal(disclosure.firstChild, summary);
+  assert.equal(disclosure.hasAttribute("open"), false, "new patch data must not reopen a manually closed step");
+  assert.equal(disclosure.querySelector(".coding-step__content"), null);
+  assert.equal(current.querySelectorAll(".coding-diff").length, 2, "other live patches appear without a click");
+  context.goCodingTimeline.reconcile(current, render(answer(), completed));
+  assert.equal(disclosure.hasAttribute("open"), false, "manual choice also survives cache-free reconciliation");
+  disclosure.setAttribute("open", "");
+  await disclosure.dispatch("toggle");
+  assert.equal(disclosure.querySelector(".coding-diff__line--added code").textContent, "+new");
+});
+
+test("added, replaced and deleted file patches display colored diff rows by default", () => {
+  const { render } = harness();
+  const patches = [
+    { tool: "coding.write", patch: "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+added\n", added: 1, removed: 0 },
+    { tool: "coding.edit", patch: "--- a/edit.py\n+++ b/edit.py\n@@ -1 +1 @@\n-before\n+after\n", added: 1, removed: 1 },
+    { tool: "coding.gitDiff", patch: "--- a/old.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-deleted\n", added: 0, removed: 1 }
+  ];
+  for (const { tool, patch, added, removed } of patches) {
+    const timeline = render(answer(), [step({ tool, outputJson: JSON.stringify({ diff: patch, success: true }) })]);
+    assert.equal(timeline.querySelector("details").hasAttribute("open"), true);
+    assert.equal(timeline.querySelectorAll(".coding-diff__line--added").length, added);
+    assert.equal(timeline.querySelectorAll(".coding-diff__line--removed").length, removed);
+  }
+  const generalReceipt = render(answer(), [step({ tool: "coding.customChange",
+    outputJson: JSON.stringify({ diff: { stdout: patches[1].patch } }) })]);
+  assert.equal(generalReceipt.querySelector("details").hasAttribute("open"), true,
+    "structured Git receipts also expose their change without relying on a tool-name whitelist");
+});
+
+test("one thousand manually collapsed receipts create only headers and build their exact latest patch on demand", async () => {
   const { context, render, document, posts } = harness();
   const patch = "diff --git a/café.py b/café.py\r\n--- a/café.py\r\n+++ b/café.py\r\n@@ -1 +1 @@\r\n-old\r\n+new 日本語\r\n\\ No newline at end of file";
   let codeNodes = 0, preNodes = 0, buttons = 0;
@@ -109,7 +157,18 @@ test("one thousand collapsed receipts create only headers and build their exact 
   const tools = Array.from({ length: 1000 }, (_, index) => step({ id: `receipt-${index}`, tool: "coding.edit",
     inputJson: JSON.stringify({ path: "café.py", oldText: "old", newText: "new 日本語" }),
     outputJson: JSON.stringify({ path: "café.py", applied: true, diff: patch, addedLines: 1, removedLines: 1 }) }));
-  const current = render(answer(), tools);
+  // Simulate the reader's existing collapsed choices without first allocating
+  // a thousand visible patches; the live renderer must keep this path lazy.
+  const previousTimeline = document.createElement("div");
+  for (const tool of tools) {
+    const section = document.createElement("section");
+    section.dataset.timelineKey = `tool-${tool.id}`;
+    const disclosure = document.createElement("details");
+    disclosure.className = "coding-step__disclosure";
+    section.append(disclosure);
+    previousTimeline.append(section);
+  }
+  const current = render(answer(), tools, { previousTimeline });
   document.body.append(current);
   assert.equal(current.querySelectorAll("summary").length, 1000);
   assert.equal(current.querySelectorAll(".coding-step__content").length, 0);
@@ -273,6 +332,31 @@ test("expanded disclosure content keeps full-height output and patch rules", () 
     assert.match(rule, /overflow:\s*visible/);
   }
   assert.match(css, /\.coding-step__title:focus-visible\s*\{[^}]*outline:/);
+});
+
+test("PDF tool output uses a complete light palette with readable text and semantic colors", () => {
+  const css = fs.readFileSync(path.join(webRoot, "coding-timeline.css"), "utf8");
+  const print = css.slice(css.lastIndexOf("@media print"));
+  const paletteRule = /\.pdf-book \.coding-timeline\s*\{([^}]+)\}/.exec(print)?.[1];
+  assert.ok(paletteRule, "print palette is scoped to the exported coding timeline");
+  const palette = Object.fromEntries([...paletteRule.matchAll(/--([\w-]+):\s*(#[\da-f]{6})/gi)].map(match => [match[1], match[2]]));
+  const luminance = hex => hex.slice(1).match(/../g).map(value => parseInt(value, 16) / 255)
+    .map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4)
+    .reduce((sum, value, index) => sum + value * [.2126, .7152, .0722][index], 0);
+  const contrast = (left, right) => {
+    const values = [luminance(left), luminance(right)].sort((a, b) => b - a);
+    return (values[0] + .05) / (values[1] + .05);
+  };
+  for (const background of ["bg", "surface", "surface-raised"]) {
+    assert.ok(palette[background]);
+    for (const foreground of ["text", "muted", "accent", "success", "danger", "warning"]) {
+      assert.ok(palette[foreground]);
+      assert.ok(contrast(palette[foreground], palette[background]) >= 4.5, `${foreground} remains legible on ${background}`);
+    }
+  }
+  assert.match(print, /\.pdf-book \.coding-diff__number\s*\{\s*opacity:\s*1/);
+  for (const kind of ["added", "removed", "header"])
+    assert.match(print, new RegExp(`\\.pdf-book \\.diff-line--${kind}\\s*\\{[^}]*color:\\s*#[\\da-f]{6} !important;[^}]*background:`));
 });
 
 test("narration and individual tool executions follow persisted text offsets without an aggregate disclosure", () => {

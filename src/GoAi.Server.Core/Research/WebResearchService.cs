@@ -4,6 +4,7 @@ using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using Microsoft.Extensions.Options;
 using System.Globalization;
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Json;
@@ -29,13 +30,17 @@ public sealed partial class WebResearchService
         "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 GO-AI-Server/1.0";
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly GoAiServerOptions _options;
+    private readonly TimeProvider _timeProvider;
+    private readonly ConcurrentDictionary<string, EngineCooldown> _engineCooldowns = new(StringComparer.OrdinalIgnoreCase);
 
     public WebResearchService(
         IHttpClientFactory httpClientFactory,
-        IOptions<GoAiServerOptions> options)
+        IOptions<GoAiServerOptions> options,
+        TimeProvider? timeProvider = null)
     {
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<WebSearchResponse> SearchAsync(
@@ -63,12 +68,25 @@ public sealed partial class WebResearchService
         }
 
         var query = youtubeFallback ? $"site:youtube.com/watch {request.Query}" : request.Query;
+        // Technical reference material is often English even when the conversation is German.
+        // SearXNG's CSE engine turns de-DE into a strict document-language filter.
+        var language = youtubeFallback ? request.Language ?? "de-DE"
+            : SearxngSearchProfiles.SearchLanguage(request.Profile, query, request.Language);
+        var profileEngines = youtubeFallback ? null : SearxngSearchProfiles.Engines(request.Profile, query)?.Split(',');
+        var skipped = new List<SearchEngineFailure>();
+        var selectedEngines = profileEngines?.Where(engine =>
+        {
+            if (!_engineCooldowns.TryGetValue(engine, out var cooldown) || cooldown.Until <= _timeProvider.GetUtcNow()) return true;
+            skipped.Add(new(engine, CleanDiagnostic("Vorübergehend ausgelassen: " + cooldown.Reason, 160)));
+            return false;
+        }).ToArray();
+        if (selectedEngines is { Length: 0 }) throw new SearxngEngineUnavailableException(skipped);
         var builder = new UriBuilder(new Uri(_options.SearxngUri, "/search"))
         {
-            Query = $"q={Uri.EscapeDataString(query)}&format=json&language={Uri.EscapeDataString(request.Language ?? "de-DE")}",
+            Query = $"q={Uri.EscapeDataString(query)}&format=json&language={Uri.EscapeDataString(language)}",
         };
-        if (!youtubeFallback && SearxngSearchProfiles.Engines(request.Profile, query) is { } engines)
-            builder.Query += "&engines=" + Uri.EscapeDataString(engines);
+        if (selectedEngines is not null)
+            builder.Query += "&engines=" + Uri.EscapeDataString(string.Join(',', selectedEngines));
         var client = _httpClientFactory.CreateClient(nameof(WebResearchService));
         client.Timeout = TimeSpan.FromSeconds(20);
         using var response = await client.GetAsync(builder.Uri, cancellationToken).ConfigureAwait(false);
@@ -97,7 +115,19 @@ public sealed partial class WebResearchService
         }
 
         var failures = ReadEngineFailures(document.RootElement);
-        if (results.Count == 0 && failures.Count > 0)
+        foreach (var failure in failures)
+        {
+            // SearXNG already suspends these engines. Preserve that decision across calls
+            // instead of immediately asking a known blocked engine with a different query.
+            var duration = EngineCooldownDuration(failure.Reason);
+            if (duration > TimeSpan.Zero)
+                _engineCooldowns[failure.Engine] = new(_timeProvider.GetUtcNow() + duration, failure.Reason);
+        }
+        failures.AddRange(skipped.Where(failure => !failures.Any(current => current.Engine.Equals(failure.Engine, StringComparison.OrdinalIgnoreCase))));
+        // An empty answer from a healthy engine is a query problem, not an outage.
+        // Keep it refinable even when another engine was blocked or deliberately skipped.
+        if (results.Count == 0 && failures.Count > 0 && (selectedEngines is null
+            || selectedEngines.All(engine => failures.Any(failure => failure.Engine.Equals(engine, StringComparison.OrdinalIgnoreCase)))))
             throw new SearxngEngineUnavailableException(failures);
         return new WebSearchResponse(
             request.Query,
@@ -105,8 +135,23 @@ public sealed partial class WebResearchService
             "searxng",
             youtubeFallback,
             DateTimeOffset.UtcNow,
-            failures.Count > 0 ? failures : null);
+            failures.Count > 0 ? failures : null,
+            language,
+            selectedEngines,
+            results.Count == 0 && selectedEngines is not null
+                ? "Die antwortenden Suchmaschinen lieferten keine Treffer. Verkürze die nächste Abfrage auf den exakten API-Namen und einen Aspekt oder prüfe eine bekannte Originalquelle mit web.fetch. Vorübergehend gesperrte Engines werden ausgelassen."
+                : null);
     }
+
+    private static TimeSpan EngineCooldownDuration(string reason) =>
+        reason.Contains("captcha", StringComparison.OrdinalIgnoreCase) ? TimeSpan.FromHours(1)
+        : reason.Contains("429", StringComparison.OrdinalIgnoreCase)
+            || reason.Contains("too many requests", StringComparison.OrdinalIgnoreCase)
+            || reason.Contains("unusual traffic", StringComparison.OrdinalIgnoreCase)
+            || reason.Contains("403", StringComparison.OrdinalIgnoreCase) ? TimeSpan.FromMinutes(3)
+        : TimeSpan.Zero;
+
+    private sealed record EngineCooldown(DateTimeOffset Until, string Reason);
 
     private static List<SearchEngineFailure> ReadEngineFailures(JsonElement response)
     {

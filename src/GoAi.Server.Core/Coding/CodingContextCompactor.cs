@@ -10,7 +10,8 @@ internal sealed record CodingCompactionPlan(
     LmChatMessage CurrentRequest,
     IReadOnlyList<LmChatMessage> RecentMessages,
     int ArchivedMessages,
-    int MaximumSummaryCharacters);
+    int MaximumSummaryCharacters,
+    LmChatMessage? WorkingStateMessage = null);
 
 internal static class CodingContextCompactor
 {
@@ -22,15 +23,16 @@ internal static class CodingContextCompactor
         Fehler, offene Aufgaben und den konkreten nächsten Schritt. Trenne Absichten strikt von bestätigten Werkzeugergebnissen.
         Bewahre wichtige frühere Zusammenfassungen. Vermeide unveränderte Dateiinhalte, ausführliche Logs und Wiederholungen.
         Antworte nur mit der Arbeitszusammenfassung, möglichst unter 6000 Zeichen. Führe keine Werkzeuge aus.
-        """;
+        """ + "\n\n" + CodingAgentPolicy.ReasoningLanguagePrompt;
 
-    internal static CodingCompactionPlan? Plan(IReadOnlyList<LmChatMessage> messages, int contextLength)
+    internal static CodingCompactionPlan? Plan(IReadOnlyList<LmChatMessage> messages, int contextLength, CodingWorkingState? workingState = null)
     {
         var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, null);
         if (messages.Count < 128 && ContextPlanner.EstimateTokens(messages) < budget * 2L / 3) return null;
         var currentRequestIndex = -1;
         for (var index = messages.Count - 1; index >= 0; index--)
-            if (messages[index].Role == "user" && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true)
+            if (messages[index].Role == "user" && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true
+                && messages[index].Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true)
             { currentRequestIndex = index; break; }
         if (currentRequestIndex < 0) return null;
 
@@ -38,14 +40,21 @@ internal static class CodingContextCompactor
             .Where(item => item.index > currentRequestIndex && item.message.Role == "assistant" && item.message.ToolCalls is { Count: > 0 })
             .Select(item => item.index).ToArray();
         if (toolTurnStarts.Length < 2) return null;
+        var receipts = messages.Select((message, index) => (message, index)).Where(static item => item.message.Role == "tool" && item.message.ToolCallId is not null)
+            .GroupBy(static item => item.message.ToolCallId!, StringComparer.Ordinal)
+            .ToDictionary(static group => group.Key, static group => group.Max(static item => item.index), StringComparer.Ordinal);
+        var firstOpen = messages.Select((message, index) => (message, index))
+            .Where(item => item.message.ToolCalls?.Any(call => !receipts.TryGetValue(call.Id, out var receipt) || receipt <= item.index) == true)
+            .Select(static item => item.index).DefaultIfEmpty(messages.Count).Min();
         var recentCount = Math.Min(8, toolTurnStarts.Length - 1);
-        var cut = toolTurnStarts[^recentCount];
+        var cut = Math.Min(toolTurnStarts[^recentCount], firstOpen);
         while (recentCount > 0 && ContextPlanner.EstimateTokens(messages.Skip(cut).ToArray()) > budget / 3)
         {
             recentCount--;
-            cut = recentCount == 0 ? messages.Count : toolTurnStarts[^recentCount];
+            cut = Math.Min(recentCount == 0 ? messages.Count : toolTurnStarts[^recentCount], firstOpen);
         }
-        var archive = messages.Take(cut).Where((message, index) => message.Role != "system" && index != currentRequestIndex).ToArray();
+        var archive = messages.Take(cut).Where((message, index) => message.Role != "system" && index != currentRequestIndex
+            && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true).ToArray();
         if (archive.Length == 0) return null;
         var transcript = new StringBuilder();
         foreach (var message in archive)
@@ -57,14 +66,18 @@ internal static class CodingContextCompactor
         }
         // A recovered legacy checkpoint can already exceed the current model window.
         // Normal rolling compaction occurs before this bound; the full journal stays on disk.
-        var maximumTranscript = Math.Max(2048, budget * 2 - (messages[currentRequestIndex].Content?.Length ?? 0));
+        var stateMessage = workingState is null ? null : CodingEvidenceContext.Build(workingState, Math.Clamp(contextLength / 2, 2048, 12_000));
+        var maximumTranscript = Math.Max(2048, budget * 2 - (messages[currentRequestIndex].Content?.Length ?? 0) - (stateMessage?.Content?.Length ?? 0));
         var history = Bound(transcript.ToString(), maximumTranscript);
         return new CodingCompactionPlan(
             [new LmChatMessage("system", SummaryInstruction),
-             new LmChatMessage("user", "Ursprünglicher Auftrag:\n" + messages[currentRequestIndex].Content + "\n\nBisherige abgeschlossene Arbeit:\n" + history)],
+             new LmChatMessage("user", "Ursprünglicher Auftrag:\n" + messages[currentRequestIndex].Content + "\n\nBisherige abgeschlossene Arbeit:\n" + history),
+             .. (stateMessage is { } memory ? new[] { memory } : Array.Empty<LmChatMessage>())],
             messages.Where(message => message.Role == "system").ToArray(), messages[currentRequestIndex],
-            messages.Skip(cut).Where(message => message.Role != "system").ToArray(), archive.Length,
-            Math.Clamp(contextLength / 4, 2048, 16_000));
+            messages.Skip(cut).Where(message => message.Role != "system" && !ReferenceEquals(message, messages[currentRequestIndex])
+                && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true).ToArray(), archive.Length,
+            Math.Clamp(contextLength / 4, 2048, 16_000),
+            stateMessage);
     }
 
     internal static LmChatMessage[] Complete(CodingCompactionPlan plan, string? summary)

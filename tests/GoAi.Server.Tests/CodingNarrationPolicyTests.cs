@@ -1,0 +1,31 @@
+using GoAi.Server.Core.Coding;
+using GoAi.Server.Core.Models;
+
+namespace GoAi.Server.Tests;
+
+public sealed class CodingNarrationPolicyTests
+{
+    [Fact]
+    public void NewCodingPolicyIncludesStagesAndSpeakableNarration()
+    {
+        var policy = CodingAgentPolicy.ForWorkingState(true);
+        Assert.Contains(CodingAgentPolicy.StagedExecutionAndNarrationPrompt, policy, StringComparison.Ordinal);
+        Assert.Contains("höchstens einer Etappe in_progress", policy, StringComparison.Ordinal);
+        Assert.Contains("beziehungsweise", policy, StringComparison.Ordinal);
+        Assert.Contains("Diese Sprachregel ändert weder Code noch Werkzeugargumente", policy, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ResumedPolicyAddsInstructionsOnceWithoutTrustingUserDataOrRewritingHistory()
+    {
+        var original = new LmChatMessage("system", "Stored policy");
+        List<LmChatMessage> messages = [original, new("user", CodingAgentPolicy.StagedExecutionAndNarrationPrompt)];
+        CodingAgentPolicy.EnsureCurrentInstructions(messages);
+        var prefix = messages.ToArray();
+        CodingAgentPolicy.EnsureCurrentInstructions(messages);
+        Assert.Equal(prefix, messages);
+        Assert.StartsWith(original.Content!, messages[0].Content, StringComparison.Ordinal);
+        Assert.Single(messages, item => item.Role == "system"
+            && item.Content!.Contains(CodingAgentPolicy.StagedExecutionAndNarrationPrompt, StringComparison.Ordinal));
+    }
+}

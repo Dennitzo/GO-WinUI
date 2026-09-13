@@ -127,6 +127,10 @@ public sealed class ModelRuntimeClientTests
         Assert.True(parsed);
         Assert.Equal("web.fetch", call.Name);
         Assert.Equal("https://example.test", call.Arguments.GetProperty("url").GetString());
+        Assert.True(ModelRuntimeClient.TryParseReasoningToolCall(
+            "<tool_call><function=go_web_fetch><parameter=url>https://example.test</parameter></function></tool_call>",
+            tools, out var repeated));
+        Assert.NotEqual(call.Id, repeated.Id);
     }
 
     [Fact]
@@ -195,8 +199,8 @@ public sealed class ModelRuntimeClientTests
         Assert.Equal(model.Id, model.InstanceId);
         Assert.True(model.SupportsTools);
         Assert.True(model.SupportsVision);
-        Assert.Equal(["none"], model.ReasoningEfforts);
-        Assert.Equal("none", model.DefaultReasoningEffort);
+        Assert.Empty(model.ReasoningEfforts);
+        Assert.Null(model.DefaultReasoningEffort);
     }
 
     [Fact]
@@ -326,9 +330,9 @@ public sealed class ModelRuntimeClientTests
 
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
         var messages = body.RootElement.GetProperty("messages");
-        Assert.Equal(3, messages.GetArrayLength());
+        Assert.Equal(4, messages.GetArrayLength());
         Assert.Equal("system", messages[0].GetProperty("role").GetString());
-        Assert.Equal("Policy\n\nRepositorykarte", messages[0].GetProperty("content").GetString());
+        Assert.EndsWith("Policy\n\nRepositorykarte", messages[0].GetProperty("content").GetString());
         Assert.Equal("user", messages[1].GetProperty("role").GetString());
         Assert.Equal("Bearbeite den Auftrag.", messages[1].GetProperty("content").GetString());
         Assert.Equal("user", messages[2].GetProperty("role").GetString());
@@ -441,6 +445,31 @@ public sealed class ModelRuntimeClientTests
         Assert.False(structured.HasStreamed);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReasoningIsLosslesslyBatchedAndKeptSeparateFromAnswer(bool jsonResponse)
+    {
+        var handler = new NativeRuntimeHandler(streamingReasoning: !jsonResponse, jsonReasoning: jsonResponse);
+        using var client = CreateClient(new HttpClient(handler));
+        var progress = new List<ModelRuntimeProgress>();
+        var result = await client.CompleteChatAsync("gpt-oss-120b", [new LmChatMessage("user", "Prüfe.")], [],
+            nativeProgress: (value, _) => { progress.Add(value); return ValueTask.CompletedTask; });
+
+        Assert.Equal("Fertig", result.Content);
+        Assert.True(result.HadReasoning);
+        Assert.Equal(NativeRuntimeHandler.ReasoningText,
+            string.Concat(progress.Select(item => item.ReasoningDelta)));
+        Assert.All(progress.Where(item => item.ReasoningDelta is not null), item => Assert.Null(item.ContentDelta));
+        if (!jsonResponse)
+        {
+            Assert.Equal("Fertig", string.Concat(progress.Select(item => item.ContentDelta)));
+            Assert.True(progress.FindLastIndex(item => item.ReasoningDelta is not null)
+                < progress.FindIndex(item => item.ContentDelta is not null));
+            Assert.True(progress.Count(item => item.ReasoningDelta is not null) < NativeRuntimeHandler.ReasoningText.Length / 2);
+        }
+    }
+
     [Fact]
     public async Task StreamingToolFragmentsAreBufferedAndValidatedBeforeReturning()
     {
@@ -471,6 +500,11 @@ public sealed class ModelRuntimeClientTests
         Assert.Equal(100, result.InputTokens);
         Assert.Equal(20, result.OutputTokens);
         Assert.Equal(7, result.ReasoningTokens);
+        Assert.Equal(7, result.Metrics?.ReasoningTokens);
+        Assert.NotNull(result.Metrics?.TimeToFirstTokenMilliseconds);
+        Assert.NotNull(result.Metrics?.TokenCountingMilliseconds);
+        Assert.NotNull(result.Metrics?.RuntimeQueueMilliseconds);
+        Assert.NotNull(result.Metrics?.TotalMilliseconds);
         Assert.True(result.HadReasoning);
         Assert.Contains(progress, item => item.State == "toolSelected" && item.ToolName == "workspace.inspect");
     }
@@ -697,8 +731,11 @@ public sealed class ModelRuntimeClientTests
         bool streamingText = false,
         bool transientLoadChannelFailure = false,
         bool streamingToolWithFreeText = false,
-        int tokenCountingFailures = 0) : HttpMessageHandler
+        int tokenCountingFailures = 0,
+        bool streamingReasoning = false,
+        bool jsonReasoning = false) : HttpMessageHandler
     {
+        internal const string ReasoningText = "## Plan\n\n1. Datei prüfen.\n2. `änderung` anwenden.\n\nAbschließend testen.";
         private string? _loadedKey = NativeGeneralId;
 
         public List<string> ChatBodies { get; } = [];
@@ -770,6 +807,20 @@ public sealed class ModelRuntimeClientTests
                     throw new HttpRequestException("transient");
                 }
                 ChatBodies.Add(body);
+                if (streamingReasoning)
+                {
+                    var frames = new StringBuilder();
+                    frames.Append("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\\n \"}}]}\n\n");
+                    foreach (var character in ReasoningText)
+                        frames.Append("data: ").Append(JsonSerializer.Serialize(new
+                        {
+                            choices = new[] { new { delta = new { reasoning_content = character.ToString(), reasoning = "duplicate alias" } } },
+                        })).Append("\n\n");
+                    frames.Append("data: {\"choices\":[{\"delta\":{\"content\":\"Fertig\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+                    return new(HttpStatusCode.OK) { Content = new StringContent(frames.ToString(), Encoding.UTF8, "text/event-stream") };
+                }
+                if (jsonReasoning)
+                    return Json(JsonSerializer.Serialize(new { choices = new[] { new { message = new { content = "Fertig", reasoning = ReasoningText } } } }));
                 if (ChatAttempts <= prematureStreamingFailures)
                 {
                     using var requestBody = JsonDocument.Parse(body);

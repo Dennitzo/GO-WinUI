@@ -5,6 +5,22 @@ embedding requests, reading existing Unsloth model files in place.
 The gateway and other GO services continue to run in Docker; the gateway connects
 to Windows through `http://host.docker.internal:8081`.
 
+GPU placement is negotiated through the supervisor on port 8082 (router port
+plus one), advertised with the `go-gpu-policy:single-preferred-v1` catalog tag.
+Before loading an unloaded model, GO reads current physical GPU free memory.
+Weights (all GGUF shards and any projector) plus the configured VRAM reserve
+must fit before attempting one GPU. Qwen3.8-27B prefers physical GPU1; other
+models choose the eligible GPU with most free memory. CUDA device indices are
+mapped using PCI bus order, independently of physical NVIDIA indices.
+
+The single-GPU trial uses the full training context, all GPU layers, one device
+and no automatic CPU offloading. llama itself validates the KV/cache/compute
+allocation. A confirmed allocation failure allows exactly one retry using the
+existing multi-GPU fitting policy after the failed child has exited. Other
+errors are not disguised as VRAM failures. No running model's placement is
+changed by catalog refresh. Decisions and failures are recorded in
+`%USERPROFILE%/.go-winui/native-runtime/gpu-placement.jsonl`.
+
 GO starts the shared native runtime when connecting to its local gateway or
 refreshing the local model catalog. The portable package includes the launcher
 and scanner in `Assets/NativeRuntime`, so this does not require a repository
@@ -14,6 +30,16 @@ installation uses `C:/Users/AMD/.cache/huggingface/hub`. The native supervisor
 uses Unsloth's existing executable at
 `%USERPROFILE%/.unsloth/llama.cpp/build/bin/Release/llama-server.exe`. No model
 files or runtime binaries are downloaded or copied.
+
+Reasoning language is independent of the selected effort. GO adds a German
+language instruction at the model request boundary. For recognized Jinja
+templates with a final `<think>` generation prefix, the native catalog writes
+an external template copy under `native-runtime/templates`: known Qwen effort
+instructions are localized without changing their effort semantics. No text is
+prefilled into the thinking channel; language announcements are discouraged. The
+thinking-disabled branch, tool formatting, code and original GGUF remain
+unchanged. Unrecognized templates retain their original form and the system
+language instruction; no unknown template syntax is rewritten.
 
 ```powershell
 .\windows\manage-coding-llama.ps1 -Action Start

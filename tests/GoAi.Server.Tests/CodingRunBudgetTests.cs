@@ -43,6 +43,45 @@ public sealed class CodingRunBudgetTests
     }
 
     [Fact]
+    public void UnlimitedBudgetRemovesRecoveredMarkersWithoutCreatingAnArtificialUserRequest()
+    {
+        var read = new LmToolCall("read", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.py" }));
+        var messages = new List<LmChatMessage>
+        {
+            new("system", "Stable coding policy: continue until verified completion."),
+            new("system", CodingRunBudget.PromptMarker + "\nold compacted budget"),
+            new("user", "Fix the slow project startup."),
+            new("assistant", "I inspect the startup code.", ToolCalls: [read]),
+            new("tool", "Current source", ToolCallId: "read"),
+            new("system", CodingRunBudget.PromptMarker + "\nunlimited budget"),
+        };
+        new CodingRunBudget(0, 0).ApplyInstruction(messages, 100, 200);
+        new CodingRunBudget(0, 0).ApplyInstruction(messages, 101, 203);
+        var native = ModelRuntimeClient.NormalizeMessageOrderForNativeRuntime(messages);
+
+        Assert.Equal(4, native.Count);
+        Assert.Equal("Fix the slow project startup.", Assert.Single(native, message => message.Role == "user").Content);
+        Assert.Equal("tool", native[^1].Role);
+        Assert.DoesNotContain(native, message => message.Content?.Contains(CodingRunBudget.PromptMarker, StringComparison.Ordinal) == true);
+        Assert.Equal("read", native[^1].ToolCallId);
+    }
+
+    [Theory]
+    [InlineData(96, 0)]
+    [InlineData(0, 96)]
+    [InlineData(96, 96)]
+    public void AnExplicitFiniteLimitStillHasExactlyOneCurrentBudgetInstruction(int rounds, int calls)
+    {
+        var budget = new CodingRunBudget(rounds, calls);
+        var messages = new List<LmChatMessage> { new("user", "Complete the task.") };
+        budget.ApplyInstruction(messages, 10, 20);
+        budget.ApplyInstruction(messages, 95, 96);
+        var marker = Assert.Single(messages, message => message.Role == "system");
+        Assert.Equal(budget.Instruction(95, 96), marker.Content);
+        Assert.Contains("reservierte Abschluss", marker.Content);
+    }
+
+    [Fact]
     public async Task UnlimitedRunPassesOldLimitsAndPersistsRollingContextWithoutLosingCurrentRequest()
     {
         using var harness = new Harness(readCalls: 150);
@@ -54,6 +93,9 @@ public sealed class CodingRunBudgetTests
         Assert.True(harness.Handler.Compactions >= 2);
         Assert.True(harness.HighestSavedCompaction >= 2);
         Assert.True(harness.Handler.LastMessages.Length < 128);
+        Assert.DoesNotContain(harness.Handler.LastMessages,
+            message => message.GetProperty("content").ValueKind == JsonValueKind.String
+                && message.GetProperty("content").GetString()!.Contains(CodingRunBudget.PromptMarker, StringComparison.Ordinal));
         Assert.Contains(harness.Handler.LastMessages, message => message.GetProperty("role").GetString() == "user"
             && message.GetProperty("content").GetString()!.Contains("Analysiere das Projekt und korrigiere den langsamen Programmstart.", StringComparison.Ordinal));
         var events = await harness.Repository.GetEventsAfterAsync(runId, 0);

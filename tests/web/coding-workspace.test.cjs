@@ -42,8 +42,8 @@ function harness({ speech = false, codingToolStepsExpanded = false } = {}) {
     createToolIcon: () => new Node("svg"), toolVisuals: { coding: ["", "coding-icon"] },
     messageCopyIcon: "copy", messagePdfIcon: "pdf", messageDoneIcon: "done"
   });
-  for (const name of ["visibleModelLabel", "codingToolLabel", "codingStepState", "normalizeCodingStep", "recordCodingActivity",
-    "createCodingActivity", "mergeCodingToolSteps", "codingPreviewHtml", "openCodingPreview", "closeCodingPreview", "enhanceCodingCodeBlocks", "renderCodingWorkspace", "pickCodingWorkspace", "cleanStatusMetadata",
+  for (const name of ["visibleModelLabel", "codingToolLabel", "codingStepState", "normalizeCodingStep", "recordCodingActivity", "compareReasoningStepUpdates",
+    "createCodingActivity", "mergeCodingToolSteps", "codingPreviewHtml", "openCodingPreview", "closeCodingPreview", "enhanceCodingCodeBlocks", "renderCodingWorkspace", "renderCodingChanges", "applyCodingChanges", "pickCodingWorkspace", "cleanStatusMetadata",
     "uniqueStatusParts", "isTerminalMessageStatus", "statusLabel", "runStatusText", "sanitizeVisibleMessageContent", "createMessage",
     "createMessageFooter", "createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "scrollMessageToTop", "renderMessages", "renderCodingMessages",
     "conversationMessagesDiffer", "sortCommittedMessages", "pruneTerminalMessageRunStatuses", "requestConversationRefresh", "acceptCommittedRevision",
@@ -210,6 +210,8 @@ test("PDF export includes every lazy patch and legacy receipt once and preserves
   ] });
   state.messages = [sourceMessage];
   const source = context.createMessage(sourceMessage);
+  const originalEditBody = source.querySelector('[data-step-id="edit"] .coding-step__content');
+  assert.ok(originalEditBody, "file changes are expanded in the live chat by default");
   const openDisclosure = source.querySelector('[data-step-id="legacy"] details');
   openDisclosure.open = true;
   await openDisclosure.dispatch("toggle");
@@ -219,7 +221,8 @@ test("PDF export includes every lazy patch and legacy receipt once and preserves
   assert.ok(pdf.textContent.includes("+after 日本語"));
   assert.equal(pdf.textContent.split("Full historical receipt").length - 1, 1);
   assert.equal(pdf.querySelectorAll("button").length, 0);
-  assert.equal(source.querySelector('[data-step-id="edit"] .coding-step__content'), null);
+  assert.equal(source.querySelector('[data-step-id="edit"] .coding-step__content'), originalEditBody,
+    "export preserves the original live diff body");
   assert.equal(openDisclosure.querySelector(".coding-step__content"), originalBody);
 });
 
@@ -274,7 +277,7 @@ test("only successful HTML steps offer previews, and stale session buttons canno
   state.activeSessionId = "another-session";
   panel.querySelector(".coding-preview-button").listeners.click();
   assert.equal(context.document.body.childNodes.length, 0);
-  assert.match(app, /if \(sessionChanged\) closeCodingPreview\(\);/);
+  assert.match(app, /if \(sessionChanged\) \{ closeCodingPreview\(\); state\.changesSummary = null; \}/);
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
   assert.ok(html.includes("frame-src https://go-coding-preview.local;"));
   assert.ok(html.includes("script-src 'self';"), "app script policy stays strict");
@@ -289,7 +292,6 @@ test("Coding and General share one header and no duplicate composer status", () 
   assert.doesNotMatch(html, /id="coding-(?:project|model)"/);
   assert.doesNotMatch(css, /\.coding-mode\s+\.(?:chat-header|chat-title-row|chat-heading-group|header-actions)\b/);
   context.renderCodingWorkspace();
-  assert.equal(elements.codingWorkspaceName.textContent, "My App");
   assert.ok(elements.codingWorkspace.title.includes("C:\\Projects\\My App"));
   state.isRunning = true;
   state.runStatus = "Quellen recherchieren";
@@ -333,8 +335,7 @@ test("Workspace chip follows Workflows, reflects the current session and opens t
   state.selectedToolAction = null;
   context.renderCodingWorkspace();
   assert.equal(elements.codingWorkspace.disabled, false);
-  assert.equal(elements.codingWorkspaceName.textContent, "My App");
-  assert.equal(elements.codingWorkspaceName.hidden, false);
+  assert.doesNotMatch(html, /id="coding-workspace-name"/);
   assert.ok(elements.codingWorkspace.className.includes("active"));
   assert.ok(elements.codingWorkspace.title.includes("C:\\Projects\\My App"));
   context.pickCodingWorkspace();
@@ -344,8 +345,6 @@ test("Workspace chip follows Workflows, reflects the current session and opens t
   state.activeSessionId = "session-b";
   state.codingWorkspacePath = null;
   context.renderCodingWorkspace();
-  assert.equal(elements.codingWorkspaceName.hidden, true);
-  assert.equal(elements.codingWorkspaceName.textContent, "");
   assert.ok(!elements.codingWorkspace.className.includes("active"));
   context.pickCodingWorkspace();
   assert.equal(posts[1].payload.sessionId, "session-b");

@@ -469,6 +469,17 @@ public partial class App : Application
             }
 
             availabilityCancellation?.Dispose();
+            var nativeRuntime = GetService<NativeModelRuntimeService>();
+            nativeRuntime.BeginShutdown();
+            try
+            {
+                await GetService<GoAiAssistantService>().CancelCurrentAsync();
+            }
+            finally
+            {
+                if (Uri.TryCreate(GetService<SettingsCoordinator>().Current.GoAiServerUrl, UriKind.Absolute, out var gateway))
+                    await nativeRuntime.StopAsync(gateway);
+            }
             await _host.StopAsync(TimeSpan.FromSeconds(4));
         }
         finally

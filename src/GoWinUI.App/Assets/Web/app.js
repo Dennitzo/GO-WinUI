@@ -38,6 +38,7 @@
     messageRunStatus: new Map(),
     codingActivity: new Map(),
     codingToolStepsExpanded: false,
+    changesSummary: null,
     codingPreviewDialog: null,
     artifactPreviewUrls: new Map(),
     artifactPreviewPending: new Set(),
@@ -136,7 +137,7 @@
     messageList: byId("message-list"),
     messageScroll: byId("message-scroll"),
     codingWorkspace: byId("coding-workspace"),
-    codingWorkspaceName: byId("coding-workspace-name"),
+    codingChanges: byId("coding-changes"),
     prompt: byId("prompt"),
     chatPane: document.querySelector(".chat-pane"),
     chatHeader: document.querySelector(".chat-header"),
@@ -442,6 +443,7 @@
   }
 
   function renderMessages(scrollToEnd) {
+    renderCodingChanges();
     if (state.selectedToolAction === "coding" || state.messages.some(message => message.toolSteps?.length)) {
       renderCodingMessages(scrollToEnd);
       return;
@@ -485,7 +487,7 @@
     const viewportTop = scroller.getBoundingClientRect().top;
     const visibleAnchor = selector => [...elements.messageList.querySelectorAll(selector)]
       .find(item => item.getBoundingClientRect().bottom > viewportTop + 2);
-    const anchor = visibleAnchor(".coding-diff__line, .coding-output, .coding-result, .coding-narration")
+    const anchor = visibleAnchor(".coding-diff__line, .coding-output, .coding-result, .coding-narration, .coding-reasoning__body > *")
       || visibleAnchor(".coding-step") || visibleAnchor(".message");
     const anchorTop = anchor?.getBoundingClientRect().top;
     const existing = new Map([...elements.messageList.children].map(item => [String(item.dataset.messageId), item]));
@@ -532,6 +534,11 @@
   }
 
   function speechBlockCandidates(content, kind) {
+    // Reasoning remains readable on screen but is never an app speech source,
+    // even if this helper is called with its Markdown body directly.
+    for (let ancestor = content; ancestor; ancestor = ancestor.parentElement) {
+      if (ancestor.hasAttribute("data-speech-exclude")) return [];
+    }
     if (content.classList.contains("coding-timeline")) {
       return [...content.querySelectorAll(".coding-narration")].flatMap(part => speechBlockCandidates(part, kind));
     }
@@ -571,6 +578,7 @@
   function captureReadFromContextTarget(event) {
     state.readFromContextTarget = null;
     const origin = event?.target instanceof Element ? event.target : null;
+    if (origin?.closest("[data-speech-exclude]")) return;
     const block = origin?.closest("[data-speech-block-kind][data-speech-block-index]");
     const article = block?.closest("article[data-message-id]");
     if (!block || !article || !elements.messageList.contains(article)) return;
@@ -1157,8 +1165,12 @@
   function codingToolLabel(value) {
     const name = String(value || "");
     return ({
+      "assistant.reasoning": "Denkprozess",
       "coding.list": "Projekt erkunden",
       "coding.read": "Datei lesen",
+      "coding.readOutput": "Ausgabe nachlesen",
+      "coding.searchRunEvidence": "Laufbelege durchsuchen",
+      "coding.updatePlan": "Arbeitsstand aktualisieren",
       "coding.search": "Code durchsuchen",
       "coding.write": "Datei schreiben",
       "coding.edit": "Datei bearbeiten",
@@ -1189,6 +1201,21 @@
       detail: String(tool.detail || ""), previewHtml: codingPreviewHtml(tool) };
   }
 
+  function compareReasoningStepUpdates(previous, next) {
+    // The server cursor is authoritative across provider retries and reconnects.
+    // A timestamp is the compatibility fallback for older display receipts.
+    const cursor = step => {
+      try {
+        const data = typeof step.outputJson === "string" ? JSON.parse(step.outputJson) : step.outputJson;
+        return Number.isSafeInteger(data?.lastEventId) && data.lastEventId >= 0 ? data.lastEventId : null;
+      } catch { return null; }
+    };
+    const priorCursor = cursor(previous), nextCursor = cursor(next);
+    if (priorCursor !== null && nextCursor !== null) return Math.sign(nextCursor - priorCursor);
+    const priorTime = Date.parse(previous.updatedAt), nextTime = Date.parse(next.updatedAt);
+    return Number.isFinite(priorTime) && Number.isFinite(nextTime) ? Math.sign(nextTime - priorTime) : null;
+  }
+
   function recordCodingActivity(payload) {
     if (state.selectedToolAction !== "coding" || !payload?.messageId
       || payload.sessionId && String(payload.sessionId) !== String(state.activeSessionId)) return;
@@ -1204,8 +1231,12 @@
       const existing = steps.find(item => item.id === String(tool.id) && item.kind === "tool");
       const next = normalizeCodingStep(tool);
       if (existing) {
-        const newer = !existing.updatedAt || !next.updatedAt || Date.parse(next.updatedAt) >= Date.parse(existing.updatedAt);
-        const regressesTerminal = !["running", "pending"].includes(existing.status) && ["running", "pending"].includes(next.status);
+        const reasoningOrder = existing.tool === "assistant.reasoning" && next.tool === "assistant.reasoning"
+          ? compareReasoningStepUpdates(existing, next) : null;
+        const newer = reasoningOrder !== null ? reasoningOrder > 0
+          : !existing.updatedAt || !next.updatedAt || Date.parse(next.updatedAt) >= Date.parse(existing.updatedAt);
+        const regressesTerminal = !["running", "pending"].includes(existing.status) && ["running", "pending"].includes(next.status)
+          && !(reasoningOrder > 0);
         if (newer && !regressesTerminal) Object.assign(existing, next);
       } else steps.push(next);
     } else if (payload.runStatus) {
@@ -1241,6 +1272,15 @@
       if (live.kind !== "tool") continue;
       const existing = steps.find(step => step.id === live.id);
       if (!existing) { steps.push({ ...live }); continue; }
+      if (existing.tool === "assistant.reasoning" && live.tool === "assistant.reasoning") {
+        const order = compareReasoningStepUpdates(existing, live);
+        if (order !== null) {
+          // A newer persisted running snapshot must also beat an older cached
+          // terminal receipt when checkpoint recovery restarts the same round.
+          if (order > 0) Object.assign(existing, live);
+          continue;
+        }
+      }
       const storedTerminal = !["running", "pending"].includes(existing.status);
       const liveTerminal = !["running", "pending"].includes(live.status);
       if (storedTerminal && !liveTerminal) continue;
@@ -1332,15 +1372,36 @@
     const coding = state.selectedToolAction === "coding";
     elements.appShell.classList.toggle("coding-mode", coding);
     elements.prompt.placeholder = coding ? "Änderung beschreiben oder Frage zum Projekt stellen …" : "Nachricht eingeben …";
-    elements.codingWorkspaceName.textContent = state.codingWorkspacePath
-      ? state.codingWorkspacePath.split(/[\\/]/).filter(Boolean).pop() : "";
-    elements.codingWorkspaceName.hidden = !state.codingWorkspacePath;
     elements.codingWorkspace.classList.toggle("active", Boolean(state.codingWorkspacePath));
     elements.codingWorkspace.title = state.codingWorkspacePath
       ? `Workspace: ${state.codingWorkspacePath}\nOrdner wechseln` : "Workspace auswählen und Coding starten";
     elements.codingWorkspace.setAttribute("aria-label", state.codingWorkspacePath
       ? `Workspace ${state.codingWorkspacePath} wechseln` : "Workspace auswählen und Coding starten");
     elements.codingWorkspace.disabled = state.isRunning || !state.activeSessionId;
+    renderCodingChanges();
+  }
+
+  function renderCodingChanges() {
+    if (!elements.codingChanges || !globalThis.goCodingChanges) return;
+    const latest = state.messages.filter(message => message.role === "assistant").at(-1);
+    const view = elements.codingChanges._view ||= globalThis.goCodingChanges.create({
+      host: elements.codingChanges, onLayout: schedulePromptResize
+    });
+    view.update(state.changesSummary, { sessionId: state.activeSessionId, messageId: latest?.id,
+      workspacePath: state.codingWorkspacePath, isCoding: state.selectedToolAction === "coding", toolSteps: latest?.toolSteps });
+    updateContextStripVisibility();
+  }
+
+  function applyCodingChanges(summary) {
+    if (!summary || String(summary.sessionId || "") !== String(state.activeSessionId || "")) return;
+    const latest = state.messages.filter(message => message.role === "assistant").at(-1);
+    if (!latest || String(summary.messageId || "") !== String(latest.id)) return;
+    const previous = state.changesSummary;
+    if (previous && previous.messageId === summary.messageId
+      && Number.isFinite(previous.revision) && Number.isFinite(summary.revision)
+      && summary.revision <= previous.revision) return;
+    state.changesSummary = summary;
+    renderCodingChanges();
   }
 
   function pickCodingWorkspace() {
@@ -1690,6 +1751,7 @@
       && !globalThis.goVoiceCapture?.isActive
       && !globalThis.goVoiceCapture?.isStarting
       && !state.voiceStarting
+      && (elements.codingChanges?.hidden ?? true)
       && !state.speechStatus?.active;
   }
 
@@ -2255,7 +2317,7 @@
     const previousSessionId = state.activeSessionId;
     const nextSessionId = payload.activeSessionId || null;
     const sessionChanged = previousSessionId !== nextSessionId;
-    if (sessionChanged) closeCodingPreview();
+    if (sessionChanged) { closeCodingPreview(); state.changesSummary = null; }
     const nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
     const currentSessionMessagesChanged = !sessionChanged
       && conversationMessagesDiffer(state.messages, nextMessages);
@@ -2278,6 +2340,7 @@
     state.model = payload.model || null;
     state.codingWorkspacePath = payload.codingWorkspacePath || null;
     state.codingToolStepsExpanded = Boolean(payload.codingToolStepsExpanded);
+    if (payload.changesSummary) applyCodingChanges(payload.changesSummary);
     if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
     if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
     state.contextWasTruncated = Boolean(payload.contextWasTruncated);
@@ -2372,6 +2435,7 @@
     const messagesChanged = conversationMessagesDiffer(state.messages, nextMessages);
     state.messages = nextMessages;
     sortCommittedMessages();
+    if (payload.changesSummary) applyCodingChanges(payload.changesSummary);
     state.conversationRevision = Number(payload.conversationRevision) || 0;
     state.conversationRefreshPending = false;
     pruneTerminalMessageRunStatuses();
@@ -2422,7 +2486,11 @@
       case "conversation.messageCommitted":
         applyCommittedMessage(payload);
         break;
+      case "coding.changes":
+        applyCodingChanges(payload);
+        break;
       case "chat.started":
+        state.changesSummary = null;
         state.isRunning = true;
         state.pendingCaptureRequest = null;
         state.waitingForCapture = false;
@@ -2560,6 +2628,12 @@
 
         if (acceptsRunStatus) {
           recordCodingActivity(payload);
+          // Reasoning packets update only their card. They must not alternate
+          // with model progress or replace token details with an internal name.
+          if (payload.toolStep?.tool === "assistant.reasoning") {
+            renderMessages(false);
+            break;
+          }
           if (payload.model) state.model = payload.model;
           if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
           if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;

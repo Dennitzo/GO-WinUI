@@ -32,6 +32,16 @@ internal sealed class TestEnvironment : IAsyncDisposable
     {
         await Services.DisposeAsync().ConfigureAwait(false);
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        try { System.IO.Directory.Delete(Directory, recursive: true); } catch (IOException) { }
+        try
+        {
+            var root = Path.GetFullPath(Directory);
+            if (Path.GetDirectoryName(root) != Path.TrimEndingDirectorySeparator(Path.GetTempPath())
+                || !Path.GetFileName(root).StartsWith("GO-tests-", StringComparison.Ordinal)) throw new IOException("Unexpected test directory.");
+            foreach (var file in System.IO.Directory.EnumerateFiles(root, "*", new EnumerationOptions
+                { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
+                File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
+            System.IO.Directory.Delete(root, recursive: true);
+        }
+        catch (IOException) { }
     }
 }
