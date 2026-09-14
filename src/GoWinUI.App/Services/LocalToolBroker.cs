@@ -58,7 +58,7 @@ public sealed class LocalToolBroker(
                     return Result(proposal, "completed", await store.ReadOutputAsync(args.GetProperty("evidenceId").GetString()!,
                         args.TryGetProperty("stream", out var stream) ? stream.GetString()! : "stdout",
                         args.TryGetProperty("offset", out var offset) ? offset.GetInt32() : 0,
-                        args.TryGetProperty("maximumCharacters", out var characters) ? characters.GetInt32() : 4000, cancellationToken).ConfigureAwait(false));
+                        args.TryGetProperty("maximumCharacters", out var characters) ? characters.GetInt32() : 16000, cancellationToken).ConfigureAwait(false));
                 }
                 if (proposal.Name == "coding.searchRunEvidence")
                 {
@@ -203,7 +203,7 @@ public sealed class LocalToolBroker(
                 if (arguments.TryGetProperty("stream", out _) && ValidateString(arguments, "stream", 1, 6) is not ("stdout" or "stderr" or "input" or "result"))
                     throw new InvalidDataException("Der Belegkanal ist ungültig.");
                 ValidateOptionalInteger(arguments, "offset", 0, int.MaxValue);
-                ValidateOptionalInteger(arguments, "maximumCharacters", 1, 8000);
+                ValidateOptionalInteger(arguments, "maximumCharacters", 1, 32000);
                 break;
             case "coding.searchRunEvidence":
                 ValidateProperties(arguments, ["query"], ["query", "maximumResults"]);

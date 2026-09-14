@@ -420,7 +420,7 @@ public sealed partial class RunProcessor : BackgroundService
                             cancellationToken).ConfigureAwait(false);
                         messages.Add(new LmChatMessage(
                             "tool",
-                            isCoding ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult)) : SerializeClientToolResult(clientResult),
+                            isCoding ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult), call.Name) : SerializeClientToolResult(clientResult),
                             ToolCallId: call.Id));
                         if (workingState is not null)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), SerializeClientToolResult(clientResult));
@@ -508,7 +508,7 @@ public sealed partial class RunProcessor : BackgroundService
                         }
                         messages.Add(new LmChatMessage(
                             "tool",
-                            isCoding ? CodingLoopGuard.BoundToolResult(result.Result.GetRawText()) : result.Result.GetRawText(),
+                            isCoding ? CodingLoopGuard.BoundToolResult(result.Result.GetRawText(), call.Name) : result.Result.GetRawText(),
                             ToolCallId: call.Id));
                         if (workingState is not null && tool.Name != CodingWorkingStateTools.PlanTool)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());

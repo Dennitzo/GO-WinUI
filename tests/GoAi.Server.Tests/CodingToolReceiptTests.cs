@@ -7,6 +7,16 @@ namespace GoAi.Server.Tests;
 
 public sealed class CodingToolReceiptTests
 {
+    [Theory]
+    [InlineData("coding.read")]
+    [InlineData("coding.readOutput")]
+    public void FullReadPageSurvivesReceiptEscaping(string tool)
+    {
+        var raw = JsonSerializer.Serialize(new { result = new { content = new string('\t', 32000), nextLine = 301 } });
+        Assert.Equal(raw, CodingLoopGuard.BoundToolResult(raw, tool));
+        Assert.NotEqual(raw, CodingLoopGuard.BoundToolResult(raw, "coding.command"));
+    }
+
     [Fact]
     public void BoundedFailureRetainsOutcomeAndArchiveReferenceWithoutWorkingState()
     {

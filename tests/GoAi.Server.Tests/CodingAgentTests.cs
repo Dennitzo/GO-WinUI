@@ -1,4 +1,4 @@
-﻿using GoAi.Contracts;
+using GoAi.Contracts;
 using GoAi.Server.Core.Coding;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Gateway;
@@ -68,7 +68,7 @@ public sealed class CodingAgentTests
     }
 
     [Theory]
-    [InlineData(ClientToolNames.CodingRead, "{\"path\":\"a.cs\",\"maximumLines\":201}")]
+    [InlineData(ClientToolNames.CodingRead, "{\"path\":\"a.cs\",\"maximumLines\":1001}")]
     [InlineData(ClientToolNames.CodingCommand, "{\"executable\":\"dotnet\",\"arguments\":[],\"timeoutSeconds\":-1}")]
     [InlineData(ClientToolNames.CodingEdit, "{\"path\":\"a.cs\",\"oldText\":\"a\",\"newText\":\"b\",\"expectedSha256\":\"wrong\"}")]
     [InlineData(ClientToolNames.CodingWrite, "{\"path\":\"a.cs\",\"content\":\"x\",\"outside\":true}")]

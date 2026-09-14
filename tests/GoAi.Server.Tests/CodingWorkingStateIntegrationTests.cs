@@ -270,7 +270,7 @@ public sealed class CodingWorkingStateIntegrationTests
     [InlineData("coding.updatePlan", "{\"facts\":[{\"text\":\"unverified\"}]}")]
     [InlineData("coding.updatePlan", "{\"rejectedHypotheses\":[{\"text\":\"x\",\"evidenceIds\":[\"1\",\"2\",\"3\",\"4\"]}]}")]
     [InlineData("coding.readOutput", "{\"evidenceId\":\"../../outside\"}")]
-    [InlineData("coding.readOutput", "{\"evidenceId\":\"ev-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"maximumCharacters\":8001}")]
+    [InlineData("coding.readOutput", "{\"evidenceId\":\"ev-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"maximumCharacters\":32001}")]
     [InlineData("coding.searchRunEvidence", "{\"query\":\"q\",\"maximumResults\":21}")]
     public void MalformedStateAndEvidenceArgumentsAreRejected(string name, string json)
     {
@@ -388,7 +388,8 @@ public sealed class CodingWorkingStateIntegrationTests
         var second = (await harness.Repository.GetCheckpointAsync(run))!;
         var system = Assert.Single(second.Messages, message => message.Role == "system").Content!;
         Assert.Equal("Legacy policy\n\n" + CodingAgentPolicy.ReasoningLanguagePrompt
-            + "\n\n" + CodingAgentPolicy.StagedExecutionAndNarrationPrompt, system);
+            + "\n\n" + CodingAgentPolicy.StagedExecutionAndNarrationPrompt
+            + "\n\n" + CodingAgentPolicy.WorkspaceDependenciesPrompt, system);
         Assert.Equal(first.Messages[0], second.Messages[0]);
         Assert.Empty(harness.Handler.Requests);
     }

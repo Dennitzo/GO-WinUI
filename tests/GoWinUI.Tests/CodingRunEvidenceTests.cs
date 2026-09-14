@@ -253,9 +253,9 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
     public void BrokerEvidenceSchemasRejectExtraScopeFieldsAndMutationRisk()
     {
         const string id = "ev-0123456789abcdef0123456789abcdef";
-        LocalToolBroker.ValidateProposal(Proposal("coding.readOutput", new { evidenceId = id, stream = "result", maximumCharacters = 8000 }));
+        LocalToolBroker.ValidateProposal(Proposal("coding.readOutput", new { evidenceId = id, stream = "result", maximumCharacters = 32000 }));
         Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(Proposal("coding.readOutput", new { evidenceId = id, runId = "other" })));
-        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(Proposal("coding.readOutput", new { evidenceId = id, maximumCharacters = 8001 })));
+        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(Proposal("coding.readOutput", new { evidenceId = id, maximumCharacters = 32001 })));
         Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(Proposal("coding.searchRunEvidence", new { query = "text", maximumResults = 21 })));
         Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(Proposal("coding.readOutput", new { evidenceId = id }, ToolRiskClass.Process)));
     }

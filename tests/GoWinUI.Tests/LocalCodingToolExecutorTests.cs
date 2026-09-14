@@ -25,6 +25,34 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         _executor = new LocalCodingToolExecutor(_root);
     }
 
+    [Fact]
+    public async Task ReadLargerPagesPreservesStructuredContentAndContinuation()
+    {
+        var lines = Enumerable.Range(1, 700).Select(i => $"value_{i} = \"some source text\";").ToArray();
+        await File.WriteAllTextAsync(Path.Combine(_root, "large.cs"), string.Join("\n", lines));
+        var first = await Execute("coding.read", new { path = "large.cs" });
+        Assert.Equal(301, first.GetProperty("nextLine").GetInt32());
+        Assert.Contains("300: " + lines[299], first.GetProperty("content").GetString());
+        var all = await Execute("coding.read", new { path = "large.cs", maximumLines = 1000 });
+        Assert.False(all.GetProperty("truncated").GetBoolean());
+        Assert.Contains("700: " + lines[699], all.GetProperty("content").GetString());
+        Assert.Equal(first.GetProperty("sha256").GetString(), all.GetProperty("sha256").GetString());
+    }
+
+    [Fact]
+    public async Task ReadCharacterBoundaryPreservesWholeLinesAndJsonEscaping()
+    {
+        var line = new string('\t', 1000);
+        await File.WriteAllTextAsync(Path.Combine(_root, "escaped.txt"), string.Join("\n", Enumerable.Repeat(line, 40)));
+        var first = await Execute("coding.read", new { path = "escaped.txt", maximumLines = 1000 });
+        Assert.True(first.GetProperty("truncated").GetBoolean());
+        var next = first.GetProperty("nextLine").GetInt32();
+        Assert.Equal(32, next);
+        var second = await Execute("coding.read", new { path = "escaped.txt", startLine = next });
+        Assert.StartsWith("32: " + line, second.GetProperty("content").GetString());
+        Assert.False(second.GetProperty("truncated").GetBoolean());
+    }
+
     [Theory]
     [InlineData("new file café.txt", "first\nsecond")]
     [InlineData("empty.txt", "")]

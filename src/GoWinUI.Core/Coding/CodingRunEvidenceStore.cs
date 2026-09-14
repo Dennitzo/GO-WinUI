@@ -98,12 +98,12 @@ public sealed class CodingRunEvidenceStore
     }
 
     public Task<CodingEvidencePage> ReadOutputAsync(string evidenceId, string stream = "stdout", int offset = 0,
-        int maximumCharacters = 4000, CancellationToken cancellationToken = default)
+        int maximumCharacters = 16000, CancellationToken cancellationToken = default)
     {
         ValidateEvidenceId(evidenceId);
         ValidateStream(stream);
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
-        if (maximumCharacters is < 1 or > 8000) throw new ArgumentOutOfRangeException(nameof(maximumCharacters));
+        if (maximumCharacters is < 1 or > 32000) throw new ArgumentOutOfRangeException(nameof(maximumCharacters));
         cancellationToken.ThrowIfCancellationRequested();
         var page = TryReadOutput(evidenceId, stream, offset, maximumCharacters, cancellationToken);
         if (page is not null) return Task.FromResult(page);

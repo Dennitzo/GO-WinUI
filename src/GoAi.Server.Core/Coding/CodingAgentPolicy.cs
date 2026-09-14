@@ -4,6 +4,33 @@ namespace GoAi.Server.Core.Coding;
 
 public static class CodingAgentPolicy
 {
+    public const string WorkspaceDependenciesPrompt = """
+        Berechtigung für Zusatzmodule: Benötigte Projekt- und Testabhängigkeiten darfst du selbstständig ohne
+        Erlaubnisfrage über coding.command installieren, sofern der Nutzerauftrag Änderungen erlaubt.
+        Diese ausdrückliche Freigabe gilt ausschließlich für den aktuell ausgewählten Workspace, auch wenn eine
+        ältere gespeicherte Coding-Anweisung Installationen allgemein untersagt. Keine globalen Installationen,
+        kein pip --user, kein npm -g, keine Administratorrechte und keine Änderungen an fremden Python-Umgebungen.
+        Ein reiner Analyseauftrag bleibt lesend. Installiere nur für die Aufgabe benötigte Pakete, beachte vorhandene
+        requirements, pyproject und Lockdateien; vermeide pauschale Upgrades und unnötige Neuinstallationen.
+
+        Python unter Windows: Prüfe zuerst den vorhandenen Workspace-Interpreter und dessen sys.prefix.
+        Fehlt eine lokale Umgebung, verwende einen bestätigten Python-Interpreter mit arguments ["-m","venv",".venv"]
+        und workingDirectory ".". Verwende anschließend direkt executable ".venv/Scripts/python.exe" und zum Beispiel
+        arguments ["-m","pip","--isolated","install","--require-virtualenv","--no-cache-dir","-r","requirements.txt"].
+        Für ein einzelnes benötigtes Paket ersetze -r und requirements.txt durch dessen Paketanforderung.
+        Aktiviere die Umgebung nicht per Shell; führe auch Imports und Tests mit diesem lokalen Interpreter aus.
+        Prüfe, dass die Umgebung tatsächlich im aktuellen Workspace liegt und keine externe Verknüpfung ist.
+        Verwende keine umgebogenen Installationsziele wie --user, --prefix oder ein externes --target. Ist pip in
+        der lokalen Umgebung nicht vorhanden, nutze deren Interpreter mit ["-m","ensurepip"] und prüfe das Ergebnis.
+        Bei anderen Paketmanagern wähle ebenfalls ausschließlich projektlokale Installations-, Store- und Cachepfade.
+        Können die benötigten Dateien damit nicht im Workspace gehalten werden, melde die konkrete Einschränkung,
+        statt auf eine globale Installation auszuweichen. Windows kann weiterhin temporäre Prozessdateien verwalten;
+        coding.command ist keine Betriebssystem-Sandbox.
+        Erkläre die Installation kurz, prüfe Exitcode und anschließend Import beziehungsweise relevanten Test.
+        Eine Installation allein bestätigt keine funktionierende Anwendung. Halte neu benötigte Abhängigkeiten in
+        der passenden Projektmanifestdatei fest und bewahre vorhandene Versionsvorgaben und Nutzeränderungen.
+        """;
+
     public const string StagedExecutionAndNarrationPrompt = """
         Etappenplan: Teile größere Änderungsaufträge in wenige fachlich zusammenhängende, überprüfbare Etappen.
         Halte diese im Arbeitsstand fest, mit höchstens einer Etappe in_progress. Kündige die nächste Etappe kurz an,
@@ -65,18 +92,21 @@ public static class CodingAgentPolicy
 
     public static string ForWorkingState(bool enabled) =>
         (enabled ? SystemPrompt + "\n\n" + WorkingStatePrompt : SystemPrompt) + "\n\n" + ReasoningLanguagePrompt
-        + "\n\n" + StagedExecutionAndNarrationPrompt;
+        + "\n\n" + StagedExecutionAndNarrationPrompt + "\n\n" + WorkspaceDependenciesPrompt;
 
     internal static void EnsureCurrentInstructions(List<LmChatMessage> messages)
     {
         EnsureReasoningLanguage(messages);
-        if (messages.Any(message => message.Role == "system"
-            && message.Content?.Contains(StagedExecutionAndNarrationPrompt, StringComparison.Ordinal) == true)) return;
-        var systemIndex = messages.FindIndex(message => message.Role == "system");
-        messages[systemIndex] = messages[systemIndex] with
+        foreach (var instruction in new[] { StagedExecutionAndNarrationPrompt, WorkspaceDependenciesPrompt })
         {
-            Content = messages[systemIndex].Content + "\n\n" + StagedExecutionAndNarrationPrompt,
-        };
+            if (messages.Any(message => message.Role == "system"
+                && message.Content?.Contains(instruction, StringComparison.Ordinal) == true)) continue;
+            var systemIndex = messages.FindIndex(message => message.Role == "system");
+            messages[systemIndex] = messages[systemIndex] with
+            {
+                Content = messages[systemIndex].Content + "\n\n" + instruction,
+            };
+        }
     }
 
     internal static void EnsureReasoningLanguage(List<LmChatMessage> messages)
@@ -140,7 +170,7 @@ public static class CodingAgentPolicy
         Windows-Pfade, Argumente und Module. Prüfe bei Bedarf einmal gezielt den verfügbaren Interpreter und benötigte
         Testplugins; verwende danach den bestätigten Interpreter und unterstützte Optionen. Wiederhole diese
         Umgebungsdiagnose nur nach einer relevanten Änderung oder einem neuen Fehler. Vermute keine vorhandene .venv.
-        Nutze es für notwendige Builds, Tests und Diagnose. Starte keine Löschungen, Deployments, Pushes, Installationen
+        Nutze es für notwendige Builds, Tests und Diagnose. Starte keine Löschungen, Deployments, Pushes
         oder dauerhaften Hintergrundprozesse ohne ausdrücklichen Nutzerauftrag. GO führt angebotene lokale Werkzeuge automatisch aus.
         Python- und PowerShell-Aufgaben laufen bei Bedarf über coding.command mit dem passenden Programm und getrennten Argumenten.
         Ändere mit Dateitools niemals .git Interna. Prüfe Git-Diffs nur in erkannten Git-Projekten und soweit der

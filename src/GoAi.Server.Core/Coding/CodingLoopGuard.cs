@@ -17,9 +17,11 @@ public static class CodingLoopGuard
     ];
     private static readonly string[] ReceiptNestedFields = ["result", "evidence"];
 
-    public static string BoundToolResult(string value)
+    public static string BoundToolResult(string value, string? toolName = null)
     {
-        if (value.Length <= MaximumToolResultCharacters) return value;
+        // Allow the complete read page even after JSON escaping and receipt wrapping.
+        var maximum = toolName is "coding.read" or "coding.readOutput" ? 256_000 : MaximumToolResultCharacters;
+        if (value.Length <= maximum) return value;
         var metadataBudget = 6000;
         var metadataTruncated = false;
         Dictionary<string, object?> bounded = [];
