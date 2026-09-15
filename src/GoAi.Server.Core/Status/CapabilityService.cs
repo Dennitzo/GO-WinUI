@@ -100,7 +100,8 @@ public sealed class CapabilityService
             GoAiProtocol.MaximumLiveCaptionChunkBytes,
             1_000,
             10_000,
-            true));
+            true),
+        SupportsCodingSessionContext: true);
 
     private static ModelCapability CreateModelCapability(
         string modelId,

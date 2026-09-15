@@ -28,6 +28,20 @@ public sealed class CodingHistoryRecoveryTests
     }
 
     [Fact]
+    public void AvailableContextPreservesFullToolOutputAndLongAnswer()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var answer = new string('x', 70000) + "ANSWER_END";
+        var output = new string('y', 32000) + "READ_END";
+        var message = new ChatMessage(Guid.NewGuid(), Guid.NewGuid(), ChatRole.Assistant, answer,
+            MessageStatus.Completed, now, now, ToolSteps: [new("read", "coding.read", "completed", OutputJson: output)]);
+        var text = GoAiAssistantService.BuildCodingHistoryMessages([message], 200000)[0].Content[0].Text!;
+        Assert.Contains(answer, text);
+        Assert.Contains(output, text);
+        Assert.DoesNotContain("gekürzt", text);
+    }
+
+    [Fact]
     public void ToolOnlyHistorySurvivesAndBudgetDoesNotDropTheNewestOversizedMessage()
     {
         var now = DateTimeOffset.UtcNow;

@@ -52,6 +52,27 @@ class CatalogTests(unittest.TestCase):
         gguf(self.root / "qwen-00003-of-00003.gguf")
         self.assertEqual(len(catalog.discover(self.root)), 1)
 
+    def test_metadata_only_first_shard_can_end_exactly_at_eof(self):
+        first = self.root / "deepseek-00001-of-00003.gguf"
+        gguf(first, architecture="deepseek4", tensors=0, context=1048576)
+        with first.open("r+b") as stream:
+            _, _, _, count = struct.unpack("<4sIQQ", stream.read(24))
+            for _ in range(count):
+                catalog.read_string(stream)
+                catalog.skip_value(stream, struct.unpack("<I", stream.read(4))[0])
+            stream.truncate(stream.tell())
+        gguf(self.root / "deepseek-00002-of-00003.gguf")
+        self.assertEqual(catalog.discover_models(self.root), [])
+        gguf(self.root / "deepseek-00003-of-00003.gguf")
+        model, = catalog.discover_models(self.root)
+        self.assertEqual(model["context"], 1048576)
+        self.assertEqual(model["path"], first)
+        self.assertIsNone(catalog.model_metadata(first))
+        # Incomplete metadata must not be accepted as a metadata-only shard.
+        with first.open("r+b") as stream:
+            stream.truncate(first.stat().st_size - 1)
+        self.assertEqual(catalog.discover_models(self.root), [])
+
     def test_duplicate_filenames_have_distinct_stable_ids(self):
         gguf(self.root / "one" / "model.gguf")
         gguf(self.root / "two" / "model.gguf")

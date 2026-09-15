@@ -200,7 +200,7 @@ public sealed partial class RunProcessor : BackgroundService
         CancellationToken cancellationToken)
     {
         var isCoding = request.Mode == RunMode.Coding;
-        if (isCoding) request = request with { CodingOptions = new CodingRunOptions() };
+        if (isCoding) request = request with { CodingOptions = (request.CodingOptions ?? new CodingRunOptions()) with { UseWorkingState = true, ReasoningPolicy = "maximum" } };
         ModelSelection selection;
         try { selection = await _router.SelectAsync(request, cancellationToken).ConfigureAwait(false); }
         catch (HttpRequestException exception) when (isCoding)
@@ -231,6 +231,11 @@ public sealed partial class RunProcessor : BackgroundService
                 0,
                 0, WorkingState: isCoding
                     ? CodingWorkingState.Create(ExtractOriginalTask(request)) : null);
+            if (isCoding && await _repository.GetSessionContextAsync(runId, request, cancellationToken).ConfigureAwait(false) is { } previous)
+            {
+                checkpoint = checkpoint with { Messages = CodingSessionContext.Continue(previous, checkpoint.Messages) };
+                _runtime.WriteLog("Information", "coding.session.context.restored", $"Run {runId}: {previous.Messages.Count} gespeicherte Kontextnachrichten derselben Sitzung übernommen.");
+            }
             await _repository.AppendEventAsync(
                 runId,
                 RunEventTypes.QueueChanged,
@@ -1081,6 +1086,11 @@ public sealed partial class RunProcessor : BackgroundService
                 }
             }
 
+            if (isCoding)
+            {
+                messages.Add(new LmChatMessage("assistant", finalResponse.Message));
+                await SaveCheckpointAsync().ConfigureAwait(false);
+            }
             var finalized = await _repository.FinalizeConversationAsync(runId, new RunCompletedEvent(
                     finalResponse.SessionTitle,
                     selection.ModelId,

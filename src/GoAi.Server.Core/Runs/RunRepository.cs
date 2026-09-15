@@ -689,6 +689,11 @@ public sealed class RunRepository
                 checkpoint_json = excluded.checkpoint_json,
                 updated_at = excluded.updated_at
             WHERE EXISTS (SELECT 1 FROM runs WHERE run_id = $run AND state IN ('Queued','Running','WaitingForClient','Interrupted'));
+            INSERT INTO coding_session_contexts(run_id, checkpoint_json)
+            SELECT c.run_id, c.checkpoint_json FROM run_checkpoints c JOIN runs r ON r.run_id = c.run_id
+            WHERE c.run_id = $run AND r.mode = 'Coding'
+                AND json_extract(r.request_json, '$.codingOptions.workspacePath') IS NOT NULL
+            ON CONFLICT(run_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json;
             """;
         command.Parameters.AddWithValue("$run", runId);
         command.Parameters.AddWithValue("$json", JsonSerializer.Serialize(checkpoint, _database.JsonOptions));
@@ -708,6 +713,28 @@ public sealed class RunRepository
         return json is null
             ? null
             : JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
+    }
+
+    internal async Task<AgentRunCheckpoint?> GetSessionContextAsync(
+        string currentRunId, RunRequest request, CancellationToken cancellationToken = default)
+    {
+        if (request.Mode != RunMode.Coding || request.CodingOptions?.ContinueSessionContext != true
+            || string.IsNullOrWhiteSpace(request.SessionId) || string.IsNullOrWhiteSpace(request.CodingOptions.WorkspacePath)) return null;
+        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT c.checkpoint_json FROM coding_session_contexts c JOIN runs r ON r.run_id = c.run_id
+            WHERE r.run_id != $run AND r.mode = 'Coding' AND r.state IN ('Completed','Failed','Cancelled','Interrupted')
+                AND json_extract(r.request_json, '$.sessionId') = $session
+                AND json_extract(r.request_json, '$.codingOptions.workspacePath') = $workspace COLLATE NOCASE
+                AND r.created_at < (SELECT created_at FROM runs WHERE run_id = $run)
+            ORDER BY r.created_at DESC LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$run", currentRunId);
+        command.Parameters.AddWithValue("$session", request.SessionId);
+        command.Parameters.AddWithValue("$workspace", request.CodingOptions.WorkspacePath);
+        var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        return json is null ? null : JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
     }
 
     public async Task DeleteCheckpointAsync(string runId, CancellationToken cancellationToken = default)

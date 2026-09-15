@@ -28,7 +28,7 @@ internal static class CodingContextCompactor
     internal static CodingCompactionPlan? Plan(IReadOnlyList<LmChatMessage> messages, int contextLength, CodingWorkingState? workingState = null)
     {
         var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, null);
-        if (messages.Count < 128 && ContextPlanner.EstimateTokens(messages) < budget * 2L / 3) return null;
+        if (ContextPlanner.EstimateTokens(messages) < budget * 4L / 5) return null;
         var currentRequestIndex = -1;
         for (var index = messages.Count - 1; index >= 0; index--)
             if (messages[index].Role == "user" && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true
@@ -37,17 +37,18 @@ internal static class CodingContextCompactor
         if (currentRequestIndex < 0) return null;
 
         var toolTurnStarts = messages.Select((message, index) => (message, index))
-            .Where(item => item.index > currentRequestIndex && item.message.Role == "assistant" && item.message.ToolCalls is { Count: > 0 })
+            .Where(item => item.message.Role == "assistant" && item.message.ToolCalls is { Count: > 0 })
             .Select(item => item.index).ToArray();
-        if (toolTurnStarts.Length < 2) return null;
+        // A continued session may be full before the new task has called any tools.
+        if (toolTurnStarts.Length < 2 && currentRequestIndex < 2) return null;
         var receipts = messages.Select((message, index) => (message, index)).Where(static item => item.message.Role == "tool" && item.message.ToolCallId is not null)
             .GroupBy(static item => item.message.ToolCallId!, StringComparer.Ordinal)
             .ToDictionary(static group => group.Key, static group => group.Max(static item => item.index), StringComparer.Ordinal);
         var firstOpen = messages.Select((message, index) => (message, index))
             .Where(item => item.message.ToolCalls?.Any(call => !receipts.TryGetValue(call.Id, out var receipt) || receipt <= item.index) == true)
             .Select(static item => item.index).DefaultIfEmpty(messages.Count).Min();
-        var recentCount = Math.Min(8, toolTurnStarts.Length - 1);
-        var cut = Math.Min(toolTurnStarts[^recentCount], firstOpen);
+        var recentCount = Math.Max(0, Math.Min(8, toolTurnStarts.Length - 1));
+        var cut = Math.Min(recentCount == 0 ? currentRequestIndex : toolTurnStarts[^recentCount], firstOpen);
         while (recentCount > 0 && ContextPlanner.EstimateTokens(messages.Skip(cut).ToArray()) > budget / 3)
         {
             recentCount--;

@@ -48,6 +48,9 @@ public static class RunRequestValidator
         }
         if (request.CodingOptions is { } codingOptions)
         {
+            if (codingOptions.WorkspacePath is { Length: > 4096 }
+                || (codingOptions.ContinueSessionContext && (string.IsNullOrWhiteSpace(codingOptions.WorkspacePath) || string.IsNullOrWhiteSpace(request.SessionId))))
+                throw new ArgumentException("Coding session continuation requires a session and workspace identity.");
             if (request.Mode != RunMode.Coding || codingOptions.ReasoningPolicy is not ("maximum" or "adaptive"))
                 throw new ArgumentException("Coding options contain an unsupported policy.");
         }

@@ -73,7 +73,7 @@ def skip_value(stream, kind):
 
 def model_metadata(path, allow_metadata_only=False):
     stat = path.stat()
-    if stat.st_size < 1024 * 1024:
+    if stat.st_size < (24 if allow_metadata_only else 1024 * 1024):
         return None
     cache_key = (str(path), stat.st_size, stat.st_mtime_ns, allow_metadata_only)
     if cache_key in _METADATA_CACHE:
@@ -92,7 +92,10 @@ def model_metadata(path, allow_metadata_only=False):
                 metadata[key] = struct.unpack("<I", read_exact(stream, 4))[0]
             else:
                 skip_value(stream, kind)
-        if stream.tell() >= path.stat().st_size:
+        # A zero-tensor first shard can end exactly at its metadata boundary.
+        # Seeking beyond EOF still indicates truncated metadata.
+        end = stream.tell()
+        if end > stat.st_size or (end == stat.st_size and not (allow_metadata_only and tensors == 0)):
             return None
         if len(_METADATA_CACHE) > 512:
             _METADATA_CACHE.clear()

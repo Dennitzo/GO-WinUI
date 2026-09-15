@@ -17,7 +17,8 @@ public sealed record CapabilitySnapshot(
     IReadOnlyList<string> MediaTypes,
     bool SupportsSseResume,
     int UploadChunkSize,
-    LiveCaptionCapability? LiveCaptions = null);
+    LiveCaptionCapability? LiveCaptions = null,
+    bool SupportsCodingSessionContext = false);
 
 public sealed record LiveCaptionCapability(
     bool Available,

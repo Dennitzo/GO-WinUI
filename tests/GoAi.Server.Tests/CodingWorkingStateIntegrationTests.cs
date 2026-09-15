@@ -446,7 +446,7 @@ public sealed class CodingWorkingStateIntegrationTests
         {
             var call = new LmToolCall("past-" + index, "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }));
             history.Add(new("assistant", null, ToolCalls: [call]));
-            history.Add(new("tool", "{\"content\":\"verified\"}", ToolCallId: call.Id));
+            history.Add(new("tool", JsonSerializer.Serialize(new { content = new string('x', 1400) }), ToolCallId: call.Id));
         }
         await harness.Repository.SaveCheckpointAsync(run, new(history, 1, 64, 0, 0,
             WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration",
@@ -708,6 +708,51 @@ public sealed class CodingWorkingStateIntegrationTests
         await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
         Assert.Equal(3, (await harness.Repository.GetCheckpointAsync(run))!.IncompleteResponseRetryCount);
         Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.RunCompleted);
+    }
+
+    [Theory]
+    [InlineData("Completed")]
+    [InlineData("Cancelled")]
+    public async Task NewRunRestoresSessionToolsWithoutReplayingThem(string terminal)
+    {
+        using var harness = new Harness();
+        var request = Request() with { SessionId = "session-continuity", CodingOptions = new(WorkspacePath: "C:/project", ContinueSessionContext: true) };
+        var first = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        var call = new LmToolCall("prior-read", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }));
+        await harness.Repository.SaveCheckpointAsync(first, new(
+            [new("system", "Old policy"), new("user", "Original task"), new("assistant", null, ToolCalls: [call]),
+             new("tool", "FULL_PREVIOUS_FILE_CONTENT", ToolCallId: call.Id), new("assistant", "Previous conclusion")],
+            8, 4, 100, 20, WorkingState: CodingWorkingState.Create("Original task")));
+        if (terminal == "Completed") await harness.Repository.FinalizeConversationAsync(first, new(null, "qwen", 100, 20));
+        else await harness.Repository.UpdateStateAsync(first, RunState.Cancelled);
+        await harness.Repository.DeleteCheckpointAsync(first);
+        Assert.Null(await harness.Repository.GetCheckpointAsync(first));
+        var next = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        harness.Handler.CompletionOverride = (_, _) => Task.FromResult(harness.Handler.ReadResponse("new-read"));
+        await harness.TickAsync(next);
+        var checkpoint = (await harness.Repository.GetCheckpointAsync(next))!;
+        Assert.Contains(checkpoint.Messages, m => m.Role == "tool" && m.Content == "FULL_PREVIOUS_FILE_CONTENT");
+        Assert.Contains(checkpoint.Messages, m => m.Content == "Previous conclusion");
+        Assert.Equal(1, checkpoint.RoundCount);
+        var proposals = (await harness.Repository.GetEventsAfterAsync(next, 0)).Where(e => e.Type == RunEventTypes.ClientToolProposed);
+        Assert.Single(proposals);
+        Assert.DoesNotContain(checkpoint.Messages, m => m.Role == "system" && m.Content == "Old policy");
+        Assert.Null(await harness.Repository.GetSessionContextAsync(next, request with { SessionId = "other-session" }));
+        Assert.Null(await harness.Repository.GetSessionContextAsync(next, request with { CodingOptions = new(WorkspacePath: "C:/other", ContinueSessionContext: true) }));
+        Assert.Null(await harness.Repository.GetSessionContextAsync(next, request with { CodingOptions = new(WorkspacePath: "C:/project", ContinueSessionContext: false) }));
+        await harness.Repository.SaveClientToolResultAsync(next, new(checkpoint.PendingProposalId!, "completed",
+            JsonSerializer.SerializeToElement(new { content = "NEW_READ_CONTENT" })));
+        harness.Handler.CompletionOverride = (_, _) => Task.FromResult(harness.Handler.CompleteResponse());
+        await harness.TickAsync(next);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(next))!.State);
+        Assert.Null(await harness.Repository.GetCheckpointAsync(next));
+        var third = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        // Reopen the repository to exercise durable storage, not an in-memory cache.
+        var reopened = new RunRepository(harness.Context.Database, harness.Notifier);
+        var retained = (await reopened.GetSessionContextAsync(third, request))!;
+        Assert.Contains(retained.Messages, m => m.Content == "Verified result.");
+        Assert.Contains(retained.Messages, m => m.Content == "FULL_PREVIOUS_FILE_CONTENT");
+        Assert.Contains(retained.Messages, m => m.Role == "tool" && m.Content!.Contains("NEW_READ_CONTENT", StringComparison.Ordinal));
     }
 
     private sealed class Harness : IDisposable

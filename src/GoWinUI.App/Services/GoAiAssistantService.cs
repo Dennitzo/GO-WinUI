@@ -1,4 +1,4 @@
-﻿using GoAi.Client;
+using GoAi.Client;
 using GoAi.Contracts;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Chat;
@@ -2405,7 +2405,11 @@ public sealed partial class GoAiAssistantService(
                 SessionId: sessionId.ToString("D"),
                 AllowedServerTools: GetAllowedServerTools(PromptTriggerAction.Coding),
                 PreferredCodingModelId: codingModel,
-                CodingOptions: codingConfiguration.Options,
+                CodingOptions: serverCapabilities.SupportsCodingSessionContext ? (codingConfiguration.Options ?? new CodingRunOptions()) with
+                {
+                    WorkspacePath = Path.GetFullPath(_activeCodingWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    ContinueSessionContext = historyBeforePrompt.Count > 0,
+                } : codingConfiguration.Options,
                 ReasoningEffort: await ResolveRequestedReasoningAsync(client, codingModel, "coding", cancellationToken).ConfigureAwait(false));
         }
         var contextProfile = audiobook

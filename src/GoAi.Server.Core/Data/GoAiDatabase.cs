@@ -160,6 +160,11 @@ public sealed class GoAiDatabase : IDisposable
             created_at TEXT NOT NULL,
             FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS coding_session_contexts (
+            run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+            checkpoint_json TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS run_checkpoints (
             run_id TEXT PRIMARY KEY,
             checkpoint_json TEXT NOT NULL,
