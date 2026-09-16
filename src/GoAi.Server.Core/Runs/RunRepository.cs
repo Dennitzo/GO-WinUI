@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 
 namespace GoAi.Server.Core.Runs;
 
-public sealed class RunRepository
+public sealed partial class RunRepository
 {
     private readonly GoAiDatabase _database;
     private readonly RunEventNotifier _notifier;

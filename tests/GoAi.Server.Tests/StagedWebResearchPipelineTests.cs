@@ -10,6 +10,65 @@ public sealed class StagedWebResearchPipelineTests
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
 
     [Fact]
+    public void ImageQueriesKeepDistinctConcreteSubjects()
+    {
+        var queries = StagedWebResearchPipeline.ParseImageQueries(
+            "[\"Pokemon 30th Celebration RGB Mew card\",\"Pokemon 30th Celebration Pikachu card\",\"Pokemon 30th Celebration RGB Mew card\"]");
+        Assert.Equal(2, queries.Count);
+        Assert.Contains("RGB Mew", queries[0], StringComparison.Ordinal);
+        Assert.Contains("Pikachu", queries[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FailedExactFetchCanRetryAWordPresentInThePagePreview()
+    {
+        var phrase = StagedWebResearchPipeline.SelectPreviewPhrase(
+            "Welche Pokémon-Erweiterung ist heute erschienen?",
+            "Pokémon TCG 30 Jahre Kartenliste",
+            "Das Pokémon-Sammelkartenspiel feiert sein Jubiläum mit neuen Karten.");
+        Assert.Equal("Pokémon", phrase);
+    }
+
+    [Fact]
+    public void ImageResultFromEarlierSetDoesNotPassAsAnniversaryCard()
+    {
+        const string query = "Arktos Zapdos Lavados Pokemon TCG 30 Jahre";
+        Assert.False(StagedWebResearchPipeline.IsRelevantImageResult(query,
+            new WebSearchResult("Arktos Zapdos Lavados GX Tag Team", "https://example.org/older-card", null)));
+        Assert.True(StagedWebResearchPipeline.IsRelevantImageResult(query,
+            new WebSearchResult("Arktos Zapdos Lavados 30 Jahre", "https://example.org/30th-card", null)));
+    }
+
+    [Fact]
+    public async Task VisualCurrentQuestionAddsSearxngImageUrlsToDossier()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest());
+        var searchedImages = false;
+        var result = await StagedWebResearchPipeline.ExecuteAsync(
+            "Zeige Bilder der schönsten Karten des heute erschienenen Pokémon-Sets.",
+            "qwen3-27b", "general", catalog.Resolve("web.search", tools), catalog.Resolve("web.fetch", tools),
+            (request, _) => Task.FromResult(ToolResult("web.search", new { query = "Pokemon 30th Celebration cards", language = "de-DE" })),
+            (call, _) =>
+            {
+                if (call.Arguments.TryGetProperty("profile", out var profile) && profile.GetString() == "images")
+                {
+                    searchedImages = true;
+                    return Task.FromResult(Result(new WebSearchResponse("Pokemon 30th Celebration cards",
+                        [new WebSearchResult("Pokemon TCG 30th Celebration card", "https://pokemon.com/card", null,
+                            ThumbnailUrl: "https://images.pokemon.com/card.png")],
+                        "searxng", false, DateTimeOffset.UtcNow)));
+                }
+                return Task.FromResult(Result(new WebSearchResponse("Pokemon 30th Celebration cards", [],
+                    "searxng", false, DateTimeOffset.UtcNow)));
+            }, catalog.Validate);
+        Assert.True(searchedImages);
+        Assert.Equal(2, result.ToolCalls);
+        Assert.Contains("https://images.pokemon.com/card.png", result.Dossier, StringComparison.Ordinal);
+        Assert.Contains("https://pokemon.com/card", result.Dossier, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task SearchFetchAndSynthesisUseTheSameModelAndNeverShareToolSchemas()
     {
         var catalog = new AgentToolCatalog();
@@ -344,7 +403,7 @@ public sealed class StagedWebResearchPipelineTests
     private static RunRequest CreateRequest() => new(
         GoAiProtocol.Version,
         RunMode.General,
-        [new RunMessage("user", [new ContentPart("text", Text: "Websuche")])],
+        [new RunMessage("user", [new ContentPart("text", Text: "[GO_WEB_RESEARCH_REQUEST]\nWebsuche")])],
         AllowedServerTools: ["web.search", "web.fetch"]);
 
     private static LmChatResult ToolResult(string name, object arguments) => new(

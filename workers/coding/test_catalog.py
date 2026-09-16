@@ -88,7 +88,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(command[command.index("--models-preset") + 1], str(preset))
         self.assertEqual(command[command.index("--sleep-idle-seconds") + 1], "-1")
         self.assertEqual(command.count("--sleep-idle-seconds"), 1)
-        self.assertEqual(command[command.index("--models-max") + 1], "1")
+        self.assertEqual(command[command.index("--models-max") + 1], "2")
         self.assertNotIn("--fit", command)  # CLI values override model-specific trial settings.
         self.assertNotIn("--n-gpu-layers", command)
         preset.parent.mkdir(parents=True, exist_ok=True)

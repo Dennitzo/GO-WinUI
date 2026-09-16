@@ -68,7 +68,7 @@ public sealed class CodingAgentTests
     }
 
     [Theory]
-    [InlineData(ClientToolNames.CodingRead, "{\"path\":\"a.cs\",\"maximumLines\":1001}")]
+    [InlineData(ClientToolNames.CodingRead, "{\"path\":\"a.cs\",\"maximumLines\":0}")]
     [InlineData(ClientToolNames.CodingCommand, "{\"executable\":\"dotnet\",\"arguments\":[],\"timeoutSeconds\":-1}")]
     [InlineData(ClientToolNames.CodingEdit, "{\"path\":\"a.cs\",\"oldText\":\"a\",\"newText\":\"b\",\"expectedSha256\":\"wrong\"}")]
     [InlineData(ClientToolNames.CodingWrite, "{\"path\":\"a.cs\",\"content\":\"x\",\"outside\":true}")]

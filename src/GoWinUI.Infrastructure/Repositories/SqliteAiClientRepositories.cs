@@ -626,7 +626,8 @@ public sealed class SqliteClientToolExecutionRepository(SqliteDatabase database)
         CancellationToken cancellationToken = default)
     {
         ValidateIdentifier(proposalId, nameof(proposalId));
-        if (string.IsNullOrWhiteSpace(resultJson) || resultJson.Length > MaximumResultJsonLength)
+        var execution = await GetAsync(proposalId, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(resultJson) || (resultJson.Length > MaximumResultJsonLength && execution?.ToolName != "coding.read"))
         {
             throw new InvalidDataException("Das lokale Client-Toolergebnis ist leer oder zu groß.");
         }

@@ -57,6 +57,7 @@ public static class GoAiServerHostExtensions
             provider.GetRequiredService<IOptions<GoAiServerOptions>>(),
             provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ModelRuntimeClient>>()));
         services.AddHttpClient<WorkerApiClient>();
+        services.AddSingleton<GoAi.Server.Core.Coding.CodingSubagentService>();
         services.AddSingleton<RunProcessor>();
         services.AddSingleton<ClientToolDeadlineService>();
         if (includeHostedServices)

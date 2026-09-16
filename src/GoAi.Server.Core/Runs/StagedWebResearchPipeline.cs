@@ -22,6 +22,8 @@ internal sealed class StagedWebResearchPipeline
         RunRequest request,
         IReadOnlyList<AgentToolSpec> tools) =>
         request.Mode != RunMode.Coding
+        && request.Messages.SelectMany(static message => message.Content)
+            .Any(static part => part.Text?.StartsWith("[GO_WEB_RESEARCH_REQUEST]", StringComparison.Ordinal) == true)
         && request.AllowedServerTools is { } requested
         && requested.Contains("web.search", StringComparer.Ordinal)
         && requested.Contains("web.fetch", StringComparer.Ordinal)
@@ -199,8 +201,42 @@ internal sealed class StagedWebResearchPipeline
                     var targeted = Deserialize<TargetedWebFetchResult>(fetchExecution.Result, "targeted web fetch result");
                     if (!targeted.Found || targeted.Matches.Count == 0)
                     {
-                        diagnostics.Add($"Die Quelle {selected.Url} enthielt keinen Treffer für die gezielte Phrase.");
-                        continue;
+                        // A model can choose a plausible phrase absent from a useful page.
+                        // Read the short preview, choose a word actually present there, then
+                        // request a bounded evidence window instead of discarding the page.
+                        var previewCall = new LmToolCall($"research-preview-{Guid.NewGuid():N}", "web.fetch",
+                            JsonSerializer.SerializeToElement(new { url = selected.Url }, JsonOptions));
+                        validateTool(fetchTool, previewCall.Arguments);
+                        var previewExecution = await executeTool(previewCall, cancellationToken).ConfigureAwait(false);
+                        toolCalls++;
+                        if (!previewExecution.Succeeded)
+                        {
+                            diagnostics.Add($"Die Quelle {selected.Url} enthielt keinen Treffer und ihre Vorschau war nicht verfügbar.");
+                            continue;
+                        }
+                        var preview = Deserialize<TargetedWebFetchResult>(previewExecution.Result, "web fetch preview");
+                        var phrase = SelectPreviewPhrase(normalizedTask, selected.Title, preview.Preview);
+                        if (phrase is null)
+                        {
+                            diagnostics.Add($"Die Quelle {selected.Url} enthielt keinen relevanten Suchbegriff in der Vorschau.");
+                            continue;
+                        }
+                        var retryCall = new LmToolCall($"research-retry-{Guid.NewGuid():N}", "web.fetch",
+                            JsonSerializer.SerializeToElement(new { url = selected.Url, query = phrase }, JsonOptions));
+                        validateTool(fetchTool, retryCall.Arguments);
+                        var retryExecution = await executeTool(retryCall, cancellationToken).ConfigureAwait(false);
+                        toolCalls++;
+                        if (!retryExecution.Succeeded)
+                        {
+                            diagnostics.Add($"Die zweite Abfrage der Quelle {selected.Url} schlug fehl.");
+                            continue;
+                        }
+                        targeted = Deserialize<TargetedWebFetchResult>(retryExecution.Result, "retried web fetch result");
+                        if (!targeted.Found || targeted.Matches.Count == 0)
+                        {
+                            diagnostics.Add($"Die Quelle {selected.Url} enthielt auch mit einem Wort aus der Vorschau keinen belegbaren Treffer.");
+                            continue;
+                        }
                     }
                     fetched.Add(new FetchedResearchSource(
                         selected.Title,
@@ -272,8 +308,69 @@ internal sealed class StagedWebResearchPipeline
             usedLocalFallback = true;
         }
 
+        var images = new List<WebSearchResult>();
+        if (RequestsImages(normalizedTask))
+        {
+            var imageQueries = new List<string>();
+            if (!string.IsNullOrWhiteSpace(synthesis))
+            {
+                try
+                {
+                    var proposal = await InvokeAsync(new StagedWebResearchModelRequest(
+                        modelId, modelRole,
+                        [new("system", "Formuliere bis zu drei getrennte kurze Bildsuchanfragen für konkrete, in den Belegen nachweislich zu dieser Veröffentlichung gehörende Motive. "
+                            + "Bevorzuge offizielle Vorschauen des Herausgebers vor Händler- und Blogangaben. "
+                            + "Jede Anfrage enthält den Kartennamen und den Setnamen; keine bloßen Produktbilder, älteren Karten oder unbestätigten Leaks. "
+                            + "Antworte ausschließlich als JSON-Array von Strings, ohne Markdown."),
+                         new("user", "Auftrag: " + normalizedTask + "\nBelegte Zusammenfassung: " + Bound(synthesis, 6000))],
+                        [], 400, false, null, true), cancellationToken).ConfigureAwait(false);
+                    imageQueries.AddRange(ParseImageQueries(proposal.Content));
+                }
+                catch (Exception exception) when (IsRecoverableModelFailure(exception, cancellationToken)
+                    || exception is JsonException)
+                {
+                    diagnostics.Add("Konkrete Bildsuchbegriffe waren nicht verfügbar: " + exception.GetType().Name);
+                }
+            }
+            if (imageQueries.Count == 0) imageQueries.Add(Bound(search.Query + " card gallery", 500));
+            foreach (var query in imageQueries.Take(3))
+            {
+                var imageCall = new LmToolCall(
+                    $"research-images-{Guid.NewGuid():N}", "web.search",
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        query = Bound(query, 500), maximumResults = 20,
+                        language = preferredLanguage, profile = "images",
+                    }, JsonOptions));
+                validateTool(searchTool, imageCall.Arguments);
+                var imageExecution = await executeTool(imageCall, cancellationToken).ConfigureAwait(false);
+                toolCalls++;
+                if (!imageExecution.Succeeded)
+                {
+                    diagnostics.Add(imageExecution.ErrorMessage ?? "Die SearXNG-Bildsuche war nicht verfügbar.");
+                    continue;
+                }
+                try
+                {
+                    var imageSearch = Deserialize<WebSearchResponse>(imageExecution.Result, "SearXNG image result");
+                    images.AddRange(imageSearch.Results.Where(static result =>
+                        TryNormalizePublicUrl(result.Url, out _)
+                        && result.ThumbnailUrl is { } imageUrl
+                        && TryNormalizePublicUrl(imageUrl, out _)
+                        && imageUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                        .Where(result => IsRelevantImageResult(query, result))
+                        .Take(3));
+                }
+                catch (Exception exception) when (exception is JsonException or InvalidDataException)
+                {
+                    diagnostics.Add("Die SearXNG-Bildtreffer waren nicht auswertbar: " + exception.GetType().Name);
+                }
+            }
+            images = images.DistinctBy(static image => image.ThumbnailUrl, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
         return new StagedWebResearchResult(
-            CreateDossier(normalizedTask, search, fetched, diagnostics, synthesis),
+            CreateDossier(normalizedTask, search, fetched, diagnostics, synthesis, images),
             modelCalls,
             toolCalls,
             inputTokens,
@@ -574,7 +671,8 @@ internal sealed class StagedWebResearchPipeline
         WebSearchResponse? search,
         List<FetchedResearchSource> fetched,
         List<string> diagnostics,
-        string? modelSynthesis)
+        string? modelSynthesis,
+        IReadOnlyList<WebSearchResult>? images = null)
     {
         var builder = new StringBuilder()
             .AppendLine(DossierMarker)
@@ -607,6 +705,14 @@ internal sealed class StagedWebResearchPipeline
                 builder.Append("- ").Append(source.Title).Append(" | ").AppendLine(source.Url);
             }
         }
+        if (images is { Count: > 0 })
+        {
+            builder.AppendLine("SearXNG-Bildtreffer (Bildinhalt nicht visuell geprüft; Bild und Quellseite getrennt nennen):");
+            foreach (var image in images)
+                builder.Append("- ").Append(image.Title).Append(" | Bild: ").Append(image.ThumbnailUrl)
+                    .Append(" | Quellseite: ").AppendLine(image.Url);
+            builder.AppendLine("Falls der Nutzer Bilder wünscht, wähle nur passende Treffer aus dieser Liste und zeige sie als Markdown ![kurzer Alternativtext](Bild-URL) mit Link zur Quellseite. Erfinde keine Bild-URLs.");
+        }
         if (!string.IsNullOrWhiteSpace(modelSynthesis))
         {
             builder.AppendLine().AppendLine("Aufbereitete Evidenz desselben ausgewaehlten Modells:")
@@ -631,6 +737,64 @@ internal sealed class StagedWebResearchPipeline
         }
         return builder.ToString().Trim();
     }
+
+    internal static bool RequestsImages(string task) => Regex.IsMatch(task,
+        @"(?i)(?:\b(?:bilder?|fotos?|abbildungen?|illustrationen?|scans?)\b|\b(?:karten?|cards?)\b.{0,100}\b(?:zeig\w*|darstell\w*|bild\w*|präsentier\w*)\b)",
+        RegexOptions.CultureInvariant);
+
+    internal static IReadOnlyList<string> ParseImageQueries(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return [];
+        var start = content.IndexOf('[');
+        var end = content.LastIndexOf(']');
+        if (start < 0 || end <= start) return [];
+        using var parsed = JsonDocument.Parse(content[start..(end + 1)]);
+        if (parsed.RootElement.ValueKind != JsonValueKind.Array) return [];
+        return parsed.RootElement.EnumerateArray()
+            .Where(static item => item.ValueKind == JsonValueKind.String)
+            .Select(static item => item.GetString()?.Trim())
+            .Where(static item => !string.IsNullOrWhiteSpace(item))
+            .Select(static item => Bound(item!, 500))
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(3).ToArray();
+    }
+
+    internal static string? SelectPreviewPhrase(string task, string title, string? preview)
+    {
+        if (string.IsNullOrWhiteSpace(preview)) return null;
+        var candidates = Regex.Matches(title + " " + task, @"[\p{L}][\p{L}\p{N}.-]{3,}")
+            .Select(static match => match.Value)
+            .Where(static word => word.ToLowerInvariant() is not
+                ("welche" or "dieses" or "dieser" or "diese" or "heute" or "aktuell" or "neuen" or "schönsten" or "karte" or "karten" or "quelle" or "quellen"))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        return candidates.FirstOrDefault(word => preview.Contains(word, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static bool IsRelevantImageResult(string query, WebSearchResult result)
+    {
+        var terms = Regex.Matches(FoldSearchText(query), @"[a-z0-9]{3,}")
+            .Select(static match => match.Value)
+            .Where(static term => term is not ("site" or "www" or "com" or "the" or "and" or "der" or "die" or "das" or "und" or "cards" or "karten"))
+            .Distinct(StringComparer.Ordinal).ToArray();
+        if (terms.Length == 0) return true;
+        var description = FoldSearchText(result.Title + " " + result.Url);
+        if (terms.Count(term => description.Contains(term, StringComparison.Ordinal)) < Math.Min(2, terms.Length)) return false;
+        var subject = terms.FirstOrDefault(static term => term is not
+            ("pokemon" or "tcg" or "30th" or "celebration" or "anniversary" or "jahre" or "2026" or "card" or "gallery" or "illustration" or "special" or "rare" or "holo"));
+        if (subject is not null && !description.Contains(subject, StringComparison.Ordinal)) return false;
+        var releaseQuery = terms.Contains("30th", StringComparer.Ordinal)
+            || terms.Contains("celebration", StringComparer.Ordinal)
+            || terms.Contains("jahre", StringComparer.Ordinal);
+        return !releaseQuery || description.Contains("30th", StringComparison.Ordinal)
+            || description.Contains("celebration", StringComparison.Ordinal)
+            || description.Contains("30 jahre", StringComparison.Ordinal)
+            || description.Contains("30-jahre", StringComparison.Ordinal)
+            || description.Contains("jubilaum", StringComparison.Ordinal);
+    }
+
+    private static string FoldSearchText(string value) => new string(value.ToLowerInvariant()
+        .Normalize(System.Text.NormalizationForm.FormD)
+        .Where(static character => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(character)
+            != System.Globalization.UnicodeCategory.NonSpacingMark).ToArray());
 
     private static LmToolCall RequireSingleToolCall(LmChatResult response, string expectedName)
     {

@@ -197,6 +197,7 @@ public sealed class AgentToolCatalogTests
         var request = CreateRequest([]) with
         {
             AllowedServerTools = ["web.search", "web.fetch", "math.evaluate"],
+            Messages = [new RunMessage("user", [new ContentPart("text", "[GO_WEB_RESEARCH_REQUEST]\nFrage")])],
         };
 
         var tools = catalog.GetAvailableTools(request);

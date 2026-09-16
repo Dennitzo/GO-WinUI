@@ -27,6 +27,7 @@ public sealed partial class RunProcessor : BackgroundService
         Arbeitsschritte mit den angebotenen Werkzeugen. Gib Denktext nicht als Abschlussantwort aus.
         """;
 
+    private readonly CodingSubagentService _subagents;
     private readonly RunWorkChannel _queue;
     private readonly RunRepository _repository;
     private readonly ModelRouter _router;
@@ -50,8 +51,9 @@ public sealed partial class RunProcessor : BackgroundService
         AgentToolCatalog toolCatalog,
         AgentToolExecutor toolExecutor,
         IOptions<GoAiServerOptions> options,
-        ServerRuntimeState runtime)
+        ServerRuntimeState runtime, CodingSubagentService subagents)
     {
+        _subagents = subagents;
         _queue = queue;
         _repository = repository;
         _router = router;
@@ -66,6 +68,7 @@ public sealed partial class RunProcessor : BackgroundService
 
     public bool Cancel(string runId)
     {
+        _subagents.Cancel(runId);
         lock (_activeGate)
         {
             return _activeRuns.TryGetValue(runId, out var cancellation) && TryCancel(cancellation);
@@ -74,6 +77,7 @@ public sealed partial class RunProcessor : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        using var stopAgents = stoppingToken.Register(_subagents.Stop);
         var recovered = await _repository.RecoverAsync(stoppingToken).ConfigureAwait(false);
         foreach (var runId in recovered)
         {
@@ -199,8 +203,35 @@ public sealed partial class RunProcessor : BackgroundService
         RunRequest request,
         CancellationToken cancellationToken)
     {
+        await _subagents.WaitForOtherRunsAsync(runId, cancellationToken).ConfigureAwait(false);
         var isCoding = request.Mode == RunMode.Coding;
         if (isCoding) request = request with { CodingOptions = (request.CodingOptions ?? new CodingRunOptions()) with { UseWorkingState = true, ReasoningPolicy = "maximum" } };
+        try
+        {
+            if (isCoding && request.CodingOptions?.ParallelModelId is { Length: > 0 } parallelModel)
+            {
+                var originalMain = request.PreferredCodingModelId ?? _options.CodingModelId;
+                var pair = await _modelRuntime.ConfigurePairAsync(originalMain, parallelModel, cancellationToken).ConfigureAwait(false);
+                request = request with { PreferredCodingModelId = pair.Main };
+                if (await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false) is null)
+                {
+                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelLoading, new ModelLoadingEvent(pair.Main, "loading", 0, 0), cancellationToken).ConfigureAwait(false);
+                    await _workers.PrepareLmModelWithStatusAsync(pair.Main, 0, null, cancellationToken).ConfigureAwait(false);
+                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelLoading, new ModelLoadingEvent(pair.Secondary, "loading", 0, 0), cancellationToken).ConfigureAwait(false);
+                    await _workers.PrepareLmModelWithStatusAsync(pair.Secondary, 0, null, cancellationToken).ConfigureAwait(false);
+                }
+                await _subagents.RestoreAsync(runId, request, cancellationToken).ConfigureAwait(false);
+            }
+            else
+                await _modelRuntime.DisablePairAsync(isCoding ? request.PreferredCodingModelId ?? _options.CodingModelId : request.PreferredGeneralModelId ?? _options.GeneralModelId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (isCoding && ModelRuntimeClient.IsTransientInferenceFailure(exception))
+        {
+            // Pair configuration happens before the normal model-loading retry path.
+            // A missing native Windows runtime after a reboot must keep the durable
+            // coding checkpoint queued instead of permanently failing the run.
+            throw new ModelProviderRequestException("model_configuration", 1, exception);
+        }
         ModelSelection selection;
         try { selection = await _router.SelectAsync(request, cancellationToken).ConfigureAwait(false); }
         catch (HttpRequestException exception) when (isCoding)
@@ -262,6 +293,8 @@ public sealed partial class RunProcessor : BackgroundService
 
         var messages = checkpoint.Messages.ToList();
         if (isCoding) CodingAgentPolicy.EnsureCurrentInstructions(messages);
+        const string delegationPolicy = "GO_PARALLEL_CODING: Hauptagent auf GPU0, ein Subagent auf GPU1. Der Subagent hat keinen Terminalzugriff: Tests ausführen, Python-Diagnosen starten und Abhängigkeiten installieren bleibt Aufgabe des Hauptagenten. Delegiere stattdessen unabhängige Codeanalyse oder abgegrenzte Dateiänderungen. Nutze coding.agentStart fuer unabhaengige klar begrenzte Teilaufgaben mit konkreten Belegen. Weise exakte Schreibdateien zu und bearbeite sie bis agentWait nicht selbst. Keine Unterdelegation. Nutze beide GPUs gleichzeitig fuer sinnvolle unabhaengige Arbeit. Vor Abschluss Ergebnisse abholen und pruefen. Im Hauptarbeitsplan bleibt genau eine Etappe in_progress; parallel laufende Teilaufgaben werden bereits im Agentenstatus erfasst. Der Startbeleg bestaetigt nur die Delegation, niemals die Erledigung des Teilauftrags. Fuer Abschlusskriterien erst die fertigen Ergebnisse und eigenen Pruefbelege verwenden.";
+        if (!string.IsNullOrWhiteSpace(request.CodingOptions?.ParallelModelId) && !messages.Any(m => m.Content == delegationPolicy)) messages.Add(new LmChatMessage("system", delegationPolicy));
         var roundCount = checkpoint.RoundCount;
         var toolCallCount = checkpoint.ToolCallCount;
         var inputTokens = checkpoint.InputTokens;
@@ -386,6 +419,7 @@ public sealed partial class RunProcessor : BackgroundService
                     AgentToolSpec tool;
                     try
                     {
+                        if (isCoding) await _subagents.ValidateParentMutationAsync(runId, call, cancellationToken).ConfigureAwait(false);
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
                         if (isCoding && string.IsNullOrWhiteSpace(pendingProposalId))
@@ -452,7 +486,9 @@ public sealed partial class RunProcessor : BackgroundService
                             new { tool = tool.Name, toolCallId = operationId, callId = operationId, target = serverToolTarget, arguments = call.Arguments },
                             cancellationToken).ConfigureAwait(false);
                         AgentToolExecutionResult result;
-                        if (tool.Name == CodingWorkingStateTools.PlanTool)
+                        if (CodingSubagentTools.IsTool(tool.Name))
+                            result = await _subagents.ExecuteAsync(tool.Name, runId, operationId, call.Arguments, request, cancellationToken).ConfigureAwait(false);
+                        else if (tool.Name == CodingWorkingStateTools.PlanTool)
                         {
                             try
                             {
@@ -1030,6 +1066,13 @@ public sealed partial class RunProcessor : BackgroundService
                 throw new InvalidOperationException("Model returned neither text nor a structured tool call.");
             }
 
+            if (isCoding && await _subagents.CollectUnseenAsync(runId, messages, cancellationToken).ConfigureAwait(false) is { } agentResults)
+            {
+                messages.Add(new LmChatMessage("assistant", response.Content));
+                messages.Add(new LmChatMessage("user", agentResults + "\nPrüfe die Ergebnisse und integriere sie in den Abschluss des Nutzerauftrags."));
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                continue;
+            }
             await CompleteRunAsync(response.Content, liveTextGate.HasStreamed).ConfigureAwait(false);
             return;
         }
@@ -1609,11 +1652,13 @@ public sealed partial class RunProcessor : BackgroundService
 
     private async Task MarkFailedAsync(string runId, Exception exception)
     {
+        _subagents.Cancel(runId);
         var failedMode = exception is TimeoutException
             ? (await _repository.GetRequestAsync(runId).ConfigureAwait(false))?.Mode ?? RunMode.Auto
             : RunMode.Auto;
         var failure = exception switch
         {
+            CodingReadContextBudgetException context => (Code: "coding.read_context_exceeded", Message: context.Message, Retryable: false),
             DocumentContextBudgetException context => (
                 Code: "document.context_preparation_failed",
                 Message: $"Der vorbereitete Dokumentkontext ({context.EstimatedTokens:N0} Token) überschreitet das sichere Modellbudget ({context.BudgetTokens:N0} Token).",

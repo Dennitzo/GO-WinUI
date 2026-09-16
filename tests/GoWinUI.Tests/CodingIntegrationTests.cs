@@ -26,6 +26,7 @@ public sealed class CodingIntegrationTests
             {
                 SelectedModel = "vendor/general-model:q8_0",
                 SelectedCodingModel = "  local/coder-model:q4_k_m  ",
+                SelectedParallelCodingModel = "  local/coder-model:q4_k_m  ",
                 CodingWorkspacePath = $"  {workspace}  ",
             });
         }
@@ -36,6 +37,7 @@ public sealed class CodingIntegrationTests
             await restarted.InitializeAsync();
             Assert.Equal("vendor/general-model:q8_0", restarted.Current.SelectedModel);
             Assert.Equal("local/coder-model:q4_k_m", restarted.Current.SelectedCodingModel);
+            Assert.Equal("local/coder-model:q4_k_m", restarted.Current.SelectedParallelCodingModel);
             Assert.Equal(workspace, restarted.Current.CodingWorkspacePath);
             await restarted.UpdateAsync(settings => settings with { SelectedCodingModel = "local/another-coder:q6_k" });
         }
@@ -55,12 +57,14 @@ public sealed class CodingIntegrationTests
         {
             SelectedModel = "vendor/general-model",
             SelectedCodingModel = "  ",
+            SelectedParallelCodingModel = "  ",
             CodingWorkspacePath = "\t",
         });
 
         var restored = await store.LoadAsync();
         Assert.Equal("vendor/general-model", restored.SelectedModel);
         Assert.Null(restored.SelectedCodingModel);
+        Assert.Null(restored.SelectedParallelCodingModel);
         Assert.Null(restored.CodingWorkspacePath);
     }
 
@@ -85,6 +89,7 @@ public sealed class CodingIntegrationTests
         {
             SelectedModel = generalId,
             SelectedCodingModel = codingId,
+            SelectedParallelCodingModel = codingId,
         });
         ModelRuntimeStatus[] models =
         [
@@ -92,6 +97,10 @@ public sealed class CodingIntegrationTests
             new(generalId, "coding", true, false, "unloaded", 32_768),
             new(codingId, "general", true, false, "unloaded", 32_768),
             new(codingId, "coding", true, false, "unloaded", 32_768),
+            new(codingId + "~main", "general", true, false, "unloaded", 32_768),
+            new(codingId + "~main", "coding", true, false, "unloaded", 32_768),
+            new(codingId + "~secondary", "general", true, false, "unloaded", 32_768),
+            new(codingId + "~secondary", "coding", true, false, "unloaded", 32_768),
             new("vision/qwen3-vl~local", "vision", true, false, "unloaded", 32_768),
             new("embedding/bge-m3~local", "embedding", true, false, "unloaded", 8_192),
         ];
@@ -111,6 +120,13 @@ public sealed class CodingIntegrationTests
         Assert.Equal(codingId, viewModel.SelectedCodingModelItem?.Id);
         Assert.Equal(generalId, settings.Current.SelectedModel);
         Assert.Equal(codingId, settings.Current.SelectedCodingModel);
+        Assert.Equal(new[] { "", generalId, codingId }, viewModel.ParallelCodingModels.Select(model => model.Id));
+        Assert.Equal(codingId, viewModel.SelectedParallelCodingModelItem?.Id);
+        viewModel.SelectedParallelCodingModelItem = viewModel.ParallelCodingModels[0];
+        await viewModel.RefreshModelsAsync();
+        Assert.Equal("", viewModel.SelectedParallelCodingModelItem?.Id);
+        await viewModel.SavePreferencesAsync();
+        Assert.Null(settings.Current.SelectedParallelCodingModel);
     }
 
     [Fact]

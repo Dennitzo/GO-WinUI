@@ -30,10 +30,10 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     {
         var lines = Enumerable.Range(1, 700).Select(i => $"value_{i} = \"some source text\";").ToArray();
         await File.WriteAllTextAsync(Path.Combine(_root, "large.cs"), string.Join("\n", lines));
-        var first = await Execute("coding.read", new { path = "large.cs" });
+        var first = await Execute("coding.read", new { path = "large.cs", maximumLines = 300 });
         Assert.Equal(301, first.GetProperty("nextLine").GetInt32());
         Assert.Contains("300: " + lines[299], first.GetProperty("content").GetString());
-        var all = await Execute("coding.read", new { path = "large.cs", maximumLines = 1000 });
+        var all = await Execute("coding.read", new { path = "large.cs" });
         Assert.False(all.GetProperty("truncated").GetBoolean());
         Assert.Contains("700: " + lines[699], all.GetProperty("content").GetString());
         Assert.Equal(first.GetProperty("sha256").GetString(), all.GetProperty("sha256").GetString());
@@ -45,12 +45,25 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var line = new string('\t', 1000);
         await File.WriteAllTextAsync(Path.Combine(_root, "escaped.txt"), string.Join("\n", Enumerable.Repeat(line, 40)));
         var first = await Execute("coding.read", new { path = "escaped.txt", maximumLines = 1000 });
-        Assert.True(first.GetProperty("truncated").GetBoolean());
-        var next = first.GetProperty("nextLine").GetInt32();
-        Assert.Equal(32, next);
-        var second = await Execute("coding.read", new { path = "escaped.txt", startLine = next });
+        Assert.False(first.GetProperty("truncated").GetBoolean());
+        Assert.Contains("40: " + line, first.GetProperty("content").GetString());
+        var second = await Execute("coding.read", new { path = "escaped.txt", startLine = 32 });
         Assert.StartsWith("32: " + line, second.GetProperty("content").GetString());
         Assert.False(second.GetProperty("truncated").GetBoolean());
+    }
+
+    [Fact]
+    public async Task ReadWholeFileBeyondFormerFileAndReceiptLimitsWithoutTruncation()
+    {
+        var line = new string('x', 3000);
+        await File.WriteAllTextAsync(Path.Combine(_root, "complete.txt"), string.Join("\n", Enumerable.Repeat(line, 1100)));
+        var result = await Execute("coding.read", new { path = "complete.txt" });
+        Assert.False(result.GetProperty("truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("nextLine").ValueKind);
+        Assert.Contains("1100: " + line, result.GetProperty("content").GetString());
+        var selected = await Execute("coding.read", new { path = "complete.txt", startLine = 1099, maximumLines = int.MaxValue });
+        Assert.StartsWith("1099: ", selected.GetProperty("content").GetString());
+        Assert.False(selected.GetProperty("truncated").GetBoolean());
     }
 
     [Theory]

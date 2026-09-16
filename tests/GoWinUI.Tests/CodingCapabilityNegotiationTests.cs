@@ -49,4 +49,17 @@ public sealed class CodingCapabilityNegotiationTests
         Assert.Equal("maximum", negotiated.Options?.ReasoningPolicy);
         Assert.True(negotiated.Options?.UseWorkingState);
     }
+    [Fact]
+    public void ParallelModelIsSentOnlyToSupportingGateways()
+    {
+        var legacy = Snapshot(["coding.updatePlan"], []);
+        var unsupported = GoAiAssistantService.NegotiateCodingOptions(legacy, "coding/same-model");
+        Assert.Null(unsupported.Options!.ParallelModelId);
+        Assert.False(JsonSerializer.SerializeToElement(unsupported.Options, GoAiProtocol.CreateJsonOptions()).TryGetProperty("parallelModelId", out _));
+        var supported = GoAiAssistantService.NegotiateCodingOptions(legacy with { SupportsParallelCoding = true }, "  coding/same-model  ");
+        Assert.Equal("coding/same-model", supported.Options!.ParallelModelId);
+        var disabled = GoAiAssistantService.NegotiateCodingOptions(legacy with { SupportsParallelCoding = true }, " ");
+        Assert.Null(disabled.Options!.ParallelModelId);
+    }
+
 }

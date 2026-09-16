@@ -10,6 +10,22 @@ namespace GoWinUI.Tests;
 public sealed class CodingToolJournalRecoveryTests
 {
     [Fact]
+    public async Task CompleteFileReadLargerThanProtocolDefaultSurvivesJournalRestart()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var run = await CreateRunAsync(environment, "server-large-read");
+        var journal = environment.Get<IClientToolExecutionRepository>();
+        await journal.BeginAsync(Claim("large-read", run.Id, "server-large-read", 1) with { ToolName = ClientToolNames.CodingRead });
+        var receipt = JsonSerializer.Serialize(new ClientToolResult("large-read", "completed",
+            JsonSerializer.SerializeToElement(new { content = new string('x', 5 * 1024 * 1024), truncated = false })), GoAiProtocol.CreateJsonOptions());
+        await journal.CompleteAsync("large-read", receipt);
+        var reopened = new SqliteClientToolExecutionRepository(environment.Get<SqliteDatabase>());
+        Assert.Equal(receipt, (await reopened.GetAsync("large-read"))!.ResultJson);
+        await journal.BeginAsync(Claim("large-command", run.Id, "server-large-read", 2));
+        await Assert.ThrowsAsync<InvalidDataException>(() => journal.CompleteAsync("large-command", receipt));
+    }
+
+    [Fact]
     public async Task RestartFindsOnlyUnfinishedClaimsForExactLocalAndServerRunWithoutRewindingTheCursor()
     {
         await using var environment = await TestEnvironment.CreateAsync();

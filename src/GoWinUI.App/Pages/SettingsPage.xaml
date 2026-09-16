@@ -107,6 +107,12 @@
             ItemsSource="{x:Bind ViewModel.CodingModels, Mode=OneWay}"
             DisplayMemberPath="DisplayName"
             SelectedItem="{x:Bind ViewModel.SelectedCodingModelItem, Mode=TwoWay}" />
+          <ComboBox
+            Header="Paralleles Coding AI Modell"
+            ToolTipService.ToolTip="Bei aktivierter Parallelität nutzt der Hauptagent GPU0 und der zusätzliche Agent GPU1. Beide Instanzen können dasselbe Modell verwenden."
+            ItemsSource="{x:Bind ViewModel.ParallelCodingModels, Mode=OneWay}"
+            DisplayMemberPath="DisplayName"
+            SelectedItem="{x:Bind ViewModel.SelectedParallelCodingModelItem, Mode=TwoWay}" />
           <TextBlock
             Margin="0,-6,0,0"
             Foreground="{ThemeResource GoMutedTextBrush}"

@@ -71,6 +71,16 @@ test("the actual final Coding response renders a Python code block", async () =>
   assert.equal(copied[0].payload.text, "return a * b");
 });
 
+test("researched card images render inline without allowing script URLs", () => {
+  const source = "![Lugia-Karte](https://images.example.org/lugia.png)\n\n[Quelle](https://pokemon.com/cards)\n\n![Unsicher](javascript:alert(1))";
+  const { root } = pipeline(source);
+  assert.equal(tags(root, "img").length, 1);
+  assert.equal(tags(root, "img")[0].src, "https://images.example.org/lugia.png");
+  assert.equal(tags(root, "img")[0].referrerPolicy, "no-referrer");
+  assert.equal(tags(root, "a").length, 1);
+  assert.match(root.textContent, /javascript:alert/);
+});
+
 test("complete strong emphasis keeps its closing delimiter", () => {
   const source = "**Geändert (nur die Funktion `multiply`):**\n\n**Tests bestanden.**";
   const { sanitized, root } = pipeline(source);

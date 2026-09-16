@@ -260,7 +260,7 @@ internal static class GatewayEndpoints
     private static async Task SubmitClientToolResultAsync(HttpContext context)
     {
         var runId = GetRouteString(context, "runId");
-        var result = await ReadClientToolResultAsync(context).ConfigureAwait(false);
+        var result = await ReadClientToolResultAsync(context, runId).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(result.ProposalId))
         {
             throw new ArgumentException("proposalId is required.");
@@ -770,10 +770,17 @@ internal static class GatewayEndpoints
     private static Task<T> ReadJsonAsync<T>(HttpContext context) =>
         GatewayRequestReader.ReadJsonAsync<T>(context, JsonOptions);
 
-    private static async Task<ClientToolResult> ReadClientToolResultAsync(HttpContext context)
+    private static async Task<ClientToolResult> ReadClientToolResultAsync(HttpContext context, string runId)
     {
+        var repository = context.RequestServices.GetRequiredService<RunRepository>();
+        var run = await repository.GetAsync(runId, context.RequestAborted).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException("Run not found.");
+        var request = await repository.GetRequestAsync(runId, context.RequestAborted).ConfigureAwait(false);
+        var coding = request?.Mode == RunMode.Coding;
+        if (coding && context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } bodySize)
+            bodySize.MaxRequestBodySize = null;
         var maximum = GoAiProtocol.MaximumToolResultTextBytes + (64 * 1024);
-        if (context.Request.ContentLength is > 0 && context.Request.ContentLength > maximum)
+        if (!coding && context.Request.ContentLength is > 0 && context.Request.ContentLength > maximum)
         {
             throw new ArgumentException("Client tool result exceeds the 4 MiB protocol limit.");
         }
@@ -787,15 +794,22 @@ internal static class GatewayEndpoints
             {
                 break;
             }
-            if (buffer.Length + read > maximum)
+            if (!coding && buffer.Length + read > maximum)
             {
                 throw new ArgumentException("Client tool result exceeds the 4 MiB protocol limit.");
             }
             buffer.Write(bytes, 0, read);
         }
         buffer.Position = 0;
-        return await JsonSerializer.DeserializeAsync<ClientToolResult>(buffer, JsonOptions, context.RequestAborted).ConfigureAwait(false)
+        var result = await JsonSerializer.DeserializeAsync<ClientToolResult>(buffer, JsonOptions, context.RequestAborted).ConfigureAwait(false)
             ?? throw new JsonException("Request body is required.");
+        if (buffer.Length > maximum)
+        {
+            var proposal = await repository.GetToolProposalAsync(result.ProposalId, runId, context.RequestAborted).ConfigureAwait(false);
+            if (proposal?.Name != "coding.read")
+                throw new ArgumentException("Only complete coding.read results may exceed the 4 MiB protocol limit.");
+        }
+        return result;
     }
 
     private static Task WriteJsonAsync<T>(HttpContext context, T value) =>

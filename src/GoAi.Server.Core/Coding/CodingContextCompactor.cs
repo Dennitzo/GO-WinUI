@@ -40,15 +40,25 @@ internal static class CodingContextCompactor
             .Where(item => item.message.Role == "assistant" && item.message.ToolCalls is { Count: > 0 })
             .Select(item => item.index).ToArray();
         // A continued session may be full before the new task has called any tools.
-        if (toolTurnStarts.Length < 2 && currentRequestIndex < 2) return null;
+        // Even the first read can fill the context after substantial earlier analysis.
+        // Let the archive calculation below decide whether useful older history exists.
+        if (toolTurnStarts.Length == 0 && currentRequestIndex < 2) return null;
         var receipts = messages.Select((message, index) => (message, index)).Where(static item => item.message.Role == "tool" && item.message.ToolCallId is not null)
             .GroupBy(static item => item.message.ToolCallId!, StringComparer.Ordinal)
             .ToDictionary(static group => group.Key, static group => group.Max(static item => item.index), StringComparer.Ordinal);
         var firstOpen = messages.Select((message, index) => (message, index))
             .Where(item => item.message.ToolCalls?.Any(call => !receipts.TryGetValue(call.Id, out var receipt) || receipt <= item.index) == true)
             .Select(static item => item.index).DefaultIfEmpty(messages.Count).Min();
+        var freshReadIds = ContextPlanner.FreshReadCallIds(messages);
+        if (freshReadIds.Count > 0)
+        {
+            var freshStart = messages.Select((message, index) => (message, index))
+                .Where(item => item.message.ToolCalls?.Any(call => freshReadIds.Contains(call.Id)) == true)
+                .Select(item => item.index).DefaultIfEmpty(messages.Count).Min();
+            firstOpen = Math.Min(firstOpen, freshStart);
+        }
         var recentCount = Math.Max(0, Math.Min(8, toolTurnStarts.Length - 1));
-        var cut = Math.Min(recentCount == 0 ? currentRequestIndex : toolTurnStarts[^recentCount], firstOpen);
+        var cut = Math.Min(recentCount == 0 ? (freshReadIds.Count > 0 ? messages.Count : currentRequestIndex) : toolTurnStarts[^recentCount], firstOpen);
         while (recentCount > 0 && ContextPlanner.EstimateTokens(messages.Skip(cut).ToArray()) > budget / 3)
         {
             recentCount--;

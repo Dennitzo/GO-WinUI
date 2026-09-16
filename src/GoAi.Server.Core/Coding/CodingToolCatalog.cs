@@ -12,8 +12,8 @@ public static class CodingToolCatalog
             """{"path":{"type":"string"},"maximumEntries":{"type":"integer","minimum":1,"maximum":200}}""", []),
         Create(ClientToolNames.CodingSearch, "Suche eine exakte Textphrase im Projekt; liefere begrenzte Treffer mit Datei und Zeile.", ToolRiskClass.ReadOnly,
             """{"query":{"type":"string","minLength":1,"maxLength":512},"path":{"type":"string"},"maximumResults":{"type":"integer","minimum":1,"maximum":50}}""", ["query"]),
-        Create(ClientToolNames.CodingRead, "Lies zusammenhängenden Code mit Zeilennummern und sha256: standardmäßig 300, höchstens 1000 Zeilen und 32000 Zeichen. Bei truncated über nextLine gezielt weiterlesen; nicht den Anfang wiederholen.", ToolRiskClass.ReadOnly,
-            """{"path":{"type":"string"},"startLine":{"type":"integer","minimum":1,"maximum":1000000},"maximumLines":{"type":"integer","minimum":1,"maximum":1000,"default":300}}""", ["path"]),
+        Create(ClientToolNames.CodingRead, "Lies die vollständige Textdatei mit Zeilennummern und sha256 ohne automatische Kürzung. Nur wenn ausdrücklich ein Ausschnitt benötigt wird, startLine und/oder maximumLines angeben. Ohne maximumLines wird bis zum Dateiende gelesen. Kontextverdichtung erhält den frischen Dateiinhalt; eine Datei, die allein nicht in den Modellkontext passt, erzeugt einen ausdrücklichen Fehler statt stiller Kürzung.", ToolRiskClass.ReadOnly,
+            """{"path":{"type":"string"},"startLine":{"type":"integer","minimum":1,"maximum":2147483647},"maximumLines":{"type":"integer","minimum":1,"maximum":2147483647}}""", ["path"]),
         Create(ClientToolNames.CodingWrite, "Erstelle eine kleine UTF-8-Datei. Bestehende Dateien nur mit aktuellem expectedSha256 überschreiben.", ToolRiskClass.LocalMutation,
             """{"path":{"type":"string"},"content":{"type":"string","maxLength":16000},"expectedSha256":{"type":"string","pattern":"^[a-fA-F0-9]{64}$"}}""", ["path", "content"]),
         Create(ClientToolNames.CodingEdit, "Ersetze exakten Text atomar: entweder oldText/newText für eine Änderung ODER edits mit 1–100 Änderungen. Alle Fundstellen müssen im selben ursprünglichen Dateiinhalt eindeutig und nicht überlappend sein. oldText/newText je höchstens16000 Zeichen, zusammen über alle Änderungen höchstens32000. Ein Fehler oder Hash-Konflikt verändert keine Datei.", ToolRiskClass.LocalMutation,
@@ -63,8 +63,8 @@ public static class CodingToolCatalog
                     break;
                 case "offset": Integer(property.Value, property.Name, 0, int.MaxValue); break;
                 case "maximumCharacters": Integer(property.Value, property.Name, 1, 32_000); break;
-                case "startLine": Integer(property.Value, property.Name, 1, 1_000_000); break;
-                case "maximumLines": Integer(property.Value, property.Name, 1, 1000); break;
+                case "startLine": Integer(property.Value, property.Name, 1, int.MaxValue); break;
+                case "maximumLines": Integer(property.Value, property.Name, 1, int.MaxValue); break;
                 case "maximumEntries": Integer(property.Value, property.Name, 1, 200); break;
                 case "maximumResults": Integer(property.Value, property.Name, 1,
                     name is ClientToolNames.CodingSearchHistory or ClientToolNames.CodingSearchKnowledge ? 8 : name == "coding.searchRunEvidence" ? 20 : 50); break;

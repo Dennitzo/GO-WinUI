@@ -101,7 +101,8 @@ public sealed class CapabilityService
             1_000,
             10_000,
             true),
-        SupportsCodingSessionContext: true);
+        SupportsCodingSessionContext: true,
+        SupportsParallelCoding: true);
 
     private static ModelCapability CreateModelCapability(
         string modelId,

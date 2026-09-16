@@ -63,7 +63,8 @@ public sealed record CodingRunOptions(
     bool UseWorkingState = true,
     string ReasoningPolicy = "maximum",
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? WorkspacePath = null,
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool ContinueSessionContext = false);
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool ContinueSessionContext = false,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? ParallelModelId = null);
 
 public sealed record DocumentContextDescriptor(
     DocumentContextMode Mode,

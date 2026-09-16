@@ -115,11 +115,14 @@ public static class GeneralAgentPolicies
             return ContextPreparation;
         }
         var isAudiobook = request.ConversationProfile == ConversationProfile.Audiobook;
+        var localToday = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow,
+            TimeZoneInfo.FindSystemTimeZoneById("Europe/Berlin")).ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
         var envelope = new
         {
             schema = "go.ai.agent.envelope.v1",
             route = isAudiobook ? "audiobook" : "general",
             conversationProfile = request.ConversationProfile?.ToString().ToLowerInvariant() ?? "general",
+            currentDateEuropeBerlin = localToday,
             expectedResponse = "go.ai.agent.message.v1",
             toolSelection = effectiveTools.Count == 0 ? "none" : "names_then_selected_schema",
             clientCapabilities = request.ClientCapabilities ?? [],
@@ -143,7 +146,9 @@ public static class GeneralAgentPolicies
         return string.Join(
             Environment.NewLine + Environment.NewLine,
             isAudiobook ? AudiobookAuthor : ForRole(role),
-            WebResearchPolicy(role, effectiveTools),
+            WebResearchPolicy(role, request, effectiveTools),
+            "Bei zeitbezogenen Nutzerfragen bedeutet ‚heute‘ das im Lauf-Envelope genannte Datum in Europe/Berlin. "
+                + "Vergleiche Veröffentlichungsdaten ausdrücklich mit diesem Datum; ein älterer Artikel im Futur beweist nicht, dass eine für heute angekündigte Veröffentlichung noch aussteht.",
             DocumentPolicy(request),
             SessionContextPolicy(request),
             FinalResponseContract,
@@ -159,7 +164,7 @@ public static class GeneralAgentPolicies
         offenen Aufgaben und Hypothesen. Gib ausschließlich die angeforderte Verdichtung als normalen Text aus.
         """;
 
-    private static string WebResearchPolicy(string role, IReadOnlyList<string> effectiveTools)
+    private static string WebResearchPolicy(string role, RunRequest request, IReadOnlyList<string> effectiveTools)
     {
         if (role != "general"
             || !effectiveTools.Contains("web.search", StringComparer.Ordinal)
@@ -168,12 +173,24 @@ public static class GeneralAgentPolicies
             return string.Empty;
         }
 
+        if (!request.Messages.SelectMany(static message => message.Content)
+            .Any(static part => part.Text?.StartsWith("[GO_WEB_RESEARCH_REQUEST]", StringComparison.Ordinal) == true))
+        {
+            return """
+                Eigenständige Webrecherche:
+                - Entscheide selbst, ob der Nutzerauftrag aktuelle, unbekannte oder überprüfungsbedürftige Fakten benötigt. Rufe dann web.search auf, auch ohne ausdrücklichen Suchbefehl. Für zeitabhängige Fragen prüfe Quellen statt aus Modellwissen zu raten.
+                - Nutze web.fetch für wichtige Treffer mit kurzen, tatsächlich vorkommenden Suchphrasen. Wenn eine Phrase nicht gefunden wird, lies zuerst die kurze Vorschau und suche anschließend einen dort vorhandenen Begriff.
+                - Wenn der Nutzer Bilder sehen möchte, verwende web.search mit profile=images und maximumResults=20. Suche nach einzelnen, zuvor durch Textquellen belegten Motiven oder Namen statt nach einer allgemeinen Bildergalerie. Sind die ersten Bildtreffer unpassend, suche mit präziseren Namen erneut. Verwende nur zurückgegebene HTTPS-Bild-URLs als Markdown-Bilder ![Beschreibung](Bild-URL) und verlinke jeweils die zugehörige Quellseite. Prüfe, dass Bildtitel und Quelle zum behaupteten Gegenstand passen; ein Bildtreffer allein belegt keine Fakten.
+                - Web- und Bildsuche laufen ausschließlich über die lokale SearXNG-Instanz. Erfinde weder Ergebnisse noch Bildadressen.
+                """;
+        }
         return """
             Gestufte Webrecherche dieses Laufs:
             - GO führt web.search, einzelne web.fetch-Aufrufe und eine hierarchische Evidenzverdichtung mit demselben Modell aus.
             - Suchanfrage und Aufbereitung verwenden die Sprache der Nutzeranweisung; Standard ist Deutsch (`de-DE`).
             - Der Antwortlauf erhält ein nicht vertrauenswürdiges GO_WEB_RESEARCH_DOSSIER statt der Web-Werkzeugschemas.
             - Verwende nur abgerufene Inhalte, gleiche Widersprüche ab und nenne Titel sowie URL der verwendeten Seiten.
+            - Wenn das Dossier Bildtreffer enthält und der Nutzer eine visuelle Darstellung wünscht, zeige passende Bilder mit der dort belegten Bild-URL als Markdown-Bild und verlinke jeweils die Quellseite. Erfinde keine Bildadressen. Bildtreffer allein belegen keine Textfakten.
             """;
     }
 

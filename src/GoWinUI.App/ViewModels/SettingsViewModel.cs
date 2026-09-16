@@ -28,6 +28,13 @@ public sealed partial class SettingsViewModel(
 
     public ObservableCollection<LocalAiModel> Models { get; } = [];
     public ObservableCollection<LocalAiModel> CodingModels { get; } = [];
+    public ObservableCollection<LocalAiModel> ParallelCodingModels { get; } = [new("", "Keine", 0, false, false)];
+
+    [ObservableProperty]
+    public partial string? SelectedParallelCodingModel { get; set; }
+
+    [ObservableProperty]
+    public partial LocalAiModel? SelectedParallelCodingModelItem { get; set; }
     public ObservableCollection<PromptTriggerEditorItem> PromptTriggers { get; } = [];
     public IReadOnlyList<PromptTriggerActionOption> TriggerActions { get; } =
         PromptTriggerEditorItem.AvailableActions;
@@ -115,6 +122,8 @@ public sealed partial class SettingsViewModel(
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel ?? AppSettings.DefaultSelectedModel;
         SelectedGeneralModelItem = EnsureModelItem(Models, SelectedModel);
+        SelectedParallelCodingModel = current.SelectedParallelCodingModel;
+        SelectedParallelCodingModelItem = EnsureModelItem(ParallelCodingModels, SelectedParallelCodingModel) ?? ParallelCodingModels[0];
         SelectedCodingModel = current.SelectedCodingModel;
         SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);
         CodingToolStepsExpanded = current.CodingToolStepsExpanded;
@@ -203,6 +212,8 @@ public sealed partial class SettingsViewModel(
             SelectedGeneralModelItem?.Id,
             SelectedModel,
             AppSettings.DefaultSelectedModel);
+        var parallelModel = SelectedParallelCodingModelItem?.Id ?? SelectedParallelCodingModel;
+        parallelModel = string.IsNullOrWhiteSpace(parallelModel) ? null : parallelModel.Trim();
         await settings.UpdateAsync(current => current with
         {
             IsAiConnectionEnabled = IsAiConnectionEnabled,
@@ -210,6 +221,7 @@ public sealed partial class SettingsViewModel(
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
             SelectedModel = generalModel,
             SelectedCodingModel = SelectedCodingModelItem?.Id ?? SelectedCodingModel,
+            SelectedParallelCodingModel = parallelModel,
             CodingToolStepsExpanded = CodingToolStepsExpanded,
             ReasoningEffort = "auto",
             Theme = Theme,
@@ -268,7 +280,7 @@ public sealed partial class SettingsViewModel(
             modelCapabilities.Update(modelStatus);
             items = modelStatus.Models
                 .Where(model => model.Downloaded
-                    && model.Role == "general")
+                    && model.Role == "general" && !IsInternalCodingInstance(model.Id))
                 .Select(model => new LocalAiModel(
                     model.Id,
                     string.Format(CultureInfo.CurrentCulture, "{0} · {1:N0} Token", model.DisplayName ?? model.Id, model.ContextTokens),
@@ -333,7 +345,7 @@ public sealed partial class SettingsViewModel(
             var catalog = await client.GetCodingModelsAsync(timeout.Token);
             var selected = SelectedCodingModel ?? settings.Current.SelectedCodingModel;
             CodingModels.Clear();
-            foreach (var item in catalog.Models)
+            foreach (var item in catalog.Models.Where(model => !IsInternalCodingInstance(model.Id)))
             {
                 CodingModels.Add(new LocalAiModel(item.Id,
                     $"{item.DisplayName ?? item.Id} · {item.ContextTokens:N0} Token",
@@ -341,7 +353,12 @@ public sealed partial class SettingsViewModel(
             }
             SelectedCodingModel = selected;
             SelectedCodingModelItem = EnsureModelItem(CodingModels, selected);
-            CodingModelStatus = $"{catalog.Models.Count} lokale Modelle · {catalog.ModelRoot}"
+            var parallelSelection = SelectedParallelCodingModel;
+            ParallelCodingModels.Clear();
+            ParallelCodingModels.Add(new LocalAiModel("", "Keine", 0, false, false));
+            foreach (var item in CodingModels) ParallelCodingModels.Add(item);
+            SelectedParallelCodingModelItem = EnsureModelItem(ParallelCodingModels, parallelSelection) ?? ParallelCodingModels[0];
+            CodingModelStatus = $"{catalog.Models.Count(model => !IsInternalCodingInstance(model.Id))} lokale Modelle · {catalog.ModelRoot}"
                 + (string.IsNullOrWhiteSpace(catalog.Message) ? string.Empty : $" · {catalog.Message}");
         }
         catch (Exception exception) when (exception is not OutOfMemoryException && !cancellationToken.IsCancellationRequested)
@@ -349,6 +366,9 @@ public sealed partial class SettingsViewModel(
             CodingModelStatus = $"Coding-Modellkatalog nicht erreichbar: {exception.Message}";
         }
     }
+
+    internal static bool IsInternalCodingInstance(string id) =>
+        id.EndsWith("~main", StringComparison.OrdinalIgnoreCase) || id.EndsWith("~secondary", StringComparison.OrdinalIgnoreCase);
 
     internal static string PreferCurrentSelection(string? current, string? persisted, string fallback) =>
         !string.IsNullOrWhiteSpace(current)
@@ -496,6 +516,12 @@ public sealed partial class SettingsViewModel(
     partial void OnSelectedCodingModelItemChanged(LocalAiModel? value)
     {
         if (value is not null) SelectedCodingModel = value.Id;
+    }
+
+    partial void OnSelectedParallelCodingModelItemChanged(LocalAiModel? value)
+    {
+        // Ignore temporary null selection while a catalog is refreshed. Empty ID is the explicit Keine choice.
+        if (value is not null) SelectedParallelCodingModel = string.IsNullOrWhiteSpace(value.Id) ? null : value.Id;
     }
 
     private IEnumerable<PromptTriggerEditorItem> ApplyTriggerSort(

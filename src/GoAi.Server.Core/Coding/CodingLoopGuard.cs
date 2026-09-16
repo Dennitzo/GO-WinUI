@@ -19,8 +19,9 @@ public static class CodingLoopGuard
 
     public static string BoundToolResult(string value, string? toolName = null)
     {
-        // Allow the complete read page even after JSON escaping and receipt wrapping.
-        var maximum = toolName is "coding.read" or "coding.readOutput" ? 256_000 : MaximumToolResultCharacters;
+        // Fresh file reads must reach context planning intact, including JSON escaping.
+        if (toolName == "coding.read") return value;
+        var maximum = toolName == "coding.readOutput" ? 256_000 : MaximumToolResultCharacters;
         if (value.Length <= maximum) return value;
         var metadataBudget = 6000;
         var metadataTruncated = false;

@@ -200,6 +200,7 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .message-content ul, .message-content ol { padding-left: 24px; }
 .message-content blockquote { margin: 12px 0; padding: 4px 14px; border-left: 3px solid var(--accent); color: var(--muted); }
 .message-content a { color: var(--accent); }
+.message-content .message-external-image { display: block; width: auto; max-width: min(100%, 520px); max-height: 620px; object-fit: contain; margin: 8px 0 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-raised); }
 .message-content code { padding: 2px 5px; border-radius: 5px; background: var(--surface-hover); font-family: "Cascadia Mono", Consolas, monospace; }
 ::highlight(go-speech-current) {
   background-color: color-mix(in srgb, var(--accent) 23%, transparent);

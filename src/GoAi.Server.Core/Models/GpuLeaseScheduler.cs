@@ -1,4 +1,4 @@
-﻿using GoAi.Server.Core.Data;
+using GoAi.Server.Core.Data;
 using GoAi.Server.Core.Runtime;
 
 namespace GoAi.Server.Core.Models;
@@ -10,6 +10,8 @@ public sealed class GpuLeaseScheduler : IDisposable
     // lane so Whisper, ECAPA and Supertonic remain usable during long AI runs.
     private const int SharedCapacity = 1;
     private const int SpeechCapacity = 3;
+    private readonly SemaphoreSlim _secondarySlots = new(1, 1);
+    private readonly SemaphoreSlim _secondaryAdmission = new(1, 1);
     private readonly SemaphoreSlim _slots = new(SharedCapacity, SharedCapacity);
     private readonly SemaphoreSlim _admissionGate = new(1, 1);
     private readonly SemaphoreSlim _speechSlots = new(SpeechCapacity, SpeechCapacity);
@@ -56,6 +58,8 @@ public sealed class GpuLeaseScheduler : IDisposable
 
     public void Dispose()
     {
+        _secondarySlots.Dispose();
+        _secondaryAdmission.Dispose();
         _speechAdmissionGate.Dispose();
         _speechSlots.Dispose();
         _admissionGate.Dispose();
@@ -92,14 +96,15 @@ public sealed class GpuLeaseScheduler : IDisposable
         await RecordAsync(leaseId, runId, workload, "queued", cancellationToken).ConfigureAwait(false);
         _ = Interlocked.Increment(ref _queueLength);
         var speechLane = mode == GpuLeaseMode.Speech;
-        var slots = speechLane ? _speechSlots : _slots;
-        var admissionGate = speechLane ? _speechAdmissionGate : _admissionGate;
+        var slots = speechLane ? _speechSlots : mode == GpuLeaseMode.CodingSecondary ? _secondarySlots : _slots;
+        var admissionGate = speechLane ? _speechAdmissionGate : mode == GpuLeaseMode.CodingSecondary ? _secondaryAdmission : _admissionGate;
         var requiredSlots = mode switch
         {
             GpuLeaseMode.Shared or GpuLeaseMode.Speech => 1,
             _ => SharedCapacity,
         };
         var acquiredSlots = 0;
+        var acquiredSecondary = false;
         try
         {
             await admissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -110,6 +115,11 @@ public sealed class GpuLeaseScheduler : IDisposable
                     await slots.WaitAsync(cancellationToken).ConfigureAwait(false);
                     acquiredSlots++;
                 }
+                if (mode == GpuLeaseMode.Exclusive)
+                {
+                    await _secondarySlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    acquiredSecondary = true;
+                }
             }
             finally
             {
@@ -118,6 +128,7 @@ public sealed class GpuLeaseScheduler : IDisposable
         }
         catch
         {
+            if (acquiredSecondary) _secondarySlots.Release();
             if (acquiredSlots > 0)
             {
                 slots.Release(acquiredSlots);
@@ -160,7 +171,8 @@ public sealed class GpuLeaseScheduler : IDisposable
         }
         finally
         {
-            var slots = mode == GpuLeaseMode.Speech ? _speechSlots : _slots;
+            var slots = mode == GpuLeaseMode.Speech ? _speechSlots : mode == GpuLeaseMode.CodingSecondary ? _secondarySlots : _slots;
+            if (mode == GpuLeaseMode.Exclusive) _secondarySlots.Release();
             slots.Release(slotCount);
         }
     }
@@ -238,6 +250,7 @@ public enum GpuLeaseMode
 {
     Shared,
     Speech,
+    CodingSecondary,
     Exclusive,
 }
 

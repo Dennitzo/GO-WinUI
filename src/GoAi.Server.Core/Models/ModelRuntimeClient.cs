@@ -1,4 +1,4 @@
-﻿using GoAi.Contracts;
+using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Coding;
 using Microsoft.Extensions.Logging;
@@ -38,6 +38,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
     private readonly ILogger<ModelRuntimeClient> _logger;
     private readonly SemaphoreSlim _modelGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
+    private readonly SemaphoreSlim _secondaryTurnGate = new(1, 1);
     private readonly object _cacheLock = new();
     private readonly Dictionary<string, RuntimeModel> _runtimeCatalog = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _modelTransitions = new(StringComparer.OrdinalIgnoreCase);
@@ -116,9 +117,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
         string modelId, int contextLength, Func<CancellationToken, Task>? loadingStarted,
         CancellationToken cancellationToken = default)
     {
-        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var turnGate = await AcquireTurnAsync(modelId, cancellationToken).ConfigureAwait(false);
         try { return await PrepareNativeModelAsync(modelId, contextLength, loadingStarted, cancellationToken).ConfigureAwait(false); }
-        finally { _turnGate.Release(); }
+        finally { turnGate.Release(); }
     }
 
     private async Task<ModelPreparation> PrepareNativeModelAsync(
@@ -131,15 +132,20 @@ public sealed partial class ModelRuntimeClient : IDisposable
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ModelLoadTimeout);
             var runtimeModels = await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);
+            if (!IsPairInstance(modelId) && (_pairMain is not null || runtimeModels.Any(m => IsPairInstance(m.Id))))
+            {
+                await DisableNativePairAsync(modelId, runtimeModels, timeout.Token).ConfigureAwait(false);
+                runtimeModels = await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);
+            }
             var selected = ResolveInstalledModel(runtimeModels, modelId)
                 ?? throw new FileNotFoundException($"Das lokale Unsloth-Modell '{modelId}' ist nicht installiert.");
             if (contextLength > selected.MaximumContextLength)
                 throw new ModelContextLengthException(selected.Id, contextLength, selected.MaximumContextLength);
             if (selected.State is "loaded" or "sleeping") return new ModelPreparation(selected.Id, WasAlreadyLoaded: true, selected.LoadedContextLength);
-            BeginModelTransition(runtimeModels.Where(model => model.Id != selected.Id && model.State is "loaded" or "loading" or "sleeping"), selected.Id);
+            BeginModelTransition(runtimeModels.Where(model => model.Id != selected.Id && !IsPairPeer(selected.Id, model.Id) && model.State is "loaded" or "loading" or "sleeping"), selected.Id);
             if (loadingStarted is not null) await loadingStarted(cancellationToken).ConfigureAwait(false);
             // Change residency only when the selected model actually needs loading. A resumed tool round reuses it.
-            foreach (var loaded in runtimeModels.Where(model => model.Id != selected.Id && model.State is "loaded" or "loading" or "sleeping"))
+            foreach (var loaded in runtimeModels.Where(model => model.Id != selected.Id && !IsPairPeer(selected.Id, model.Id) && model.State is "loaded" or "loading" or "sleeping"))
                 await UnloadRuntimeInstanceAsync(loaded.Id, timeout.Token).ConfigureAwait(false);
             try { await LoadRuntimeModelAsync(selected.Id, timeout.Token, selected.ManagedGpuPlacement).ConfigureAwait(false); }
             catch (Exception exception) when (IsTransientInferenceFailure(exception) && !timeout.IsCancellationRequested)
@@ -169,7 +175,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
 
     public async Task<bool> UnloadModelAsync(string modelId, CancellationToken cancellationToken = default)
     {
-        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var turnGate = await AcquireTurnAsync(null, cancellationToken).ConfigureAwait(false);
         try
         {
             await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -183,14 +189,14 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
             finally { EndModelTransition(); _modelGate.Release(); }
         }
-        finally { _turnGate.Release(); }
+        finally { turnGate.Release(); }
     }
 
     public Task UnloadAllModelsAsync(CancellationToken cancellationToken = default) => UnloadModelsExceptAsync([], cancellationToken);
 
     public async Task UnloadModelsExceptAsync(IReadOnlyCollection<string> preservedModelIds, CancellationToken cancellationToken = default)
     {
-        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var turnGate = await AcquireTurnAsync(null, cancellationToken).ConfigureAwait(false);
         try
         {
             await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -205,7 +211,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
             finally { EndModelTransition(); _modelGate.Release(); }
         }
-        finally { _turnGate.Release(); }
+        finally { turnGate.Release(); }
     }
 
     public async Task<LmChatResult> CompleteChatAsync(
@@ -229,7 +235,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             throw new ArgumentException("Coding requires an installed model from the Coding model catalog.", nameof(modelId));
         }
         var turnClock = Stopwatch.StartNew();
-        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var turnGate = await AcquireTurnAsync(modelId, cancellationToken).ConfigureAwait(false);
         var queueMilliseconds = turnClock.Elapsed.TotalMilliseconds;
         try
         {
@@ -341,7 +347,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
         finally
         {
-            _turnGate.Release();
+            turnGate.Release();
         }
     }
 
@@ -354,7 +360,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(inputs));
         }
-        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var turnGate = await AcquireTurnAsync(null, cancellationToken).ConfigureAwait(false);
         try
         {
         var preparation = await PrepareNativeModelAsync(
@@ -376,7 +382,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 .EnumerateArray().Select(static number => number.GetDouble()).ToArray())
             .ToArray();
         }
-        finally { _turnGate.Release(); }
+        finally { turnGate.Release(); }
     }
 
     public async Task<string> AnalyzeImagesAsync(
@@ -389,7 +395,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(imagePaths));
         }
-        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var turnGate = await AcquireTurnAsync(null, cancellationToken).ConfigureAwait(false);
         try
         {
         var preparation = await PrepareNativeModelAsync(
@@ -433,7 +439,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             ? throw new JsonException("Das Vision-Modell lieferte keine Textantwort.")
             : text;
         }
-        finally { _turnGate.Release(); }
+        finally { turnGate.Release(); }
     }
 
     internal static string DetectImageMediaType(ReadOnlySpan<byte> bytes)
@@ -1883,6 +1889,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
     {
         _modelGate.Dispose();
         _turnGate.Dispose();
+        _secondaryTurnGate.Dispose();
     }
 
     internal sealed record RuntimeModel(

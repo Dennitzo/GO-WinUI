@@ -118,6 +118,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
                         : settings.LiveCaptionLanguage.Trim(),
             SelectedModel = NormalizeGeneralModel(settings.SelectedModel),
             SelectedCodingModel = string.IsNullOrWhiteSpace(settings.SelectedCodingModel) ? null : settings.SelectedCodingModel.Trim(),
+            SelectedParallelCodingModel = string.IsNullOrWhiteSpace(settings.SelectedParallelCodingModel) ? null : settings.SelectedParallelCodingModel.Trim(),
             CodingWorkspacePath = string.IsNullOrWhiteSpace(settings.CodingWorkspacePath) ? null : settings.CodingWorkspacePath.Trim(),
             ReasoningEffort = NormalizeReasoningEffort(settings.Version, settings.ReasoningEffort),
             ReasoningEffortsByModel = (settings.ReasoningEffortsByModel ?? [])

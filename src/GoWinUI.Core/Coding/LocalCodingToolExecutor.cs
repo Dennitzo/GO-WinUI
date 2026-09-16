@@ -10,7 +10,6 @@ namespace GoWinUI.Core.Coding;
 public sealed class LocalCodingToolExecutor
 {
     public const int MaximumOutputCharacters = 12_000;
-    public const int MaximumReadOutputCharacters = 256_000;
     private const int MaximumFileBytes = 2 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private static readonly HashSet<string> IgnoredDirectories = new(StringComparer.OrdinalIgnoreCase)
@@ -53,7 +52,7 @@ public sealed class LocalCodingToolExecutor
             _ => throw new ArgumentException($"Unbekanntes Coding-Werkzeug: {toolName}."),
         };
         _evidence?.SetResult(result);
-        if (result.GetRawText().Length <= (toolName == "coding.read" ? MaximumReadOutputCharacters : MaximumOutputCharacters)) return result;
+        if (toolName == "coding.read" || result.GetRawText().Length <= MaximumOutputCharacters) return result;
         var raw = result.GetRawText();
         return Serialize(new
         {
@@ -141,23 +140,21 @@ public sealed class LocalCodingToolExecutor
     private async Task<JsonElement> ReadAsync(JsonElement args, CancellationToken cancellationToken)
     {
         var path = ResolvePath(RequiredString(args, "path", 1, 1_024));
-        var bytes = await ReadTextFileAsync(path, cancellationToken).ConfigureAwait(false);
+        // Direct reads are complete; only an explicit line range limits the returned content.
+        // Search and mutation retain their independent safety limits.
+        var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        if (IsBinary(bytes)) throw new InvalidDataException("Die Datei ist binär und kann nicht als Text gelesen werden.");
         var text = Decode(bytes);
         var lines = text.Split('\n');
-        var start = Integer(args, "startLine", 1, 1, 1_000_000);
-        var maximum = Integer(args, "maximumLines", 300, 1, 1000);
+        var start = Integer(args, "startLine", 1, 1, int.MaxValue);
+        var maximum = Integer(args, "maximumLines", int.MaxValue, 1, int.MaxValue);
         var content = new StringBuilder();
         var next = start - 1;
-        while (next < lines.Length && next < start - 1 + maximum)
+        var end = Math.Min((long)lines.Length, (long)start - 1 + maximum);
+        while (next < end)
         {
-            var line = $"{next + 1}: {lines[next].TrimEnd('\r')}";
-            if (content.Length + line.Length + Environment.NewLine.Length > 32_000)
-            {
-                if (content.Length == 0)
-                    throw new InvalidDataException("Diese Einzelzeile überschreitet das Leselimit. Nutze coding.search für Trefferfenster oder einen gezielten Prozessaufruf.");
-                break;
-            }
-            content.AppendLine(line);
+            cancellationToken.ThrowIfCancellationRequested();
+            content.Append(next + 1).Append(": ").AppendLine(lines[next].TrimEnd('\r'));
             next++;
         }
         return Serialize(new

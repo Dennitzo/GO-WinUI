@@ -7,6 +7,13 @@ namespace GoAi.Server.Tests;
 
 public sealed class CodingToolReceiptTests
 {
+    [Fact]
+    public void CompleteReadBeyondFormerReceiptLimitIsPreserved()
+    {
+        var raw = JsonSerializer.Serialize(new { content = new string('x', 500_000), truncated = false });
+        Assert.Equal(raw, CodingLoopGuard.BoundToolResult(raw, "coding.read"));
+    }
+
     [Theory]
     [InlineData("coding.read")]
     [InlineData("coding.readOutput")]

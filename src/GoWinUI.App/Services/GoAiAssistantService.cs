@@ -1591,7 +1591,7 @@ public sealed partial class GoAiAssistantService(
                             StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId") ?? "server-" + item.Id,
                             StringProperty(item.Data, "tool") ?? "web.search", "running", StringProperty(item.Data, "target"),
                             inputJson: item.Data.TryGetProperty("arguments", out var serverArguments) ? serverArguments.GetRawText() : JsonSerializer.Serialize(new { target = StringProperty(item.Data, "target") }, JsonOptions),
-                            explanation: DescribeServerTool(StringProperty(item.Data, "tool") ?? "web.search", StringProperty(item.Data, "target")),
+                            explanation: StringProperty(item.Data, "message") ?? DescribeServerTool(StringProperty(item.Data, "tool") ?? "web.search", StringProperty(item.Data, "target")),
                             eventAt: item.CreatedAt).ConfigureAwait(false);
                         await update(new(
                             GoAiAssistantUpdateKind.Status,
@@ -1683,7 +1683,7 @@ public sealed partial class GoAiAssistantService(
                         {
                             try
                             {
-                                var result = await ExecuteClientToolOnceAsync(localRun, item, proposal,
+                                var result = await ExecuteClientToolOnceAsync(client, localRun, item, proposal,
                                     progress => pump.PostAsync(async () =>
                                     {
                                         commandProgressByStep[proposal.ProposalId] = progress;
@@ -2048,6 +2048,7 @@ public sealed partial class GoAiAssistantService(
     }
 
     private async Task<ClientToolResult> ExecuteClientToolOnceAsync(
+        GoAiClient client,
         GoAiRunRecord localRun,
         RunEvent item,
         ToolProposal proposal,
@@ -2059,6 +2060,10 @@ public sealed partial class GoAiAssistantService(
         var execution = await toolExecutions.GetAsync(proposal.ProposalId, cancellationToken).ConfigureAwait(false);
         if (execution is null)
         {
+            // An event can be replayed after the gateway has already failed or
+            // cancelled its run. Check the authoritative state before executing
+            // any new local operation, especially a terminal command or file edit.
+            var currentRun = await client.GetRunAsync(item.RunId, cancellationToken).ConfigureAwait(false);
             var now = DateTimeOffset.UtcNow;
             execution = await toolExecutions.BeginAsync(
                 new ClientToolExecutionRecord(
@@ -2073,6 +2078,15 @@ public sealed partial class GoAiAssistantService(
                     now),
                 cancellationToken).ConfigureAwait(false);
             executionClaimed();
+            if (currentRun.State is RunState.Completed or RunState.Failed or RunState.Cancelled)
+            {
+                var rejected = new ClientToolResult(proposal.ProposalId, "rejected",
+                    JsonSerializer.SerializeToElement(new { failed = true, runState = currentRun.State.ToString() }, JsonOptions),
+                    "client.run_terminal", "Der Serverlauf ist bereits beendet; diese lokale Aktion wurde nicht ausgeführt.");
+                _ = await toolExecutions.CompleteAsync(proposal.ProposalId,
+                    JsonSerializer.Serialize(rejected, JsonOptions), CancellationToken.None).ConfigureAwait(false);
+                return rejected;
+            }
             var result = await toolBroker.ExecuteAsync(
                 proposal,
                 localRun.SessionId,
@@ -2395,7 +2409,7 @@ public sealed partial class GoAiAssistantService(
                 CalculateCodingHistoryBudget(availableCodingModel.ContextTokens, originalPrompt)).ToList();
             codingMessages.Add(new RunMessage("user", [new ContentPart("text", Text: originalPrompt)]));
             var serverCapabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
-            var codingConfiguration = NegotiateCodingOptions(serverCapabilities);
+            var codingConfiguration = NegotiateCodingOptions(serverCapabilities, settings.Current.SelectedParallelCodingModel);
             return new RunRequest(
                 GoAiProtocol.Version,
                 RunMode.Coding,
@@ -2617,21 +2631,8 @@ public sealed partial class GoAiAssistantService(
         PromptTriggerAction.Coding => ["web.search", "web.fetch", "web.deepResearch"],
         PromptTriggerAction.YouTubeSearch => ["youtube.search", "web.fetch"],
         PromptTriggerAction.Audiobook => [],
-        _ => ["math.evaluate", "context.embed", "context.retrieve"],
+        _ => ["math.evaluate", "context.embed", "context.retrieve", "web.search", "web.fetch"],
     };
-
-    internal static bool ContainsWebResearchDirective(string? prompt)
-    {
-        if (string.IsNullOrWhiteSpace(prompt))
-        {
-            return false;
-        }
-
-        return Regex.IsMatch(
-            prompt,
-            @"(?<![\p{L}\p{N}])(?:websuche|web-search|websearch|suche\s+im\s+web|recherchiere\s+(?:im\s+web|im\s+internet|online)|internetrecherche)(?![\p{L}\p{N}])",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-    }
 
     internal static string BuildWebResearchPrompt(string prompt)
     {

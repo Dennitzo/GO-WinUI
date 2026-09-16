@@ -1168,7 +1168,18 @@ public sealed class AssistantWorkflowTests
         var tools = GoAiAssistantService.GetAllowedServerTools(null);
         Assert.DoesNotContain("image.generate", tools);
         Assert.DoesNotContain("media.analyze", tools);
-        Assert.DoesNotContain("web.search", tools);
+        Assert.Contains("web.search", tools);
+        Assert.Contains("web.fetch", tools);
+    }
+
+    [Theory]
+    [InlineData("Welche Karten sind heute im Pokémon 30th Anniversary Set erschienen? Zeige Bilder.")]
+    [InlineData("Was ist die aktuellste Version von WebView2?")]
+    public void CurrentQuestionsTriggerResearchWithoutWebSearchChip(string prompt)
+    {
+        var tools = GoAiAssistantService.GetAllowedServerTools(null, prompt);
+        Assert.Contains("web.search", tools);
+        Assert.Contains("web.fetch", tools);
     }
 
     [Fact]

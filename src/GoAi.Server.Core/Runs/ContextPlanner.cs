@@ -25,6 +25,7 @@ public static class ContextPlanner
         var budget = ComputeInputTokenBudget(contextLength, maximumOutputTokens);
         var conversation = CompactRepeatedConversationMessages(source, out var conversationCompacted);
         var messages = CodingEvidenceContext.CompactCompletedCalls(conversation).ToArray();
+        var freshReadIds = FreshReadCallIds(messages);
         var compacted = conversationCompacted || !messages.SequenceEqual(conversation);
         var latestUserIndex = Array.FindLastIndex(messages, static message =>
             string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)
@@ -55,6 +56,7 @@ public static class ContextPlanner
                 .ToArray();
             foreach (var index in toolIndices.Take(Math.Max(0, toolIndices.Length - 12)))
             {
+                if (freshReadIds.Contains(messages[index].ToolCallId ?? string.Empty)) continue;
                 if (EstimateTokens(messages) <= budget)
                 {
                     break;
@@ -72,7 +74,7 @@ public static class ContextPlanner
                     Message = message,
                     Index = index,
                     Length = message.Content?.Length ?? 0,
-                    Protected = index == latestUserIndex
+                    Protected = freshReadIds.Contains(message.ToolCallId ?? string.Empty) || index == latestUserIndex
                         || string.Equals(message.Role, "system", StringComparison.OrdinalIgnoreCase),
                 })
                 .Where(static item => !item.Protected && item.Length > 2_048)
@@ -92,6 +94,7 @@ public static class ContextPlanner
         var estimated = EstimateTokens(messages);
         if (estimated > budget)
         {
+            if (freshReadIds.Count > 0) throw new CodingReadContextBudgetException(estimated, budget);
             throw new ContextBudgetException(estimated, budget);
         }
         return new ContextPlan(
@@ -102,6 +105,20 @@ public static class ContextPlanner
             compacted
                 ? "Ältere Chat- und Werkzeugdaten wurden verdichtet; aktuelle Quellen und Tool-IDs bleiben erhalten."
                 : null);
+    }
+
+    // A read is fresh until an assistant generation follows its result. Preserve every
+    // read in that final tool batch, not merely the last file in a parallel batch.
+    internal static HashSet<string> FreshReadCallIds(IReadOnlyList<LmChatMessage> messages)
+    {
+        var lastAssistant = -1;
+        for (var index = messages.Count - 1; index >= 0; index--)
+            if (messages[index].Role == "assistant") { lastAssistant = index; break; }
+        if (lastAssistant < 0) return [];
+        var readIds = (messages[lastAssistant].ToolCalls ?? [])
+            .Where(call => call.Name == "coding.read").Select(call => call.Id).ToHashSet(StringComparer.Ordinal);
+        return messages.Skip(lastAssistant + 1).Where(message => message.Role == "tool" && message.ToolCallId is not null
+            && readIds.Contains(message.ToolCallId)).Select(message => message.ToolCallId!).ToHashSet(StringComparer.Ordinal);
     }
 
     public static int ComputeInputTokenBudget(int contextLength, int? maximumOutputTokens)
@@ -240,5 +257,12 @@ public sealed class GeneralContextBudgetException(int estimatedTokens, int budge
 {
     public int EstimatedTokens { get; } = estimatedTokens;
 
+    public int BudgetTokens { get; } = budgetTokens;
+}
+
+public sealed class CodingReadContextBudgetException(int estimatedTokens, int budgetTokens)
+    : InvalidOperationException($"Der vollständige gelesene Dateiinhalt passt auch nach Verdichtung älterer Daten nicht in den Modellkontext ({estimatedTokens:N0} von {budgetTokens:N0} Token). Die Datei wurde nicht gekürzt. Wähle ausdrücklich einen Zeilenbereich oder ein Modell mit größerem Kontext.")
+{
+    public int EstimatedTokens { get; } = estimatedTokens;
     public int BudgetTokens { get; } = budgetTokens;
 }

@@ -294,6 +294,7 @@ public sealed record AppSettings
     public string LiveCaptionLanguage { get; init; } = "auto";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
     public string? SelectedCodingModel { get; init; }
+    public string? SelectedParallelCodingModel { get; init; }
     public string? CodingWorkspacePath { get; init; }
     public bool CodingToolStepsExpanded { get; init; }
     // Legacy JSON field retained for backward-compatible deserialization. "auto"

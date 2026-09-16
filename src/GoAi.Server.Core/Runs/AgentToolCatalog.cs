@@ -42,6 +42,7 @@ public sealed class AgentToolCatalog
             names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => tool.Name is not ("coding.readOutput" or "coding.searchRunEvidence")
                 || HasCapability(capabilities, "coding.evidence")).Select(static tool => tool.Name));
             names.Add(CodingWorkingStateTools.PlanTool);
+            if (!string.IsNullOrWhiteSpace(request.CodingOptions?.ParallelModelId)) names.UnionWith(CodingSubagentTools.CreateTools().Select(t => t.Name));
         }
         if (HasCapability(capabilities, "documentIo"))
         {
@@ -157,6 +158,7 @@ public sealed class AgentToolCatalog
 
     private static void ValidateToolSpecific(string name, JsonElement value)
     {
+        if (CodingSubagentTools.IsTool(name)) { CodingSubagentTools.Validate(name, value); return; }
         if (name == CodingWorkingStateTools.PlanTool)
         {
             CodingWorkingStateTools.Validate(value);
@@ -247,7 +249,7 @@ public sealed class AgentToolCatalog
                 OptionalString(value, "language", 2, 16);
                 if (name == "web.search" && value.TryGetProperty("profile", out var searchProfile)
                     && (searchProfile.ValueKind != JsonValueKind.String || !SearxngSearchProfiles.IsValid(searchProfile.GetString())))
-                    throw new ArgumentException("web.search profile must be auto, general, python, web or dotnet.");
+                    throw new ArgumentException("web.search profile must be auto, general, python, web, dotnet or images.");
                 break;
             case "media.inspect":
             case "media.analyze":
@@ -298,7 +300,7 @@ public sealed class AgentToolCatalog
     {
         var tools = new[]
         {
-            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Für allgemeine Fragen formuliere query in der Sprache des aktuellen Nutzerprompts und setze language passend; ohne eindeutige Sprache gilt de-DE. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern zu genau einem Aspekt, beginnend mit dem exakten API-Namen. Keine Sammelabfragen mit allen Teilproblemen. Technische Profile suchen sprachübergreifend, damit auch englische Originaldokumentation gefunden wird; die Antwort bleibt deutsch. Diese Profile wählen passende Engines innerhalb derselben SearXNG-Instanz, ohne Anbieter-Fallback, und lassen vorübergehend gesperrte Engines aus. Bei leeren Treffern verkürze die nächste Abfrage auf API und einen Aspekt oder prüfe direkte bekannte Originalquellen mit web.fetch. Wiederhole gesperrte Engines nicht unmittelbar.", ToolRiskClass.ReadOnly, WebSearchSchema()),
+            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Für aktuelle Fakten nutze profile=general; für konkrete Bildwünsche nutze profile=images und präzise Motive. Bildtreffer enthalten die Quellseite in url und die Bildadresse in thumbnailUrl; nur passende HTTPS-Bildadressen als Markdown-Bild anzeigen. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern zu genau einem Aspekt. Keine Sammelabfragen. Technische Profile suchen sprachübergreifend, die Antwort bleibt deutsch. Alle Profile bleiben bei SearXNG ohne Anbieter-Fallback und lassen gesperrte Engines aus. Bei leeren Treffern verkürze die Abfrage oder prüfe bekannte Originalquellen mit web.fetch.", ToolRiskClass.ReadOnly, WebSearchSchema()),
             Server("youtube.search", "Suche YouTube; ohne API-Key wird ein sichtbar gekennzeichneter SearXNG-Fallback verwendet.", ToolRiskClass.ReadOnly, SearchSchema()),
             Server("web.fetch", "Durchsuche eine öffentliche HTTP(S)-Quelle SSRF-geschützt nach konkreten Phrasen. Bevorzuge queries und bündele bis zu acht unabhängig zu suchende Phrasen in einem Abruf. Zurückgegeben werden ausschließlich begrenzte Trefferfenster aus Webseiten, PDF-, DOCX- und RTF-Dokumenten, niemals die gesamte Quelle. Ohne Suchphrase liefert das Werkzeug nur eine kurze Vorschau und fordert eine gezielte Wiederholung an. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, WebFetchSchema()),
             Server(CodingDeepResearchPipeline.ToolName, "Recherchiere komplexe Coding-Fragen autonom: plane mehrere Teilfragen, suche über SearXNG, prüfe Originalquellen und liefere eine belegte Synthese mit Quellen und Unsicherheiten. Nutze dies für Architekturvergleiche, aktuelle API-/Versionsfragen oder widersprüchliche Informationen. Für eine einzelne Frage reichen web.search und web.fetch. Task enthält nur die öffentliche technische Frage, keine Zugangsdaten oder lokalen Dateiinhalte. Grenzen: 2–3 geplante Suchfragen mit höchstens einer verkürzten Wiederholung bei leeren Treffern, 2–6 Quellen, maximal 8 Modellturns, insgesamt 9 Webaufrufe und 7 Minuten innerhalb des verbleibenden Laufbudgets.", ToolRiskClass.ReadOnly, Parse("""
@@ -320,7 +322,7 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.BricsCadMove, "Führe eine typisierte BricsCAD-Verschiebung automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
             Client(ClientToolNames.BricsCadAction, "Führe eine typisierte BricsCAD-Aktion automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
         };
-        return tools.Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
+        return tools.Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).Concat(CodingSubagentTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
     }
 
     private static AgentToolSpec Server(string name, string description, ToolRiskClass risk, JsonElement schema) =>
@@ -341,7 +343,7 @@ public sealed class AgentToolCatalog
         """);
 
     private static JsonElement WebSearchSchema() => Parse("""
-        {"type":"object","properties":{"query":{"type":"string","description":"Kurze präzise Suchanfrage; technische API-Namen unverändert lassen."},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string"},"profile":{"type":"string","enum":["auto","general","python","web","dotnet"],"description":"Passende Engines derselben lokalen SearXNG-Instanz; technische Profile brauchen nur 2–4 präzise Suchbegriffe."}},"required":["query"],"additionalProperties":false}
+        {"type":"object","properties":{"query":{"type":"string","description":"Kurze präzise Suchanfrage; technische API-Namen unverändert lassen."},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string"},"profile":{"type":"string","enum":["auto","general","python","web","dotnet","images"],"description":"Passende Engines derselben lokalen SearXNG-Instanz; images sucht tatsächliche Bild-URLs."}},"required":["query"],"additionalProperties":false}
         """);
 
     private static JsonElement WebFetchSchema() => Parse("""

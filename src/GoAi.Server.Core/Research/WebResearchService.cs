@@ -58,7 +58,7 @@ public sealed partial class WebResearchService
             throw new ArgumentException("Search language may contain at most 16 characters.", nameof(request));
         }
         if (!SearxngSearchProfiles.IsValid(request.Profile))
-            throw new ArgumentException("Search profile must be auto, general, python, web or dotnet.", nameof(request));
+            throw new ArgumentException("Search profile must be auto, general, python, web, dotnet or images.", nameof(request));
 
         var maximum = Math.Clamp(request.MaximumResults, 1, 20);
         var youtubeApiKey = _options.YouTubeApiKey;
@@ -83,7 +83,8 @@ public sealed partial class WebResearchService
         if (selectedEngines is { Length: 0 }) throw new SearxngEngineUnavailableException(skipped);
         var builder = new UriBuilder(new Uri(_options.SearxngUri, "/search"))
         {
-            Query = $"q={Uri.EscapeDataString(query)}&format=json&language={Uri.EscapeDataString(language)}",
+            Query = $"q={Uri.EscapeDataString(query)}&format=json&language={Uri.EscapeDataString(language)}"
+                + (request.Profile == "images" ? "&categories=images" : string.Empty),
         };
         if (selectedEngines is not null)
             builder.Query += "&engines=" + Uri.EscapeDataString(string.Join(',', selectedEngines));
@@ -110,7 +111,7 @@ public sealed partial class WebResearchService
                     GetString(raw, "content"),
                     GetString(raw, "engine"),
                     null,
-                    GetString(raw, "thumbnail")));
+                    GetString(raw, "img_src") ?? GetString(raw, "thumbnail_src") ?? GetString(raw, "thumbnail")));
             }
         }
 

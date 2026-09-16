@@ -11,7 +11,7 @@ internal static class SearxngSearchProfiles
     private static readonly Regex Web = new(@"\b(html|css|javascript|iframe|webview|webview2|dom|browser)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
     private static readonly Regex Dotnet = new(@"(?<!\w)(\.net|dotnet|c#|csharp|asp\.net|winui|powershell)(?!\w)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
-    internal static bool IsValid(string? profile) => profile is null or "auto" or "general" or "python" or "web" or "dotnet";
+    internal static bool IsValid(string? profile) => profile is null or "auto" or "general" or "python" or "web" or "dotnet" or "images";
 
     internal static string Select(string query) => Python.IsMatch(query) ? "python"
         : Dotnet.IsMatch(query) ? "dotnet" : Web.IsMatch(query) ? "web" : "general";
@@ -21,7 +21,7 @@ internal static class SearxngSearchProfiles
 
     internal static string? Engines(string? profile, string query)
     {
-        if (!IsValid(profile)) throw new ArgumentException("Search profile must be auto, general, python, web or dotnet.", nameof(profile));
+        if (!IsValid(profile)) throw new ArgumentException("Search profile must be auto, general, python, web, dotnet or images.", nameof(profile));
         return (profile == "auto" ? Select(query) : profile) switch
         {
             // Include general web engines so official library documentation is reachable.

@@ -250,10 +250,27 @@
     parent.append(link);
   }
 
+  function appendExternalImage(parent, url, label) {
+    const safeUrl = safeExternalUrl(url);
+    if (!safeUrl || !safeUrl.startsWith("https://")) {
+      parent.append(document.createTextNode(label));
+      return;
+    }
+    const image = document.createElement("img");
+    image.src = safeUrl;
+    image.alt = label;
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.referrerPolicy = "no-referrer";
+    image.className = "message-external-image";
+    image.addEventListener("error", () => image.replaceWith(document.createTextNode(`${label} (Bild nicht verfügbar)`)));
+    parent.append(image);
+  }
+
   function appendInline(parent, text) {
     const protectedSource = protectMarkdownSegments(String(text || ""));
     const segmentByToken = new Map(protectedSource.segments.map(segment => [segment.token, segment]));
-    const pattern = /(\uE000GO_MATH_[0-9A-Z]+\uE001)|\*\*(.+?)\*\*|\*([^*\n]{1,400})\*|<(sub|sup)>([^<>\r\n]+)<\/\4>|\[([^\]\r\n]{1,500})\]\((https?:\/\/[^\s<>)]+)\)|(https?:\/\/[^\s<]+)/gi;
+    const pattern = /(\uE000GO_MATH_[0-9A-Z]+\uE001)|\*\*(.+?)\*\*|\*([^*\n]{1,400})\*|<(sub|sup)>([^<>\r\n]+)<\/\4>|!\[([^\]\r\n]{1,500})\]\((https?:\/\/[^\s<>)]+)\)|\[([^\]\r\n]{1,500})\]\((https?:\/\/[^\s<>)]+)\)|(https?:\/\/[^\s<]+)/gi;
     let cursor = 0;
     let match = pattern.exec(protectedSource.text);
     while (match) {
@@ -282,9 +299,11 @@
         semantic.textContent = restoreSegments(match[5], protectedSource.segments);
         parent.append(semantic);
       } else if (match[6] && match[7]) {
-        appendExternalLink(parent, match[7], restoreSegments(match[6], protectedSource.segments));
-      } else if (match[8]) {
-        appendExternalLink(parent, match[8]);
+        appendExternalImage(parent, match[7], restoreSegments(match[6], protectedSource.segments));
+      } else if (match[8] && match[9]) {
+        appendExternalLink(parent, match[9], restoreSegments(match[8], protectedSource.segments));
+      } else if (match[10]) {
+        appendExternalLink(parent, match[10]);
       }
       cursor = match.index + match[0].length;
       match = pattern.exec(protectedSource.text);
