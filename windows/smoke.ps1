@@ -143,6 +143,11 @@ try {
             (Get-Item -LiteralPath $nativeRuntimePath).Length -eq 0) {
             throw "Runtime smoke failed; bundled native model runtime support is missing or empty: $nativeRuntimePath"
         }
+        $sourceNativeRuntimePath = Resolve-GoRepositoryPath -RelativePath ($nativeRuntimeFile.Substring('Assets\NativeRuntime\'.Length))
+        if ((Get-FileHash -LiteralPath $sourceNativeRuntimePath -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $nativeRuntimePath -Algorithm SHA256).Hash) {
+            throw "Runtime smoke failed; bundled native model runtime differs from current source: $nativeRuntimeFile"
+        }
     }
     Write-Host "Native model runtime support verified: $runtimeContentDirectory"
 

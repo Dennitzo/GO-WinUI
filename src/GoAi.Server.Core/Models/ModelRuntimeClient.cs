@@ -401,7 +401,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(imagePaths));
         }
-        var turnGate = await AcquireTurnAsync(null, cancellationToken).ConfigureAwait(false);
+        var turnGate = await AcquireTurnAsync(modelId, cancellationToken).ConfigureAwait(false);
         try
         {
         var preparation = await PrepareNativeModelAsync(
@@ -1788,7 +1788,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
             var id = item.TryGetProperty("id", out var idValue) ? idValue.GetString() : null;
             if (id is null || !(id.StartsWith("coding/", StringComparison.Ordinal) || id.StartsWith("vision/", StringComparison.Ordinal) || id.StartsWith("embedding/", StringComparison.Ordinal))) continue;
             var embedding = id.StartsWith("embedding/", StringComparison.Ordinal);
-            var vision = id.StartsWith("vision/", StringComparison.Ordinal);
+            var vision = id.StartsWith("vision/", StringComparison.Ordinal)
+                || (item.TryGetProperty("tags", out var visionTags) && visionTags.ValueKind == JsonValueKind.Array
+                    && visionTags.EnumerateArray().Any(tag => tag.ValueKind == JsonValueKind.String && tag.GetString() == "go-vision:projector"));
             var fallback = embedding ? embeddingContextLength : vision ? visionContextLength : textContextLength;
             var context = ReadNominalContextLength(item, id, fallback);
             var state = "unloaded";
@@ -1855,7 +1857,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
 
             if (model.SupportsVision) statuses.Add(CreateRuntimeStatus(model, "vision", context, displayName, loaded));
-            else
+            if (!model.Id.StartsWith("vision/", StringComparison.Ordinal))
             {
                 statuses.Add(CreateRuntimeStatus(model, "general", context, displayName, loaded));
                 statuses.Add(CreateRuntimeStatus(model, "coding", context, displayName, loaded));

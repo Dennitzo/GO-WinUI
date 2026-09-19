@@ -702,6 +702,9 @@ internal static class GatewayEndpoints
     private static async Task AnalyzeMediaAsync(HttpContext context)
     {
         var request = await ReadJsonAsync<MediaJobRequest>(context).ConfigureAwait(false);
+        if (request.PreferredModelId is { } modelId
+            && (string.IsNullOrWhiteSpace(modelId) || modelId.Length > 512 || modelId.Any(char.IsControl)))
+            throw new ArgumentException("preferredModelId must contain a bounded model ID.");
         if (request.Prompt?.Length > 10_000
             || request.Options?.Count > 32
             || request.Options?.Any(static option =>
@@ -738,7 +741,8 @@ internal static class GatewayEndpoints
                 UploadId: request.UploadId,
                 Prompt: prompt,
                 Options: options,
-                DetailWindows: request.DetailWindows));
+                DetailWindows: request.DetailWindows),
+            PreferredGeneralModelId: request.PreferredModelId);
         await AcceptSpecialRunAsync(context, runRequest).ConfigureAwait(false);
     }
 

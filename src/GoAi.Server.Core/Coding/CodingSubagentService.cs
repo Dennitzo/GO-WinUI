@@ -260,7 +260,7 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
                                 result = research.Result;
                                 state = state with { InputTokens = state.InputTokens + research.InputTokens, OutputTokens = state.OutputTokens + research.OutputTokens };
                             }
-                            else result = await executor.ExecuteAsync(call.Name, call.Arguments, state.RunId, token).ConfigureAwait(false);
+                            else result = await executor.ExecuteAsync(call.Name, call.Arguments, state.RunId, state.Model, token).ConfigureAwait(false);
                             output = result.Result.GetRawText();
                             foreach (var artifact in result.Artifacts)
                                 await repository.AppendEventAsync(state.RunId, RunEventTypes.ArtifactCreated, artifact, token).ConfigureAwait(false);

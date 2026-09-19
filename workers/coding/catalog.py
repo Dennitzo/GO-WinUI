@@ -223,6 +223,9 @@ def discover_models(root):
             found.append({"id": f"coding/{safe_name}~{digest}", "path": path, "role": "general", "context": context,
                           "contextPolicy": "max-fit", "reasoning": reasoning})
             projector = matching_projector(path, root)
+            if projector and architecture.startswith("deepseek"):
+                # Keep DeepSeek's text/tools and vision in the same native instance.
+                found[-1]["projector"] = projector
             if projector:
                 found.append({"id": f"vision/{safe_name}~{digest}", "path": path, "role": "vision",
                               "context": context, "contextPolicy": "max-fit", "reasoning": reasoning, "projector": projector})
@@ -289,6 +292,8 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
         if any(char in str(path) for char in "\r\n"):
             continue
         tags = f"go-context-train:{model['context']},go-context-policy:{model['contextPolicy']}"
+        if model.get("projector"):
+            tags += ",go-vision:projector"
         if managed_gpu:
             tags += ",go-gpu-policy:single-preferred-v1"
         if model.get("instance"):
@@ -314,7 +319,7 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             lines += [f"device = {placement}", "split-mode = none", "main-gpu = 0", "n-gpu-layers = 999", "fit = off"]
             if model["role"] != "embedding":
                 lines += [f"ctx-size = {model['context']}"]
-            if model["role"] == "vision":
+            if model.get("projector"):
                 lines += [f"mmproj-device = {placement}"]
         if model["role"] == "embedding":
             lines += [f"ctx-size = {model['context']}", "embedding = true", f"pooling = {model['pooling']}", f"batch-size = {model['context']}",
@@ -327,7 +332,7 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
                       "reasoning-budget = -1", "reasoning = on" if model["reasoning"]["enabled"] else "reasoning = auto"]
             if model["reasoning"]["effort"]:
                 lines += [f"reasoning-effort = {model['reasoning']['effort']}"]
-            if model["role"] == "vision":
+            if model.get("projector"):
                 lines += [f"mmproj = {model['projector'].as_posix()}"]
         lines.append("")
     text = "\n".join(lines)

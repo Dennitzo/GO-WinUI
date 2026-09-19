@@ -1,4 +1,4 @@
-﻿using GoAi.Contracts;
+using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
 using GoAi.Server.Core.Models;
 using GoAi.Server.Core.Policies;
@@ -58,10 +58,14 @@ public sealed class AgentToolExecutor
         _options = options.Value;
     }
 
+    public Task<AgentToolExecutionResult> ExecuteAsync(string name, JsonElement arguments, string runId,
+        CancellationToken cancellationToken = default) => ExecuteAsync(name, arguments, runId, null, cancellationToken);
+
     public async Task<AgentToolExecutionResult> ExecuteAsync(
         string name,
         JsonElement arguments,
         string runId,
+        string? selectedModelId,
         CancellationToken cancellationToken = default)
     {
         try
@@ -71,8 +75,8 @@ public sealed class AgentToolExecutor
                 "web.search" => await SearchAsync(arguments, runId, youtube: false, cancellationToken).ConfigureAwait(false),
                 "youtube.search" => await SearchAsync(arguments, runId, youtube: true, cancellationToken).ConfigureAwait(false),
                 "web.fetch" => await FetchAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
-                "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, cancellationToken).ConfigureAwait(false),
-                "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, cancellationToken).ConfigureAwait(false),
+                "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, selectedModelId, cancellationToken).ConfigureAwait(false),
+                "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, selectedModelId, cancellationToken).ConfigureAwait(false),
                 "image.generate" => await GenerateImagesAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "speech.synthesize" => await SynthesizeSpeechAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "math.evaluate" => EvaluateMath(arguments),
@@ -246,6 +250,7 @@ public sealed class AgentToolExecutor
         JsonElement arguments,
         string runId,
         bool analyze,
+        string? selectedModelId,
         CancellationToken cancellationToken)
     {
         var uploadId = arguments.GetProperty("uploadId").GetString()!;
@@ -383,7 +388,10 @@ public sealed class AgentToolExecutor
         {
             prompt += $"\n\n{transcriptionWarning} Analysiere den Clip anhand der zeitcodierten Bilder weiter.";
         }
-        var visionAnalysis = await AnalyzeWithVisionAsync(prompt, imagePaths, runId, cancellationToken).ConfigureAwait(false);
+        var integratedModel = await _modelRuntime.ResolveIntegratedVisionAsync(selectedModelId, cancellationToken).ConfigureAwait(false);
+        var visionModel = integratedModel ?? _options.VisionModelId;
+        var fusionModel = integratedModel ?? _options.GeneralModelId;
+        var visionAnalysis = await AnalyzeWithVisionAsync(prompt, imagePaths, runId, visionModel, cancellationToken).ConfigureAwait(false);
         var hasVideoTranscript = upload.MediaType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
             && transcription is not null
             && !string.IsNullOrWhiteSpace(transcription.Text);
@@ -393,6 +401,7 @@ public sealed class AgentToolExecutor
                 visionAnalysis,
                 transcription!,
                 runId,
+                fusionModel,
                 cancellationToken).ConfigureAwait(false)
             : visionAnalysis;
         return Result(new
@@ -409,15 +418,17 @@ public sealed class AgentToolExecutor
             transcriptionWarning,
             visionAnalysis = hasVideoTranscript ? visionAnalysis : null,
             analysis,
-            modelId = hasVideoTranscript ? _options.GeneralModelId : _options.VisionModelId,
+            visionModelId = visionModel,
+            modelId = hasVideoTranscript ? fusionModel : visionModel,
             artifacts = processed.Artifacts,
-        }, processed.Artifacts, hasVideoTranscript ? _options.GeneralModelId : _options.VisionModelId);
+        }, processed.Artifacts, hasVideoTranscript ? fusionModel : visionModel);
     }
 
     private async Task<string> AnalyzeWithVisionAsync(
         string prompt,
         IReadOnlyList<string> imagePaths,
         string runId,
+        string modelId,
         CancellationToken cancellationToken)
     {
         await using var lease = await _scheduler.AcquireAsync(
@@ -426,11 +437,11 @@ public sealed class AgentToolExecutor
             GpuLeaseMode.Shared,
             cancellationToken).ConfigureAwait(false);
         _ = await _workers.PrepareLmModelAsync(
-            _options.VisionModelId,
-            _options.VisionContextLength,
+            modelId,
+            modelId == _options.VisionModelId ? _options.VisionContextLength : 0,
             cancellationToken).ConfigureAwait(false);
         return await _modelRuntime.AnalyzeImagesAsync(
-            _options.VisionModelId,
+            modelId,
             prompt,
             imagePaths,
             cancellationToken).ConfigureAwait(false);
@@ -472,6 +483,7 @@ public sealed class AgentToolExecutor
         string visionAnalysis,
         TranscriptionResponse transcription,
         string runId,
+        string modelId,
         CancellationToken cancellationToken)
     {
         var messages = BuildVideoAndAudioFusionMessages(prompt, visionAnalysis, transcription);
@@ -481,11 +493,11 @@ public sealed class AgentToolExecutor
             GpuLeaseMode.Shared,
             cancellationToken).ConfigureAwait(false);
         _ = await _workers.PrepareLmModelAsync(
-            _options.GeneralModelId,
-            _options.GeneralContextLength,
+            modelId,
+            modelId == _options.GeneralModelId ? _options.GeneralContextLength : 0,
             cancellationToken).ConfigureAwait(false);
         var response = await _modelRuntime.CompleteChatAsync(
-            _options.GeneralModelId,
+            modelId,
             messages,
             [],
             cancellationToken: cancellationToken).ConfigureAwait(false);

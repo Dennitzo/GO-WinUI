@@ -27,6 +27,22 @@ def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=3276
 
 
 class CatalogTests(unittest.TestCase):
+    def test_deepseek_text_preset_loads_its_own_projector_and_advertises_vision(self):
+        gguf(self.root / "deepseek" / "DeepSeek-Vision.gguf", architecture="deepseek4")
+        gguf(self.root / "deepseek" / "mmproj-F16.gguf", architecture="clip")
+        gguf(self.root / "text" / "qwen3.gguf")
+        target = self.root / "models.ini"
+        models = catalog.write_presets(self.root, target)
+        deepseek = next(m for m in models if m["id"].startswith("coding/DeepSeek"))
+        qwen = next(m for m in models if m["id"].startswith("coding/qwen3"))
+        self.assertIn("projector", deepseek)
+        self.assertNotIn("projector", qwen)
+        block = target.read_text().split("[" + deepseek["id"] + "]")[1].split("\n[")[0]
+        self.assertIn("go-vision:projector", block)
+        self.assertIn("mmproj = ", block)
+        qwen_block = target.read_text().split("[" + qwen["id"] + "]")[1].split("\n[")[0]
+        self.assertNotIn("mmproj = ", qwen_block)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

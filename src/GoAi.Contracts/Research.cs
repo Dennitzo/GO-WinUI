@@ -190,7 +190,8 @@ public sealed record MediaJobRequest(
     string UploadId,
     string? Prompt = null,
     IReadOnlyDictionary<string, string>? Options = null,
-    IReadOnlyList<MediaTimeWindow>? DetailWindows = null);
+    IReadOnlyList<MediaTimeWindow>? DetailWindows = null,
+    string? PreferredModelId = null);
 
 public sealed record MediaTimeWindow(double Start, double End);
 

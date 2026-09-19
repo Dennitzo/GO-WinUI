@@ -160,7 +160,7 @@ public sealed partial class RunProcessor : BackgroundService
 
             if (request.Workload?.Kind == RunWorkloadKind.MediaAnalysis)
             {
-                await ProcessMediaAnalysisAsync(runId, request.Workload, runCancellationToken).ConfigureAwait(false);
+                await ProcessMediaAnalysisAsync(runId, request.Workload, request.PreferredGeneralModelId, runCancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -564,7 +564,7 @@ public sealed partial class RunProcessor : BackgroundService
                         else
                         {
                             result = await _toolExecutor.ExecuteAsync(tool.Name, call.Arguments, runId,
-                                cancellationToken).ConfigureAwait(false);
+                                selection.ModelId, cancellationToken).ConfigureAwait(false);
                         }
                         foreach (var artifact in result.Artifacts)
                         {
@@ -1328,6 +1328,7 @@ public sealed partial class RunProcessor : BackgroundService
     private async Task ProcessMediaAnalysisAsync(
         string runId,
         RunWorkload workload,
+        string? selectedModelId,
         CancellationToken cancellationToken)
     {
         var uploadId = workload.UploadId ?? throw new InvalidOperationException("Media upload ID is missing.");
@@ -1349,7 +1350,7 @@ public sealed partial class RunProcessor : BackgroundService
             "media.analyze",
             arguments,
             runId,
-            cancellationToken).ConfigureAwait(false);
+            selectedModelId, cancellationToken).ConfigureAwait(false);
         await _repository.AppendEventAsync(
             runId,
             RunEventTypes.ServerToolCompleted,

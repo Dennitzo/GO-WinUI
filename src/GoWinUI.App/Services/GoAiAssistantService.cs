@@ -1083,7 +1083,7 @@ public sealed partial class GoAiAssistantService(
                     }
                     : requestedAnalysis;
                 accepted = await client.AnalyzeMediaAsync(
-                    new MediaJobRequest(selected.Upload.UploadId, analysisPrompt),
+                    new MediaJobRequest(selected.Upload.UploadId, analysisPrompt, PreferredModelId: ResolvePreferredModel(settings.Current)),
                     idempotencyKey,
                     cancellationToken).ConfigureAwait(false);
             }

@@ -45,9 +45,12 @@ Invoke-GoDotNet -CommandArguments @(
 
 if (-not $SkipTests) {
     & (Join-Path $PSScriptRoot 'test.ps1') -Configuration $Configuration
+    # Includes DeepSeek integrated-vision routing and native projector/preset tests.
     & (Join-Path $PSScriptRoot 'test-agent-context.ps1') -Configuration $Configuration -SkipClientTests
 }
 if (-not $SkipPublish) {
+    # Publish smoke verifies the bundled native catalog against current sources,
+    # including DeepSeek vision support; stale runtime assets fail the build.
     & (Join-Path $PSScriptRoot 'publish.ps1') `
         -Mode SingleFile `
         -RuntimeIdentifier win-x64 `
