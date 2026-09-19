@@ -45,6 +45,7 @@ Invoke-GoDotNet -CommandArguments @(
 
 if (-not $SkipTests) {
     & (Join-Path $PSScriptRoot 'test.ps1') -Configuration $Configuration
+    & (Join-Path $PSScriptRoot 'test-agent-context.ps1') -Configuration $Configuration -SkipClientTests
 }
 if (-not $SkipPublish) {
     & (Join-Path $PSScriptRoot 'publish.ps1') `

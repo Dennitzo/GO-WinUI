@@ -111,6 +111,8 @@ public sealed class NativeRoleRuntimeTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.RequestUri!.AbsolutePath is "/sessions/prepare" or "/sessions/save")
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
             Requests.Add(request.RequestUri!);
             if (!Available) throw new HttpRequestException("Native runtime is offline.");
             var path = request.RequestUri!.AbsolutePath;

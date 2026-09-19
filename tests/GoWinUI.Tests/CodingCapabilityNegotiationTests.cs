@@ -11,6 +11,14 @@ public sealed class CodingCapabilityNegotiationTests
         client, new Dictionary<string, long>(), [], true, GoAiProtocol.UploadChunkSize);
 
     [Fact]
+    public void IsolatedSubagentExecutionIsExplicitlyNegotiated()
+    {
+        var legacy = Snapshot([], []);
+        Assert.DoesNotContain("coding-isolated-subagents", GoAiAssistantService.NegotiateCodingOptions(legacy).Capabilities);
+        Assert.Contains("coding-isolated-subagents", GoAiAssistantService.NegotiateCodingOptions(legacy with { SupportsIsolatedSubagents = true }).Capabilities);
+    }
+
+    [Fact]
     public void WorkingStateAndMaximumReasoningAreAlwaysRequested()
     {
         var result = GoAiAssistantService.NegotiateCodingOptions(Snapshot(["coding.updatePlan"],

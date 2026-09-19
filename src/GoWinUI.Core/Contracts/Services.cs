@@ -18,6 +18,7 @@ public interface IChatRepository
     Task DeleteSessionAsync(Guid id, CancellationToken cancellationToken = default);
     Task<int> DeleteUnpinnedSessionsAsync(CancellationToken cancellationToken = default);
     Task SaveDraftAsync(Guid id, string draft, CancellationToken cancellationToken = default);
+    Task ClearDraftIfMatchesAsync(Guid id, string expectedDraft, CancellationToken cancellationToken = default);
     Task SelectWorkflowAsync(Guid id, Guid? workflowId, CancellationToken cancellationToken = default);
     Task SetPersistentToolActionAsync(
         Guid id,
@@ -26,6 +27,10 @@ public interface IChatRepository
     Task SetCodingWorkspacePathAsync(Guid id, string? path, CancellationToken cancellationToken = default);
     Task SetCodingWorkspacePathAsync(Guid id, string? path, bool activateCoding, CancellationToken cancellationToken = default);
     Task SetPinnedAsync(Guid id, bool isPinned, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ChatSessionGroup>> ListSessionGroupsAsync(CancellationToken cancellationToken = default);
+    Task<ChatSessionGroup> GetOrCreateSessionGroupForWorkspaceAsync(string workspacePath, CancellationToken cancellationToken = default);
+    Task ApplySessionGroupingAsync(IReadOnlyList<SessionGroupAssignment> groups, CancellationToken cancellationToken = default);
+    Task SetSessionGroupCollapsedAsync(Guid groupId, bool collapsed, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ChatMessage>> ListMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<ChatMessage?> GetMessageAsync(Guid messageId, CancellationToken cancellationToken = default);
     Task<ChatTurn> AddTurnAsync(

@@ -67,6 +67,29 @@ function harness({ speech = false, codingToolStepsExpanded = false } = {}) {
 
 const message = (extra = {}) => ({ id: "answer-1", role: "assistant", content: "**Fertig.**", status: "completed", ...extra });
 
+test("General steering live receipts opt into the same ordered persisted timeline without replacing its answer", () => {
+  const { context, state, elements } = harness();
+  state.selectedToolAction = null;
+  const first = "Zuerst die Erklärung.\n\n";
+  state.messages = [message({ status: "streaming", content: first + "Nun die gewünschte Korrektur." })];
+  const receipt = { id: "steer-1", tool: "assistant.steering", status: "running", contentOffset: first.length,
+    detail: "Bitte korrigiere zuerst das Beispiel.", inputJson: '{"inputId":"input-1","sequence":1}', updatedAt: "2026-09-19T10:00:01Z" };
+  context.recordCodingActivity({ messageId: "answer-1", sessionId: "session-a", toolStep: receipt });
+  context.renderMessages(false);
+  const article = elements.messageList.querySelector("article");
+  assert.equal(article.querySelectorAll(".steering-message").length, 1);
+  assert.ok(article.textContent.includes(first.trim()));
+  assert.ok(article.textContent.includes("Nun die gewünschte Korrektur."));
+  assert.equal(article.querySelectorAll(".coding-step").length, 0);
+  context.applyConversationSnapshot({ activeSessionId: "session-a", conversationRevision: 3, messages: [
+    { ...state.messages[0], status: "completed", toolSteps: [{ ...receipt, status: "completed", updatedAt: "2026-09-19T10:00:02Z" }] }
+  ] });
+  assert.equal(elements.messageList.querySelector("article"), article);
+  assert.equal(article.querySelectorAll(".steering-message").length, 1);
+  assert.ok(article.querySelector(".steering-message").textContent.includes("Angewendet"));
+  assert.equal(state.messages[0].id, "answer-1");
+});
+
 test("identical failure fallback appears once after live completion and reload while tools and copy/export remain intact", async () => {
   for (const mode of ["coding", null]) {
     for (const hasTools of [false, true]) {

@@ -14,6 +14,7 @@ public static class RunRequestValidator
         "pdf",
         "coding",
         "coding.evidence",
+        "coding-isolated-subagents",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {

@@ -21,13 +21,15 @@ public sealed record ModelRuntimeProgress(
     int? ContentCharacters = null,
     bool? FinishObserved = null,
     string? ContentDelta = null,
-    string? ReasoningDelta = null);
+    string? ReasoningDelta = null,
+    int? CachedPromptTokens = null);
 
 public sealed record LmChatMessage(
     string Role,
     string? Content = null,
     IReadOnlyList<LmToolCall>? ToolCalls = null,
-    string? ToolCallId = null);
+    string? ToolCallId = null,
+    string? ReasoningContent = null);
 
 public sealed record LmToolCall(string Id, string Name, JsonElement Arguments);
 
@@ -40,7 +42,8 @@ public sealed record LmChatResult(
     int OutputTokens,
     bool HadReasoning = false,
     int ReasoningTokens = 0,
-    ModelTurnMetrics? Metrics = null);
+    ModelTurnMetrics? Metrics = null,
+    string? ReasoningContent = null);
 
 public sealed class ModelEmptyResponseException(bool hadReasoning, int attempts)
     : InvalidOperationException(hadReasoning

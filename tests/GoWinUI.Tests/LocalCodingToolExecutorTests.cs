@@ -8,6 +8,40 @@ namespace GoWinUI.Tests;
 
 public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
 {
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public async Task MixedLineEndingsMatchReadRepresentationAndPreserveUntouchedBytes(string suppliedNewline)
+    {
+        var path = Path.Combine(_root, "mixed.cs");
+        await File.WriteAllTextAsync(path, "prefix\nalpha\r\nbeta\ngamma\r\nsuffix\n", new UTF8Encoding(true));
+        var read = await Execute("coding.read", new { path = "mixed.cs" });
+        await Execute("coding.edit", new { path = "mixed.cs", expectedSha256 = read.GetProperty("sha256").GetString(),
+            oldText = "alpha" + suppliedNewline + "beta" + suppliedNewline + "gamma", newText = "changed\nblock" });
+        var bytes = await File.ReadAllBytesAsync(path);
+        Assert.True(bytes.AsSpan().StartsWith(Encoding.UTF8.Preamble));
+        Assert.Equal("prefix\nchanged\r\nblock\r\nsuffix\n", await File.ReadAllTextAsync(path));
+    }
+
+    [Theory]
+    [InlineData("absent", "text_not_found")]
+    [InlineData("same\nline", "ambiguous_match")]
+    public async Task FailedMixedNewlineEditExplainsRecoveryAndDoesNotWrite(string oldText, string error)
+    {
+        var path = Path.Combine(_root, "conflict.txt");
+        const string original = "same\r\nline\nother\nsame\nline\n";
+        await File.WriteAllTextAsync(path, original);
+        var read = await Execute("coding.read", new { path = "conflict.txt" });
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.edit",
+            new { path = "conflict.txt", expectedSha256 = read.GetProperty("sha256").GetString(), oldText, newText = "changed" }));
+        Assert.Contains(error, failure.Message);
+        Assert.Equal(original, await File.ReadAllTextAsync(path));
+        var refreshed = await Execute("coding.read", new { path = "conflict.txt" });
+        await Execute("coding.edit", new { path = "conflict.txt", expectedSha256 = refreshed.GetProperty("sha256").GetString(),
+            oldText = "other\nsame\nline", newText = "other\nrecovered" });
+        Assert.Equal("same\r\nline\nother\nrecovered\n", await File.ReadAllTextAsync(path));
+    }
+
     private static readonly string[] OutputCommandArguments = ["-NoProfile", "-NonInteractive", "-Command", "[Console]::Write(('x' * 20000) + 'FINAL_DIAGNOSTIC'); exit 7"];
     private static readonly string[] SleepCommandArguments = ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"];
     private static readonly string[] ChildScriptArguments = ["-NoProfile", "-NonInteractive", "-File", "spawn-child.ps1"];

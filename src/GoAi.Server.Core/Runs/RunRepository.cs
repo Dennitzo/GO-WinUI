@@ -214,7 +214,8 @@ public sealed partial class RunRepository
         command.CommandText = """
             UPDATE runs SET state = 'Completed', selected_model = COALESCE($model, selected_model),
                 session_title = COALESCE($title, session_title), error_code = NULL, updated_at = $now
-            WHERE run_id = $run AND state IN ('Queued', 'Running', 'WaitingForClient');
+            WHERE run_id = $run AND state IN ('Queued', 'Running', 'WaitingForClient')
+                AND NOT EXISTS (SELECT 1 FROM run_steering_inputs WHERE run_id = $run AND applied_at IS NULL);
             """;
         command.Parameters.AddWithValue("$run", runId);
         command.Parameters.AddWithValue("$model", (object?)completed.ModelId ?? DBNull.Value);
@@ -258,6 +259,12 @@ public sealed partial class RunRepository
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 published = new RunEvent(reader.GetInt64(0), runId, RunEventTypes.ClientToolProposed,
                     GoAiDatabase.ParseTimestamp(reader.GetString(2)), JsonSerializer.Deserialize<JsonElement>(reader.GetString(1)));
+        }
+        if (published is null)
+        {
+            command.CommandText = "SELECT EXISTS(SELECT 1 FROM run_steering_inputs WHERE run_id = $run AND applied_at IS NULL);";
+            if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+                return null;
         }
         command.CommandText = """
             SELECT proposal.proposal_json FROM client_tool_proposals proposal
@@ -337,7 +344,8 @@ public sealed partial class RunRepository
             interrupt.Transaction = (SqliteTransaction)transaction;
             interrupt.CommandText = """
                 UPDATE runs SET state = $interrupted, error_code = 'run.gateway_restarted', updated_at = $now
-                WHERE state = $running AND mode != 'Coding';
+                WHERE state = $running AND mode != 'Coding'
+                    AND NOT EXISTS (SELECT 1 FROM run_steering_inputs s WHERE s.run_id = runs.run_id);
                 """;
             interrupt.Parameters.AddWithValue("$interrupted", RunState.Interrupted.ToString());
             interrupt.Parameters.AddWithValue("$running", RunState.Running.ToString());
@@ -350,7 +358,7 @@ public sealed partial class RunRepository
             resumeCoding.Transaction = (SqliteTransaction)transaction;
             resumeCoding.CommandText = """
                 UPDATE runs SET state = $queued, error_code = NULL, updated_at = $now
-                WHERE mode = 'Coding' AND (
+                WHERE (mode = 'Coding' OR EXISTS (SELECT 1 FROM run_steering_inputs s WHERE s.run_id = runs.run_id)) AND (
                     state = $running OR (state = $interrupted AND error_code IN ('run.gateway_stopped', 'run.gateway_restarted'))
                 );
                 """;
@@ -679,8 +687,20 @@ public sealed partial class RunRepository
         AgentRunCheckpoint checkpoint,
         CancellationToken cancellationToken = default)
     {
+        var visibleSteeringOffset = 0;
+        if (checkpoint.AppliedSteeringSequence > 0
+            && (await GetPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false))
+                .Any(input => input.Sequence <= checkpoint.AppliedSteeringSequence))
+        {
+            var rawVisible = GoAi.Server.Core.Coding.CodingTextReconciler.Project(
+                await GetEventsAfterAsync(runId, 0, cancellationToken).ConfigureAwait(false));
+            var rawOffset = Math.Clamp(checkpoint.VisibleTextLength ?? 0, 0, rawVisible.Length);
+            visibleSteeringOffset = RunVisibleText.Canonicalize(rawVisible[..rawOffset]).Length;
+        }
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: false);
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO run_checkpoints(run_id, checkpoint_json, updated_at)
             SELECT $run, $json, $updated WHERE EXISTS (
@@ -691,14 +711,29 @@ public sealed partial class RunRepository
             WHERE EXISTS (SELECT 1 FROM runs WHERE run_id = $run AND state IN ('Queued','Running','WaitingForClient','Interrupted'));
             INSERT INTO coding_session_contexts(run_id, checkpoint_json)
             SELECT c.run_id, c.checkpoint_json FROM run_checkpoints c JOIN runs r ON r.run_id = c.run_id
-            WHERE c.run_id = $run AND r.mode = 'Coding'
-                AND json_extract(r.request_json, '$.codingOptions.workspacePath') IS NOT NULL
+            WHERE c.run_id = $run AND (
+                (r.mode = 'Coding' AND json_extract(r.request_json, '$.codingOptions.workspacePath') IS NOT NULL)
+                OR (r.mode IN ('Auto','General') AND json_extract(r.request_json, '$.sessionId') IS NOT NULL))
             ON CONFLICT(run_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json;
+            INSERT INTO run_events(run_id, event_type, data_json, created_at)
+            SELECT $run, 'run.steering.applied', json_object('inputId', input_id, 'sequence', sequence,
+                'sessionId', session_id, 'text', text, 'visibleTextOffset', $offset), $updated
+            FROM run_steering_inputs
+            WHERE run_id = $run AND sequence <= $steering AND applied_at IS NULL
+                AND EXISTS (SELECT 1 FROM runs WHERE run_id = $run AND state IN ('Queued','Running','WaitingForClient','Interrupted'))
+            ORDER BY sequence;
+            UPDATE run_steering_inputs SET applied_at = $updated
+            WHERE run_id = $run AND sequence <= $steering AND applied_at IS NULL
+                AND EXISTS (SELECT 1 FROM runs WHERE run_id = $run AND state IN ('Queued','Running','WaitingForClient','Interrupted'));
             """;
         command.Parameters.AddWithValue("$run", runId);
         command.Parameters.AddWithValue("$json", JsonSerializer.Serialize(checkpoint, _database.JsonOptions));
         command.Parameters.AddWithValue("$updated", GoAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$steering", checkpoint.AppliedSteeringSequence);
+        command.Parameters.AddWithValue("$offset", visibleSteeringOffset);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        _notifier.Notify(runId);
     }
 
     public async Task<AgentRunCheckpoint?> GetCheckpointAsync(
@@ -735,6 +770,68 @@ public sealed partial class RunRepository
         command.Parameters.AddWithValue("$workspace", request.CodingOptions.WorkspacePath);
         var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
         return json is null ? null : JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
+    }
+
+    internal async Task<GeneralSessionContextSnapshot?> GetGeneralSessionContextAsync(
+        string currentRunId, RunRequest request, CancellationToken cancellationToken = default)
+    {
+        if (request.Mode == RunMode.Coding || string.IsNullOrWhiteSpace(request.SessionId)) return null;
+        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        // The table predates General continuation. Its rows are run-scoped and
+        // cascade with the run; retaining the name avoids rewriting user data.
+        command.CommandText = """
+            SELECT r.run_id, c.checkpoint_json, r.request_json
+            FROM coding_session_contexts c JOIN runs r ON r.run_id = c.run_id
+            WHERE r.run_id != $run AND r.mode IN ('Auto','General') AND r.state = 'Completed'
+                AND json_extract(r.request_json, '$.sessionId') = $session
+                AND r.created_at < (SELECT created_at FROM runs WHERE run_id = $run)
+            ORDER BY r.created_at DESC LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$run", currentRunId);
+        command.Parameters.AddWithValue("$session", request.SessionId);
+        string previousRun;
+        AgentRunCheckpoint? checkpoint;
+        RunRequest? previousRequest;
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) return null;
+            previousRun = reader.GetString(0);
+            checkpoint = JsonSerializer.Deserialize<AgentRunCheckpoint>(reader.GetString(1), _checkpointJsonOptions);
+            previousRequest = DeserializeRequest(reader.GetString(2), _database.JsonOptions);
+        }
+        if (checkpoint is null || previousRequest is null) return null;
+        var text = new System.Text.StringBuilder();
+        var journal = await GetEventsAfterAsync(previousRun, 0, cancellationToken).ConfigureAwait(false);
+        foreach (var item in journal)
+        {
+            if (item.Type != RunEventTypes.TextDelta || !item.Data.TryGetProperty("delta", out var delta)
+                || delta.ValueKind != JsonValueKind.String) continue;
+            if (item.Data.TryGetProperty("agentId", out var agentId) && agentId.ValueKind == JsonValueKind.String
+                && !string.IsNullOrEmpty(agentId.GetString())) continue;
+            if (item.Data.TryGetProperty("replaceFrom", out var replace) && replace.TryGetInt32(out var offset))
+            {
+                if (offset < 0 || offset > text.Length) return null;
+                text.Length = offset;
+            }
+            text.Append(delta.GetString());
+        }
+        var rawVisible = text.ToString();
+        var visible = RunVisibleText.Canonicalize(rawVisible);
+        var history = previousRequest.Messages.ToList();
+        var segmentStart = 0;
+        foreach (var item in journal.Where(item => item.Type == RunSteeringEventTypes.Applied))
+        {
+            var steering = item.Data.Deserialize<RunSteeringEvent>(_database.JsonOptions);
+            if (steering?.VisibleTextOffset is not { } offset || offset < segmentStart || offset > visible.Length) return null;
+            var segment = visible[segmentStart..offset];
+            if (!string.IsNullOrWhiteSpace(segment)) history.Add(new("assistant", [new("text", Text: segment)]));
+            history.Add(new("user", [new("text", Text: steering.Text)]));
+            segmentStart = offset;
+        }
+        // The persisted request remains the immutable Create idempotency binding.
+        // For session continuation compare the client's logical, steered history.
+        return new(checkpoint, previousRequest with { Messages = history }, visible[segmentStart..]);
     }
 
     public async Task DeleteCheckpointAsync(string runId, CancellationToken cancellationToken = default)

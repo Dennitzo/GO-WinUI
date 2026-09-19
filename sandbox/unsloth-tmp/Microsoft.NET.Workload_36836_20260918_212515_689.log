@@ -1,0 +1,14 @@
+[2026-09-18 21:25:15.691] [00008FE4] === Logging started ===
+[2026-09-18 21:25:15.697] [00008FE4] Executing: "C:\Program Files\dotnet\dotnet.exe" test "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\GoWinUI.Tests.csproj" --configuration Release --no-restore --nologo --logger console;verbosity=normal, PID: 36836, PPID: 33392
+[2026-09-18 21:25:15.699] [00008FE4] IsElevated: False
+[2026-09-18 21:25:15.699] [00008FE4] Is64BitProcess: True
+[2026-09-18 21:25:15.699] [00008FE4] RebootPending: False
+[2026-09-18 21:25:15.699] [00008FE4] ProcessorArchitecture: amd64
+[2026-09-18 21:25:15.699] [00008FE4] HostArchitecture: x64
+[2026-09-18 21:25:15.699] [00008FE4] SdkDirectory: 10.0.302
+[2026-09-18 21:25:15.699] [00008FE4] VerifySignatures: False
+[2026-09-18 21:25:15.699] [00008FE4] SDK feature band: 10.0.300
+[2026-09-18 21:26:33.207] [00008FE4] Shutting down
+[2026-09-18 21:26:33.207] [00008FE4] Shutdown completed.
+[2026-09-18 21:26:33.207] [00008FE4] Restart required: False
+[2026-09-18 21:26:33.208] [00008FE4] === Logging ended ===

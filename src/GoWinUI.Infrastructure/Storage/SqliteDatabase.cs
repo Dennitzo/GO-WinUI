@@ -8,7 +8,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 33;
+    public const int CurrentSchemaVersion = 36;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -80,6 +80,9 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationThirtyOneAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyFourAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtySixAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -1262,6 +1265,167 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyFourAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=34;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            // Topic groups for the sidebar. Deleting a session or group clears the
+            // reference instead of cascading, so session history stays intact either way.
+            command.CommandText = """
+                CREATE TABLE chat_session_groups(
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+                    is_collapsed INTEGER NOT NULL DEFAULT 0 CHECK(is_collapsed IN (0,1)),
+                    created_at TEXT NOT NULL
+                ) STRICT;
+                ALTER TABLE chat_sessions ADD COLUMN session_group_id TEXT NULL REFERENCES chat_session_groups(id) ON DELETE SET NULL;
+                CREATE INDEX ix_chat_sessions_group ON chat_sessions(session_group_id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(34,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyFiveAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=35;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            // Workspace assignment is performed by migration 36, including repair of
+            // databases that already applied an early version of migration 35.
+            command.CommandText = """
+                ALTER TABLE chat_session_groups ADD COLUMN workspace_path TEXT NULL;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(35,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtySixAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=36;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var groups = new List<(string Id, string Name, string? Path, bool Collapsed, string Created)>();
+        command.CommandText = "SELECT id,name,workspace_path,is_collapsed,created_at FROM chat_session_groups ORDER BY created_at,id;";
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                groups.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetBoolean(3), reader.GetString(4)));
+        }
+        var projects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var group in groups)
+        {
+            // The former SQL randomblob expression produced non-GUID IDs. Copy the
+            // parent before updating references so foreign keys remain valid throughout.
+            var id = Guid.TryParse(group.Id, out var parsedId) ? parsedId.ToString("D") : Guid.NewGuid().ToString("D");
+            var path = NormalizeWorkspaceProjectPath(group.Path);
+            var name = path is null ? group.Name : WorkspaceProjectName(path);
+            if (path is not null && projects.TryGetValue(path, out var existingId)) id = existingId;
+            command.Parameters.Clear();
+            command.CommandText = "INSERT OR IGNORE INTO chat_session_groups(id,name,workspace_path,is_collapsed,created_at) VALUES($id,$name,$path,$collapsed,$created);";
+            command.Parameters.AddWithValue("$id", id);
+            command.Parameters.AddWithValue("$name", name);
+            command.Parameters.AddWithValue("$path", (object?)path ?? DBNull.Value);
+            command.Parameters.AddWithValue("$collapsed", group.Collapsed ? 1 : 0);
+            command.Parameters.AddWithValue("$created", group.Created);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(id, group.Id, StringComparison.Ordinal))
+            {
+                command.Parameters.Clear();
+                command.CommandText = "UPDATE chat_sessions SET session_group_id=$id WHERE session_group_id=$old; DELETE FROM chat_session_groups WHERE id=$old;";
+                command.Parameters.AddWithValue("$id", id);
+                command.Parameters.AddWithValue("$old", group.Id);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            if (path is not null)
+            {
+                projects.TryAdd(path, id);
+                command.Parameters.Clear();
+                command.CommandText = "UPDATE chat_session_groups SET name=$name,workspace_path=$path WHERE id=$id;";
+                command.Parameters.AddWithValue("$id", id);
+                command.Parameters.AddWithValue("$name", name);
+                command.Parameters.AddWithValue("$path", path);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        var sessions = new List<(string Id, string Path)>();
+        command.Parameters.Clear();
+        command.CommandText = "SELECT id,coding_workspace_path FROM chat_sessions WHERE coding_workspace_path IS NOT NULL ORDER BY created_at,id;";
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                sessions.Add((reader.GetString(0), reader.GetString(1)));
+        }
+        foreach (var session in sessions)
+        {
+            var path = NormalizeWorkspaceProjectPath(session.Path);
+            if (path is null) continue; // Unavailable/malformed historic metadata never removes a session.
+            if (!projects.TryGetValue(path, out var id))
+            {
+                id = Guid.NewGuid().ToString("D");
+                projects.Add(path, id);
+                command.Parameters.Clear();
+                command.CommandText = "INSERT INTO chat_session_groups(id,name,workspace_path,is_collapsed,created_at) VALUES($id,$name,$path,0,$now);";
+                command.Parameters.AddWithValue("$id", id);
+                command.Parameters.AddWithValue("$name", WorkspaceProjectName(path));
+                command.Parameters.AddWithValue("$path", path);
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            command.Parameters.Clear();
+            command.CommandText = "UPDATE chat_sessions SET session_group_id=$group WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", session.Id);
+            command.Parameters.AddWithValue("$group", id);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        command.Parameters.Clear();
+        command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(36,$now);";
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static string? NormalizeWorkspaceProjectPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Any(char.IsControl)) return null;
+        try
+        {
+            var value = path.Trim().Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+            return Path.IsPathFullyQualified(value) ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(value)) : null;
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+    }
+
+    internal static string WorkspaceProjectName(string path)
+    {
+        var name = Path.GetFileName(path);
+        if (string.IsNullOrWhiteSpace(name)) name = path;
+        return name.Length <= 120 ? name : name[..120];
     }
 
     private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)

@@ -97,7 +97,9 @@ if ($Action -eq 'Stop') {
     $process = Get-OwnedSupervisor
     if ($process) {
         [IO.File]::WriteAllText($stopFile, 'stop')
-        if (-not $process.WaitForExit(15000)) {
+        # A cache prepare may first save and restore under the manager lock;
+        # shutdown then checkpoints up to two model slots before terminating.
+        if (-not $process.WaitForExit(600000)) {
             $verified = Get-OwnedSupervisor
             if ($verified) { Stop-Process -Id $verified.Id -Force }
         }

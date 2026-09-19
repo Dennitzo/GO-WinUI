@@ -42,6 +42,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
     private readonly object _cacheLock = new();
     private readonly Dictionary<string, RuntimeModel> _runtimeCatalog = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _modelTransitions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _sessionCacheModels = new(StringComparer.Ordinal);
     private ModelStatusSnapshot? _cachedStatus;
     private IReadOnlyList<ModelRuntimeStatus> _lastReachableModels = [];
     private DateTimeOffset _cacheExpiresAt;
@@ -226,6 +227,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         int? requiredContextLength = null,
         Func<ModelRuntimeProgress, CancellationToken, ValueTask>? nativeProgress = null,
         bool structuredToolOnly = false,
+        string? sessionCacheKey = null,
         CancellationToken cancellationToken = default)
     {
         ValidateToolChoice(tools, requireToolCall, requiredToolName);
@@ -242,6 +244,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             // The preset chooses the model's maximum that fits. A request limit is
             // an upper bound; it must not require a larger allocation after fitting.
             var preparation = await PrepareNativeModelAsync(modelId, 0, null, cancellationToken).ConfigureAwait(false);
+            await UpdateSessionCacheAsync("prepare", preparation.InstanceId, sessionCacheKey, cancellationToken).ConfigureAwait(false);
             var context = requiredContextLength is { } requested
                 ? Math.Min(requested, preparation.ContextLength) : preparation.ContextLength;
             if (nativeProgress is not null)
@@ -322,8 +325,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     new ModelRuntimeProgress(
                         "tokenProgress",
                         PromptProgress: 1,
-                        PromptTokens: result.InputTokens,
-                        ProcessedPromptTokens: result.InputTokens,
+                        PromptTokens: result.Metrics?.InputTokens,
+                        ProcessedPromptTokens: result.Metrics?.InputTokens,
+                        CachedPromptTokens: result.Metrics?.CachedPromptTokens,
                         GeneratedTokens: result.OutputTokens,
                         CurrentTokens: result.InputTokens + result.OutputTokens),
                     cancellationToken).ConfigureAwait(false);
@@ -335,6 +339,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
                         cancellationToken).ConfigureAwait(false);
                 }
             }
+            if (!string.IsNullOrEmpty(sessionCacheKey) && result.ToolCalls.Count == 0)
+                await UpdateSessionCacheAsync("save", preparation.InstanceId, sessionCacheKey, cancellationToken).ConfigureAwait(false);
             return result with { Metrics = (result.Metrics ?? new ModelTurnMetrics()) with
             {
                 RuntimeQueueMilliseconds = queueMilliseconds,
@@ -429,6 +435,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 new { role = "user", content = content.ToArray() },
             },
         };
+        await UpdateSessionCacheAsync("prepare", preparation.InstanceId, null, cancellationToken).ConfigureAwait(false);
         ApplyReasoningSettings(body, preparation.InstanceId, "vision", null);
         var budgetedBody = await ApplyTokenBudgetAsync(body, preparation.ContextLength, null, null, cancellationToken).ConfigureAwait(false);
         using var response = await SendJsonAsync(HttpMethod.Post, "v1/chat/completions", budgetedBody, cancellationToken).ConfigureAwait(false);
@@ -557,8 +564,61 @@ public sealed partial class ModelRuntimeClient : IDisposable
 
     private async Task UnloadRuntimeInstanceAsync(string modelId, CancellationToken cancellationToken)
     {
-        using var response = await SendJsonAsync(HttpMethod.Post, "models/unload", new { model = modelId }, cancellationToken).ConfigureAwait(false);
+        await UpdateSessionCacheAsync("save", modelId, null, cancellationToken).ConfigureAwait(false);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMinutes(1));
+        using var response = await SendJsonAsync(HttpMethod.Post, "models/unload", new { model = modelId }, timeout.Token).ConfigureAwait(false);
+        // The router acknowledges an unload before the child has exited. Keep
+        // the model gate until its residency actually changes; otherwise the
+        // next GPU placement request rejects the still-running previous model.
+        while ((await ReadRuntimeCatalogAsync(timeout.Token).ConfigureAwait(false))
+            .Any(model => model.Id == modelId && model.State is "loaded" or "loading" or "sleeping"))
+            await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token).ConfigureAwait(false);
     }
+
+    private async Task UpdateSessionCacheAsync(string operation, string model, string? sessionKey, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_cacheLock)
+        {
+            // The supervisor can outlive this client/gateway and still own a
+            // resident session. Every managed-runtime turn must detach/save it
+            // before a stateless prompt, including the first turn after restart.
+            // A bare legacy router advertises no supervisor; keep its stateless
+            // path unchanged unless this client already used session persistence.
+            var managedRuntime = _runtimeCatalog.TryGetValue(model, out var catalogModel) && catalogModel.ManagedGpuPlacement;
+            if (sessionKey is null && !managedRuntime && !_sessionCacheModels.Contains(model)) return;
+            if (sessionKey is not null && operation == "prepare") _sessionCacheModels.Add(model);
+        }
+        // The native cache is an optimization. Older portable runtimes and incompatible
+        // cache files must fall back to the authoritative persisted conversation.
+        var path = new UriBuilder(_options.ModelRuntimeUri)
+        { Port = _options.ModelRuntimeUri.Port + 1, Path = "/sessions/" + operation, Query = "" }.Uri.AbsoluteUri;
+        // Once dispatched, retain the caller's turn gate until the control response
+        // returns. Cancelling an HTTP waiter does not cancel llama's slot operation.
+        // Prepare may save an outgoing slot and restore another (120 s each).
+        // This bounded deadline covers both operations; it is not a guarantee that
+        // an unresponsive native process has stopped work after a transport failure.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        try
+        {
+            using var response = await SendJsonAsync(HttpMethod.Post, path, new { model, sessionKey }, timeout.Token,
+                bufferContent: true).ConfigureAwait(false);
+            using var result = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false),
+                cancellationToken: timeout.Token).ConfigureAwait(false);
+            var status = result.RootElement.TryGetProperty("status", out var value) ? value.GetString() : "unknown";
+            var detail = result.RootElement.TryGetProperty("detail", out var reason) ? reason.GetString() : null;
+            LogSessionCache(_logger, operation, (status ?? "unknown") + (detail is null ? "" : ": " + detail), null);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or JsonException or OperationCanceledException)
+        {
+            LogSessionCache(_logger, operation, "unavailable", exception);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private static readonly Action<ILogger, string, string, Exception?> LogSessionCache = LoggerMessage.Define<string, string>(
+        LogLevel.Information, new EventId(4110, "NativeSessionCache"), "Native session cache {Operation}: {Status}.");
 
     private async Task<LmChatResult> CompleteStreamingChatWithBoundedRetryAsync(
         Dictionary<string, object?> body,
@@ -817,10 +877,11 @@ public sealed partial class ModelRuntimeClient : IDisposable
             {
                 var total = promptProgress.TryGetProperty("total", out var totalValue) && totalValue.TryGetInt32(out var totalTokens) ? totalTokens : 0;
                 var processed = promptProgress.TryGetProperty("processed", out var processedValue) && processedValue.TryGetInt32(out var processedTokens) ? processedTokens : 0;
+                int? cached = promptProgress.TryGetProperty("cache", out var cacheValue) && cacheValue.TryGetInt32(out var cachedTokens) && cachedTokens >= 0 ? cachedTokens : null;
                 await nativeProgress(new ModelRuntimeProgress("promptProcessing",
                     PromptProgress: total > 0 ? Math.Clamp((double)processed / total, 0, 1) : null,
                     PromptTokens: total > 0 ? total : null,
-                    ProcessedPromptTokens: processed), cancellationToken).ConfigureAwait(false);
+                    ProcessedPromptTokens: processed, CachedPromptTokens: cached), cancellationToken).ConfigureAwait(false);
             }
             var contentDelta = accumulator.Add(chunk.RootElement);
             // Capture every provider fragment, but limit durable UI updates to a
@@ -1039,7 +1100,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 InputTokens,
                 OutputTokens > 0 ? OutputTokens : GeneratedFragments,
                 HadReasoning,
-                ReasoningTokens, _measurement.Build());
+                ReasoningTokens, _measurement.Build(), ReasoningContent: _reasoningContent.ToString());
         }
 
         public bool TryBuildCompleteToolCall(
@@ -1064,7 +1125,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     InputTokens,
                     OutputTokens > 0 ? OutputTokens : GeneratedFragments,
                     HadReasoning,
-                    ReasoningTokens, _measurement.Build());
+                    ReasoningTokens, _measurement.Build(), ReasoningContent: _reasoningContent.ToString());
                 return true;
             }
 
@@ -1284,7 +1345,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             inputTokens,
             outputTokens,
             hasReasoningContent || reasoningTokens > 0,
-            reasoningTokens, measurement.Build());
+            reasoningTokens, measurement.Build(), ReasoningContent: reasoningContent);
     }
 
     internal static bool TryParseReasoningToolCall(
@@ -1482,7 +1543,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
             return new
             {
                 role = "assistant",
-                content = message.Content,
+                content = message.Content ?? string.Empty,
+                reasoning_content = message.ReasoningContent ?? string.Empty,
                 tool_calls = message.ToolCalls.Select(static call => new
                 {
                     id = call.Id,
@@ -1504,6 +1566,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 tool_call_id = message.ToolCallId,
             };
         }
+        if (message.Role == "assistant" && !string.IsNullOrEmpty(message.ReasoningContent))
+            return new { role = "assistant", content = message.Content ?? string.Empty, reasoning_content = message.ReasoningContent };
         return new { role = NormalizeRole(message.Role), content = message.Content ?? string.Empty };
     }
 

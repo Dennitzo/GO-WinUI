@@ -18,9 +18,9 @@ public sealed class MaximumGenerationDefaultsTests
     [InlineData("coding/Qwen3.8-27B~test", "coding", "xhigh", 262_144)]
     [InlineData("coding/Qwen3.8-Flash-Next~test", "general", "xhigh", 262_144)]
     [InlineData("vision/Qwen3.8-27B~test", "vision", "xhigh", 262_144)]
-    [InlineData("vision/Qwen3VL-30B-Instruct~test", "vision", "none", 262_144)]
+    [InlineData("vision/Qwen3VL-30B-Instruct~test", "vision", null, 262_144)]
     public async Task DefaultsUseRealHighestReasoningAndAllRemainingNativeContext(
-        string modelId, string role, string expectedEffort, int context)
+        string modelId, string role, string? expectedEffort, int context)
     {
         using var handler = new BudgetHandler(modelId, context, 7_123);
         using var http = new HttpClient(handler);
@@ -49,7 +49,7 @@ public sealed class MaximumGenerationDefaultsTests
             Assert.False(body.TryGetProperty("reasoning_effort", out _));
             Assert.False(body.TryGetProperty("chat_template_kwargs", out _));
         }
-        if (expectedEffort != "none") Assert.Equal(context - 7_124, body.GetProperty("reasoning_budget_tokens").GetInt32());
+        if (expectedEffort is "high" or "xhigh") Assert.Equal(context - 7_124, body.GetProperty("reasoning_budget_tokens").GetInt32());
         var status = await client.GetStatusAsync();
         Assert.All(status.Models, model => Assert.Equal(expectedEffort, model.DefaultReasoningEffort));
     }
@@ -168,6 +168,8 @@ public sealed class MaximumGenerationDefaultsTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.RequestUri!.AbsolutePath is "/sessions/prepare" or "/sessions/save")
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
             var path = request.RequestUri!.AbsolutePath;
             if (path == "/v1/models") return Json(new { data = new[] { new
             {

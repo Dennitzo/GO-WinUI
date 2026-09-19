@@ -1,0 +1,14 @@
+[2026-09-18 22:31:49.674] [000082E8] === Logging started ===
+[2026-09-18 22:31:49.680] [000082E8] Executing: "C:\Program Files\dotnet\dotnet.exe" test tests/GoWinUI.Tests/GoWinUI.Tests.csproj -c Release --nologo --filter FullyQualifiedName~AssistantWorkflowTests.ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout|FullyQualifiedName~AssistantWorkflowTests.PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts, PID: 33512, PPID: 12956
+[2026-09-18 22:31:49.682] [000082E8] IsElevated: False
+[2026-09-18 22:31:49.682] [000082E8] Is64BitProcess: True
+[2026-09-18 22:31:49.682] [000082E8] RebootPending: False
+[2026-09-18 22:31:49.682] [000082E8] ProcessorArchitecture: amd64
+[2026-09-18 22:31:49.682] [000082E8] HostArchitecture: x64
+[2026-09-18 22:31:49.682] [000082E8] SdkDirectory: 10.0.302
+[2026-09-18 22:31:49.682] [000082E8] VerifySignatures: False
+[2026-09-18 22:31:49.682] [000082E8] SDK feature band: 10.0.300
+[2026-09-18 22:32:25.848] [000082E8] Shutting down
+[2026-09-18 22:32:25.848] [000082E8] Shutdown completed.
+[2026-09-18 22:32:25.848] [000082E8] Restart required: False
+[2026-09-18 22:32:25.848] [000082E8] === Logging ended ===

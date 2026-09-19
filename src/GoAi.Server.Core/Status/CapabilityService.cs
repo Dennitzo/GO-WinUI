@@ -102,7 +102,9 @@ public sealed class CapabilityService
             10_000,
             true),
         SupportsCodingSessionContext: true,
-        SupportsParallelCoding: true);
+        SupportsParallelCoding: true,
+        SupportsIsolatedSubagents: true,
+        SupportsRunSteering: true);
 
     private static ModelCapability CreateModelCapability(
         string modelId,

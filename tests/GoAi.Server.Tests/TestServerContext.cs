@@ -28,7 +28,17 @@ internal sealed class TestServerContext : IDisposable
     public void Dispose()
     {
         Database.Dispose();
-        SqliteConnection.ClearAllPools();
+        // Other test classes use their own databases concurrently. Clearing all
+        // pools races their connection checkout/native command lifetime. Release
+        // only this fixture's exact pool before removing its private directory.
+        using var pool = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = Options.DatabasePath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared,
+            Pooling = true,
+        }.ToString());
+        SqliteConnection.ClearPool(pool);
         if (Directory.Exists(Root))
         {
             Directory.Delete(Root, recursive: true);

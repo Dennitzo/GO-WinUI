@@ -3,6 +3,7 @@
 
   const state = {
     sessions: [],
+    sessionGroups: [],
     messages: [],
     workflows: [],
     conversationRevision: 0,
@@ -16,6 +17,14 @@
     isWorkflowEditing: false,
     pendingWorkflowTitle: null,
     isRunning: false,
+    isAiBusy: false,
+    activeRunId: null,
+    activeRunSessionId: null,
+    activeRunMessageId: null,
+    pendingChatSend: null,
+    contextSource: "estimated",
+    contextProfile: null,
+    contextMeasurementMessageId: null,
     model: null,
     contextUsed: 0,
     contextLimit: 8192,
@@ -148,7 +157,6 @@
     composerSpeechPauseIcon: byId("composer-speech-pause-icon"),
     composerSpeechStop: byId("composer-speech-stop"),
     send: byId("send"),
-    stop: byId("stop"),
     toolsButton: byId("tools-button"),
     toolsMenu: byId("tools-menu"),
     workflowsButton: byId("open-workflows"),
@@ -203,6 +211,7 @@
     scroller: elements.messageScroll, content: elements.messageList, button: byId("scroll-to-latest")
   });
   const sessionScrollStoragePrefix = "go.assistant.session-scroll.v1:";
+  const ungroupedSessionStorageKey = "go-session-ungrouped-collapsed";
   let draftTimer = 0;
   let pendingDraft = null;
   let promptResizeFrame = 0;
@@ -240,11 +249,12 @@
   function setPromptValue(value) {
     elements.prompt.value = value;
     schedulePromptResize();
+    renderComposerAction();
   }
 
-  function post(type, payload) {
+  function post(type, payload, requestId) {
     try {
-      return globalThis.goBridge.post(type, payload);
+      return globalThis.goBridge.post(type, payload, requestId);
     } catch (error) {
       showToast(error instanceof Error ? error.message : String(error), true);
       return null;
@@ -276,15 +286,6 @@
     const draft = pendingDraft;
     pendingDraft = null;
     if (draft?.sessionId) post("session.draft", draft);
-  }
-
-  function dateLabel(value) {
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "";
-    return new Intl.DateTimeFormat(document.documentElement.lang || "de", {
-      dateStyle: "short",
-      timeStyle: "short"
-    }).format(date);
   }
 
   function timeLabel(value) {
@@ -333,6 +334,7 @@
   }
 
   function persistSessionScrollPosition(sessionId = state.activeSessionId) {
+    if (globalThis.goAgentTabs?.activeTab === "subagent") return;
     if (!sessionId || !elements.messageScroll) return;
     const scroller = elements.messageScroll;
     const maximumTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
@@ -387,64 +389,208 @@
     });
   }
 
+  function readUngroupedCollapsed() {
+    try { return globalThis.localStorage.getItem(ungroupedSessionStorageKey) === "1"; }
+    catch { return false; }
+  }
+
+  function persistUngroupedCollapsed(collapsed) {
+    try { globalThis.localStorage.setItem(ungroupedSessionStorageKey, collapsed ? "1" : "0"); }
+    catch { /* WebView storage is optional. */ }
+  }
+
+  function createSessionItem(session) {
+    const item = document.createElement("div");
+    item.className = `session-item${session.id === state.activeSessionId ? " active" : ""}${session.isPinned ? " pinned" : ""}`;
+    item.setAttribute("role", "listitem");
+
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "session-item__open";
+    open.title = `${session.title || "Neue Sitzung"}\nRechtsklick zum Umbenennen`;
+    const main = document.createElement("span");
+    main.className = "session-item__main";
+    const title = document.createElement("span");
+    title.className = "session-item__title";
+    title.textContent = session.title || "Neue Sitzung";
+    main.append(title);
+    const short = document.createElement("span");
+    short.className = "session-item__short";
+    short.textContent = sessionShortLabel(session.title);
+    open.append(main, short);
+    open.addEventListener("click", () => {
+      flushDraft();
+      post("session.open", { sessionId: session.id });
+      document.body.classList.remove("sessions-open");
+    });
+    open.addEventListener("contextmenu", event => {
+      event.preventDefault();
+      const nextTitle = globalThis.prompt("Sitzung umbenennen", session.title || "Neue Sitzung");
+      if (nextTitle?.trim()) post("session.rename", { sessionId: session.id, title: nextTitle.trim() });
+    });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "session-delete";
+    remove.setAttribute("aria-label", `${session.title || "Sitzung"} löschen`);
+    remove.title = "Sitzung löschen";
+    remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>';
+    remove.addEventListener("click", () => {
+      if (globalThis.confirm(`„${session.title || "Neue Sitzung"}“ endgültig löschen?`)) {
+        post("session.delete", { sessionId: session.id });
+      }
+    });
+
+    item.append(open, remove);
+    return item;
+  }
+
+  function createProjectRow({ id, name, workspacePath, addable = true, collapsed, sessions, onToggle, onNewSession }) {
+    const section = document.createElement("section");
+    section.className = "session-group";
+
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = collapsed ? "session-group__head" : "session-group__head is-open";
+    head.setAttribute("aria-expanded", String(!collapsed));
+    head.title = [workspacePath, collapsed ? `${name} ausklappen` : `${name} einklappen`].filter(Boolean).join("\n");
+
+    const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    chevron.setAttribute("viewBox", "0 0 24 24");
+    chevron.classList.add("session-group__chevron");
+    chevron.setAttribute("aria-hidden", "true");
+    const chevronPath = document.createElementNS(chevron.namespaceURI, "path");
+    chevronPath.setAttribute("d", "m9 6 6 6-6 6");
+    chevron.append(chevronPath);
+
+    const nameLabel = document.createElement("span");
+    nameLabel.className = "session-group__name";
+    nameLabel.textContent = name;
+
+    const count = document.createElement("span");
+    count.className = "session-group__count";
+    count.textContent = String(sessions.length);
+
+    const folder = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    folder.setAttribute("viewBox", "0 0 24 24");
+    folder.setAttribute("aria-hidden", "true");
+    folder.classList.add("session-group__folder");
+    const folderPath = document.createElementNS(folder.namespaceURI, "path");
+    folderPath.setAttribute("d", "M3 7V5h6l2 2h10v13H3Z");
+    folder.append(folderPath);
+    head.append(chevron, folder, nameLabel, count);
+    head.addEventListener("click", () => onToggle(!collapsed));
+
+    if (addable && onNewSession) {
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "session-group__add";
+      add.disabled = state.isAiBusy || state.isRunning;
+      add.setAttribute("aria-label", `Neue Sitzung im Projekt ${name}`);
+      add.title = `Neue Sitzung im Projekt ${name} starten`;
+      const compose = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      compose.setAttribute("viewBox", "0 0 24 24");
+      compose.setAttribute("aria-hidden", "true");
+      compose.classList.add("session-group__compose");
+      for (const shape of ["M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7",
+        "m16 3 5 5-10 10-5 1 1-5ZM14 5l5 5"]) {
+        const path = document.createElementNS(compose.namespaceURI, "path");
+        path.setAttribute("d", shape);
+        compose.append(path);
+      }
+      add.append(compose);
+      add.addEventListener("click", event => {
+        event.stopPropagation();
+        onNewSession();
+      });
+      const headRow = document.createElement("div");
+      headRow.className = "session-group__headrow";
+      headRow.append(head, add);
+      section.append(headRow);
+    } else {
+      section.append(head);
+    }
+
+    if (!collapsed) {
+      const body = document.createElement("div");
+      body.className = "session-group__body";
+      for (const session of sessions) body.append(createSessionItem(session));
+      section.append(body);
+    }
+    return section;
+  }
+
+  function createWorkspaceProject() {
+    if (state.isRunning || state.isAiBusy || state.pendingChatSend) return;
+    flushDraft();
+    post("session.workspaceCreate", {});
+    document.body.classList.remove("sessions-open");
+  }
+
   function renderSessions() {
     const query = elements.sessionSearch.value.trim().toLocaleLowerCase();
+    const matchesQuery = item => !query || String(item.title || "").toLocaleLowerCase().includes(query);
     elements.sessionList.replaceChildren();
-    const sessions = state.sessions.filter(item => !query || String(item.title || "").toLocaleLowerCase().includes(query));
 
-    for (const session of sessions) {
-      const item = document.createElement("div");
-      item.className = `session-item${session.id === state.activeSessionId ? " active" : ""}${session.isPinned ? " pinned" : ""}`;
-      item.setAttribute("role", "listitem");
+    const groups = Array.isArray(state.sessionGroups) ? state.sessionGroups : [];
+    const assignedIds = new Set();
 
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "session-item__open";
-      open.title = `${session.title || "Neue Sitzung"}\nRechtsklick zum Umbenennen`;
-      const main = document.createElement("span");
-      main.className = "session-item__main";
-      const title = document.createElement("span");
-      title.className = "session-item__title";
-      title.textContent = session.title || "Neue Sitzung";
-      const date = document.createElement("span");
-      date.className = "session-item__date";
-      date.textContent = dateLabel(session.updatedAt);
-      main.append(title, date);
-      const short = document.createElement("span");
-      short.className = "session-item__short";
-      short.textContent = sessionShortLabel(session.title);
-      open.append(main, short);
-      open.addEventListener("click", () => {
-        flushDraft();
-        post("session.open", { sessionId: session.id });
-        document.body.classList.remove("sessions-open");
-      });
-      open.addEventListener("contextmenu", event => {
-        event.preventDefault();
-        const nextTitle = globalThis.prompt("Sitzung umbenennen", session.title || "Neue Sitzung");
-        if (nextTitle?.trim()) post("session.rename", { sessionId: session.id, title: nextTitle.trim() });
-      });
-
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "session-delete";
-      remove.setAttribute("aria-label", `${session.title || "Sitzung"} löschen`);
-      remove.title = "Sitzung löschen";
-      remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>';
-      remove.addEventListener("click", () => {
-        if (globalThis.confirm(`„${session.title || "Neue Sitzung"}“ endgültig löschen?`)) {
-          post("session.delete", { sessionId: session.id });
+    for (const group of groups) {
+      const groupIds = new Set((Array.isArray(group.sessionIds) ? group.sessionIds : []).map(id => String(id)));
+      const members = state.sessions.filter(session => Object.prototype.hasOwnProperty.call(session, "sessionGroupId")
+        ? String(session.sessionGroupId || "") === String(group.id)
+        : groupIds.has(String(session.id)));
+      for (const session of members) assignedIds.add(String(session.id));
+      const matchesProject = query && String(group.name || "").toLocaleLowerCase().includes(query);
+      const groupSessions = members.filter(session => matchesProject || matchesQuery(session))
+        .sort((a, b) => Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned)));
+      const collapsed = query ? false : Boolean(group.isCollapsed);
+      if (!groupSessions.length && (!group.workspacePath || query && !matchesProject)) continue;
+      elements.sessionList.append(createProjectRow({
+        id: group.id,
+        name: group.name || "Projekt",
+        workspacePath: group.workspacePath || null,
+        collapsed,
+        sessions: groupSessions,
+        onToggle: nextCollapsed => {
+          group.isCollapsed = nextCollapsed;
+          renderSessions();
+          post("session.groupCollapse", { groupId: group.id, collapsed: nextCollapsed });
+        },
+        onNewSession: () => {
+          if (!group.workspacePath) { showToast("Für dieses Projekt ist kein Projektordner hinterlegt.", true); return; }
+          flushDraft();
+          post("session.projectCreate", { workspacePath: group.workspacePath });
+          document.body.classList.remove("sessions-open");
         }
-      });
+      }));
+    }
 
-      item.append(open, remove);
-      elements.sessionList.append(item);
+    const ungroupedSessions = state.sessions.filter(session => !assignedIds.has(String(session.id)) && matchesQuery(session))
+      .sort((a, b) => Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned)));
+    if (ungroupedSessions.length) {
+      const collapsed = query ? false : readUngroupedCollapsed();
+      elements.sessionList.append(createProjectRow({
+        id: "ungrouped",
+        name: "Allgemeine Sitzungen",
+        workspacePath: null,
+        addable: true,
+        collapsed,
+        sessions: ungroupedSessions,
+        onNewSession: () => { flushDraft(); post("session.create", {}); },
+        onToggle: nextCollapsed => {
+          persistUngroupedCollapsed(nextCollapsed);
+          renderSessions();
+        }
+      }));
     }
   }
 
   function renderMessages(scrollToEnd) {
     renderCodingChanges();
-    if (state.selectedToolAction === "coding" || state.messages.some(message => message.toolSteps?.length)) {
+    if (globalThis.goAgentTabs?.refresh(state) === "subagent") return;
+    if (state.selectedToolAction === "coding" || state.messages.some(message => message.toolSteps?.length
+      || state.codingActivity.get(String(message.id))?.some(step => step.tool === "assistant.steering"))) {
       renderCodingMessages(scrollToEnd);
       return;
     }
@@ -955,6 +1101,8 @@
 
   function createMessage(message, previousArticle = null) {
     const role = String(message.role).toLowerCase();
+    const hasTimeline = role === "assistant" && (state.selectedToolAction === "coding" || message.toolSteps?.length
+      || state.codingActivity.get(String(message.id))?.some(step => step.tool === "assistant.steering"));
     // Failed runs without generated text store their error as a content fallback.
     // Display it once; retain the original message for copy/export and persistence.
     const contentMessage = role === "assistant" && message.error
@@ -986,7 +1134,7 @@
         status.textContent = statusLabel(message.status);
         meta.append(" · ", status);
       }
-      if (liveStatus?.status && state.selectedToolAction !== "coding") {
+      if (liveStatus?.status && !hasTimeline) {
         const spinner = document.createElement("span");
         spinner.className = "message-status-spinner";
         spinner.setAttribute("aria-hidden", "true");
@@ -998,7 +1146,7 @@
       body.append(meta);
     }
 
-    const timeline = role === "assistant" && (state.selectedToolAction === "coding" || message.toolSteps?.length)
+    const timeline = hasTimeline
       ? createCodingActivity(contentMessage, previousArticle?.querySelector(".coding-timeline")) : null;
     if (timeline) {
       body.append(timeline);
@@ -1220,7 +1368,7 @@
   }
 
   function recordCodingActivity(payload) {
-    if (state.selectedToolAction !== "coding" || !payload?.messageId
+    if ((state.selectedToolAction !== "coding" && payload?.toolStep?.tool !== "assistant.steering") || !payload?.messageId
       || payload.sessionId && String(payload.sessionId) !== String(state.activeSessionId)) return;
     const messageId = String(payload.messageId);
     let steps = state.codingActivity.get(messageId);
@@ -1252,7 +1400,8 @@
   }
 
   function createCodingActivity(message, previousTimeline = null) {
-    const steps = mergeCodingToolSteps(message).filter(step => step.kind === "tool");
+    const allSteps = mergeCodingToolSteps(message).filter(step => step.kind === "tool");
+    const steps = globalThis.goAgentTabs?.mainSteps(message, allSteps) || allSteps;
     const live = isTerminalMessageStatus(message.status) ? null : state.messageRunStatus.get(String(message.id));
     if (!steps.length && !live?.status) return null;
     const sessionId = state.activeSessionId;
@@ -1380,7 +1529,7 @@
       ? `Workspace: ${state.codingWorkspacePath}\nOrdner wechseln` : "Workspace auswählen und Coding starten";
     elements.codingWorkspace.setAttribute("aria-label", state.codingWorkspacePath
       ? `Workspace ${state.codingWorkspacePath} wechseln` : "Workspace auswählen und Coding starten");
-    elements.codingWorkspace.disabled = state.isRunning || !state.activeSessionId;
+    elements.codingWorkspace.disabled = state.isRunning || Boolean(state.pendingChatSend) || !state.activeSessionId;
     renderCodingChanges();
   }
 
@@ -1660,10 +1809,11 @@
       remove.textContent = "×";
       remove.setAttribute("aria-label", `${file.item.fileName} entfernen`);
       remove.hidden = file.kind === "pending";
-      remove.addEventListener("click", () => post(
-        file.kind === "document" ? "document.remove" : "attachment.remove",
-        file.kind === "document" ? { documentId: file.item.id } : { attachmentId: file.item.id }
-      ));
+      remove.addEventListener("click", () => {
+        if (!ensureEditableContext()) return;
+        post(file.kind === "document" ? "document.remove" : "attachment.remove",
+          file.kind === "document" ? { documentId: file.item.id } : { attachmentId: file.item.id });
+      });
       chip.append(icon, name, status, remove);
       return chip;
     };
@@ -1730,6 +1880,7 @@
       });
       removeAll.addEventListener("click", event => {
         event.stopPropagation();
+        if (!ensureEditableContext()) return;
         closeAttachmentMenu();
         for (const file of attachedFiles) {
           post(
@@ -1758,18 +1909,38 @@
       && !state.speechStatus?.active;
   }
 
-  function renderStatus() {
-    renderCodingWorkspace();
+  function renderComposerAction() {
     // Speech playback is an independent activity. The composer stop button only
     // cancels the current AI run; playback has its own chip
     // controls so sending/aborting a prompt cannot interrupt it.
-    const canStop = state.isRunning;
-    elements.send.hidden = canStop;
-    elements.stop.hidden = !canStop;
+    const canSteer = globalThis.goRunSteering?.canSteer(state) ?? false;
+    const canRetrySteer = Boolean(globalThis.goRunSteering?.pendingRetry(state, elements.prompt.value));
+    const preparing = Boolean(state.pendingChatSend);
+    const hasText = Boolean(elements.prompt.value.trim());
+    const canStop = canSteer && !hasText && !preparing;
+    elements.send.hidden = false;
+    elements.send.classList.toggle("send-button--stop", canStop);
+    elements.send.disabled = preparing || (!hasText && !canStop)
+      || Boolean((state.isAiBusy || state.isRunning) && !canSteer && !canRetrySteer);
+    elements.send.title = preparing ? "Der Auftrag wird vorbereitet. Deine weitere Eingabe bleibt erhalten."
+      : canStop ? "Antwort stoppen"
+      : (state.isAiBusy || state.isRunning) && !canSteer && !canRetrySteer ? "In einer anderen Sitzung läuft eine Antwort."
+      : canRetrySteer ? "Umlenkung erneut bestätigen" : canSteer ? "Laufenden Auftrag umlenken" : "Nachricht senden";
+    elements.send.setAttribute("aria-label", preparing ? "Wird vorbereitet" : canStop ? "Antwort stoppen"
+      : canSteer || canRetrySteer ? "Umlenken" : "Senden");
+  }
+
+  function renderStatus() {
+    renderCodingWorkspace();
+    renderComposerAction();
+    const preparing = Boolean(state.pendingChatSend);
     elements.prompt.disabled = false;
-    elements.newSession.disabled = state.isRunning;
+    elements.newSession.disabled = state.isRunning || state.isAiBusy || preparing;
+    for (const button of elements.sessionList?.querySelectorAll(".session-group__add") || []) {
+      button.disabled = state.isRunning || state.isAiBusy || preparing;
+    }
     const hasUnpinnedSessions = state.sessions.some(session => !session.isPinned);
-    elements.clearSessions.disabled = state.isRunning || !hasUnpinnedSessions;
+    elements.clearSessions.disabled = state.isRunning || state.isAiBusy || preparing || !hasUnpinnedSessions;
     elements.clearSessions.title = hasUnpinnedSessions
       ? "Alle nicht angepinnten Sitzungen löschen"
       : "Keine nicht angepinnten Sitzungen vorhanden";
@@ -2094,11 +2265,18 @@
   }
 
   async function postChatRequest(payload) {
+    if (state.pendingChatSend) return null;
+    const requestId = globalThis.crypto.randomUUID();
+    const pending = { sessionId: payload.sessionId, prompt: payload.prompt, requestId };
+    state.pendingChatSend = pending;
     state.pendingCaptureRequest = payload;
+    renderStatus();
     if (state.audioCapture?.isRecording) {
       post("audioCapture.stop", {});
     }
-    post("chat.send", payload);
+    const posted = post("chat.send", payload, requestId);
+    if (posted === null && state.pendingChatSend === pending) { state.pendingChatSend = null; renderStatus(); }
+    return posted;
   }
 
   function resumePendingCaptureRequest() {
@@ -2106,25 +2284,49 @@
     const action = request?.toolAction || state.selectedToolAction;
     if (!state.waitingForCapture || !request || !hasMediaAnalysisContext(action)) return;
     state.waitingForCapture = false;
-    post("chat.send", request);
+    void postChatRequest(request);
+  }
+
+  async function handleComposerAction() {
+    if (state.pendingChatSend) return;
+    if (elements.prompt.value.trim()) await submitPrompt();
+    else if (globalThis.goRunSteering?.canSteer(state)) post("chat.cancel", {});
   }
 
   async function submitPrompt() {
     const prompt = elements.prompt.value.trim();
+    if (!prompt) return;
+    if (state.pendingChatSend) {
+      showToast("Der Auftrag wird vorbereitet. Deine neue Eingabe bleibt erhalten und kann danach umlenken.");
+      return;
+    }
+    const retry = globalThis.goRunSteering?.retryPending(state, prompt, post);
+    if (retry) {
+      if (retry === "unbound") showToast("Diese Umlenkung ist noch nicht bestätigt. Die Eingabe bleibt erhalten; es wird kein neuer Auftrag gestartet.", true);
+      return;
+    }
+    if (state.isRunning || state.isAiBusy) {
+      if (!globalThis.goRunSteering?.canSteer(state)) {
+        showToast("In einer anderen Sitzung läuft eine Antwort. Öffne diese Sitzung zum Umlenken.", true);
+        return;
+      }
+      globalThis.goRunSteering.request(state, prompt, post);
+      return;
+    }
     state.voiceTurn = null;
     renderContext();
-    if (!prompt) return;
     chatScroll.jump(false);
     clearTimeout(draftTimer);
     draftTimer = 0;
     pendingDraft = null;
-    await postChatRequest({
+    const sessionId = state.activeSessionId;
+    const sent = await postChatRequest({
       sessionId: state.activeSessionId,
       prompt,
       documentIds: state.documents.map(item => item.id),
       toolAction: state.selectedToolAction
     });
-    setPromptValue("");
+    if (sent !== null && state.activeSessionId === sessionId && elements.prompt.value.trim() === prompt) setPromptValue("");
   }
 
   function appendVoiceDictation(baseText, transcript) {
@@ -2234,7 +2436,14 @@
     renderContext();
   }
 
+  function ensureEditableContext() {
+    if (!state.isRunning && !state.isAiBusy && !state.pendingChatSend) return true;
+    showToast("Während des laufenden Auftrags kannst du mit Text umlenken. Werkzeuge, Workspace und Anhänge lassen sich danach ändern.", true);
+    return false;
+  }
+
   function selectToolAction(action, persist = true) {
+    if (persist && !ensureEditableContext()) return;
     const previous = state.selectedToolAction;
     const requested = normalizeToolAction(action);
     const persistentFallback = normalizeToolAction(state.persistentToolAction);
@@ -2313,6 +2522,52 @@
     return false;
   }
 
+  function contextProfileForSnapshot(payload) {
+    return JSON.stringify([payload.activeSessionId || "", payload.reasoningRole || "general",
+      payload.reasoningModelId || "", String(payload.codingWorkspacePath || "").toLocaleLowerCase()]);
+  }
+
+  function persistMeasuredContext() {
+    if (state.contextSource !== "measured" || !state.contextProfile) return;
+    try {
+      globalThis.localStorage.setItem(`go.assistant.context.v1:${state.contextProfile}`, JSON.stringify({
+        messageId: state.contextMeasurementMessageId,
+        used: state.contextUsed, limit: state.contextLimit, truncated: state.contextWasTruncated
+      }));
+    } catch { /* Optional display storage must never block navigation. */ }
+  }
+
+  function restoreSnapshotContext(payload) {
+    state.contextProfile = contextProfileForSnapshot(payload);
+    state.contextSource = payload.contextSource === "measured" ? "measured" : "estimated";
+    state.contextMeasurementMessageId = payload.contextMessageId || state.messages.at(-1)?.id || null;
+    state.contextUsed = Number.isFinite(payload.contextUsed) ? payload.contextUsed : 0;
+    state.contextLimit = Number.isFinite(payload.contextLimit) && payload.contextLimit > 0 ? payload.contextLimit : 8192;
+    state.contextWasTruncated = Boolean(payload.contextWasTruncated);
+    state.contextNotice = payload.contextNotice || null;
+    if (state.contextSource !== "measured") {
+      try {
+        const saved = JSON.parse(globalThis.localStorage.getItem(`go.assistant.context.v1:${state.contextProfile}`) || "null");
+        if (saved && saved.messageId === (state.messages.at(-1)?.id || null)
+          && Number.isFinite(saved.used) && saved.used >= 0 && Number.isFinite(saved.limit) && saved.limit > 0) {
+          state.contextUsed = saved.used;
+          // Snapshot estimates use the catalog maximum. The last measured run
+          // may have fitted a smaller native context, which remains authoritative.
+          state.contextLimit = saved.limit;
+          state.contextWasTruncated = Boolean(saved.truncated);
+          state.contextSource = "measured";
+          state.contextNotice = null;
+        }
+      } catch { /* Invalid optional state falls back to the host estimate. */ }
+    }
+    persistMeasuredContext();
+  }
+
+  function belongsToActiveSession(payload) {
+    const sessionId = payload?.sessionId || payload?.message?.sessionId;
+    return !sessionId || String(sessionId) === String(state.activeSessionId || "");
+  }
+
   function applySnapshot(payload) {
     const dialogWasOpen = !elements.overlay.hidden;
     const editorSelection = state.selectedWorkflowEditorId;
@@ -2326,6 +2581,7 @@
       && conversationMessagesDiffer(state.messages, nextMessages);
     if (sessionChanged && previousSessionId) persistSessionScrollPosition(previousSessionId);
     state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+    state.sessionGroups = Array.isArray(payload.sessionGroups) ? payload.sessionGroups : [];
     state.messages = nextMessages;
     state.conversationRevision = Number(payload.conversationRevision) || 0;
     state.conversationRefreshPending = false;
@@ -2340,14 +2596,15 @@
       resetTransientVoiceStateForSessionChange();
     }
     state.isRunning = Boolean(payload.isRunning);
+    state.isAiBusy = Boolean(payload.isAiBusy ?? payload.isRunning);
+    state.activeRunSessionId = payload.activeRunSessionId || (state.isRunning ? nextSessionId : null);
+    state.activeRunId = payload.activeRunId || null;
+    state.loadedFiles = payload.loadedFiles ?? null;
     state.model = payload.model || null;
     state.codingWorkspacePath = payload.codingWorkspacePath || null;
     state.codingToolStepsExpanded = Boolean(payload.codingToolStepsExpanded);
     if (payload.changesSummary) applyCodingChanges(payload.changesSummary);
-    if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
-    if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
-    state.contextWasTruncated = Boolean(payload.contextWasTruncated);
-    state.contextNotice = payload.contextNotice || null;
+    restoreSnapshotContext(payload);
     const serverToolAction = normalizeToolAction(payload.selectedToolAction);
     state.persistentToolAction = persistentToolActions.has(serverToolAction) ? serverToolAction : null;
     const activeOneShotTool = state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction);
@@ -2358,6 +2615,14 @@
     }
     state.runStatus = payload.runStatus || null;
     state.runDetail = payload.runDetail || null;
+    const runningMessage = state.isRunning && state.messages.findLast(message => message.role === "assistant"
+      && !isTerminalMessageStatus(message.status)
+      && (!payload.runMessageId || String(message.id) === String(payload.runMessageId)));
+    state.activeRunMessageId = runningMessage?.id || null;
+    globalThis.goRunSteering?.observeRun(state);
+    if (runningMessage) state.messageRunStatus.set(String(runningMessage.id), {
+      status: state.runStatus || "Denkt nach", detail: state.runDetail, model: state.model
+    });
     pruneTerminalMessageRunStatuses();
     state.liveCaption = payload.liveCaption || state.liveCaption;
     if (typeof payload.isSessionPaneOpen === "boolean") {
@@ -2478,7 +2743,7 @@
   }
 
   function handleHostMessage(event) {
-    const { type, payload } = event.detail;
+    const { type, payload, requestId } = event.detail;
     switch (type) {
       case "state.snapshot":
         applySnapshot(payload);
@@ -2493,6 +2758,12 @@
         applyCodingChanges(payload);
         break;
       case "chat.started":
+        if (state.pendingChatSend?.requestId === requestId) state.pendingChatSend = null;
+        state.isAiBusy = true;
+        state.activeRunSessionId = payload.sessionId || payload.message?.sessionId || state.activeSessionId;
+        state.activeRunId = payload.runId || null;
+        state.activeRunMessageId = payload.message?.id || null;
+        if (!belongsToActiveSession(payload)) { renderStatus(); break; }
         state.changesSummary = null;
         state.isRunning = true;
         state.pendingCaptureRequest = null;
@@ -2502,7 +2773,11 @@
           state.attachments = payload.attachments;
           renderContext();
         }
-        if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
+        if (Number.isFinite(payload.contextUsed)) {
+          state.contextUsed = payload.contextUsed;
+          state.contextSource = "measured";
+          state.contextMeasurementMessageId = payload.message?.id || state.messages.at(-1)?.id || null;
+        }
         if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
         if (payload.model) state.model = payload.model;
         state.contextWasTruncated = Boolean(payload.contextWasTruncated);
@@ -2514,6 +2789,7 @@
           detail: payload.runDetail || null,
           model: payload.model || state.model || null
         });
+        persistMeasuredContext();
         recordCodingActivity({ ...payload, messageId: payload.message?.id, runStatus: state.runStatus });
         renderMessages(true);
         renderSessions();
@@ -2524,15 +2800,44 @@
       case "chat.delta": {
         break;
       }
+      case "chat.steer.accepted": {
+        if (state.pendingChatSend?.requestId === requestId) {
+          state.pendingChatSend = null;
+          state.pendingCaptureRequest = null;
+          renderStatus();
+        }
+        const receipt = globalThis.goRunSteering?.accept(payload, state, elements.prompt.value);
+        if (receipt?.clearDraft) { setPromptValue(""); scheduleDraftSave(); flushDraft(); }
+        if (receipt?.sameSession) showToast("Umlenkung übernommen.");
+        renderStatus();
+        break;
+      }
       case "chat.completed":
       case "chat.cancelled":
       case "chat.failed":
+        if (state.pendingChatSend?.requestId === requestId) state.pendingChatSend = null;
+        globalThis.goRunSteering?.observeRun(state);
+        state.isAiBusy = false;
+        state.activeRunSessionId = null;
+        state.activeRunId = null;
+        state.activeRunMessageId = null;
+        if (!belongsToActiveSession(payload)) {
+          if (payload.session) {
+            const index = state.sessions.findIndex(session => session.id === payload.session.id);
+            if (index < 0) state.sessions.push(payload.session);
+            else state.sessions[index] = payload.session;
+          }
+          renderSessions();
+          renderStatus();
+          break;
+        }
         state.isRunning = false;
         state.pendingCaptureRequest = null;
         state.waitingForCapture = false;
         clearCompletedOneShotToolAction();
         state.runStatus = payload.runStatus || null;
         state.runDetail = payload.runDetail || null;
+        persistMeasuredContext();
         // A terminal chat event ends the only active model run. Clear every
         // transient per-message status so a previously rendered card cannot
         // retain (or regain) a stale "Denkt nach" indicator.
@@ -2564,6 +2869,15 @@
           }
         }, 1800);
         break;
+      case "session.grouped":
+        // A late grouping result only refreshes the sidebar. It must not replace
+        // the active session, its measured context, draft, messages or scroll position.
+        state.sessions = Array.isArray(payload.sessions) ? payload.sessions : state.sessions;
+        state.sessionGroups = Array.isArray(payload.sessionGroups) ? payload.sessionGroups : state.sessionGroups;
+        renderSessions();
+        renderSessionPin();
+        renderStatus();
+        break;
       case "session.changed":
       case "workflow.changed":
         applySnapshot(payload);
@@ -2585,22 +2899,27 @@
         renderContext();
         break;
       case "capture.required": {
+        if (state.pendingChatSend?.requestId === requestId) state.pendingChatSend = null;
         const action = String(payload?.action || "");
         if (!["audioAnalysis", "videoAnalysis", "imageAnalysis"].includes(action)) break;
         state.waitingForCapture = true;
         selectToolAction(action, false);
+        renderStatus();
         void beginMediaCapture(action);
         break;
       }
       case "capture.cancelled": {
+        if (state.pendingChatSend?.requestId === requestId) state.pendingChatSend = null;
         const action = String(payload?.action || "");
-        if (state.pendingCaptureRequest?.prompt) {
+        if (state.pendingCaptureRequest?.prompt && !elements.prompt.value.trim()
+          && String(state.pendingCaptureRequest.sessionId) === String(state.activeSessionId)) {
           setPromptValue(state.pendingCaptureRequest.prompt);
           scheduleDraftSave();
         }
         state.pendingCaptureRequest = null;
         state.waitingForCapture = false;
         if (state.selectedToolAction === action) selectToolAction(null, false);
+        renderStatus();
         break;
       }
       case "workflow.snapshot": {
@@ -2624,24 +2943,38 @@
           : null;
         const statusSessionMatches = !payload?.sessionId
           || String(payload.sessionId) === String(state.activeSessionId || "");
-        const acceptsRunStatus = !statusMessageId
-          || (state.isRunning
-            && statusSessionMatches
-            && !isTerminalMessageStatus(statusMessage?.status));
+        const acceptsRunStatus = statusSessionMatches && (!statusMessageId
+          || (state.isRunning && !isTerminalMessageStatus(statusMessage?.status)));
 
         if (acceptsRunStatus) {
+          if (payload.runId) {
+            state.activeRunId = payload.runId;
+            state.activeRunSessionId = state.activeSessionId;
+            if (payload.messageId) state.activeRunMessageId = payload.messageId;
+          }
+          globalThis.goRunSteering?.observeRun(state);
           recordCodingActivity(payload);
+          if (globalThis.goAgentTabs?.isChild(payload.toolStep)
+            || /^Subagent GPU1(?:\b|\s|·)/i.test(String(payload.runDetail || ""))) {
+            renderMessages(false);
+            break;
+          }
           // Reasoning packets update only their card. They must not alternate
           // with model progress or replace token details with an internal name.
-          if (payload.toolStep?.tool === "assistant.reasoning") {
+          if (["assistant.reasoning", "assistant.steering"].includes(payload.toolStep?.tool)) {
             renderMessages(false);
             break;
           }
           if (payload.model) state.model = payload.model;
-          if (Number.isFinite(payload.contextUsed)) state.contextUsed = payload.contextUsed;
+          if (Number.isFinite(payload.contextUsed)) {
+            state.contextUsed = payload.contextUsed;
+            state.contextSource = "measured";
+            state.contextMeasurementMessageId = statusMessageId || state.messages.at(-1)?.id || null;
+          }
           if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
           if (typeof payload.contextWasTruncated === "boolean") state.contextWasTruncated = payload.contextWasTruncated;
           if (Object.hasOwn(payload, "loadedFiles")) state.loadedFiles = payload.loadedFiles;
+          persistMeasuredContext();
           state.runStatus = payload.runStatus || state.runStatus;
           state.runDetail = payload.runDetail ?? state.runDetail;
           if (statusMessageId) state.messageRunStatus.set(statusMessageId, {
@@ -2821,6 +3154,22 @@
         }
         break;
       case "host.error":
+        if (state.pendingChatSend?.requestId === requestId) {
+          const pending = state.pendingChatSend;
+          state.pendingChatSend = null;
+          state.pendingCaptureRequest = null;
+          if (String(state.activeSessionId) === String(pending.sessionId) && !elements.prompt.value.trim()) {
+            setPromptValue(pending.prompt);
+            scheduleDraftSave();
+          }
+          renderStatus();
+          showToast(payload.message || "Der Auftrag konnte nicht gestartet werden. Deine Eingabe bleibt erhalten.", true);
+          break;
+        }
+        if (globalThis.goRunSteering?.ownsRequest(requestId, state)) {
+          showToast(payload.message || "Umlenken fehlgeschlagen. Der Text bleibt im Eingabefeld.", true);
+          break;
+        }
         state.artifactPreviewPending.clear();
         if (state.voiceStarting) {
           state.voiceStarting = false;
@@ -2846,6 +3195,19 @@
     }
   }
 
+  globalThis.goAgentTabs?.attach({
+    elements: { mainTab: byId("main-agent-tab"), subagentTab: byId("subagent-tab"),
+      mainPanel: elements.messageScroll, subagentPanel: byId("subagent-scroll"), subagentList: byId("subagent-list"),
+      composer: elements.composerRegion },
+    steps: mergeCodingToolSteps,
+    timeline: { get codingToolStepsExpanded() { return state.codingToolStepsExpanded; }, renderMarkdown: text => globalThis.goMarkdown.render(text),
+      enhanceCodeBlocks: enhanceCodingCodeBlocks, sanitizeText: sanitizeVisibleMessageContent,
+      onPreview: openCodingPreview, timeLabel },
+    saveMainScroll: persistSessionScrollPosition,
+    pauseMainScroll: () => chatScroll.restore(false),
+    restoreMainScroll: () => restoreSessionScrollPosition(state.activeSessionId),
+    renderMain: () => renderMessages(false)
+  });
   restoreSessionsCollapsed();
 
   elements.toggleSessions.addEventListener("click", () => {
@@ -2853,11 +3215,7 @@
     setSessionsCollapsed(collapsed, true);
     post("ui.sessionPane", { isOpen: !collapsed });
   });
-  elements.newSession.addEventListener("click", () => {
-    flushDraft();
-    post("session.create", {});
-    document.body.classList.remove("sessions-open");
-  });
+  elements.newSession.addEventListener("click", createWorkspaceProject);
   elements.clearSessions.addEventListener("click", () => {
     const hasUnpinnedSessions = state.sessions.some(session => !session.isPinned);
     if (hasUnpinnedSessions && globalThis.confirm(
@@ -2872,6 +3230,7 @@
 
   elements.prompt.addEventListener("input", () => {
     resizePrompt();
+    renderStatus();
     scheduleDraftSave();
   });
   elements.prompt.addEventListener("keydown", event => {
@@ -2880,18 +3239,17 @@
       submitPrompt();
     }
   });
-  elements.send.addEventListener("click", submitPrompt);
+  elements.send.addEventListener("click", handleComposerAction);
   elements.codingWorkspace.addEventListener("click", pickCodingWorkspace);
-  elements.stop.addEventListener("click", () => {
-    post("chat.cancel", {});
-  });
   elements.composerSpeechPause.addEventListener("click", () => {
     if (!elements.composerSpeechPause.disabled) post("microphone.toggleSpeechPause", {});
   });
   elements.composerSpeechStop.addEventListener("click", () => {
     if (!elements.composerSpeechStop.disabled) post("microphone.stopSpeech", {});
   });
-  byId("pick-document").addEventListener("click", () => post("document.pick", { sessionId: state.activeSessionId }));
+  byId("pick-document").addEventListener("click", () => {
+    if (ensureEditableContext()) post("document.pick", { sessionId: state.activeSessionId });
+  });
   elements.microphone.addEventListener("click", async () => {
     if (state.voiceStarting) return;
     const active = Boolean(globalThis.goVoiceCapture?.isActive || globalThis.goVoiceCapture?.isStarting);
@@ -2947,6 +3305,7 @@
     const visual = toolVisuals[option.dataset.toolAction];
     if (visual) option.prepend(createToolIcon(visual[1]));
     option.addEventListener("click", () => {
+      if (!ensureEditableContext()) return;
       const action = option.dataset.toolAction;
       const selecting = state.selectedToolAction !== action;
       selectToolAction(selecting ? action : null);
@@ -2961,6 +3320,7 @@
     const visual = toolVisuals[option.dataset.toolImmediate];
     if (visual) option.prepend(createToolIcon(visual[1]));
     option.addEventListener("click", () => {
+      if (!ensureEditableContext()) return;
       const action = option.dataset.toolImmediate;
       if (action === "screen.capture") post("screen.capture", { sessionId: state.activeSessionId });
       else if (action === "screenClip.toggle") post(state.screenClip?.isRecording ? "screenClip.stop" : "screenClip.start", { sessionId: state.activeSessionId });

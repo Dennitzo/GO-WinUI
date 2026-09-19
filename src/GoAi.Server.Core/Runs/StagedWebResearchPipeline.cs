@@ -988,7 +988,7 @@ internal sealed class StagedWebResearchPipeline
 
     private static bool IsRecoverableModelFailure(Exception exception, CancellationToken cancellationToken) =>
         !cancellationToken.IsCancellationRequested
-        && exception is not OutOfMemoryException;
+        && exception is not (OutOfMemoryException or RunSteeringBoundaryException);
 
     private static string NormalizeTask(string task)
     {

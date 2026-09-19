@@ -159,10 +159,12 @@ public static class RunEventTypes
     public const string CodingMetrics = "coding.metrics";
 }
 
-public sealed record TextDeltaEvent(string Delta, int? ReplaceFrom = null);
+public sealed record TextDeltaEvent(string Delta, int? ReplaceFrom = null, string? AgentId = null,
+    int Round = 0, string Phase = "main", string? State = null);
 
 /// <summary>Provider reasoning is separate from answer text. A new attempt replaces its round/phase at offset zero.</summary>
-public sealed record ReasoningDeltaEvent(string Delta, int Round, string Phase = "main", int? ReplaceFrom = null, string? State = null);
+public sealed record ReasoningDeltaEvent(string Delta, int Round, string Phase = "main", int? ReplaceFrom = null, string? State = null,
+    string? AgentId = null);
 
 public sealed record ModelSelectedEvent(string ModelId, string Role, bool IsFallback = false);
 
@@ -187,7 +189,8 @@ public sealed record ModelGenerationEvent(
     bool? ToolArgumentsJsonComplete = null,
     int? ContentCharacters = null,
     bool? FinishObserved = null,
-    int? ElapsedSeconds = null);
+    int? ElapsedSeconds = null,
+    int? CachedPromptTokens = null);
 
 /// <summary>Measured values only; unavailable provider counters remain null.</summary>
 public sealed record ModelTurnMetrics(

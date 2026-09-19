@@ -126,6 +126,7 @@ public sealed class CodingWorkingStateIntegrationTests
         }
         Assert.StartsWith(CodingEvidenceContext.Marker, first[^1].Content, StringComparison.Ordinal);
         Assert.NotEqual(first[^1].Content, next[^1].Content);
+        Assert.Same(first, RunProcessor.WithWorkingState(first, state with { NextStep = "Receipt already carries this update" }, alreadyIncluded: true));
     }
 
     [Fact]
@@ -514,7 +515,10 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.DoesNotContain(events, item => item.Type == RunEventTypes.TextDelta || item.Type == RunEventTypes.RunFailed);
         Assert.Contains(events, item => item.Type == RunEventTypes.ReasoningDelta
             && item.Data.GetProperty("delta").GetString() == NativeHandler.EmptyTurnReasoning);
-        Assert.DoesNotContain("REASONING_ONLY_NOT_AN_EXECUTABLE_CALL", harness.Handler.Requests[1].GetRawText(), StringComparison.Ordinal);
+        var retainedReasoning = Assert.Single(harness.Handler.Requests[1].GetProperty("messages").EnumerateArray(),
+            item => item.TryGetProperty("reasoning_content", out var value) && value.GetString() == NativeHandler.EmptyTurnReasoning);
+        Assert.Equal(string.Empty, retainedReasoning.GetProperty("content").GetString());
+        Assert.False(retainedReasoning.TryGetProperty("tool_calls", out _));
     }
 
     [Theory]
@@ -534,7 +538,13 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal(3, checkpoint.RoundCount);
         Assert.Equal(192, checkpoint.InputTokens);
         Assert.Equal(24, checkpoint.OutputTokens);
-        Assert.DoesNotContain(checkpoint.Messages, item => item.Role == "assistant" && string.IsNullOrWhiteSpace(item.Content));
+        var reasoningOnlyMessages = checkpoint.Messages.Where(item => item.Role == "assistant" && string.IsNullOrWhiteSpace(item.Content)).ToArray();
+        Assert.Equal(reasoning ? 3 : 0, reasoningOnlyMessages.Length);
+        Assert.All(reasoningOnlyMessages, item =>
+        {
+            Assert.Equal(NativeHandler.EmptyTurnReasoning, item.ReasoningContent);
+            Assert.Null(item.ToolCalls);
+        });
         Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0),
             item => item.Type == RunEventTypes.TextDelta || item.Type == RunEventTypes.ClientToolProposed);
     }
@@ -719,10 +729,17 @@ public sealed class CodingWorkingStateIntegrationTests
         var request = Request() with { SessionId = "session-continuity", CodingOptions = new(WorkspacePath: "C:/project", ContinueSessionContext: true) };
         var first = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         var call = new LmToolCall("prior-read", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }));
+        var priorState = CodingWorkingState.Create("Original task") with
+        {
+            Sequence = 224,
+            Evidence = Enumerable.Range(0, 224).Select(i => new CodingToolEvidence("historic-" + i,
+                "coding.read", true, "source.cs", null, null, new string('x', 1600), i)).ToArray(),
+            Facts = [new("Confirmed project architecture", ["historic-1"])],
+        };
         await harness.Repository.SaveCheckpointAsync(first, new(
             [new("system", "Old policy"), new("user", "Original task"), new("assistant", null, ToolCalls: [call]),
              new("tool", "FULL_PREVIOUS_FILE_CONTENT", ToolCallId: call.Id), new("assistant", "Previous conclusion")],
-            8, 4, 100, 20, WorkingState: CodingWorkingState.Create("Original task")));
+            8, 4, 100, 20, WorkingState: priorState));
         if (terminal == "Completed") await harness.Repository.FinalizeConversationAsync(first, new(null, "qwen", 100, 20));
         else await harness.Repository.UpdateStateAsync(first, RunState.Cancelled);
         await harness.Repository.DeleteCheckpointAsync(first);
@@ -734,6 +751,9 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Contains(checkpoint.Messages, m => m.Role == "tool" && m.Content == "FULL_PREVIOUS_FILE_CONTENT");
         Assert.Contains(checkpoint.Messages, m => m.Content == "Previous conclusion");
         Assert.Equal(1, checkpoint.RoundCount);
+        Assert.Equal(0, checkpoint.CompactionCount);
+        Assert.Equal("Confirmed project architecture", Assert.Single(checkpoint.WorkingState!.Facts).Text);
+        Assert.Equal(224, checkpoint.WorkingState.Evidence.Count);
         var proposals = (await harness.Repository.GetEventsAfterAsync(next, 0)).Where(e => e.Type == RunEventTypes.ClientToolProposed);
         Assert.Single(proposals);
         Assert.DoesNotContain(checkpoint.Messages, m => m.Role == "system" && m.Content == "Old policy");
@@ -750,9 +770,97 @@ public sealed class CodingWorkingStateIntegrationTests
         // Reopen the repository to exercise durable storage, not an in-memory cache.
         var reopened = new RunRepository(harness.Context.Database, harness.Notifier);
         var retained = (await reopened.GetSessionContextAsync(third, request))!;
+        Assert.True(retained.PreserveSessionPromptPrefix);
+        var lastNative = harness.Handler.Requests.Last().GetProperty("messages");
+        Assert.Equal(lastNative.GetArrayLength() + 1, retained.Messages.Count);
+        Assert.Equal(lastNative.EnumerateArray().Select(m => m.GetProperty("content").GetString()),
+            retained.Messages.SkipLast(1).Select(m => m.Content ?? string.Empty));
         Assert.Contains(retained.Messages, m => m.Content == "Verified result.");
         Assert.Contains(retained.Messages, m => m.Content == "FULL_PREVIOUS_FILE_CONTENT");
         Assert.Contains(retained.Messages, m => m.Role == "tool" && m.Content!.Contains("NEW_READ_CONTENT", StringComparison.Ordinal));
+        await harness.TickAsync(third);
+        var continuedNative = harness.Handler.Requests.Last().GetProperty("messages");
+        // The actual HTTP prompt, including tool definitions/messages and internal
+        // hints, keeps the entire previous input as a prefix after repository reopen.
+        Assert.Equal(lastNative.EnumerateArray().Select(m => m.GetRawText()),
+            continuedNative.EnumerateArray().Take(lastNative.GetArrayLength()).Select(m => m.GetRawText()));
+    }
+
+    [Fact]
+    public async Task ToolRoundsAndFollowUpKeepExactNativePrefixAcrossClientWaits()
+    {
+        using var harness = new Harness();
+        var request = Request("Read, edit and verify source.cs.") with
+        {
+            SessionId = "native-tool-prefix",
+            CodingOptions = new(WorkspacePath: "C:/project", ContinueSessionContext: true),
+        };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        harness.Handler.EmitReasoning = true;
+        harness.Handler.CompletionOverride = (ordinal, _) => Task.FromResult(ordinal switch
+        {
+            1 => harness.Handler.ReadResponse("read-source"),
+            2 => harness.Handler.EditResponse("edit-source", new string('x', 4096)),
+            _ => harness.Handler.CompleteResponse(),
+        });
+
+        await harness.TickAsync(run);
+        var waitingForRead = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.True(waitingForRead.PreserveSessionPromptPrefix);
+        Assert.True(waitingForRead.WorkingStatePromptIncluded);
+        Assert.Equal("Prüfplan für diesen Modellturn.", waitingForRead.Messages[^1].ReasoningContent);
+        await harness.Repository.SaveClientToolResultAsync(run, new(waitingForRead.PendingProposalId!, "completed",
+            JsonSerializer.SerializeToElement(new { path = "source.cs", content = new string('x', 4096), sha256 = new string('a', 64) })));
+
+        // Each Tick constructs the processor's local state again from its checkpoint.
+        await harness.TickAsync(run);
+        var waitingForEdit = (await harness.Repository.GetCheckpointAsync(run))!;
+        AssertNativePrefix(harness.Handler.Requests[0], harness.Handler.Requests[1]);
+        Assert.Equal(1, CountWorkingStates(harness.Handler.Requests[1]));
+        var replayedRead = harness.Handler.Requests[1].GetProperty("messages").EnumerateArray()
+            .Single(message => message.TryGetProperty("tool_calls", out var calls)
+                && calls[0].GetProperty("id").GetString() == "read-source");
+        Assert.Equal("Prüfplan für diesen Modellturn.", replayedRead.GetProperty("reasoning_content").GetString());
+        Assert.Single(waitingForEdit.WorkingState!.Evidence);
+        await harness.Repository.SaveClientToolResultAsync(run, new(waitingForEdit.PendingProposalId!, "completed",
+            JsonSerializer.SerializeToElement(new { path = "source.cs", sha256 = new string('b', 64), written = true })));
+
+        await harness.TickAsync(run);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+        AssertNativePrefix(harness.Handler.Requests[1], harness.Handler.Requests[2]);
+        Assert.Equal(1, CountWorkingStates(harness.Handler.Requests[2]));
+        var replayedEdit = harness.Handler.Requests[2].GetProperty("messages").EnumerateArray()
+            .Single(message => message.TryGetProperty("tool_calls", out var calls)
+                && calls[0].GetProperty("id").GetString() == "edit-source");
+        using var editArguments = JsonDocument.Parse(replayedEdit.GetProperty("tool_calls")[0]
+            .GetProperty("function").GetProperty("arguments").GetString()!);
+        Assert.Equal(new string('x', 4096), editArguments.RootElement.GetProperty("oldText").GetString());
+        Assert.False(editArguments.RootElement.TryGetProperty("_goCompletedArguments", out _));
+        Assert.Equal("Prüfplan für diesen Modellturn.", replayedEdit.GetProperty("reasoning_content").GetString());
+
+        var next = (await harness.Repository.CreateAsync(request with
+        {
+            Messages = [new("user", [new("text", "Which file did you just change?")])],
+        }, null)).Snapshot.RunId;
+        var persisted = (await new RunRepository(harness.Context.Database, harness.Notifier).GetSessionContextAsync(next, request))!;
+        Assert.Equal(2, persisted.WorkingState!.Evidence.Count);
+        await harness.TickAsync(next);
+        AssertNativePrefix(harness.Handler.Requests[2], harness.Handler.Requests[3]);
+        Assert.Equal(2, CountWorkingStates(harness.Handler.Requests[3]));
+        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0), item =>
+            item.Type == RunEventTypes.ContextChanged && item.Data.GetProperty("wasCompacted").GetBoolean());
+
+        static int CountWorkingStates(JsonElement request) => request.GetProperty("messages").EnumerateArray()
+            .Count(message => message.TryGetProperty("content", out var content)
+                && content.GetString()?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) == true);
+
+        static void AssertNativePrefix(JsonElement previous, JsonElement next)
+        {
+            var prefix = previous.GetProperty("messages");
+            Assert.Equal(prefix.EnumerateArray().Select(message => message.GetRawText()),
+                next.GetProperty("messages").EnumerateArray().Take(prefix.GetArrayLength()).Select(message => message.GetRawText()));
+            Assert.Equal(previous.GetProperty("tools").GetRawText(), next.GetProperty("tools").GetRawText());
+        }
     }
 
     private sealed class Harness : IDisposable
@@ -818,6 +926,7 @@ public sealed class CodingWorkingStateIntegrationTests
                 return Json(new { data = new[] { new { id = ModelId, tags = Tags, status = new { value = "loaded" } } } });
             }
             if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });
+            if (path is "/sessions/prepare" or "/sessions/save") return Json(new { success = true });
             if (path == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 64 });
             if (path != "/v1/chat/completions") throw new InvalidOperationException("Unexpected endpoint " + path);
             var concurrent = Interlocked.Increment(ref _concurrent);
@@ -861,6 +970,14 @@ public sealed class CodingWorkingStateIntegrationTests
             {
                 name = ModelRuntimeClient.ToTransportToolName("coding.read"),
                 arguments = JsonSerializer.Serialize(new { path = "source.cs" }),
+            },
+        });
+        internal HttpResponseMessage EditResponse(string id, string oldText) => Answer(null, new
+        {
+            id, type = "function", function = new
+            {
+                name = ModelRuntimeClient.ToTransportToolName("coding.edit"),
+                arguments = JsonSerializer.Serialize(new { path = "source.cs", expectedSha256 = new string('a', 64), oldText, newText = "replacement" }),
             },
         });
         internal static HttpResponseMessage EmptyResponse(bool reasoning, bool streaming = false)

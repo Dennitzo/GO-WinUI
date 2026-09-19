@@ -19,6 +19,225 @@ public sealed class ModelRuntimeClientTests
     private static readonly string[] RequiredOperation = ["operation"];
 
     [Fact]
+    public async Task SessionCacheIsPreparedBeforeInferenceAndSavedBeforeReleasingTurn()
+    {
+        var handler = new NativeRuntimeHandler();
+        using var client = CreateClient(new HttpClient(handler));
+        await client.CompleteChatAsync("gpt-oss-120b", [new LmChatMessage("user", "Hallo")], [], sessionCacheKey: "session/workspace");
+        Assert.True(handler.RequestPaths.IndexOf("/sessions/prepare") < handler.RequestPaths.IndexOf("/v1/chat/completions"));
+        Assert.True(handler.RequestPaths.IndexOf("/sessions/save") > handler.RequestPaths.IndexOf("/v1/chat/completions"));
+        Assert.Equal("session/workspace", handler.CacheBodies[0].GetProperty("sessionKey").GetString());
+        Assert.Equal("session/workspace", handler.CacheBodies[1].GetProperty("sessionKey").GetString());
+        await client.CompleteChatAsync("gpt-oss-120b", [new LmChatMessage("user", "Nebenaufgabe")], []);
+        Assert.Equal(JsonValueKind.Null, handler.CacheBodies[^1].GetProperty("sessionKey").ValueKind);
+    }
+
+    [Fact]
+    public async Task BareLegacyRouterDoesNotRequireSessionPersistenceForStatelessTurns()
+    {
+        var handler = new NativeRuntimeHandler();
+        using var client = CreateClient(new HttpClient(handler));
+        await client.CompleteChatAsync("gpt-oss-120b", [new LmChatMessage("user", "Nebenaufgabe")], []);
+        Assert.Empty(handler.CacheBodies);
+    }
+
+    [Fact]
+    public async Task RestartedClientPreservesTheWorkersResidentSessionBeforeItsFirstStatelessPrompt()
+    {
+        // The HTTP handler represents one surviving supervisor/router. Its
+        // resident slot outlives both independent ModelRuntimeClient instances.
+        string? resident = null;
+        string? slot = null;
+        var snapshots = new Dictionary<string, string>();
+        var beforeGeneration = new List<string?>();
+        NativeRuntimeHandler? handler = null;
+        handler = new NativeRuntimeHandler
+        {
+            ManagedGpuRuntime = true,
+            OnCacheRequest = (path, _) =>
+            {
+                var key = handler!.CacheBodies[^1].GetProperty("sessionKey").GetString();
+                if (path == "/sessions/prepare" && key != resident)
+                {
+                    if (resident is not null && slot is not null) snapshots[resident] = slot;
+                    resident = key;
+                    if (key is not null && snapshots.TryGetValue(key, out var restored)) slot = restored;
+                }
+                else if (path == "/sessions/save" && resident is not null && slot is not null)
+                    snapshots[resident] = slot;
+                return Task.CompletedTask;
+            },
+            OnChatRequest = body => { beforeGeneration.Add(slot); slot = body; },
+        };
+        using (var first = CreateClient(new HttpClient(handler, disposeHandler: false)))
+            await first.CompleteChatAsync("gpt-oss-120b", [new("user", "Sitzung A: unveränderter Kontext")], [], sessionCacheKey: "session-A");
+        var original = Assert.Single(handler.ChatBodies);
+        using (var restarted = CreateClient(new HttpClient(handler, disposeHandler: false)))
+        {
+            await restarted.CompleteChatAsync("gpt-oss-120b", [new("user", "Unabhängige Hilfszusammenfassung")], []);
+            Assert.Null(resident);
+            Assert.Equal(original, snapshots["session-A"]);
+            await restarted.CompleteChatAsync("gpt-oss-120b", [new("user", "Sitzung A: Fortsetzung")], [], sessionCacheKey: "session-A");
+        }
+        Assert.Equal(original, beforeGeneration[2]);
+        Assert.Equal(JsonValueKind.Null, handler.CacheBodies[2].GetProperty("sessionKey").ValueKind);
+        handler.Dispose();
+    }
+
+    [Fact]
+    public async Task ManagedLegacySupervisorWithoutSessionEndpointStillAllowsFirstStatelessTurn()
+    {
+        var handler = new NativeRuntimeHandler
+        {
+            ManagedGpuRuntime = true,
+            OnCacheRequest = (_, _) => throw new HttpRequestException("Legacy supervisor has no session API", null, HttpStatusCode.NotFound),
+        };
+        using var client = CreateClient(new HttpClient(handler));
+
+        var response = await client.CompleteChatAsync("gpt-oss-120b", [new("user", "Stateless Frage")], []);
+
+        Assert.NotNull(response.Content);
+        Assert.Single(handler.CacheBodies);
+        Assert.Equal(JsonValueKind.Null, handler.CacheBodies[0].GetProperty("sessionKey").ValueKind);
+        Assert.Equal(1, handler.ChatAttempts);
+    }
+
+    [Fact]
+    public async Task SessionCacheProgrammingErrorsAreNeverTreatedAsLegacyCompatibility()
+    {
+        var handler = new NativeRuntimeHandler
+        {
+            ManagedGpuRuntime = true,
+            OnCacheRequest = (_, _) => throw new InvalidOperationException("Unexpected fake endpoint or programming error"),
+        };
+        using var client = CreateClient(new HttpClient(handler));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.CompleteChatAsync("gpt-oss-120b", [new("user", "Frage")], []));
+        Assert.Equal(0, handler.ChatAttempts);
+    }
+
+    [Fact]
+    public async Task UnsupportedLegacySessionEndpointFallsBackToCompleteConversation()
+    {
+        var handler = new NativeRuntimeHandler
+        {
+            OnCacheRequest = (_, _) => throw new HttpRequestException("Legacy runtime has no session API", null, HttpStatusCode.NotFound),
+        };
+        using var client = CreateClient(new HttpClient(handler));
+        var response = await client.CompleteChatAsync("gpt-oss-120b",
+            [new LmChatMessage("user", "Erste Frage"), new LmChatMessage("assistant", "Erste Antwort"), new LmChatMessage("user", "Folgefrage")],
+            [], sessionCacheKey: "persisted-session");
+        Assert.NotNull(response.Content);
+        Assert.Contains("Erste Antwort", Assert.Single(handler.ChatBodies));
+        Assert.Equal(1, handler.ChatAttempts);
+    }
+
+    [Fact]
+    public async Task CancelledTurnDoesNotStartSessionCacheOperation()
+    {
+        var handler = new NativeRuntimeHandler();
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        Assert.Equal(Timeout.InfiniteTimeSpan, http.Timeout);
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.CompleteChatAsync(
+            "gpt-oss-120b", [new LmChatMessage("user", "Abgebrochen")], [],
+            sessionCacheKey: "session/workspace", cancellationToken: cancellation.Token));
+        Assert.Empty(handler.RequestPaths);
+    }
+
+    [Theory]
+    [InlineData("prepare")]
+    [InlineData("save")]
+    public async Task CancellationWaitsForDispatchedCacheOperationBeforeReleasingModelTurn(string operation)
+    {
+        var entered = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var intercepted = 0;
+        var handler = new NativeRuntimeHandler
+        {
+            OnCacheRequest = async (path, token) =>
+            {
+                if (path == "/sessions/" + operation && Interlocked.Increment(ref intercepted) == 1)
+                {
+                    entered.SetResult(token);
+                    await release.Task.WaitAsync(token);
+                }
+            },
+        };
+        using var client = CreateClient(new HttpClient(handler));
+        using var cancellation = new CancellationTokenSource();
+        var first = client.CompleteChatAsync("gpt-oss-120b", [new LmChatMessage("user", "Erster Auftrag")], [],
+            sessionCacheKey: "session/workspace", cancellationToken: cancellation.Token);
+        var controlToken = await entered.Task;
+        await cancellation.CancelAsync();
+        Assert.False(controlToken.IsCancellationRequested);
+        Assert.False(first.IsCompleted);
+        var pathsBeforeSecond = handler.RequestPaths.Count;
+        var second = client.CompleteChatAsync("gpt-oss-120b", [new LmChatMessage("user", "Neuer Auftrag")], []);
+        Assert.False(second.IsCompleted);
+        Assert.Equal(pathsBeforeSecond, handler.RequestPaths.Count);
+        release.SetResult();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await first);
+        await second;
+        Assert.Equal(operation == "save" ? 2 : 1, handler.ChatAttempts);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("Prüfung")]
+    public async Task ToolHistoryNeverSendsNullTextToNativeParser(string? reasoning)
+    {
+        var handler = new NativeRuntimeHandler();
+        using var client = CreateClient(new HttpClient(handler));
+        await client.CompleteChatAsync("gpt-oss-120b",
+            [new LmChatMessage("user", "Prüfe die Datei"),
+             new LmChatMessage("assistant", null,
+                 [new LmToolCall("call-test", "fs.readText", JsonSerializer.SerializeToElement(new { path = "README.md" }))],
+                 ReasoningContent: reasoning),
+             new LmChatMessage("tool", "Dateiinhalt", ToolCallId: "call-test"),
+             new LmChatMessage("user", "Weiter")],
+            [], modelRole: "general");
+        using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
+        var assistant = body.RootElement.GetProperty("messages").EnumerateArray()
+            .Single(message => message.TryGetProperty("tool_calls", out _));
+        Assert.Equal("", assistant.GetProperty("content").GetString());
+        Assert.Equal(reasoning ?? "", assistant.GetProperty("reasoning_content").GetString());
+    }
+
+    [Theory]
+    [InlineData(NativeGeneralId, "general")]
+    [InlineData(NativeGeneralId, "coding")]
+    [InlineData(NativeQwenId, "general")]
+    [InlineData(NativeQwenId, "coding")]
+    [InlineData(NativeCoderId, "coding")]
+    public async Task GermanReasoningInstructionAndCacheFlagReachEveryTextModelRole(string model, string role)
+    {
+        var handler = new NativeRuntimeHandler();
+        using var client = CreateClient(new HttpClient(handler));
+        await client.CompleteChatAsync(model, [new LmChatMessage("user", "Explain this English source code.")], [], modelRole: role);
+        using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
+        var messages = body.RootElement.GetProperty("messages").EnumerateArray().ToArray();
+        Assert.Equal("system", messages[0].GetProperty("role").GetString());
+        Assert.Contains("Deutsch", messages[0].GetProperty("content").GetString());
+        Assert.Contains("ausschließlich auf Deutsch", messages[^1].GetProperty("content").GetString());
+        Assert.Contains(messages, message => message.GetProperty("content").GetString() == "Explain this English source code.");
+        Assert.True(body.RootElement.GetProperty("cache_prompt").GetBoolean());
+    }
+
+    [Fact]
+    public void GermanLanguagePreparationIsIdempotentAndPreservesHistoricalReasoningExactly()
+    {
+        var messages = new LmChatMessage[] { new("system", "Aktuelle Policy"), new("user", "Hello"),
+            new("assistant", "Done", ReasoningContent: "Original historical reasoning."), new("user", "Weiter") };
+        var first = ModelRuntimeClient.PrepareLanguageBoundMessages(messages);
+        var repeated = ModelRuntimeClient.PrepareLanguageBoundMessages(first);
+        Assert.Equal(first, repeated);
+        Assert.Equal("Original historical reasoning.", repeated.Single(message => message.Role == "assistant").ReasoningContent);
+        Assert.Single(repeated, ModelRuntimeClient.IsLanguageReminder);
+    }
+
+    [Fact]
     public async Task InstalledNativeRuntimeCatalogIsMappedToGoRoles()
     {
         var handler = new NativeRuntimeHandler();
@@ -36,6 +255,16 @@ public sealed class ModelRuntimeClientTests
             model.Id == NativeGeneralId
             && model.Role == "general"
             && model.Loaded);
+    }
+
+    [Fact]
+    public async Task ModelSwitchWaitsForActualUnloadBeforeRequestingNewGpuPlacement()
+    {
+        var handler = new NativeRuntimeHandler { DelayedUnloadPolls = 3 };
+        using var client = CreateClient(new HttpClient(handler));
+        await client.CompleteChatAsync(NativeQwenId, [new LmChatMessage("user", "Modell wechseln")], []);
+        Assert.Equal(3, handler.CatalogReadsWhileUnloading);
+        Assert.Equal(new[] { "unload:" + NativeGeneralId, "load:" + NativeQwenId }, handler.ModelOperations);
     }
 
     [Fact]
@@ -332,7 +561,8 @@ public sealed class ModelRuntimeClientTests
         var messages = body.RootElement.GetProperty("messages");
         Assert.Equal(4, messages.GetArrayLength());
         Assert.Equal("system", messages[0].GetProperty("role").GetString());
-        Assert.EndsWith("Policy\n\nRepositorykarte", messages[0].GetProperty("content").GetString());
+        Assert.EndsWith("Policy\n\nRepositorykarte\n\n" + ModelRuntimeClient.DirectUserInstructionPolicy,
+            messages[0].GetProperty("content").GetString());
         Assert.Equal("user", messages[1].GetProperty("role").GetString());
         Assert.Equal("Bearbeite den Auftrag.", messages[1].GetProperty("content").GetString());
         Assert.Equal("user", messages[2].GetProperty("role").GetString());
@@ -458,6 +688,7 @@ public sealed class ModelRuntimeClientTests
 
         Assert.Equal("Fertig", result.Content);
         Assert.True(result.HadReasoning);
+        Assert.Equal(NativeRuntimeHandler.ReasoningText, result.ReasoningContent);
         Assert.Equal(NativeRuntimeHandler.ReasoningText,
             string.Concat(progress.Select(item => item.ReasoningDelta)));
         Assert.All(progress.Where(item => item.ReasoningDelta is not null), item => Assert.Null(item.ContentDelta));
@@ -737,12 +968,19 @@ public sealed class ModelRuntimeClientTests
     {
         internal const string ReasoningText = "## Plan\n\n1. Datei prüfen.\n2. `änderung` anwenden.\n\nAbschließend testen.";
         private string? _loadedKey = NativeGeneralId;
+        private int _remainingUnloadPolls;
 
         public List<string> ChatBodies { get; } = [];
         public List<string> ModelOperations { get; } = [];
         public List<string> RequestPaths { get; } = [];
+        public List<JsonElement> CacheBodies { get; } = [];
         public int ChatAttempts { get; private set; }
         public int TokenCountingAttempts { get; private set; }
+        public Func<string, CancellationToken, Task>? OnCacheRequest { get; init; }
+        public Action<string>? OnChatRequest { get; init; }
+        public bool ManagedGpuRuntime { get; init; }
+        public int DelayedUnloadPolls { get; init; }
+        public int CatalogReadsWhileUnloading { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -750,6 +988,12 @@ public sealed class ModelRuntimeClientTests
         {
             var path = request.RequestUri?.AbsolutePath ?? string.Empty;
             RequestPaths.Add(path);
+            if (path.StartsWith("/sessions/", StringComparison.Ordinal))
+            {
+                CacheBodies.Add(JsonSerializer.Deserialize<JsonElement>(await request.Content!.ReadAsStringAsync(cancellationToken)));
+                if (OnCacheRequest is not null) await OnCacheRequest(path, cancellationToken);
+                return Json("{\"status\":\"resident\"}");
+            }
             if (path == "/props") return Json("{\"default_generation_settings\":{\"n_ctx\":32768}}");
             if (path == "/v1/chat/completions/input_tokens")
             {
@@ -760,6 +1004,11 @@ public sealed class ModelRuntimeClientTests
             }
             if (request.Method == HttpMethod.Get && path == "/v1/models")
             {
+                if (_remainingUnloadPolls > 0)
+                {
+                    CatalogReadsWhileUnloading++;
+                    if (--_remainingUnloadPolls == 0) _loadedKey = null;
+                }
                 return Json(JsonSerializer.Serialize(new
                 {
                     data = new object[]
@@ -781,11 +1030,14 @@ public sealed class ModelRuntimeClientTests
                 using var operation = JsonDocument.Parse(body);
                 var instance = operation.RootElement.GetProperty("model").GetString();
                 ModelOperations.Add("unload:" + instance);
-                _loadedKey = null;
+                _remainingUnloadPolls = DelayedUnloadPolls;
+                if (_remainingUnloadPolls == 0) _loadedKey = null;
                 return Json("{\"success\":true}");
             }
             if (request.Method == HttpMethod.Post && path == "/models/load")
             {
+                if (_remainingUnloadPolls > 0)
+                    return new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("Unload the previous model before selecting GPU placement") };
                 using var operation = JsonDocument.Parse(body);
                 var requestedModel = operation.RootElement.GetProperty("model").GetString();
                 _loadedKey = requestedModel;
@@ -806,6 +1058,7 @@ public sealed class ModelRuntimeClientTests
                 {
                     throw new HttpRequestException("transient");
                 }
+                OnChatRequest?.Invoke(body);
                 ChatBodies.Add(body);
                 if (streamingReasoning)
                 {
@@ -892,7 +1145,8 @@ public sealed class ModelRuntimeClientTests
                 "qwen3-vl-30b-a3b-instruct" => "vision/qwen3-vl-30b-a3b-instruct~test",
                 _ => "coding/" + key + "~test",
             };
-            return new { id, status = new { value = _loadedKey == id ? "loaded" : "unloaded" } };
+            return new { id, status = new { value = _loadedKey == id ? "loaded" : "unloaded" },
+                tags = ManagedGpuRuntime ? new[] { "go-gpu-policy:single-preferred-v1" } : Array.Empty<string>() };
         }
 
         private static HttpResponseMessage Json(string json) => new(HttpStatusCode.OK)

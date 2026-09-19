@@ -6,6 +6,49 @@ namespace GoWinUI.Tests;
 public sealed class ModelTokenProgressTests
 {
     [Fact]
+    public void NativePromptProgressSeparatesCachedPrefixFromNewlyEvaluatedTokens()
+    {
+        var counter = new GoAiAssistantService.ModelTokenProgressState();
+        var first = GoAiAssistantService.FormatModelTokenProgress(new("promptProcessing",
+            PromptProgress: 0.94, PromptTokens: 9_262, ProcessedPromptTokens: 8_746,
+            CachedPromptTokens: 8_622), counter);
+
+        Assert.Contains($"{8_622:N0} Token wiederverwendet", first);
+        Assert.Contains("124 neu verarbeitet", first);
+        Assert.DoesNotContain("Kontext wird verarbeitet", first);
+        Assert.Equal(8_746, counter.ActiveTokens);
+        var waiting = GoAiAssistantService.FormatModelTokenProgress(new("codingWaiting",
+            Attempt: 1, ElapsedSeconds: 2), counter);
+        Assert.Contains($"{8_622:N0} Kontexttoken wiederverwendet · 124 neu verarbeitet", waiting);
+
+        // The final usage frame is authoritative; generation keeps the known cache split.
+        var final = GoAiAssistantService.FormatModelTokenProgress(new("tokenProgress",
+            PromptTokens: 9_262, ProcessedPromptTokens: 9_262, GeneratedTokens: 51,
+            CurrentTokens: 9_313, CachedPromptTokens: 8_622), counter);
+        Assert.Equal($"{8_622:N0} Kontexttoken wiederverwendet · 640 neu verarbeitet · ca. 51 erzeugte Token", final);
+        Assert.Equal(9_313, counter.ActiveTokens);
+
+        _ = GoAiAssistantService.FormatModelTokenProgress(new("generationStarted"), counter);
+        Assert.Null(counter.CachedPromptTokens);
+    }
+
+    [Fact]
+    public void UnknownNativeCacheCountDoesNotClaimThatWholePromptWasReprocessed()
+    {
+        var counter = new GoAiAssistantService.ModelTokenProgressState();
+        var detail = GoAiAssistantService.FormatModelTokenProgress(new("promptProcessing",
+            PromptTokens: 9_262, ProcessedPromptTokens: 8_746), counter);
+        Assert.Equal($"Kontext bereit · {8_746:N0} Token", detail);
+        Assert.Null(counter.CachedPromptTokens);
+        Assert.DoesNotContain("neu verarbeitet", detail);
+
+        var cold = GoAiAssistantService.FormatModelTokenProgress(new("promptProcessing",
+            PromptTokens: 9_262, ProcessedPromptTokens: 8_746, CachedPromptTokens: 0), counter);
+        Assert.Contains("0 Token wiederverwendet", cold);
+        Assert.Contains($"{8_746:N0} neu verarbeitet", cold);
+    }
+
+    [Fact]
     public void EmptyResponseRecoveryIsExplainedWithoutRestartingTheCodingPrompt()
     {
         var counter = new GoAiAssistantService.ModelTokenProgressState();

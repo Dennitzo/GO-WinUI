@@ -1,0 +1,14 @@
+[2026-09-18 21:25:14.556] [00007700] === Logging started ===
+[2026-09-18 21:25:14.561] [00007700] Executing: "C:\Program Files\dotnet\dotnet.exe" build "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Plugin\GoWinUI.BricsCad.Plugin.csproj" --configuration Release --no-restore --nologo, PID: 30464, PPID: 33392
+[2026-09-18 21:25:14.563] [00007700] IsElevated: False
+[2026-09-18 21:25:14.563] [00007700] Is64BitProcess: True
+[2026-09-18 21:25:14.563] [00007700] RebootPending: False
+[2026-09-18 21:25:14.563] [00007700] ProcessorArchitecture: amd64
+[2026-09-18 21:25:14.563] [00007700] HostArchitecture: x64
+[2026-09-18 21:25:14.563] [00007700] SdkDirectory: 10.0.302
+[2026-09-18 21:25:14.563] [00007700] VerifySignatures: False
+[2026-09-18 21:25:14.563] [00007700] SDK feature band: 10.0.300
+[2026-09-18 21:25:15.440] [00007700] Shutting down
+[2026-09-18 21:25:15.440] [00007700] Shutdown completed.
+[2026-09-18 21:25:15.440] [00007700] Restart required: False
+[2026-09-18 21:25:15.440] [00007700] === Logging ended ===

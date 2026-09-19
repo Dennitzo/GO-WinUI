@@ -9,6 +9,7 @@ public sealed partial class GoAiAssistantService
     {
         var supportsOptions = server.ServerTools.Contains("coding.updatePlan", StringComparer.Ordinal);
         List<string> capabilities = ["coding"];
+        if (server.SupportsIsolatedSubagents) capabilities.Add("coding-isolated-subagents");
         if (supportsOptions && server.ClientTools.Contains(ClientToolNames.CodingReadOutput, StringComparer.Ordinal)
             && server.ClientTools.Contains(ClientToolNames.CodingSearchRunEvidence, StringComparer.Ordinal)) capabilities.Add("coding.evidence");
         return (capabilities, supportsOptions ? new CodingRunOptions(UseWorkingState: true, ReasoningPolicy: "maximum",

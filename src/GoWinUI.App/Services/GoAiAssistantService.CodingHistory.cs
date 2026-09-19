@@ -13,7 +13,7 @@ public sealed partial class GoAiAssistantService
     internal static IReadOnlyList<RunMessage> BuildCodingHistoryMessages(IReadOnlyList<ChatMessage> history, int budget)
     {
         var selected = new Stack<RunMessage>();
-        foreach (var message in history.Reverse())
+        foreach (var message in ExpandSteeringHistory(history).Reverse())
         {
             if (budget <= 0 || selected.Count >= 499) break;
             if (message.Role is not (ChatRole.User or ChatRole.Assistant)
@@ -55,7 +55,7 @@ public sealed partial class GoAiAssistantService
         if (!string.IsNullOrWhiteSpace(message.Error)) text.AppendLine(message.Error);
         foreach (var step in message.ToolSteps ?? [])
         {
-            if (step.Tool == ReasoningStepTool) continue;
+            if (step.Tool is ReasoningStepTool or "assistant.progress" or "assistant.narration") continue;
             text.AppendLine(CultureInfo.InvariantCulture, $"{step.Tool} | {step.Status} | {step.Id}");
             text.AppendLine("Eingabe: " + step.InputJson);
             text.AppendLine("Ergebnis: " + (step.OutputJson ?? step.Detail));
@@ -75,7 +75,7 @@ public sealed partial class GoAiAssistantService
             text.AppendLine("Gespeicherte Zusammenfassung: " + ClipCodingHistory(message.ContextSummary, 4_000));
         text.AppendLine(ClipCodingHistory(message.Content, 20_000));
         if (!string.IsNullOrWhiteSpace(message.Error)) text.AppendLine("Abbruchgrund: " + ClipCodingHistory(message.Error, 1_000));
-        var steps = (message.ToolSteps ?? []).Where(step => step.Tool != ReasoningStepTool).ToArray();
+        var steps = (message.ToolSteps ?? []).Where(step => step.Tool is not (ReasoningStepTool or "assistant.progress" or "assistant.narration")).ToArray();
         // Prefer committed edits, commands and failures over repeated broad directory reads.
         var candidates = steps.Select((step, index) => (step, index))
             .OrderBy(item => item.step.Tool is "coding.write" or "coding.edit" or "coding.command" or "coding.updatePlan"

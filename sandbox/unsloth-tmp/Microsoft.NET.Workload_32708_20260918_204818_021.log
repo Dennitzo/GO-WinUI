@@ -1,0 +1,14 @@
+[2026-09-18 20:48:18.023] [00007FC4] === Logging started ===
+[2026-09-18 20:48:18.029] [00007FC4] Executing: "C:\Program Files\dotnet\dotnet.exe" test tests/GoWinUI.Tests/GoWinUI.Tests.csproj --no-build, PID: 32708, PPID: 29784
+[2026-09-18 20:48:18.032] [00007FC4] IsElevated: False
+[2026-09-18 20:48:18.032] [00007FC4] Is64BitProcess: True
+[2026-09-18 20:48:18.032] [00007FC4] RebootPending: False
+[2026-09-18 20:48:18.032] [00007FC4] ProcessorArchitecture: amd64
+[2026-09-18 20:48:18.032] [00007FC4] HostArchitecture: x64
+[2026-09-18 20:48:18.032] [00007FC4] SdkDirectory: 10.0.302
+[2026-09-18 20:48:18.032] [00007FC4] VerifySignatures: False
+[2026-09-18 20:48:18.032] [00007FC4] SDK feature band: 10.0.300
+[2026-09-18 20:49:05.571] [00007FC4] Shutting down
+[2026-09-18 20:49:05.571] [00007FC4] Shutdown completed.
+[2026-09-18 20:49:05.571] [00007FC4] Restart required: False
+[2026-09-18 20:49:05.571] [00007FC4] === Logging ended ===

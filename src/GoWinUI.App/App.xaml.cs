@@ -89,7 +89,24 @@ public partial class App : Application
                 services.AddSingleton<ShellViewModel>();
                 services.AddSingleton<RecentActivityService>();
                 services.AddSingleton<ProjectAssetActivityService>();
-                services.AddSingleton<AssistantCoordinator>();
+                services.AddSingleton<AssistantCoordinator>(static provider =>
+                {
+                    var goAi = provider.GetRequiredService<GoAiAssistantService>();
+                    var microphone = provider.GetRequiredService<MicrophoneTranscriptionService>();
+                    return new AssistantCoordinator(
+                        provider.GetRequiredService<IChatRepository>(),
+                        provider.GetRequiredService<IWorkflowRepository>(),
+                        provider.GetRequiredService<IDocumentIngestor>(),
+                        provider.GetRequiredService<IContextAssembler>(),
+                        provider.GetRequiredService<IPromptTriggerRepository>(),
+                        provider.GetRequiredService<IAssistantAttachmentRepository>(),
+                        provider.GetRequiredService<IChatArtifactRepository>(),
+                        provider.GetRequiredService<IConversationSnapshotRepository>(),
+                        goAi,
+                        provider.GetRequiredService<SettingsCoordinator>(),
+                        provider.GetRequiredService<RecentActivityService>(),
+                        microphone);
+                });
                 services.AddSingleton<ProjectsViewModel>();
                 services.AddSingleton<LogsViewModel>();
                 services.AddSingleton<SettingsViewModel>();
@@ -314,6 +331,9 @@ public partial class App : Application
             // Readiness may legitimately be degraded because one optional
             // model is still downloading. Capabilities is authenticated and
             // therefore proves that this client can use the gateway.
+            // Observe both parallel requests even when the gateway goes offline;
+            // otherwise the second fault escapes as UnobservedTaskException.
+            await Task.WhenAll(healthTask, capabilitiesTask).ConfigureAwait(false);
             var health = await healthTask.ConfigureAwait(false);
             var capabilities = await capabilitiesTask.ConfigureAwait(false);
             GetService<ModelCapabilityRegistry>().Update(capabilities);
@@ -332,12 +352,13 @@ public partial class App : Application
             using var diagnosticCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             diagnosticCancellation.CancelAfter(AiDiagnosticProbeTimeout);
             var diagnosticToken = diagnosticCancellation.Token;
-            var gpuTask = client.GetGpuStatusAsync(diagnosticToken);
-            var modelTask = client.GetModelStatusAsync(diagnosticToken);
-            var serviceTask = client.GetServiceStatusAsync(diagnosticToken);
-            gpuStatus = await AwaitOptionalStatusAsync(gpuTask, cancellationToken).ConfigureAwait(false);
-            modelStatus = await AwaitOptionalStatusAsync(modelTask, cancellationToken).ConfigureAwait(false);
-            serviceStatus = await AwaitOptionalStatusAsync(serviceTask, cancellationToken).ConfigureAwait(false);
+            var gpuTask = AwaitOptionalStatusAsync(client.GetGpuStatusAsync(diagnosticToken), cancellationToken);
+            var modelTask = AwaitOptionalStatusAsync(client.GetModelStatusAsync(diagnosticToken), cancellationToken);
+            var serviceTask = AwaitOptionalStatusAsync(client.GetServiceStatusAsync(diagnosticToken), cancellationToken);
+            await Task.WhenAll(gpuTask, modelTask, serviceTask).ConfigureAwait(false);
+            gpuStatus = await gpuTask.ConfigureAwait(false);
+            modelStatus = await modelTask.ConfigureAwait(false);
+            serviceStatus = await serviceTask.ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

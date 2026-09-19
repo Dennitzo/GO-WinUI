@@ -144,6 +144,17 @@ public sealed class GoAiDatabase : IDisposable
         );
         CREATE INDEX IF NOT EXISTS ix_run_events_run_id_id ON run_events(run_id, id);
         CREATE INDEX IF NOT EXISTS ix_run_events_proposal ON run_events(run_id, event_type, json_extract(data_json, '$.proposalId'));
+        CREATE TABLE IF NOT EXISTS run_steering_inputs (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            input_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            applied_at TEXT NULL,
+            UNIQUE(run_id, input_id)
+        );
+        CREATE INDEX IF NOT EXISTS ix_run_steering_pending ON run_steering_inputs(run_id, applied_at, sequence);
         CREATE TABLE IF NOT EXISTS client_tool_results (
             proposal_id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,

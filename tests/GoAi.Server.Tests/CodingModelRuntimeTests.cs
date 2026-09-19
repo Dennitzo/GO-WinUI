@@ -29,7 +29,10 @@ public sealed class CodingModelRuntimeTests
 
         Assert.Equal("workspace.read", Assert.Single(result.ToolCalls).Name);
         Assert.Equal("README.md", result.ToolCalls[0].Arguments.GetProperty("path").GetString());
-        Assert.Contains(progress, value => value.State == "promptProcessing" && value.ProcessedPromptTokens == 8 && value.PromptProgress == 0.5);
+        Assert.Contains(progress, value => value.State == "promptProcessing" && value.ProcessedPromptTokens == 8 && value.PromptProgress == 0.5 && value.CachedPromptTokens == 6);
+        Assert.Equal(6, result.Metrics!.CachedPromptTokens);
+        Assert.Null(result.Metrics.PromptEvaluatedTokens);
+        Assert.Contains(progress, value => value.State == "tokenProgress" && value.CachedPromptTokens == 6 && value.ProcessedPromptTokens == 16);
         Assert.Equal(1, handler.Loads);
         Assert.All(handler.Hosts, host => Assert.Equal("coding.test", host));
         using var request = JsonDocument.Parse(handler.ChatBody!);
@@ -89,6 +92,7 @@ public sealed class CodingModelRuntimeTests
             Hosts.Add(request.RequestUri!.Host);
             if (unavailable) { throw new HttpRequestException("Offline"); }
             if (request.RequestUri.AbsolutePath == "/props") return Json(new { default_generation_settings = new { n_ctx = 32_768 } });
+            if (request.RequestUri.AbsolutePath is "/sessions/prepare" or "/sessions/save") return Json(new { success = true });
             if (request.RequestUri.AbsolutePath == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 16 });
             if (request.RequestUri.AbsolutePath == "/v1/models")
             {
@@ -106,7 +110,7 @@ public sealed class CodingModelRuntimeTests
                 ChatBody = await request.Content!.ReadAsStringAsync(cancellationToken);
                 var toolName = ModelRuntimeClient.ToTransportToolName("workspace.read");
                 var frames = new[] {
-                    JsonSerializer.Serialize(new { prompt_progress = new { total = 16, processed = 8 }, choices = Array.Empty<object>() }),
+                    JsonSerializer.Serialize(new { prompt_progress = new { total = 16, cache = 6, processed = 8 }, choices = Array.Empty<object>() }),
                     JsonSerializer.Serialize(new { choices = new[] { new { index = 0, delta = new { tool_calls = new[] { new { index = 0, id = "call_1", type = "function", function = new { name = toolName, arguments = "{\"path\":\"README.md\"}" } } } }, finish_reason = "tool_calls" } } }),
                     "[DONE]" };
                 return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(string.Join("\n\n", frames.Select(frame => "data: " + frame)) + "\n\n", Encoding.UTF8, "text/event-stream") };

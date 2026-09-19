@@ -17,7 +17,11 @@ public sealed record ToolProposal(
     JsonElement Arguments,
     ToolRiskClass RiskClass,
     string Summary,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    CodingExecutionScope? ExecutionScope = null);
+
+/// <summary>Server-assigned delegation scope; never supplied by model tool arguments.</summary>
+public sealed record CodingExecutionScope(string AgentId, string[] WritePaths, bool IsolatedWorkspace = true);
 
 public sealed record ClientToolResult(
     string ProposalId,

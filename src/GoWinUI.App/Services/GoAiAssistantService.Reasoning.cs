@@ -38,14 +38,15 @@ public sealed partial class GoAiAssistantService
             if (char.IsHighSurrogate(text[end - 1])) end--;
             text = text[..end] + marker;
         }
-        var status = update.State is "completed" or "failed" or "cancelled" or "interrupted"
-            ? update.State : "running";
+        var status = update.State == "steered" ? "interrupted"
+            : update.State is "completed" or "failed" or "cancelled" or "interrupted" ? update.State : "running";
         return new AssistantToolStep(id, ReasoningStepTool, status, text,
             InputJson: JsonSerializer.Serialize(new { round = update.Round, phase = update.Phase }, JsonOptions),
-            OutputJson: JsonSerializer.Serialize(new { lastEventId = eventId }, JsonOptions),
+            OutputJson: JsonSerializer.Serialize(new { lastEventId = eventId, state = update.State }, JsonOptions),
             ContentOffset: previous?.ContentOffset ?? contentOffset,
             StartedAt: previous?.StartedAt ?? now,
             CompletedAt: status == "running" ? null : now,
-            UpdatedAt: now);
+            UpdatedAt: now,
+            AgentId: update.AgentId ?? previous?.AgentId);
     }
 }

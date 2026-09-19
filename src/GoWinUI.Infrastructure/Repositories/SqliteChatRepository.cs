@@ -14,7 +14,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path
+            SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path,session_group_id
             FROM chat_sessions
             WHERE $search='' OR rowid IN (SELECT rowid FROM session_search WHERE session_search MATCH $fts)
             ORDER BY is_pinned DESC, updated_at DESC;
@@ -35,7 +35,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path FROM chat_sessions WHERE id=$id;";
+        command.CommandText = "SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path,session_group_id FROM chat_sessions WHERE id=$id;";
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSession(reader) : null;
@@ -68,6 +68,17 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
     public Task SaveDraftAsync(Guid id, string draft, CancellationToken cancellationToken = default) =>
         UpdateSessionAsync(id, "draft=$value", draft ?? string.Empty, cancellationToken);
 
+    public Task ClearDraftIfMatchesAsync(Guid id, string expectedDraft, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE chat_sessions SET draft='' WHERE id=$id AND draft=$expected;";
+            command.Parameters.AddWithValue("$id", id.ToString("D"));
+            command.Parameters.AddWithValue("$expected", expectedDraft);
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
     public Task SelectWorkflowAsync(Guid id, Guid? workflowId, CancellationToken cancellationToken = default) =>
         UpdateSessionAsync(id, "selected_workflow_id=$value", workflowId?.ToString("D"), cancellationToken);
 
@@ -83,7 +94,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             {
                 throw new ArgumentException("Der Coding-Projektordner muss ein absoluter Pfad sein.", nameof(path));
             }
-            normalized = Path.GetFullPath(normalized);
+            normalized = SqliteDatabase.NormalizeWorkspaceProjectPath(normalized);
         }
         if (activateCoding && normalized is null)
             throw new ArgumentException("Zum Aktivieren von Coding ist ein Projektordner erforderlich.", nameof(path));
@@ -105,6 +116,15 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             var changed = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
             if (activateCoding && changed != 1)
                 throw new InvalidOperationException("Die ausgewählte Coding-Sitzung wurde nicht gefunden.");
+            if (changed == 1 && normalized is not null)
+            {
+                var group = await GetOrCreateWorkspaceGroupAsync(connection, transaction, normalized, token).ConfigureAwait(false);
+                command.Parameters.Clear();
+                command.CommandText = "UPDATE chat_sessions SET session_group_id=$group WHERE id=$id;";
+                command.Parameters.AddWithValue("$id", id.ToString("D"));
+                command.Parameters.AddWithValue("$group", group.Id.ToString("D"));
+                await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            }
         }, cancellationToken);
     }
 
@@ -377,6 +397,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             || toolStep.InputJson?.Length > AssistantToolStep.MaximumStructuredJsonCharacters
             || toolStep.OutputJson?.Length > AssistantToolStep.MaximumStructuredJsonCharacters
             || toolStep.Explanation?.Length > AssistantToolStep.MaximumExplanationCharacters || toolStep.ContentOffset < 0
+            || toolStep.AgentId?.Length > 128
             || toolStep.Status is not ("running" or "completed" or "failed" or "denied" or "cancelled" or "interrupted"))
             throw new ArgumentException("Ungültiger oder zu großer Werkzeugschritt.", nameof(toolStep));
         foreach (var json in new[] { toolStep.InputJson, toolStep.OutputJson }.Where(static value => value is not null))
@@ -696,7 +717,8 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         reader.IsDBNull(7) ? null : reader.ReadDate(7),
         reader.IsDBNull(8) ? null : reader.GetString(8) == "code" ? PersistentToolAction.Coding : reader.ReadEnum<PersistentToolAction>(8),
         reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-        reader.IsDBNull(10) ? null : reader.GetString(10));
+        reader.IsDBNull(10) ? null : reader.GetString(10),
+        reader.IsDBNull(11) ? null : reader.ReadGuid(11));
 
     internal static ChatMessage ReadMessage(SqliteDataReader reader) => new(
         reader.ReadGuid(0), reader.ReadGuid(1), reader.ReadEnum<ChatRole>(2), reader.GetString(3),
@@ -708,4 +730,106 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         reader.IsDBNull(14) ? MessageContentProfile.General : reader.ReadEnum<MessageContentProfile>(14),
         reader.IsDBNull(15) ? 1 : reader.GetInt64(15),
         reader.FieldCount < 17 || reader.IsDBNull(16) ? [] : JsonSerializer.Deserialize<AssistantToolStep[]>(reader.GetString(16), JsonSerializerOptions.Web) ?? []);
+
+    public async Task<IReadOnlyList<ChatSessionGroup>> ListSessionGroupsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id,name,is_collapsed,created_at,workspace_path FROM chat_session_groups ORDER BY created_at DESC;";
+        var result = new List<ChatSessionGroup>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            result.Add(new ChatSessionGroup(
+                reader.ReadGuid(0),
+                reader.GetString(1),
+                !reader.IsDBNull(2) && reader.GetInt32(2) != 0,
+                reader.ReadDate(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4)));
+        }
+        return result;
+    }
+
+    public Task<ChatSessionGroup> GetOrCreateSessionGroupForWorkspaceAsync(string workspacePath, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(workspacePath);
+        var normalized = SqliteDatabase.NormalizeWorkspaceProjectPath(workspacePath)
+            ?? throw new ArgumentException("Der Projektordner muss ein absoluter Pfad sein.", nameof(workspacePath));
+        return database.WriteAsync((connection, transaction, token) =>
+            GetOrCreateWorkspaceGroupAsync(connection, transaction, normalized, token), cancellationToken);
+    }
+
+    private static async Task<ChatSessionGroup> GetOrCreateWorkspaceGroupAsync(
+        SqliteConnection connection, SqliteTransaction transaction, string normalized, CancellationToken token)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        // SQLite NOCASE covers ASCII only; Windows project names also include
+        // characters such as ü/Ü. Use the same path comparison as migration 36.
+        command.CommandText = "SELECT id,name,is_collapsed,created_at,workspace_path FROM chat_session_groups WHERE workspace_path IS NOT NULL;";
+        await using (var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
+                if (string.Equals(reader.GetString(4), normalized, StringComparison.OrdinalIgnoreCase))
+                    return new ChatSessionGroup(reader.ReadGuid(0), reader.GetString(1), reader.GetBoolean(2), reader.ReadDate(3), reader.GetString(4));
+        }
+        var now = DateTimeOffset.UtcNow;
+        var group = new ChatSessionGroup(Guid.NewGuid(), SqliteDatabase.WorkspaceProjectName(normalized), false, now, normalized);
+        command.Parameters.Clear();
+        command.CommandText = "INSERT INTO chat_session_groups(id,name,workspace_path,is_collapsed,created_at) VALUES($id,$name,$path,0,$now);";
+        command.Parameters.AddWithValue("$id", group.Id.ToString("D"));
+        command.Parameters.AddWithValue("$name", group.Name);
+        command.Parameters.AddWithValue("$path", normalized);
+        command.Parameters.AddWithValue("$now", now.ToDb());
+        await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        return group;
+    }
+
+    public Task ApplySessionGroupingAsync(IReadOnlyList<SessionGroupAssignment> groups, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            ArgumentNullException.ThrowIfNull(groups);
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            var now = DateTimeOffset.UtcNow;
+            foreach (var group in groups)
+            {
+                if (group.SessionIds is null || group.SessionIds.Count == 0) continue;
+                var name = group.Name?.Trim() ?? string.Empty;
+                if (name.Length == 0 || name.Length > 120)
+                    throw new ArgumentException("Ungültiger Gruppenname.");
+                command.CommandText = "INSERT INTO chat_session_groups(id,name,is_collapsed,created_at) VALUES($id,$name,0,$now) ON CONFLICT(id) DO UPDATE SET name=excluded.name;";
+                command.Parameters.Clear();
+                var id = group.Id is null ? Guid.NewGuid().ToString("D") : group.Id.Value.ToString("D");
+                command.Parameters.AddWithValue("$id", id);
+                command.Parameters.AddWithValue("$name", name);
+                command.Parameters.AddWithValue("$now", now.ToDb());
+                await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+                command.CommandText = "UPDATE chat_sessions SET session_group_id=$group WHERE id=$id;";
+                command.Parameters.Clear();
+                command.Parameters.AddWithValue("$group", id);
+                var sessionParameter = command.Parameters.Add("$id", SqliteType.Text);
+                foreach (var sessionId in group.SessionIds.Distinct())
+                {
+                    sessionParameter.Value = sessionId.ToString("D");
+                    await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+                }
+            }
+            // Grouping is an incremental assignment operation. Unmentioned and
+            // concurrently-created sessions retain their current group.
+            command.CommandText = "DELETE FROM chat_session_groups WHERE workspace_path IS NULL AND NOT EXISTS (SELECT 1 FROM chat_sessions WHERE session_group_id=chat_session_groups.id);";
+            command.Parameters.Clear();
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
+    public Task SetSessionGroupCollapsedAsync(Guid groupId, bool collapsed, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE chat_session_groups SET is_collapsed=$collapsed WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", groupId.ToString("D"));
+            command.Parameters.AddWithValue("$collapsed", collapsed ? 1 : 0);
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
 }

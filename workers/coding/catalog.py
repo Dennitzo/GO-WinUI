@@ -22,6 +22,7 @@ import time
 import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from session_cache import NativeSessionCache
 
 SHARD = re.compile(r"^(.*)-([0-9]{5})-of-([0-9]{5})\.gguf$", re.IGNORECASE)
 NON_TEXT = re.compile(r"(?:^|[-_./])(?:mmproj|ggml-vocab|embedding|embed|asr|whisper|clip|vae|diffusion)(?:[-_./]|$)", re.IGNORECASE)
@@ -88,7 +89,10 @@ def model_metadata(path, allow_metadata_only=False):
             kind = struct.unpack("<I", read_exact(stream, 4))[0]
             if key in ("general.architecture", "general.type", "general.name", "tokenizer.chat_template") and kind == 8:
                 metadata[key] = read_string(stream)
-            elif (key.endswith(".context_length") or key.endswith(".pooling_type")) and kind == 4:
+            elif key.endswith((".context_length", ".pooling_type", ".block_count", ".embedding_length",
+                               ".attention.head_count", ".attention.head_count_kv", ".attention.key_length",
+                               ".attention.value_length", ".ssm.state_size", ".ssm.inner_size",
+                               ".ssm.group_count", ".ssm.conv_kernel")) and kind == 4:
                 metadata[key] = struct.unpack("<I", read_exact(stream, 4))[0]
             else:
                 skip_value(stream, kind)
@@ -233,7 +237,11 @@ def discover(root):
 
 
 def german_reasoning_template(template):
-    """Localize recognized instructions without adding synthetic model output."""
+    """Localize known instructions and prime thinking with a language heading.
+
+    The heading is native assistant prefill, not a fabricated reasoning sentence.
+    llama returns the prefill in reasoning_content; history must retain it once.
+    """
     marker = "{%- if add_generation_prompt %}"
     position = template.rfind(marker)
     thinking = "{{- '<think>\\n' }}"
@@ -250,6 +258,17 @@ def german_reasoning_template(template):
     }
     for original, translated in translations.items():
         localized = localized.replace("'" + original + "'", "'" + translated + " " + instruction + "'")
+    # System/reminder instructions alone do not reliably change Qwen's learned
+    # English thinking language. A neutral German heading primes the actual
+    # native continuation without inventing any analysis or modifying GGUFs.
+    heading = "Überlegung auf Deutsch:\\n"
+    history_thinking = "'\\n<think>\\n' + reasoning_content"
+    if history_thinking in template:
+        localized = localized.replace(thinking, "{{- '<think>\\n" + heading + "' }}")
+        # The native parser returns this prefill with reasoning_content. The
+        # original history formatter already reproduces it. Adding it here
+        # would duplicate it and invalidate the KV prefix; empty reasoning
+        # (thinking disabled) likewise keeps the original empty think block.
     return localized if localized != template else None
 
 
@@ -260,7 +279,10 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
         for role, source in zip(("main", "secondary"), pair):
             if source in by_id:
                 models.append(dict(by_id[source], id=source + "~" + role, instance=role, baseModel=source))
+    session_directory = Path(target).resolve().parent / "session-cache"
+    session_directory.mkdir(parents=True, exist_ok=True)
     lines = ["version = 1", "", "[*]", "load-on-startup = false", "stop-timeout = 10", "sleep-idle-seconds = -1",
+             f"slot-save-path = {session_directory.as_posix()}/",
              "fit = on", f"fit-target = {fit_target}", "fit-ctx = 4096", f"n-gpu-layers = {gpu_layers}", ""]
     for model in models:
         model_id, path = model["id"], model["path"]
@@ -388,14 +410,87 @@ def choose_single_gpu(model, devices, reserve_mib=2048):
     return candidates[0]["device"] if candidates else None
 
 
+def estimate_q8_session_bytes(metadata, tokens):
+    """Conservative q8_0 KV estimate for standard/GQA Qwen and Llama models.
+
+    Count every layer as attention, including hybrid layers, so this remains an
+    upper estimate without guessing an architecture's recurrent-layer mask.
+    Unknown/variable dimensions use the cache manager's explicit fallback.
+    """
+    architecture = metadata.get("general.architecture", "")
+    if architecture != "llama" and not architecture.startswith("qwen"):
+        return None
+    def number(suffix):
+        value = metadata.get(architecture + "." + suffix)
+        return value if isinstance(value, int) and value > 0 else None
+    layers = number("block_count")
+    heads = number("attention.head_count")
+    embedding = number("embedding_length")
+    kv_heads = number("attention.head_count_kv") or heads
+    inferred = embedding // heads if embedding and heads and embedding % heads == 0 else None
+    key = number("attention.key_length") or inferred
+    value = number("attention.value_length") or key
+    if not all((layers, kv_heads, key, value)):
+        return None
+    # GGML q8_0 stores 32 values and a 2-byte scale in each 34-byte block.
+    per_token = layers * (((key * kv_heads + 31) // 32) * 34 + ((value * kv_heads + 31) // 32) * 34)
+    recurrent = 0
+    if number("ssm.state_size") and number("ssm.inner_size"):
+        state, inner = number("ssm.state_size"), number("ssm.inner_size")
+        convolution = max(0, (number("ssm.conv_kernel") or 1) - 1) * (inner + 2 * (number("ssm.group_count") or 1) * state)
+        recurrent = layers * (state * inner + convolution) * 4 * 2
+    return int((tokens * (per_token + 24) + recurrent) * 1.1) + 16 * 1024**2
+
+
 class GpuLoadManager:
     """Only changes presets while their model is unloaded; never on live refresh."""
-    def __init__(self, root, preset, state, port, fit_target="2048", gpu_layers="auto"):
+    def __init__(self, root, preset, state, port, fit_target="2048", gpu_layers="auto", binary=None):
         self.root, self.preset, self.state, self.port = root, preset, state, port
         self.fit_target, self.gpu_layers = fit_target, gpu_layers
         self.placements = {}
         self.pair = None
         self.lock = threading.RLock()
+        self.binary = Path(binary) if binary else None
+        self.sessions = NativeSessionCache(Path(state) / "session-cache", self.router, self.session_fingerprint,
+                                           estimate_bytes=self.session_size_estimate)
+
+    def session_model(self, model_id):
+        # This lookup is read-only: fingerprint checks do not rewrite/reload
+        # active presets on each inference round.
+        base_id = model_id
+        for role, source in zip(("main", "secondary"), self.pair or ()):
+            if model_id == source + "~" + role:
+                base_id = source
+                break
+        model = next((item for item in discover_models(self.root) if item["id"] == base_id), None)
+        if model is None:
+            raise ValueError("Model is not in the local catalog")
+        return model
+
+    def session_size_estimate(self, model_id, tokens):
+        metadata = model_metadata(Path(self.session_model(model_id)["path"]), allow_metadata_only=True) or {}
+        return estimate_q8_session_bytes(metadata, tokens)
+
+    def session_fingerprint(self, model_id):
+        model = self.session_model(model_id)
+        path = Path(model["path"])
+        shard = SHARD.match(path.name)
+        paths = sorted(path.parent.glob(shard.group(1) + "-*.gguf")) if shard else [path]
+        if self.binary:
+            paths += [self.binary] + sorted(self.binary.parent.glob("*.dll"))
+        identity = [(str(item.resolve()), item.stat().st_size, item.stat().st_mtime_ns) for item in paths]
+        metadata = model_metadata(path, allow_metadata_only=True) or {}
+        return dict(version=1, files=identity, context=model["context"], cache="q8_0",
+                    template=german_reasoning_template(metadata.get("tokenizer.chat_template", "")),
+                    placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers)
+
+    def session_prepare(self, model, key):
+        with self.lock:
+            return self.sessions.prepare(model, key)
+
+    def session_save(self, model, key):
+        with self.lock:
+            return self.sessions.save(model, key)
 
     def refresh(self):
         with self.lock:
@@ -436,11 +531,11 @@ class GpuLoadManager:
                 raise
             return dict(response, success=True, reused=False)
 
-    def router(self, path, body=None):
+    def router(self, path, body=None, timeout=15):
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/{path}",
                   data=json.dumps(body).encode() if body is not None else None,
                   headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
 
     def record(self, model, device, outcome, detail=None):
@@ -463,6 +558,7 @@ class GpuLoadManager:
                 raise ValueError("Unload the previous model before selecting GPU placement")
             if any(item["id"] == model_id for item in active):
                 return {"success": True, "reused": True}
+            self.sessions.invalidate(model_id)
             device = self.placements[model_id] if pair_aliases else choose_single_gpu(model, gpu_inventory(), self.fit_target)
             deadline = time.monotonic() + 280
             for attempt in range(2):
@@ -509,11 +605,15 @@ def start_gpu_control(manager, host, port):
         def do_POST(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if self.path not in ("/models/load", "/models/configure-pair") or not 0 < length <= 2048:
+                if self.path not in ("/models/load", "/models/configure-pair", "/sessions/prepare", "/sessions/save") or not 0 < length <= 8192:
                     raise ValueError("Invalid GPU control request")
                 body = json.loads(self.rfile.read(length))
-                result = (manager.configure_pair(body["mainModel"], body.get("secondaryModel"))
-                          if self.path == "/models/configure-pair" else manager.load(body["model"]))
+                if self.path.startswith("/sessions/"):
+                    action = manager.session_prepare if self.path == "/sessions/prepare" else manager.session_save
+                    result = action(body["model"], body.get("sessionKey"))
+                else:
+                    result = (manager.configure_pair(body["mainModel"], body.get("secondaryModel"))
+                              if self.path == "/models/configure-pair" else manager.load(body["model"]))
                 status = 200
             except Exception as error:
                 result, status = {"error": str(error)}, 500
@@ -579,7 +679,7 @@ def main():
     preset = state_directory / "models.ini"
     stop_file = state_directory / "stop.requested"
     stop_file.unlink(missing_ok=True)
-    gpu_manager = GpuLoadManager(root, preset, state_directory, args.port, args.fit_target, args.gpu_layers)
+    gpu_manager = GpuLoadManager(root, preset, state_directory, args.port, args.fit_target, args.gpu_layers, binary=binary)
     gpu_manager.refresh()
     control = start_gpu_control(gpu_manager, args.host, args.port + 1)
     stopped = threading.Event()
@@ -612,6 +712,8 @@ def main():
     def stop(*_):
         stopped.set()
         if process.poll() is None:
+            with gpu_manager.lock:
+                gpu_manager.sessions.save_all()
             process.terminate()
 
     signal.signal(signal.SIGTERM, stop)

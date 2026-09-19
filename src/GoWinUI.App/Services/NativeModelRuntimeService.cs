@@ -118,7 +118,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         // Use stable paths instead of the single-file extraction directory. The supervisor remains
         // identifiable for shutdown and across application updates.
         var supportDirectory = Path.Combine(stateDirectory, "support");
-        foreach (var relative in new[] { Path.Combine("windows", "manage-coding-llama.ps1"), Path.Combine("workers", "coding", "catalog.py") })
+        foreach (var relative in new[] { Path.Combine("windows", "manage-coding-llama.ps1"), Path.Combine("workers", "coding", "session_cache.py"), Path.Combine("workers", "coding", "catalog.py") })
         {
             var source = ApplicationAssets.ResolvePath("Assets", "NativeRuntime", relative);
             if (!File.Exists(source))
@@ -151,7 +151,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         using var process = new Process { StartInfo = info };
         if (!process.Start()) throw new InvalidOperationException("Der Starthelfer für Windows llama.cpp konnte nicht gestartet werden.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(45));
+        timeout.CancelAfter(TimeSpan.FromSeconds(action == "Stop" ? 660 : 45));
         try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
         catch (OperationCanceledException)
         {
@@ -159,7 +159,7 @@ public sealed class NativeModelRuntimeService : IDisposable
             // own process tree and is discovered on the next probe.
             if (!process.HasExited) process.Kill();
             if (cancellationToken.IsCancellationRequested) throw;
-            throw new InvalidOperationException($"Windows llama.cpp: Aktion {action} wurde nicht innerhalb von 45 Sekunden beendet. Diagnose: {Path.Combine(stateDirectory, "stderr.log")}");
+            throw new InvalidOperationException($"Windows llama.cpp: Aktion {action} hat das Zeitlimit überschritten. Diagnose: {Path.Combine(stateDirectory, "stderr.log")}");
         }
         if (process.ExitCode != 0)
         {

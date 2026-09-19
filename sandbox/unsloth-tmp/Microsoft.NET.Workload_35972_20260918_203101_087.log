@@ -1,0 +1,14 @@
+[2026-09-18 20:31:01.089] [00008C84] === Logging started ===
+[2026-09-18 20:31:01.095] [00008C84] Executing: "C:\Program Files\dotnet\dotnet.exe" test tests/GoWinUI.Tests/GoWinUI.Tests.csproj --no-build, PID: 35972, PPID: 39080
+[2026-09-18 20:31:01.096] [00008C84] IsElevated: False
+[2026-09-18 20:31:01.096] [00008C84] Is64BitProcess: True
+[2026-09-18 20:31:01.096] [00008C84] RebootPending: False
+[2026-09-18 20:31:01.096] [00008C84] ProcessorArchitecture: amd64
+[2026-09-18 20:31:01.096] [00008C84] HostArchitecture: x64
+[2026-09-18 20:31:01.096] [00008C84] SdkDirectory: 10.0.302
+[2026-09-18 20:31:01.096] [00008C84] VerifySignatures: False
+[2026-09-18 20:31:01.096] [00008C84] SDK feature band: 10.0.300
+[2026-09-18 20:31:47.186] [00008C84] Shutting down
+[2026-09-18 20:31:47.186] [00008C84] Shutdown completed.
+[2026-09-18 20:31:47.186] [00008C84] Restart required: False
+[2026-09-18 20:31:47.186] [00008C84] === Logging ended ===

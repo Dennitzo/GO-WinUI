@@ -1,11 +1,18 @@
 (function () {
   "use strict";
-  const names = { auto: "Automatisch", none: "Aus", on: "Ein", minimal: "Minimal", low: "Niedrig", medium: "Mittel", high: "Hoch", xhigh: "Sehr hoch", max: "Maximum", ultra: "Ultra" };
+  const names = { none: "Aus", on: "Ein", minimal: "Minimal", low: "Niedrig", medium: "Mittel", high: "Hoch", xhigh: "Sehr hoch", max: "Maximum", ultra: "Ultra" };
+  const normalized = value => typeof value === "string" ? value.trim().toLowerCase() : "";
   function options(profile) {
-    const levels = [...new Set((profile?.levels || []).filter(value => typeof value === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(value) && value !== "auto"))];
-    return ["auto", ...levels].map(value => ({ value, label: names[value] || value }));
+    const levels = [...new Set((Array.isArray(profile?.levels) ? profile.levels : []).map(normalized)
+      .filter(value => /^[a-z][a-z0-9_-]{0,31}$/.test(value) && value !== "auto"))];
+    return levels.map(value => ({ value, label: names[value] || value }));
   }
-  if (typeof module === "object") module.exports = { options };
+  function selection(profile, choices = options(profile)) {
+    const supported = value => choices.some(option => option.value === value);
+    const preferred = normalized(profile?.selected), modelDefault = normalized(profile?.defaultLevel);
+    return supported(preferred) ? preferred : supported(modelDefault) ? modelDefault : choices[0]?.value || null;
+  }
+  if (typeof module === "object") module.exports = { options, selection };
   if (typeof document === "undefined") return;
   const button = document.getElementById("reasoning-button");
   if (!button) return;
@@ -19,21 +26,23 @@
     if (focus) button.focus();
   }
   function render() {
-    button.disabled = running || !modelId;
-    const selected = profile?.selected || "auto";
+    const choices = options(profile), selected = selection(profile, choices);
+    button.disabled = running || Boolean(pending) || !modelId || !profile?.available || !choices.length;
+    if (running || !modelId || !pending && (!profile?.available || !choices.length)) close();
     label.textContent = "Reasoning";
-    button.title = `Reasoning: ${names[selected] || selected}`;
+    button.title = selected ? `Reasoning: ${names[selected] || selected}` : "Keine wählbare Reasoning-Stufe verfügbar";
     detail.textContent = pending ? "Modellinformationen werden geladen …" : profile?.detail
-      || (profile?.defaultLevel ? `Automatisch: ${names[profile.defaultLevel] || profile.defaultLevel}. Auswahl wird für dieses Modell gespeichert.` : "Auswahl wird für dieses Modell gespeichert.");
+      || (choices.length ? "Auswahl wird für dieses Modell gespeichert." : "Das Modell bietet keine wählbaren Reasoning-Stufen.");
     list.replaceChildren();
-    for (const option of options(profile)) {
+    for (const option of choices) {
       const item = document.createElement("button");
       item.type = "button"; item.className = "service-option reasoning-option";
       item.setAttribute("role", "menuitemradio");
       item.setAttribute("aria-checked", String(option.value === selected));
       item.textContent = option.label;
-      item.disabled = running || Boolean(pending) || (option.value !== "auto" && !profile?.available);
+      item.disabled = running || Boolean(pending) || !profile?.available;
       item.addEventListener("click", () => {
+        if (item.disabled) return;
         pending = globalThis.goBridge.post("reasoning.set", { modelId, role, effort: option.value });
         render();
       });
@@ -47,6 +56,7 @@
   }
   button.addEventListener("click", event => {
     event.stopPropagation();
+    if (button.disabled) return;
     if (!menu.hidden) return close();
     const tools = document.getElementById("tools-menu");
     if (tools) tools.hidden = true;
@@ -59,7 +69,7 @@
   document.addEventListener("keydown", event => {
     if (menu.hidden) return;
     if (event.key === "Escape") { event.preventDefault(); close(true); return; }
-    const items = [...list.querySelectorAll("button:not(:disabled)")];
+    const items = [...list.querySelectorAll("button")].filter(item => !item.disabled);
     if (!items.length) return;
     const index = items.indexOf(document.activeElement);
     const next = event.key === "ArrowDown" ? (index + 1) % items.length
@@ -74,6 +84,7 @@
       const changed = modelId !== (data.reasoningModelId || "") || role !== (data.reasoningRole || "general");
       modelId = data.reasoningModelId || ""; role = data.reasoningRole || "general";
       if (changed) { profile = null; pending = null; close(); refresh(); }
+      else if (!profile?.available && !pending && !running) refresh();
       if (running) close();
       render();
     } else if (message.type === "reasoning.snapshot" && message.requestId === pending && data.modelId === modelId && data.role === role) {
@@ -82,7 +93,7 @@
       if (wasSetting) close(true);
       else if (!menu.hidden) list.querySelector('[aria-checked="true"]')?.focus();
     } else if (message.type === "host.error" && message.requestId === pending) {
-      pending = null; profile = { selected: "auto", levels: [], ...profile, available: false, detail: "Modellinformationen konnten nicht geladen werden. Zum erneuten Prüfen das Menü öffnen." }; render();
+      pending = null; profile = { ...profile, selected: null, levels: [], available: false, detail: "Modellinformationen konnten nicht geladen werden." }; render();
     } else if (message.type === "chat.started") { running = true; close(); render(); }
     else if (["chat.completed", "chat.failed", "chat.cancelled"].includes(message.type)) { running = false; render(); }
   });

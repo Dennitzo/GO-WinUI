@@ -25,14 +25,21 @@ internal static class CodingContextCompactor
         Antworte nur mit der Arbeitszusammenfassung, möglichst unter 6000 Zeichen. Führe keine Werkzeuge aus.
         """ + "\n\n" + CodingAgentPolicy.ReasoningLanguagePrompt;
 
-    internal static CodingCompactionPlan? Plan(IReadOnlyList<LmChatMessage> messages, int contextLength, CodingWorkingState? workingState = null)
+    internal static CodingCompactionPlan? Plan(IReadOnlyList<LmChatMessage> messages, int contextLength,
+        CodingWorkingState? workingState = null, bool includeWorkingStateInBudget = true)
     {
         var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, null);
-        if (ContextPlanner.EstimateTokens(messages) < budget * 4L / 5) return null;
+        // The input budget already reserves space for generation and protocol overhead.
+        // Starting a new run must not discard a still-fitting conversation at 80%.
+        var prompt = workingState is null || !includeWorkingStateInBudget
+            ? messages : messages.Append(CodingEvidenceContext.Build(workingState)).ToArray();
+        if (ContextPlanner.EstimateTokens(prompt) < budget) return null;
         var currentRequestIndex = -1;
         for (var index = messages.Count - 1; index >= 0; index--)
             if (messages[index].Role == "user" && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true
-                && messages[index].Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true)
+                && !ModelRuntimeClient.IsLanguageReminder(messages[index])
+                && messages[index].Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true
+                && messages[index].Content?.StartsWith(CodingSessionContext.StateMarker, StringComparison.Ordinal) != true)
             { currentRequestIndex = index; break; }
         if (currentRequestIndex < 0) return null;
 
@@ -65,6 +72,7 @@ internal static class CodingContextCompactor
             cut = Math.Min(recentCount == 0 ? messages.Count : toolTurnStarts[^recentCount], firstOpen);
         }
         var archive = messages.Take(cut).Where((message, index) => message.Role != "system" && index != currentRequestIndex
+            && !ModelRuntimeClient.IsLanguageReminder(message)
             && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true).ToArray();
         if (archive.Length == 0) return null;
         var transcript = new StringBuilder();

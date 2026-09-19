@@ -19,17 +19,23 @@ public static class ContextPlanner
         IReadOnlyList<LmChatMessage> source,
         int contextLength,
         int? maximumOutputTokens,
-        bool allowLossyCompaction = true)
+        bool allowLossyCompaction = true,
+        bool preserveConversationPrefix = false)
     {
         ArgumentNullException.ThrowIfNull(source);
         var budget = ComputeInputTokenBudget(contextLength, maximumOutputTokens);
-        var conversation = CompactRepeatedConversationMessages(source, out var conversationCompacted);
-        var messages = CodingEvidenceContext.CompactCompletedCalls(conversation).ToArray();
+        var conversationCompacted = false;
+        var conversation = preserveConversationPrefix ? source.ToList()
+            : CompactRepeatedConversationMessages(source, out conversationCompacted);
+        var messages = preserveConversationPrefix && EstimateTokens(conversation) <= budget
+            ? conversation.ToArray() : CodingEvidenceContext.CompactCompletedCalls(conversation).ToArray();
         var freshReadIds = FreshReadCallIds(messages);
         var compacted = conversationCompacted || !messages.SequenceEqual(conversation);
         var latestUserIndex = Array.FindLastIndex(messages, static message =>
             string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)
+            && !ModelRuntimeClient.IsLanguageReminder(message)
             && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true
+            && message.Content?.StartsWith(CodingSessionContext.StateMarker, StringComparison.Ordinal) != true
             && message.Content?.StartsWith(CodingContextCompactor.MemoryMarker, StringComparison.Ordinal) != true);
 
         if (allowLossyCompaction && EstimateTokens(messages) > budget)
@@ -73,7 +79,7 @@ public static class ContextPlanner
                 {
                     Message = message,
                     Index = index,
-                    Length = message.Content?.Length ?? 0,
+                    Length = (message.Content?.Length ?? 0) + (message.ReasoningContent?.Length ?? 0),
                     Protected = freshReadIds.Contains(message.ToolCallId ?? string.Empty) || index == latestUserIndex
                         || string.Equals(message.Role, "system", StringComparison.OrdinalIgnoreCase),
                 })
@@ -137,6 +143,7 @@ public static class ContextPlanner
         foreach (var message in messages)
         {
             characters += message.Content?.Length ?? 0;
+            characters += message.ReasoningContent?.Length ?? 0;
             characters += message.ToolCallId?.Length ?? 0;
             foreach (var call in message.ToolCalls ?? [])
             {
@@ -204,6 +211,10 @@ public static class ContextPlanner
 
     private static LmChatMessage TruncateContent(LmChatMessage message, int maximumCharacters)
     {
+        // Reasoning is part of the cached native transcript and of the context budget.
+        // When lossy reduction is actually required, keep the visible answer first.
+        if ((long)(message.Content?.Length ?? 0) + (message.ReasoningContent?.Length ?? 0) > maximumCharacters)
+            message = message with { ReasoningContent = null };
         if (message.Content is not { } content || content.Length <= maximumCharacters)
         {
             return message;

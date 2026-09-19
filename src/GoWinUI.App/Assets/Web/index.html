@@ -6,13 +6,13 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https: data: blob:; media-src 'self' https://go-preview.local; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; frame-src https://go-coding-preview.local; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
   <title>GO AI Assistent</title>
   <link rel="stylesheet" href="vendor/katex/0.16.10/katex.min.css">
-  <link rel="stylesheet" href="styles.css?v=20260913-5">
+  <link rel="stylesheet" href="styles.css?v=20260919-agents-3">
   <link rel="stylesheet" href="coding-timeline.css?v=20260913-3">
   <link rel="stylesheet" href="coding-changes.css?v=20260913-3">
 </head>
 <body>
   <div id="app-shell" class="app-shell">
-    <aside class="session-pane" aria-label="Sitzungen">
+    <aside class="session-pane" aria-label="Projekte und Sitzungen">
       <div class="session-pane__toolbar">
         <button id="toggle-sessions" class="sidebar-icon-button" type="button" title="Sitzungsleiste ein- oder ausklappen" aria-label="Sitzungsleiste ein- oder ausklappen" aria-expanded="true">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -26,16 +26,16 @@
         </button>
       </div>
 
-      <button id="new-session" class="new-session-button" type="button" title="Neue Sitzung">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.2-1 10.7-10.7a2.1 2.1 0 0 0-3-3L5.2 16 4 20Zm10.4-13.2 3 3"/></svg>
-        <span>Neue Sitzung</span>
-      </button>
-
       <label class="search-field" title="Sitzung suchen">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.2 16.2 4 4"/></svg>
-        <input id="session-search" type="search" autocomplete="off" placeholder="Sitzung suchen">
+        <input id="session-search" type="search" autocomplete="off" placeholder="Projekt oder Sitzung suchen">
       </label>
-      <div class="sidebar-title">Sitzungen</div>
+      <div class="sidebar-projects-heading">
+        <span class="sidebar-title">Projekte</span>
+        <button id="new-session" class="sidebar-icon-button new-project-button" type="button" title="Projektordner auswählen" aria-label="Neues Projekt: Workspace auswählen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
       <div id="session-list" class="session-list" role="list"></div>
     </aside>
 
@@ -46,6 +46,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
           <h1 id="chat-heading">AI Assistent</h1>
+          <div class="agent-tabs" role="tablist" aria-label="Agent auswählen">
+            <button id="main-agent-tab" class="agent-tab" type="button" role="tab" aria-selected="true" aria-controls="message-scroll">Hauptagent</button>
+            <button id="subagent-tab" class="agent-tab" type="button" role="tab" aria-selected="false" aria-controls="subagent-scroll" tabindex="-1">Subagent</button>
+          </div>
         </div>
         <div class="header-actions">
           <button id="pin-session" class="pdf-chip" type="button" title="Sitzung anpinnen" aria-label="Sitzung anpinnen">Sitzung anpinnen</button>
@@ -53,8 +57,11 @@
         </div>
       </header>
 
-      <section id="message-scroll" class="message-scroll" aria-live="polite">
+      <section id="message-scroll" class="message-scroll" role="tabpanel" aria-labelledby="main-agent-tab" aria-live="polite">
         <div id="message-list" class="message-list"></div>
+      </section>
+      <section id="subagent-scroll" class="message-scroll subagent-scroll" role="tabpanel" aria-labelledby="subagent-tab" tabindex="0" hidden>
+        <div id="subagent-list" class="message-list subagent-list"></div>
       </section>
 
       <section class="composer-region" aria-label="Nachricht verfassen">
@@ -153,10 +160,8 @@
                 <span class="microphone-frequency" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
               </button>
               <button id="send" class="send-button" type="button" aria-label="Senden">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
-              </button>
-              <button id="stop" class="stop-button" type="button" aria-label="Antwort stoppen" hidden>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+                <svg class="send-button__send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
+                <svg class="send-button__stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
               </button>
             </div>
           </div>
@@ -251,16 +256,18 @@
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
   <script src="vendor/katex/0.16.10/katex.min.js?v=20260814-3"></script>
-  <script src="bridge.js?v=20260913-4"></script>
-  <script src="reasoning-menu.js?v=20260913-5"></script>
+  <script src="bridge.js?v=20260919-agents-1"></script>
+  <script src="reasoning-menu.js?v=20260919-explicit-1"></script>
   <script src="voice.js?v=20260822-2"></script>
   <script src="vendor/highlightjs/11.11.1/highlight.min.js"></script>
   <script src="vendor/highlightjs/11.11.1/powershell.min.js"></script>
   <script src="code-highlighting.js?v=20260913-3"></script>
   <script src="markdown.js?v=20260913-3"></script>
-  <script src="coding-timeline.js?v=20260913-3"></script>
+  <script src="coding-timeline.js?v=20260919-agents-2"></script>
+  <script src="agent-tabs.js?v=20260919-agents-2"></script>
+  <script src="run-steering.js?v=20260919-agents-1"></script>
   <script src="coding-changes.js?v=20260913-3"></script>
   <script src="chat-scroll.js?v=20260913-3"></script>
-  <script src="app.js?v=20260915-parallel-1"></script>
+  <script src="app.js?v=20260919-agents-3"></script>
 </body>
 </html>

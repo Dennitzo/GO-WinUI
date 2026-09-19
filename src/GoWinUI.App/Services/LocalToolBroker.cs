@@ -49,6 +49,9 @@ public sealed class LocalToolBroker(
 
             if (coding)
             {
+                if (proposal.ExecutionScope is { } scope && proposal.Name is "coding.write" or "coding.edit"
+                    && !CodingDelegatedWorkspace.IsOwned(proposal.Arguments.GetProperty("path").GetString()!, scope.WritePaths))
+                    throw new UnauthorizedAccessException("Subagent-Schreibzugriff außerhalb des zugewiesenen Bereichs verweigert.");
                 if (evidenceStore is not null && (evidenceStore.SessionId != sessionId || evidenceStore.RootRunId != proposal.RunId))
                     throw new UnauthorizedAccessException("Der Werkzeugbelegspeicher gehört nicht zu dieser Sitzung und diesem Lauf.");
                 if (proposal.Name == "coding.readOutput")
@@ -80,8 +83,11 @@ public sealed class LocalToolBroker(
                 if (proposal.Name == "coding.renderHtml")
                     return Result(proposal, "completed", CodingSessionTools.RenderReceipt(proposal.Arguments));
                 using var evidence = evidenceStore?.BeginStep(proposal.ProposalId, proposal.Name, proposal.Arguments);
-                var codingResult = await new LocalCodingToolExecutor(codingWorkspacePath!, commandProgress, evidence)
-                    .ExecuteAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false);
+                var codingResult = proposal.Name == "coding.command" && proposal.ExecutionScope is { } commandScope
+                    ? await new CodingDelegatedWorkspace(codingWorkspacePath!, proposal.RunId, commandScope.AgentId, commandScope.WritePaths)
+                        .ExecuteCommandAsync(proposal.Arguments, commandProgress, evidence, cancellationToken).ConfigureAwait(false)
+                    : await new LocalCodingToolExecutor(codingWorkspacePath!, commandProgress, evidence)
+                        .ExecuteAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false);
                 if (evidence is not null)
                 {
                     var enriched = JsonNode.Parse(codingResult.GetRawText())!.AsObject();
@@ -155,6 +161,15 @@ public sealed class LocalToolBroker(
         ArgumentNullException.ThrowIfNull(proposal);
         ValidateIdentifier(proposal.ProposalId, "proposalId");
         ValidateIdentifier(proposal.RunId, "runId");
+        if (proposal.ExecutionScope is { } scope)
+        {
+            ValidateIdentifier(scope.AgentId, "agentId");
+            if (!proposal.Name.StartsWith("coding.", StringComparison.Ordinal) && proposal.RiskClass != ToolRiskClass.ReadOnly)
+                throw new InvalidDataException("Subagent-Mutationen außerhalb des Coding-Workspaces sind nicht delegierbar.");
+            if (!scope.IsolatedWorkspace || scope.WritePaths is null || scope.WritePaths.Length > 32)
+                throw new InvalidDataException("Ungültiger isolierter Subagent-Schreibbereich.");
+            foreach (var path in scope.WritePaths) _ = CodingDelegatedWorkspace.NormalizeScope(path);
+        }
         if (string.IsNullOrWhiteSpace(proposal.Summary)
             || proposal.Summary.Length > 1_000
             || proposal.Summary.Any(character => char.IsControl(character)

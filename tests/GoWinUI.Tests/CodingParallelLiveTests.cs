@@ -25,6 +25,9 @@ public sealed class CodingParallelLiveTests(ITestOutputHelper output)
         var marker = Guid.NewGuid().ToString("N");
         var mainText = "MAIN-" + marker;
         var secondaryText = "SECONDARY-" + marker;
+        await File.WriteAllTextAsync(Path.Combine(workspace, "verify-secondary.ps1"),
+            "$ErrorActionPreference='Stop'; if ((Get-Content secondary.txt -Raw).Trim() -ne '" + secondaryText
+            + "') { throw 'Falscher Marker' }; Write-Output 'SUBAGENT-TEST-PASSED'");
         var model = Environment.GetEnvironmentVariable("GO_AI_LIVE_CODING_MODEL") ?? "coding/Qwen3.8-27B-UD-Q8_K_XL~86704cb9d896";
         var server = Environment.GetEnvironmentVariable("GO_AI_SERVER_URL") ?? "http://127.0.0.1:8080";
         var chats = environment.Get<IChatRepository>();
@@ -32,9 +35,10 @@ public sealed class CodingParallelLiveTests(ITestOutputHelper output)
         await chats.SetCodingWorkspacePathAsync(session.Id, workspace);
         var prompt = $"Führe diese kleine echte Parallelaufgabe aus. Starte zuerst mit coding.agentStart einen Subagenten, "
             + $"der ausschließlich secondary.txt mit dem exakten Inhalt {secondaryText} erstellt und anschließend selbst liest. "
+            + "Der Subagent muss außerdem mit coding.command powershell.exe und arguments=[\"-NoProfile\",\"-NonInteractive\",\"-File\",\"verify-secondary.ps1\"] den vorhandenen Test in seiner isolierten Kopie ausführen. "
             + "Weise writePaths=[\"secondary.txt\"] zu. "
             + $"Erstelle nach dem Start selbst main.txt mit dem exakten Inhalt {mainText}. "
-            + "Nutze coding.write, keine Terminalbefehle. Nutze danach coding.agentWait und lies beide Dateien vollständig mit coding.read. "
+            + "Nutze als Hauptagent coding.write und keine eigenen Terminalbefehle. Nutze danach coding.agentWait und lies beide Dateien vollständig mit coding.read. "
             + "Prüfe die beiden Marker und bestätige nur bei erfolgreicher Prüfung den Abschluss. Keine Recherche und keine weiteren Dateien.";
         var turn = await chats.AddTurnAsync(session.Id, prompt);
         using var settings = new SettingsCoordinator(new ConnectionSettings(server));
@@ -58,10 +62,11 @@ public sealed class CodingParallelLiveTests(ITestOutputHelper output)
         {
             var caps = await client.GetCapabilitiesAsync(token);
             Assert.True(caps.SupportsParallelCoding, "Deploy parallel gateway before running this acceptance.");
+            Assert.True(caps.SupportsIsolatedSubagents, "Deploy the gateway with isolated subagent support before this acceptance.");
             var accepted = await client.CreateRunAsync(new RunRequest(GoAiProtocol.Version, RunMode.Coding,
-                [new("user", [new("text", prompt)])], ClientCapabilities: ["coding"],
+                [new("user", [new("text", prompt)])], ClientCapabilities: ["coding", "coding-isolated-subagents"],
                 SessionId: session.Id.ToString("D"), PreferredCodingModelId: model,
-                CodingOptions: new(WorkspacePath: workspace, ParallelModelId: model)), "parallel-" + marker, token);
+                CodingOptions: new(WorkspacePath: workspace, ParallelModelId: model), ReasoningEffort: "low"), "parallel-" + marker, token);
             runId = accepted.RunId;
             output.WriteLine("Parallel run=" + runId);
             long cursor = 0;
@@ -77,10 +82,12 @@ public sealed class CodingParallelLiveTests(ITestOutputHelper output)
                         if (!completed.TryGetValue(proposal.ProposalId, out var previous))
                         {
                             LocalToolBroker.ValidateProposal(proposal);
-                            Assert.True(proposal.Name is ClientToolNames.CodingRead or ClientToolNames.CodingWrite or ClientToolNames.CodingList or ClientToolNames.CodingGitDiff,
+                            Assert.True(proposal.Name is ClientToolNames.CodingRead or ClientToolNames.CodingWrite or ClientToolNames.CodingList or ClientToolNames.CodingGitDiff or ClientToolNames.CodingCommand,
                                 "Unexpected fixture tool: " + proposal.Name);
+                            if (proposal.Name == ClientToolNames.CodingCommand) Assert.NotNull(proposal.ExecutionScope);
                             if (proposal.Name is ClientToolNames.CodingRead or ClientToolNames.CodingWrite)
-                                Assert.Contains(proposal.Arguments.GetProperty("path").GetString(), FileNames);
+                                Assert.True(FileNames.Contains(proposal.Arguments.GetProperty("path").GetString())
+                                    || proposal.Name == ClientToolNames.CodingRead && proposal.Arguments.GetProperty("path").GetString() == "verify-secondary.ps1");
                             var result = await broker.ExecuteAsync(proposal, session.Id, turn.AssistantMessage.Id, workspace, cancellationToken: token);
                             previous = (proposal, result);
                             completed.Add(proposal.ProposalId, previous);
@@ -105,6 +112,9 @@ public sealed class CodingParallelLiveTests(ITestOutputHelper output)
             var snapshot = await client.GetRunAsync(runId, token);
             Assert.Equal(RunState.Completed, snapshot.State);
             Assert.True(started && joined && childCompleted, "Subagent must start, complete successfully and be joined.");
+            Assert.Contains(completed.Values, c => c.Proposal.Name == ClientToolNames.CodingCommand
+                && c.Proposal.ExecutionScope is not null && c.Result.Result.GetProperty("stdout").GetString()!.Contains("SUBAGENT-TEST-PASSED", StringComparison.Ordinal)
+                && c.Result.Result.TryGetProperty("delegation", out _));
             Assert.Equal(mainText, (await File.ReadAllTextAsync(Path.Combine(workspace, "main.txt"), token)).Trim());
             Assert.Equal(secondaryText, (await File.ReadAllTextAsync(Path.Combine(workspace, "secondary.txt"), token)).Trim());
             Assert.Contains(completed.Values, c => c.Proposal.Name == ClientToolNames.CodingWrite && c.Proposal.Summary.StartsWith("Subagent GPU1", StringComparison.Ordinal)

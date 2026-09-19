@@ -18,8 +18,24 @@ public sealed partial class RunProcessor
     internal static LmToolCall WithOperationIdentity(string runId, string scope, long round, int ordinal, LmToolCall call) =>
         call with { Id = CreateServerToolOperationId(runId, scope, round, ordinal, call.Id) };
 
-    internal static IReadOnlyList<LmChatMessage> WithWorkingState(IReadOnlyList<LmChatMessage> messages, CodingWorkingState? state) =>
-        state is null ? messages : [.. messages, CodingEvidenceContext.Build(state)];
+    internal static IReadOnlyList<LmChatMessage> WithWorkingState(IReadOnlyList<LmChatMessage> messages,
+        CodingWorkingState? state, bool alreadyIncluded = false) =>
+        state is null || alreadyIncluded ? messages : [.. messages, CodingEvidenceContext.Build(state)];
+
+    private static void ApplyCodingBudgetInstruction(List<LmChatMessage> messages, CodingRunBudget budget,
+        long rounds, long tools, bool preservePrefix)
+    {
+        if (!preservePrefix)
+        {
+            budget.ApplyInstruction(messages, rounds, tools);
+            return;
+        }
+        if (budget.ModelRounds == 0 && budget.ToolCalls == 0) return;
+        var instruction = budget.Instruction(rounds, tools);
+        if (messages.LastOrDefault(message => message.Role == "system"
+            && message.Content?.StartsWith(CodingRunBudget.PromptMarker, StringComparison.Ordinal) == true)?.Content != instruction)
+            messages.Add(new LmChatMessage("system", instruction));
+    }
 
     internal static bool HasUnresolvedCodingErrors(CodingWorkingState? state) => state is not null
         && state.Failures.Any(failure => failure.Count > 0 && failure.EnvironmentRevision == state.EnvironmentRevision);

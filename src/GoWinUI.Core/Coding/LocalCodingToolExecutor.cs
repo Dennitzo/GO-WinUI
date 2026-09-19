@@ -241,9 +241,16 @@ public sealed class LocalCodingToolExecutor
         JsonElement[] operations = hasBatch ? batch.EnumerateArray().ToArray() : [args];
         var replacements = new List<(int Start, int Length, string NewText)>(operations.Length);
         var totalCharacters = 0;
-        // coding.read omits CR characters. Accept that representation for uniform
-        // CRLF files while resolving every edit against this same original text.
-        var newline = DetectUniformNewline(original);
+        // coding.read omits CR characters. Match LF/CRLF equivalently even in mixed
+        // files, then map back to original offsets without rewriting untouched bytes.
+        var normalized = original.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var offsets = new List<int>(normalized.Length + 1);
+        for (var position = 0; position < original.Length; position++)
+        {
+            offsets.Add(position);
+            if (original[position] == '\r' && position + 1 < original.Length && original[position + 1] == '\n') position++;
+        }
+        offsets.Add(original.Length);
         foreach (var operation in operations)
         {
             if (operation.ValueKind != JsonValueKind.Object
@@ -255,12 +262,21 @@ public sealed class LocalCodingToolExecutor
             totalCharacters += oldText.Length + newText.Length;
             if (totalCharacters > 32_000)
                 throw new ArgumentException("Alle oldText/newText-Werte dürfen zusammen höchstens 32000 Zeichen enthalten.");
-            oldText = NormalizeNewlines(oldText, newline);
+            oldText = NormalizeNewlines(oldText, "\n");
+            var index = normalized.IndexOf(oldText, StringComparison.Ordinal);
+            if (index < 0)
+                throw new InvalidOperationException($"coding.edit.text_not_found: Ersetzung {replacements.Count + 1}: oldText wurde nicht gefunden. Es wurde nichts geändert. Suche mit coding.search nach einer kurzen eindeutigen Textstelle, lies deren Umgebung mit coding.read und übernimm den tatsächlichen Text ohne Zeilennummern. Verwende den aktuellen sha256 und kleinere Ersetzungen. Wiederhole nicht dieselben Argumente.");
+            var duplicate = normalized.IndexOf(oldText, index + 1, StringComparison.Ordinal);
+            if (duplicate >= 0)
+                throw new InvalidOperationException($"coding.edit.ambiguous_match: Ersetzung {replacements.Count + 1}: oldText kommt mehrfach vor (Zeilen {1 + normalized.AsSpan(0, index).Count('\n')} und {1 + normalized.AsSpan(0, duplicate).Count('\n')}). Es wurde nichts geändert. Lies diese Bereiche und ergänze eindeutige benachbarte Zeilen in oldText.");
+            var start = offsets[index];
+            var length = offsets[index + oldText.Length] - start;
+            var matched = original.Substring(start, length);
+            var firstLf = matched.IndexOf('\n');
+            var newline = firstLf >= 0 ? (firstLf > 0 && matched[firstLf - 1] == '\r' ? "\r\n" : "\n")
+                : DetectUniformNewline(original);
             newText = NormalizeNewlines(newText, newline);
-            var index = original.IndexOf(oldText, StringComparison.Ordinal);
-            if (index < 0 || original.IndexOf(oldText, index + 1, StringComparison.Ordinal) >= 0)
-                throw new InvalidOperationException("oldText muss exakt einmal im ursprünglichen Dateiinhalt vorkommen. Lies die Datei erneut und wähle eine eindeutige Fundstelle.");
-            replacements.Add((index, oldText.Length, newText));
+            replacements.Add((start, length, newText));
         }
         replacements.Sort(static (left, right) => left.Start.CompareTo(right.Start));
         for (var index = 1; index < replacements.Count; index++)

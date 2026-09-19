@@ -18,7 +18,7 @@ function harness() {
   const app = fs.readFileSync(path.join(webRoot, "app.js"), "utf8");
   for (const name of ["normalizeCodingStep", "codingToolLabel", "codingStepState", "codingPreviewHtml", "recordCodingActivity",
     "mergeCodingToolSteps", "compareReasoningStepUpdates", "cleanStatusMetadata", "speechBlockCandidates",
-    "handleHostMessage", "isTerminalMessageStatus"]) {
+    "handleHostMessage", "isTerminalMessageStatus", "persistMeasuredContext"]) {
     const start = app.indexOf(`  function ${name}(`);
     const ending = app.slice(start).match(/\r?\n {2}\}(?:\r?\n|$)/);
     const end = ending ? start + ending.index + ending[0].length : -1;
@@ -109,6 +109,33 @@ test("model and tool status updates remain functional between display-only reaso
   assert.equal(calls.messages, 3);
   assert.equal(calls.context, 2);
   assert.equal(calls.status, 2);
+});
+
+test("steering closes the previous reasoning round without stopping the next round or reopening on replay", () => {
+  const { context, status, post, timeline, render } = statusHarness();
+  const first = reasoning({ outputJson: '{"lastEventId":1,"state":"running"}' });
+  post({ toolStep: first });
+  const card = timeline().querySelector(".coding-reasoning");
+  assert.ok(card.querySelector(".message-status-spinner"));
+  const stopped = { ...first, status: "interrupted", outputJson: '{"lastEventId":2,"state":"steered"}' };
+  post({ toolStep: stopped });
+  assert.equal(timeline().querySelector(".coding-reasoning"), card);
+  assert.equal(card.querySelector(".coding-reasoning__status").textContent, "Umgeleitet");
+  assert.equal(card.querySelector(".message-status-spinner"), null);
+  const next = reasoning({ id: "reasoning-a-2", detail: "Ich bearbeite den neuen Auftrag.", inputJson: '{"round":2}',
+    outputJson: '{"lastEventId":3,"state":"running"}' });
+  post({ toolStep: next });
+  post({ toolStep: first });
+  const cards = timeline().querySelectorAll(".coding-reasoning");
+  assert.equal(cards.length, 2);
+  assert.equal(cards[0].querySelector(".coding-reasoning__status").textContent, "Umgeleitet");
+  assert.equal(cards[0].querySelector(".message-status-spinner"), null);
+  assert.ok(cards[1].querySelector(".message-status-spinner"));
+  assert.equal(context.state.messageRunStatus.get("message-a"), status);
+  assert.equal(context.state.isRunning, true);
+  const restored = render(message(), JSON.parse(JSON.stringify([stopped, next])));
+  assert.equal(restored.querySelectorAll(".coding-reasoning")[0].querySelector(".coding-reasoning__status").textContent, "Umgeleitet");
+  assert.equal(restored.querySelectorAll(".message-status-spinner").length, 1);
 });
 
 test("reasoning packets from another session or after completion cannot resurrect a live card", () => {

@@ -17,12 +17,20 @@ public sealed class CodingContextCompactorTests
     public void FullInheritedContextCanCompactBeforeNewTaskCallsTools()
     {
         LmChatMessage[] messages = [new("system", "Policy"), new("user", "Old task"),
-            new("assistant", new string('x', 90000)), new("user", "New task")];
+            new("assistant", new string('x', 100000)), new("user", "New task")];
         var plan = CodingContextCompactor.Plan(messages, 32768);
         Assert.NotNull(plan);
         var compacted = CodingContextCompactor.Complete(plan, "Previous findings retained");
         Assert.Equal("New task", compacted.Last().Content);
         Assert.Contains(compacted, m => m.Content!.Contains("Previous findings retained", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void InheritedContextAboveEightyPercentStillFitsWithoutCompaction()
+    {
+        LmChatMessage[] messages = [new("system", "Policy"), new("user", "Old task"),
+            new("assistant", new string('x', 85000)), new("user", "Continue")];
+        Assert.Null(CodingContextCompactor.Plan(messages, 32768));
     }
 
     [Fact]

@@ -84,20 +84,26 @@ public sealed class CodingRunBudgetTests
     [Fact]
     public async Task UnlimitedRunPassesOldLimitsAndPersistsRollingContextWithoutLosingCurrentRequest()
     {
-        using var harness = new Harness(readCalls: 150);
+        // Compaction is driven by real context pressure, not an arbitrary message count.
+        using var harness = new Harness(readCalls: 150, readContentCharacters: 4_000);
         var runId = await harness.CreateRunAsync(timeoutSeconds: 0);
 
         Assert.Null(await harness.DriveAsync(runId));
 
         Assert.Equal(150, harness.ExecutedReads);
-        Assert.True(harness.Handler.Compactions >= 2);
-        Assert.True(harness.HighestSavedCompaction >= 2);
+        Assert.True(harness.Handler.Compactions >= 2,
+            $"Expected repeated model summaries; observed {harness.Handler.Compactions}, persisted {harness.HighestSavedCompaction}.");
+        Assert.True(harness.HighestSavedCompaction >= 2,
+            $"Expected repeated persisted summaries; observed {harness.HighestSavedCompaction}.");
         Assert.True(harness.Handler.LastMessages.Length < 128);
         Assert.DoesNotContain(harness.Handler.LastMessages,
             message => message.GetProperty("content").ValueKind == JsonValueKind.String
                 && message.GetProperty("content").GetString()!.Contains(CodingRunBudget.PromptMarker, StringComparison.Ordinal));
         Assert.Contains(harness.Handler.LastMessages, message => message.GetProperty("role").GetString() == "user"
             && message.GetProperty("content").GetString()!.Contains("Analysiere das Projekt und korrigiere den langsamen Programmstart.", StringComparison.Ordinal));
+        Assert.Contains(harness.Handler.LastMessages, message => message.GetProperty("role").GetString() == "user"
+            && message.GetProperty("content").GetString()!.StartsWith(CodingContextCompactor.MemoryMarker, StringComparison.Ordinal)
+            && message.GetProperty("content").GetString()!.Contains("Bisherige Dateien wurden geprüft.", StringComparison.Ordinal));
         var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
         Assert.Equal(150, events.Count(item => item.Type == RunEventTypes.ClientToolProposed));
         Assert.Contains(events, item => item.Type == RunEventTypes.ContextChanged && item.Data.GetProperty("wasCompacted").GetBoolean());
@@ -586,8 +592,10 @@ public sealed class CodingRunBudgetTests
         public int ExecutedReads { get; private set; }
         public long HighestSavedCompaction { get; private set; }
 
-        public Harness(int readCalls, int batchSize = 1, int maximumRounds = 0, int maximumTools = 0)
+        private readonly string _readContent;
+        public Harness(int readCalls, int batchSize = 1, int maximumRounds = 0, int maximumTools = 0, int readContentCharacters = 0)
         {
+            _readContent = "1: return await LoadAsync();" + new string('x', readContentCharacters);
             Context.Options.ModelRuntimeUri = new Uri("http://native.test");
             Context.Options.CodingMaximumModelRounds = maximumRounds;
             Context.Options.CodingMaximumToolCalls = maximumTools;
@@ -651,7 +659,7 @@ public sealed class CodingRunBudgetTests
                     var proposal = (await Repository.GetToolProposalAsync(checkpoint.PendingProposalId!, runId))!;
                     Assert.Equal(ClientToolNames.CodingRead, proposal.Name);
                     await Repository.SaveClientToolResultAsync(runId, new ClientToolResult(proposal.ProposalId, "completed",
-                        JsonSerializer.SerializeToElement(new { path = proposal.Arguments.GetProperty("path").GetString(), content = "1: return await LoadAsync();", sha256 = new string('a', 64), totalLines = 1, startLine = 1, truncated = false })));
+                        JsonSerializer.SerializeToElement(new { path = proposal.Arguments.GetProperty("path").GetString(), content = _readContent, sha256 = new string('a', 64), totalLines = 1, startLine = 1, truncated = false })));
                     ExecutedReads++;
                 }
                 catch (AgentRunLimitException exception)
@@ -673,6 +681,11 @@ public sealed class CodingRunBudgetTests
 
     private sealed class NativeHandler(int readCalls, int batchSize) : HttpMessageHandler
     {
+        // The runtime moves the German reasoning rule to the beginning of the
+        // system message. Identify the whole unchanged summary task, not its
+        // previous wire placement relative to that shared language policy.
+        private static readonly string SummaryTask = CodingContextCompactor.SummaryInstruction
+            .Replace(CodingAgentPolicy.ReasoningLanguagePrompt, "", StringComparison.Ordinal).Trim();
         public int ChatCalls { get; private set; }
         public int Requests { get; private set; }
         public bool FailTokenCounting { get; set; }
@@ -683,6 +696,8 @@ public sealed class CodingRunBudgetTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.RequestUri!.AbsolutePath is "/sessions/prepare" or "/sessions/save")
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
             Requests++;
             var path = request.RequestUri!.AbsolutePath;
             if (path == "/v1/models") return Json(new { data = new[] { new { id = ModelId, tags = ModelTags, status = new { value = "loaded" } } } });
@@ -698,8 +713,9 @@ public sealed class CodingRunBudgetTests
             object delta;
             string finish;
             if (LastMessages.Any(message => message.GetProperty("role").GetString() == "system"
-                && message.GetProperty("content").GetString() == CodingContextCompactor.SummaryInstruction))
+                && message.GetProperty("content").GetString()?.Contains(SummaryTask, StringComparison.Ordinal) == true))
             {
+                Assert.True(LastTurnHadNoTools);
                 Compactions++;
                 delta = new { content = "Bisherige Dateien wurden geprüft. Auftrag: langsamen Programmstart korrigieren. Noch offen: weitere Dateien prüfen, Änderung und Tests." };
                 finish = "stop";

@@ -1,0 +1,14 @@
+[2026-09-18 21:25:12.773] [00007458] === Logging started ===
+[2026-09-18 21:25:12.778] [00007458] Executing: "C:\Program Files\dotnet\dotnet.exe" run --project "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\windows\.protocol-smoke\ProtocolSmoke.csproj" --configuration Release --no-restore --nologo, PID: 29784, PPID: 33392
+[2026-09-18 21:25:12.780] [00007458] IsElevated: False
+[2026-09-18 21:25:12.780] [00007458] Is64BitProcess: True
+[2026-09-18 21:25:12.780] [00007458] RebootPending: False
+[2026-09-18 21:25:12.780] [00007458] ProcessorArchitecture: amd64
+[2026-09-18 21:25:12.780] [00007458] HostArchitecture: x64
+[2026-09-18 21:25:12.780] [00007458] SdkDirectory: 10.0.302
+[2026-09-18 21:25:12.780] [00007458] VerifySignatures: False
+[2026-09-18 21:25:12.780] [00007458] SDK feature band: 10.0.300
+[2026-09-18 21:25:14.308] [00007458] Shutting down
+[2026-09-18 21:25:14.308] [00007458] Shutdown completed.
+[2026-09-18 21:25:14.308] [00007458] Restart required: False
+[2026-09-18 21:25:14.308] [00007458] === Logging ended ===

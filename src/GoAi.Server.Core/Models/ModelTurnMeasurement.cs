@@ -11,6 +11,17 @@ internal sealed class ModelTurnMeasurement(Stopwatch requestClock)
 
     public void Observe(JsonElement root)
     {
+        if (root.TryGetProperty("prompt_progress", out var progress) && progress.ValueKind == JsonValueKind.Object)
+        {
+            // Native prefill frames carry real measurements even when an older
+            // server omits the final OpenAI usage block. Never infer a cache hit
+            // from the requested cache flag or a successfully restored file.
+            _metrics = _metrics with
+            {
+                InputTokens = Integer(progress, "total") ?? _metrics.InputTokens,
+                CachedPromptTokens = Integer(progress, "cache") ?? _metrics.CachedPromptTokens,
+            };
+        }
         if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
         {
             _metrics = _metrics with

@@ -711,7 +711,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         IReadOnlyList<ChatMessage> history,
         SessionContextProfile profile = SessionContextProfile.General)
     {
-        var ordered = history
+        var ordered = GoAiAssistantService.ExpandSteeringHistory(history)
             .Where(static message => message.Status is MessageStatus.Completed
                 or MessageStatus.Cancelled
                 or MessageStatus.Failed

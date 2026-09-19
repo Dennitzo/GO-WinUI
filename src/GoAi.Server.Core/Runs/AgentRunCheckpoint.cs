@@ -24,4 +24,7 @@ public sealed record AgentRunCheckpoint(
     long? ActiveCallRound = null,
     bool ActiveCallsReadOnly = false,
     int EmptyResponseRetryCount = 0,
-    int IncompleteResponseRetryCount = 0);
+    int IncompleteResponseRetryCount = 0,
+    bool PreserveSessionPromptPrefix = false,
+    bool WorkingStatePromptIncluded = false,
+    long AppliedSteeringSequence = 0);

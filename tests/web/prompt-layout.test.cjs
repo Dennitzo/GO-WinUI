@@ -15,6 +15,7 @@ function harness() {
     composerRegion: { getBoundingClientRect: () => ({ height: parseFloat(prompt.style.height) + layout.overhead }) } };
   const frames = [];
   const context = vm.createContext({ elements, innerHeight: 1000, getComputedStyle: () => ({ minHeight: "58px" }),
+    renderComposerAction() {},
     requestAnimationFrame: fn => { frames.push(fn); return frames.length; } });
   vm.runInContext("let promptResizeFrame = 0;", context);
   for (const name of ["resizePrompt", "schedulePromptResize", "setPromptValue"]) {

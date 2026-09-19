@@ -1,0 +1,196 @@
+  Wiederherzustellende Projekte werden ermittelt...
+  "C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.Core\GoWinUI.Core.csproj" wiederhergestellt (in 109 ms.).
+  "C:\Users\AMD\Documents\go-head-baseline\src\GoAi.Contracts\GoAi.Contracts.csproj" wiederhergestellt (in 109 ms.).
+  "C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.BricsCad.Protocol\GoWinUI.BricsCad.Protocol.csproj" wiederhergestellt (in 109 ms.).
+  "C:\Users\AMD\Documents\go-head-baseline\src\GoAi.Client\GoAi.Client.csproj" wiederhergestellt (in 117 ms.).
+  "C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.Infrastructure\GoWinUI.Infrastructure.csproj" wiederhergestellt (in 301 ms.).
+  "C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.App\GoWinUI.App.csproj" wiederhergestellt (in 438 ms.).
+  "C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\GoWinUI.Tests.csproj" wiederhergestellt (in 444 ms.).
+  GoWinUI.Core -> C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.Core\bin\Release\net10.0\GoWinUI.Core.dll
+  GoAi.Contracts -> C:\Users\AMD\Documents\go-head-baseline\src\GoAi.Contracts\bin\Release\net10.0\GoAi.Contracts.dll
+  GoAi.Client -> C:\Users\AMD\Documents\go-head-baseline\src\GoAi.Client\bin\Release\net10.0\GoAi.Client.dll
+  GoWinUI.Infrastructure -> C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.Infrastructure\bin\Release\net10.0\GoWinUI.Infrastructure.dll
+  GoWinUI.BricsCad.Protocol -> C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.BricsCad.Protocol\bin\Release\net10.0\GoWinUI.BricsCad.Protocol.dll
+  GoWinUI.App -> C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\GO.dll
+  GoWinUI.Tests -> C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\bin\Release\net10.0-windows10.0.19041.0\win-x64\GoWinUI.Tests.dll
+Testlauf für "C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\bin\Release\net10.0-windows10.0.19041.0\win-x64\GoWinUI.Tests.dll" (.NETCoreApp,Version=v10.0)
+Insgesamt 1 Testdateien stimmten mit dem angegebenen Muster überein.
+[xUnit.net 00:00:00.90]     GoWinUI.Tests.LocalCodingToolExecutorTests.HighlyDifferentFileUsesBoundedSearchAndStillProducesAnApplicablePatch [FAIL]
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.HighlyDifferentFileUsesBoundedSearchAndStillProducesAnApplicablePatch [244 ms]
+  Fehlermeldung:
+   Assert.Equal() Failure: Collections differ
+           ↓ (pos 0)
+Expected: [110, 101, 119, 32, 49, ···]
+Actual:   [111, 108, 100, 32, 49, ···]
+           ↑ (pos 0)
+  Stapelverfolgung:
+     at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 282
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.HighlyDifferentFileUsesBoundedSearchAndStillProducesAnApplicablePatch() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 234
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:09.21]     GoWinUI.Tests.LocalCodingToolExecutorTests.LargeDiffStaysAvailableToUiWhileModelReceiptRetainsHashesAndAppliedState [FAIL]
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.LargeDiffStaysAvailableToUiWhileModelReceiptRetainsHashesAndAppliedState [104 ms]
+  Fehlermeldung:
+   System.IO.FileNotFoundException : Could not find file 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\go-coding-tests-681e2f7bcc3240cdbf886285adf841af\long.txt'.
+  Stapelverfolgung:
+     at Microsoft.Win32.SafeHandles.SafeFileHandle.CreateFile(String fullPath, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+   at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 282
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.LargeDiffStaysAvailableToUiWhileModelReceiptRetainsHashesAndAppliedState() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 211
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:09.41]     GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(newline: "\r\n", withBom: True) [FAIL]
+[xUnit.net 00:00:09.51]     GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(newline: "\n", withBom: False) [FAIL]
+[xUnit.net 00:00:09.74]     GoWinUI.Tests.LocalCodingToolExecutorTests.GitDiffWithoutARepositoryKeepsTheRealErrorAndExplainsAvailableFileTools [FAIL]
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(newline: "\r\n", withBom: True) [101 ms]
+  Fehlermeldung:
+   Assert.Equal() Failure: Collections differ
+                        ↓ (pos 39)
+Expected: [···, 13, 10, 105, 110, 115, ···]
+Actual:   [···, 13, 10, 108, 105, 110, ···]
+                        ↑ (pos 39)
+  Stapelverfolgung:
+     at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 282
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(String newline, Boolean withBom) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 133
+--- End of stack trace from previous location ---
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(newline: "\n", withBom: False) [102 ms]
+  Fehlermeldung:
+   Assert.Equal() Failure: Collections differ
+                        ↓ (pos 32)
+Expected: [···, 52, 10, 105, 110, 115, ···]
+Actual:   [···, 52, 10, 108, 105, 110, ···]
+                        ↑ (pos 32)
+  Stapelverfolgung:
+     at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 282
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(String newline, Boolean withBom) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 133
+--- End of stack trace from previous location ---
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.GitDiffWithoutARepositoryKeepsTheRealErrorAndExplainsAvailableFileTools [96 ms]
+  Fehlermeldung:
+   Assert.False() Failure
+Expected: False
+Actual:   True
+  Stapelverfolgung:
+     at GoWinUI.Tests.LocalCodingToolExecutorTests.GitDiffWithoutARepositoryKeepsTheRealErrorAndExplainsAvailableFileTools() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 762
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:11.14]     GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(relative: "empty.txt", content: "") [FAIL]
+[xUnit.net 00:00:11.23]     GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(relative: "new file café.txt", content: "first\nsecond") [FAIL]
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(relative: "empty.txt", content: "") [102 ms]
+  Fehlermeldung:
+   System.IO.FileNotFoundException : Could not find file 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\go-coding-tests-7ac2679acbc0409f839c4b7bc97fa12b\empty.txt'.
+  Stapelverfolgung:
+     at Microsoft.Win32.SafeHandles.SafeFileHandle.CreateFile(String fullPath, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+   at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 282
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(String relative, String content) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 103
+--- End of stack trace from previous location ---
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(relative: "new file café.txt", content: "first\nsecond") [93 ms]
+  Fehlermeldung:
+   System.IO.FileNotFoundException : Could not find file 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\go-coding-tests-35280468b9f64d858d7867a53f4aed5c\new file café.txt'.
+  Stapelverfolgung:
+     at Microsoft.Win32.SafeHandles.SafeFileHandle.CreateFile(String fullPath, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+   at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 282
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(String relative, String content) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 103
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:15.91]     GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(cancelBlockedRefresh: True) [FAIL]
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(cancelBlockedRefresh: True) [15 s]
+  Fehlermeldung:
+   System.TimeoutException : The operation has timed out.
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 39
+   at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 58
+   at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 58
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:26.05]     GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex [FAIL]
+  Fehler GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex [5 s]
+  Fehlermeldung:
+   System.IO.DirectoryNotFoundException : Could not find a part of the path 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\GO-tests-3190378287f840378f2c15bd1b20e2bf\workspace\.git\index'.
+  Stapelverfolgung:
+     at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+   at GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingGitChangeTrackerTests.cs:line 17
+   at GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingGitChangeTrackerTests.cs:line 36
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:27.76]     GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(cancelBlockedRefresh: False) [FAIL]
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(cancelBlockedRefresh: False) [11 s]
+  Fehlermeldung:
+   System.TimeoutException : The operation has timed out.
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 39
+   at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 58
+   at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 58
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:34.96]     GoWinUI.Tests.AssistantWorkflowTests.ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout [FAIL]
+[xUnit.net 00:00:34.96]     GoWinUI.Tests.AssistantWorkflowTests.SpeechUsesComposerStatusWithoutRetryOrChatRendering [FAIL]
+[xUnit.net 00:00:34.96]     GoWinUI.Tests.AssistantWorkflowTests.PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts [FAIL]
+  Fehler GoWinUI.Tests.AssistantWorkflowTests.ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout [3 ms]
+  Fehlermeldung:
+   Assert.Contains() Failure: Sub-string not found
+String:    "<!doctype html>\r\n<html lang="de">\r\n<head>"···
+Not found: "styles.css?v=20260912-2"
+  Stapelverfolgung:
+     at GoWinUI.Tests.AssistantWorkflowTests.ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\AssistantWorkflowTests.cs:line 136
+   at System.RuntimeMethodHandle.InvokeMethod(ObjectHandleOnStack target, Void** arguments, ObjectHandleOnStack sig, BOOL isConstructor, ObjectHandleOnStack result)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+  Fehler GoWinUI.Tests.AssistantWorkflowTests.SpeechUsesComposerStatusWithoutRetryOrChatRendering [1 ms]
+  Fehlermeldung:
+   Assert.Contains() Failure: Sub-string not found
+String:    "<!doctype html>\r\n<html lang="de">\r\n<head>"···
+Not found: "title="Vorlesen stoppen""
+  Stapelverfolgung:
+     at GoWinUI.Tests.AssistantWorkflowTests.SpeechUsesComposerStatusWithoutRetryOrChatRendering() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\AssistantWorkflowTests.cs:line 1337
+   at System.RuntimeMethodHandle.InvokeMethod(ObjectHandleOnStack target, Void** arguments, ObjectHandleOnStack sig, BOOL isConstructor, ObjectHandleOnStack result)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+  Fehler GoWinUI.Tests.AssistantWorkflowTests.PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts [< 1 ms]
+  Fehlermeldung:
+   Assert.Contains() Failure: Sub-string not found
+String:    "<!doctype html>\r\n<html lang="de">\r\n<head>"···
+Not found: "bridge.js?v=20260821-2"
+  Stapelverfolgung:
+     at GoWinUI.Tests.AssistantWorkflowTests.PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\AssistantWorkflowTests.cs:line 97
+   at System.RuntimeMethodHandle.InvokeMethod(ObjectHandleOnStack target, Void** arguments, ObjectHandleOnStack sig, BOOL isConstructor, ObjectHandleOnStack result)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+[xUnit.net 00:00:37.09]     GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation [FAIL]
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation [1 s]
+  Fehlermeldung:
+   Assert.Single() Failure: The collection was empty
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 82
+   at GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 99
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:38.05]     GoWinUI.Tests.AssistantWorkflowTests.ToolsMenuLeavesReasoningAtTheNativeModelDefault [FAIL]
+  Fehler GoWinUI.Tests.AssistantWorkflowTests.ToolsMenuLeavesReasoningAtTheNativeModelDefault [< 1 ms]
+  Fehlermeldung:
+   Assert.DoesNotContain() Failure: Sub-string found
+                                ↓ (pos 9536)
+String: ···"               <div id="reasoning-options"···
+Found:  "id="reasoning-options""
+  Stapelverfolgung:
+     at GoWinUI.Tests.AssistantWorkflowTests.ToolsMenuLeavesReasoningAtTheNativeModelDefault() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\AssistantWorkflowTests.cs:line 434
+   at System.RuntimeMethodHandle.InvokeMethod(ObjectHandleOnStack target, Void** arguments, ObjectHandleOnStack sig, BOOL isConstructor, ObjectHandleOnStack result)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+[xUnit.net 00:00:48.19]     GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange [FAIL]
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange [11 s]
+  Fehlermeldung:
+   System.TimeoutException : The operation has timed out.
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 147
+   at GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 150
+   at GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 153
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:48.46]     GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding [FAIL]
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding [266 ms]
+  Fehlermeldung:
+   System.InvalidOperationException : Unexpected tracker error
+---- System.IO.IOException : Git-Dateivergleich fehlgeschlagen: fatal: '$GIT_DIR' too big
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.<>c.<SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding>b__4_3(Exception exception) in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 167
+   at GoWinUI.App.Services.CodingChangesMonitor.StartAsync(Boolean resume, CancellationToken cancellationToken) in C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.App\Services\GoAiAssistantService.FileChanges.cs:line 144
+   at GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 169
+   at GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 170
+   at GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding() in C:\Users\AMD\Documents\go-head-baseline\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 208
+--- End of stack trace from previous location ---
+----- Inner Stack Trace -----
+   at GoWinUI.Core.Coding.CodingGitChangeTracker.GitAsync(String[] arguments, CancellationToken cancellationToken, Boolean isolated, String input) in C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.Core\Coding\CodingGitChangeTracker.cs:line 148
+   at GoWinUI.Core.Coding.CodingGitChangeTracker.CaptureTreeAsync(CancellationToken cancellationToken) in C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.Core\Coding\CodingGitChangeTracker.cs:line 82
+   at GoWinUI.Core.Coding.CodingGitChangeTracker.StartAsync(Boolean resume, CancellationToken cancellationToken) in C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.Core\Coding\CodingGitChangeTracker.cs:line 58
+   at GoWinUI.App.Services.CodingChangesMonitor.StartAsync(Boolean resume, CancellationToken cancellationToken) in C:\Users\AMD\Documents\go-head-baseline\src\GoWinUI.App\Services\GoAiAssistantService.FileChanges.cs:line 136
+
+Fehler!      : Fehler:    17, erfolgreich:   565, übersprungen:     0, gesamt:   582, Dauer: 48 s - GoWinUI.Tests.dll (net10.0)

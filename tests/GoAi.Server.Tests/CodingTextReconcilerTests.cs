@@ -198,7 +198,7 @@ public sealed class CodingTextReconcilerTests
     private sealed class NativeHandler(bool diverge, bool streamReasoning) : HttpMessageHandler
     {
         internal const string ModelId = "coding/RetryFixture-Q4~abc123";
-        internal const string FirstText = "Ich prüfe die nächste Funktion und ihre Aufrufstellen sorgfältig. Die bisherige Annahme ist noch unbestätigt und bleibt deshalb vorläufig.";
+        internal const string FirstText = "Die gelesene Funktion enthält keine Seiteneffekte. Ihre Aufrufstellen verwenden den Rückgabewert ausschließlich zur Anzeige.";
         internal const string FirstReasoning = "## Prüfplan\n\nZuerst die Datei lesen.\nDann gezielt ändern.";
         private static readonly string[] ModelTags = ["go-context-train:32768"];
         internal string FinalText { get; } = diverge ? "Die neue Prüfung zeigt einen anderen Zusammenhang. Die Antwort wurde anhand der Datei korrigiert." : FirstText + " Die Prüfung ist jetzt abgeschlossen.";
@@ -209,6 +209,8 @@ public sealed class CodingTextReconcilerTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.RequestUri!.AbsolutePath is "/sessions/prepare" or "/sessions/save")
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
             var path = request.RequestUri!.AbsolutePath;
             if (path == "/v1/models") return Json(new { data = new[] { new { id = ModelId, tags = ModelTags, status = new { value = "loaded" } } } });
             if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });

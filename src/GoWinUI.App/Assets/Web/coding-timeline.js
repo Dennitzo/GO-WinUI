@@ -1,9 +1,9 @@
 (() => {
   "use strict";
 
-  const terminalStates = new Set(["completed", "failed", "denied", "cancelled", "interrupted"]);
+  const terminalStates = new Set(["completed", "failed", "denied", "cancelled", "interrupted", "steered"]);
   const statusLabels = { completed: "Abgeschlossen", running: "Läuft", pending: "Wartet",
-    failed: "Fehlgeschlagen", denied: "Abgelehnt", cancelled: "Abgebrochen", interrupted: "Nicht abgeschlossen" };
+    failed: "Fehlgeschlagen", denied: "Abgelehnt", cancelled: "Abgebrochen", interrupted: "Nicht abgeschlossen", steered: "Umgeleitet" };
 
   function node(tag, className, text) {
     const result = document.createElement(tag);
@@ -407,9 +407,18 @@
       || Boolean(output?.stagedDiff?.stdout);
   }
 
+  function displayStepStatus(step, message) {
+    const status = String(step.status || "running").toLowerCase();
+    const output = json(step.outputJson);
+    if (status === "interrupted" && (output?.state === "steered" || output?.generation?.state === "steered")) return "steered";
+    if (!terminalStates.has(status) && terminalStates.has(String(message.status).toLowerCase())) {
+      return message.status === "steered" ? "steered" : "interrupted";
+    }
+    return status;
+  }
+
   function renderStep(step, index, message, options, previous) {
-    const pending = !terminalStates.has(String(step.status).toLowerCase());
-    const status = terminalStates.has(String(message.status).toLowerCase()) && pending ? "interrupted" : String(step.status || "running").toLowerCase();
+    const status = displayStepStatus(step, message);
     const section = node("section", `coding-step coding-step--${status}`);
     section.dataset.stepId = String(step.id);
     section.dataset.timelineKey = `tool-${step.id}`;
@@ -454,9 +463,7 @@
   }
 
   function renderReasoning(step, message, options, previous) {
-    const pending = !terminalStates.has(String(step.status).toLowerCase());
-    const status = terminalStates.has(String(message.status).toLowerCase()) && pending
-      ? "interrupted" : String(step.status || "running").toLowerCase();
+    const status = displayStepStatus(step, message);
     const active = !terminalStates.has(status);
     const input = json(step.inputJson);
     const round = Number.isSafeInteger(input?.round) && input.round > 0 ? input.round : null;
@@ -547,7 +554,13 @@
         offset = end;
       }
       const previous = previousByKey.get(`tool-${step.id}`);
-      timeline.append(step.tool === "assistant.reasoning"
+      timeline.append(step.agentNotice && globalThis.goAgentTabs
+        ? globalThis.goAgentTabs.renderNotice(step, options)
+        : step.tool === "assistant.steering"
+        ? renderSteering(step)
+        : ["assistant.narration", "assistant.progress"].includes(step.tool)
+        ? renderAgentActivity(step, message, options)
+        : step.tool === "assistant.reasoning"
         ? renderReasoning(step, message, options, previous)
         : renderStep(step, executionIndex++, message, options, previous));
     });
@@ -563,6 +576,55 @@
       timeline.append(phase);
     }
     return timeline;
+  }
+
+  function renderAgentActivity(step, message, options) {
+    const section = node("section", `subagent-activity subagent-activity--${step.tool.split(".")[1]}`);
+    section.dataset.timelineKey = `tool-${step.id}`;
+    section.dataset.stepId = String(step.id);
+    const round = json(step.inputJson)?.round;
+    if (step.tool === "assistant.narration") {
+      if (round) section.append(node("span", "subagent-activity__round", `Runde ${round}`));
+      const body = node("div", "message-content");
+      body.append(options.renderMarkdown(String(step.detail || "")));
+      options.enhanceCodeBlocks?.(body);
+      section.append(body);
+    } else {
+      const displayStatus = displayStepStatus(step, message);
+      const running = !terminalStates.has(displayStatus);
+      const status = node("div", "subagent-activity__status");
+      status.setAttribute("role", "status");
+      if (running) status.append(node("span", "message-status-spinner"));
+      status.append(node("span", "", displayStatus === "steered" ? "Umgeleitet" : String(step.detail || (running ? "Arbeitet" : "Abgeschlossen"))));
+      section.append(status);
+      const data = json(step.outputJson);
+      const generation = data?.generation || {}, context = data?.context || {}, measured = data?.metrics?.metrics || data?.metrics || {};
+      const inputTokens = data?.metrics?.inputTokens ?? measured.inputTokens ?? generation.inputTokens ?? generation.promptTokens;
+      const outputTokens = data?.metrics?.outputTokens ?? measured.outputTokens ?? generation.outputTokens ?? generation.generatedTokens;
+      const cachedTokens = measured.cachedInputTokens ?? measured.cachedPromptTokens ?? generation.cachedPromptTokens;
+      const metrics = [
+        Number.isFinite(inputTokens) ? `${inputTokens.toLocaleString("de-DE")} Eingabetoken` : "",
+        Number.isFinite(outputTokens) ? `${outputTokens.toLocaleString("de-DE")} Ausgabetoken` : "",
+        Number.isFinite(cachedTokens) ? `${cachedTokens.toLocaleString("de-DE")} wiederverwendet` : "",
+        Number.isFinite(context.contextLimit) ? `Kontext: ${(context.estimatedInputTokens ?? inputTokens ?? 0).toLocaleString("de-DE")} / ${context.contextLimit.toLocaleString("de-DE")}` : ""
+      ].filter(Boolean);
+      if (metrics.length) section.append(node("p", "subagent-activity__metrics", metrics.join(" · ")));
+    }
+    return section;
+  }
+
+  function renderSteering(step) {
+    const section = node("section", "steering-message");
+    section.dataset.timelineKey = `tool-${step.id}`;
+    section.dataset.stepId = String(step.id);
+    section.dataset.speechExclude = "true";
+    const input = json(step.inputJson);
+    const label = node("div", "steering-message__label", "Du · Umlenkung");
+    const body = node("div", "steering-message__text", String(step.detail || input?.text || ""));
+    const status = node("span", "steering-message__status", step.status === "completed" ? "Angewendet"
+      : terminalStates.has(String(step.status).toLowerCase()) ? "Nicht angewendet" : "Übernommen · wird angewendet");
+    section.append(label, body, status);
+    return section;
   }
 
   // Keep completed rows and unchanged text nodes in place while output grows.

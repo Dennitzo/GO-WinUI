@@ -20,7 +20,20 @@ public sealed record ChatSession(
     DateTimeOffset? PinnedAt = null,
     PersistentToolAction? PersistentToolAction = null,
     long ConversationRevision = 0,
-    string? CodingWorkspacePath = null);
+    string? CodingWorkspacePath = null,
+    Guid? SessionGroupId = null);
+
+public sealed record ChatSessionGroup(
+    Guid Id,
+    string Name,
+    bool IsCollapsed = false,
+    DateTimeOffset CreatedAt = default,
+    string? WorkspacePath = null);
+
+public sealed record SessionGroupAssignment(
+    Guid? Id,
+    string Name,
+    IReadOnlyList<Guid> SessionIds);
 
 public sealed record ChatMessage(
     Guid Id,
@@ -49,7 +62,8 @@ public sealed record AssistantToolStep(
     int? ContentOffset = null,
     DateTimeOffset? StartedAt = null,
     DateTimeOffset? CompletedAt = null,
-    DateTimeOffset? UpdatedAt = null)
+    DateTimeOffset? UpdatedAt = null,
+    string? AgentId = null)
 {
     // Display/storage limit only. Tool collection and model-context budgets are independent.
     public const int MaximumDetailCharacters = 2_097_152;
@@ -61,7 +75,7 @@ public sealed record AssistantToolStep(
         ArgumentNullException.ThrowIfNull(incoming);
         if (previous is null) return incoming;
         if (incoming.Status == "running" && previous.Status != "running"
-            && incoming.Tool != "assistant.reasoning") return previous;
+            && incoming.Tool is not ("assistant.reasoning" or "assistant.narration" or "assistant.progress")) return previous;
         if (previous.UpdatedAt is { } previousAt
             && (incoming.UpdatedAt is { } incomingAt && incomingAt < previousAt
                 || incoming.UpdatedAt is null)) return previous;
@@ -76,6 +90,7 @@ public sealed record AssistantToolStep(
             UpdatedAt = incoming.UpdatedAt ?? previous.UpdatedAt,
             Detail = incoming.Detail ?? previous.Detail,
             PreviewHtml = incoming.PreviewHtml ?? previous.PreviewHtml,
+            AgentId = previous.AgentId ?? incoming.AgentId,
         };
     }
 }

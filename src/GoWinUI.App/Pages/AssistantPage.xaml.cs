@@ -6,6 +6,7 @@ using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Navigation;
 using Microsoft.Web.WebView2.Core;
 using System.Text.Json;
 using System.Text;
@@ -80,6 +81,7 @@ public sealed partial class AssistantPage : Page, IDisposable
     public AssistantPage()
     {
         InitializeComponent();
+        NavigationCacheMode = NavigationCacheMode.Required;
         _coordinator = App.Current.GetService<AssistantCoordinator>();
         _goAi = App.Current.GetService<GoAiAssistantService>();
         _settings = App.Current.GetService<SettingsCoordinator>();
@@ -98,8 +100,14 @@ public sealed partial class AssistantPage : Page, IDisposable
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         if (_initialized)
         {
+            await RefreshAfterNavigationAsync();
             return;
         }
 
@@ -145,6 +153,10 @@ public sealed partial class AssistantPage : Page, IDisposable
             var userDataFolder = Path.Combine(App.Current.DataDirectory, "WebView2");
             initializationStage = "WebView2-Umgebung";
             await _bridge.InitializeAsync(webRoot, userDataFolder, _previews.CacheRoot);
+            if (_disposed)
+            {
+                return;
+            }
             webView.CoreWebView2.AddWebResourceRequestedFilter(
                 "https://go-coding-preview.local/coding/*", CoreWebView2WebResourceContext.All,
                 CoreWebView2WebResourceRequestSourceKinds.All);
@@ -153,6 +165,10 @@ public sealed partial class AssistantPage : Page, IDisposable
             initializationStage = "Navigation";
             webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
             _bridge.NavigateToApp();
+        }
+        catch (Exception) when (_disposed)
+        {
+            // The window can close while WebView2 initializes asynchronously.
         }
         catch (Exception exception)
         {
@@ -166,7 +182,50 @@ public sealed partial class AssistantPage : Page, IDisposable
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        Dispose();
+        // MainWindow owns this cached page until shutdown. Navigation must keep
+        // the WebView, event stream and local tool processes alive.
+    }
+
+    private async Task RefreshAfterNavigationAsync()
+    {
+        if (_assistantWebView?.CoreWebView2 is null || _bridge is not { } bridge)
+        {
+            return;
+        }
+
+        var locked = false;
+        try
+        {
+            await SendThemeAsync();
+            // The retained WebView continues receiving live events while hidden.
+            // Do not replace its streaming content with a persisted snapshot.
+            locked = await _chatBridgeGate.WaitAsync(0, _lifetime?.Token ?? CancellationToken.None);
+            if (!locked || _goAi.IsRunning)
+            {
+                return;
+            }
+
+            var snapshot = await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None);
+            if (!_disposed && !_goAi.IsRunning)
+            {
+                await bridge.PostAsync("state.snapshot", snapshot);
+            }
+        }
+        catch (OperationCanceledException) when (_disposed || _lifetime?.IsCancellationRequested == true)
+        {
+            // Only actual window shutdown cancels the cached page.
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "navigation.refresh");
+        }
+        finally
+        {
+            if (locked)
+            {
+                _chatBridgeGate.Release();
+            }
+        }
     }
 
     public async Task FlushDraftAsync()
@@ -206,8 +265,9 @@ public sealed partial class AssistantPage : Page, IDisposable
 
         _disposed = true;
         _lifetime?.Cancel();
-        _lifetime?.Dispose();
-        _lifetime = null;
+        // In-flight async handlers still read this token and release their gates.
+        // Keep these managed objects valid until those handlers finish and the
+        // page is collected; none of their optional wait handles are created.
         if (_colorEventsSubscribed)
         {
             _uiSettings.ColorValuesChanged -= OnSystemColorsChanged;
@@ -266,15 +326,15 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
 
         _initialized = false;
-        _microphoneBridgeGate.Dispose();
-        _audioCaptureBridgeGate.Dispose();
-        _chatBridgeGate.Dispose();
-        _speechStartGate.Dispose();
-        _exportGate.Dispose();
     }
 
     private async void OnNavigationCompleted(CoreWebView2 sender, CoreWebView2NavigationCompletedEventArgs args)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         LoadingOverlay.Visibility = Visibility.Collapsed;
         if (!args.IsSuccess)
         {
@@ -296,7 +356,7 @@ public sealed partial class AssistantPage : Page, IDisposable
     private async void OnBridgeMessageReceived(object? sender, WebBridgeMessageEventArgs args)
     {
         var bridge = _bridge;
-        if (bridge is null)
+        if (_disposed || bridge is null)
         {
             return;
         }
@@ -316,6 +376,23 @@ public sealed partial class AssistantPage : Page, IDisposable
             }
             updatesAiState = args.Envelope.Type == "chat.send" && !isSpeechRequest;
 
+            if (updatesAiState && _goAi.IsRunning)
+            {
+                updatesAiState = false;
+                var steerSession = args.Envelope.Payload.GetProperty("sessionId").GetGuid();
+                var steerPrompt = args.Envelope.Payload.GetProperty("prompt").GetString() ?? "";
+                var receipt = await _goAi.SteerAsync(steerSession, steerPrompt, args.Envelope.RequestId,
+                    _goAi.ActiveRunId, _lifetime?.Token ?? CancellationToken.None);
+                await bridge.PostAsync("chat.steer.accepted", new { sessionId = steerSession,
+                    inputId = receipt.InputId, runId = receipt.RunId }, args.Envelope.RequestId);
+                return;
+            }
+            if (updatesAiState && _chatBridgeGate.CurrentCount == 0)
+            {
+                updatesAiState = false;
+                throw new InvalidOperationException("Der Auftrag wird noch vorbereitet. Die neue Eingabe bleibt erhalten; Umlenken ist möglich, sobald der Lauf bereit ist.");
+            }
+
             if (args.Envelope.Type.StartsWith("microphone.", StringComparison.Ordinal))
             {
                 await _microphoneBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
@@ -331,17 +408,13 @@ public sealed partial class AssistantPage : Page, IDisposable
 
             if (args.Envelope.Type == "chat.send")
             {
-                if (ShouldCancelActiveChatBeforePrompt(
-                    isSpeechRequest,
-                    _chatBridgeGate.CurrentCount == 0,
-                    _goAi.IsRunning,
-                    _microphone.Current.IsSpeaking || _goAi.IsSpeaking))
-                {
-                    await _coordinator.CancelCurrentAsync().ConfigureAwait(false);
-                }
                 if (!isSpeechRequest)
                 {
-                    await _chatBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
+                    if (!await _chatBridgeGate.WaitAsync(0, _lifetime?.Token ?? CancellationToken.None))
+                    {
+                        updatesAiState = false;
+                        throw new InvalidOperationException("Ein Auftrag wird bereits bearbeitet. Verwende Umlenken; die Eingabe bleibt erhalten.");
+                    }
                     chatMessageLocked = true;
                     if (_screenClips.Current.IsRecording)
                     {
@@ -372,6 +445,19 @@ public sealed partial class AssistantPage : Page, IDisposable
 
             switch (args.Envelope.Type)
             {
+                case "session.workspaceCreate":
+                    if (_goAi.IsRunning)
+                        throw new InvalidOperationException("Beende zuerst den laufenden Auftrag, bevor du ein Projekt öffnest.");
+                    var projectPicker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+                    projectPicker.FileTypeFilter.Add("*");
+                    InitializePicker(projectPicker);
+                    var projectFolder = await projectPicker.PickSingleFolderAsync();
+                    if (projectFolder is not null)
+                        await CommitCodingWorkspaceAsync(_chatBridgeGate, () => _goAi.IsRunning,
+                            token => _coordinator.CreateWorkspaceSessionAsync(projectFolder.Path,
+                                (type, payload, requestId) => bridge.PostAsync(type, payload, requestId),
+                                args.Envelope.RequestId, token), _lifetime?.Token ?? CancellationToken.None);
+                    break;
                 case "coding.pickWorkspace":
                     if (_goAi.IsRunning)
                     {
@@ -530,9 +616,9 @@ public sealed partial class AssistantPage : Page, IDisposable
                     break;
             }
         }
-        catch (OperationCanceledException) when (_lifetime?.IsCancellationRequested == true)
+        catch (OperationCanceledException) when (_disposed || _lifetime?.IsCancellationRequested == true)
         {
-            // Navigation away from the assistant intentionally cancels page work.
+            // Actual window shutdown cancels page work; navigation keeps it alive.
         }
         catch (ObjectDisposedException) when (_disposed || _lifetime?.IsCancellationRequested == true)
         {
@@ -583,18 +669,6 @@ public sealed partial class AssistantPage : Page, IDisposable
         {
             chatGate.Release();
         }
-    }
-
-    internal static bool ShouldCancelActiveChatBeforePrompt(
-        bool isSpeechRequest,
-        bool chatRequestInFlight,
-        bool aiRunActive,
-        bool speechPlaybackActive)
-    {
-        // Vorlesen has its own lifecycle and controls. Merely playing audio is
-        // never a reason to cancel anything when a new prompt is submitted.
-        _ = speechPlaybackActive;
-        return !isSpeechRequest && (chatRequestInFlight || aiRunActive);
     }
 
     private void OnReadFromContextRequested(

@@ -16,9 +16,9 @@ public sealed class AssistantWebBridge : IDisposable
     private const int MaximumOutgoingMessageLength = 16_777_216;
     private static readonly HashSet<string> AllowedIncomingTypes = new(StringComparer.Ordinal)
     {
-        "app.ready", "conversation.refresh", "chat.send", "chat.cancel", "session.create", "session.open",
+        "app.ready", "conversation.refresh", "chat.send", "chat.steer", "chat.cancel", "session.create", "session.open",
         "reasoning.get", "reasoning.set",
-        "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "document.pick", "coding.pickWorkspace",
+        "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "session.groupCollapse", "session.projectCreate", "session.workspaceCreate", "document.pick", "coding.pickWorkspace",
         "document.remove", "attachment.remove", "workflow.list", "workflow.insert", "workflow.create",
         "workflow.update", "workflow.delete",
         "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
@@ -30,12 +30,13 @@ public sealed class AssistantWebBridge : IDisposable
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
         "state.snapshot", "chat.started", "chat.delta", "chat.completed",
-        "chat.cancelled", "chat.failed", "session.changed", "workflow.snapshot",
+        "chat.cancelled", "chat.failed", "session.changed", "session.grouped", "workflow.snapshot",
         "workflow.changed", "workflow.draft", "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
         "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
         "microphone.changed", "microphone.transcript", "artifact.previewReady", "host.error",
         "conversation.snapshot", "conversation.messageCommitted", "coding.changes",
         "reasoning.snapshot",
+        "chat.steer.accepted",
     };
     private static readonly HashSet<string> ReadableBlockKinds = new(StringComparer.Ordinal)
     {

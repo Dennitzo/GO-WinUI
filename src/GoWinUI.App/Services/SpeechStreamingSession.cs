@@ -50,7 +50,7 @@ internal sealed class SpeechStreamingSession : IDisposable
             return;
         }
         var flushSentence = update.Kind == GoAiAssistantUpdateKind.Status
-            && update.ToolStep is { Tool: not GoAiAssistantService.ReasoningStepTool };
+            && update.ToolStep is { AgentId: null, Tool: not GoAiAssistantService.ReasoningStepTool };
         if (update.Kind is not (GoAiAssistantUpdateKind.Delta or GoAiAssistantUpdateKind.Completed) && !flushSentence) return;
         lock (_gate)
         {

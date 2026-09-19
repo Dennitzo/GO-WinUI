@@ -37,6 +37,7 @@ internal static class GatewayEndpoints
         endpoints.MapGet("/v1/runs/{runId}/events", StreamRunEventsAsync);
         endpoints.MapPost("/v1/runs/{runId}/client-tool-results", SubmitClientToolResultAsync);
         endpoints.MapPost("/v1/runs/{runId}/cancel", CancelRunAsync);
+        endpoints.MapPost("/v1/runs/{runId}/steer", SteerRunAsync);
 
         endpoints.MapPost("/v1/uploads", CreateUploadAsync);
         endpoints.MapGet("/v1/uploads/{uploadId}", GetUploadAsync);
@@ -290,6 +291,19 @@ internal static class GatewayEndpoints
             await queue.EnqueueAsync(runId, context.RequestAborted).ConfigureAwait(false);
         }
         context.Response.StatusCode = StatusCodes.Status204NoContent;
+    }
+
+    private static async Task SteerRunAsync(HttpContext context)
+    {
+        var runId = GetRouteString(context, "runId");
+        var input = await ReadJsonAsync<RunSteeringRequest>(context).ConfigureAwait(false);
+        var repository = context.RequestServices.GetRequiredService<RunRepository>();
+        var accepted = await repository.AcceptSteeringAsync(runId, input, context.RequestAborted).ConfigureAwait(false);
+        // Acceptance is durable even if the HTTP caller disconnects after commit.
+        // Active model calls observe it; suspended workers resume at their tool boundary.
+        await context.RequestServices.GetRequiredService<RunWorkChannel>().EnqueueAsync(runId, CancellationToken.None).ConfigureAwait(false);
+        context.Response.StatusCode = accepted.Duplicate ? StatusCodes.Status200OK : StatusCodes.Status202Accepted;
+        await WriteJsonAsync(context, accepted).ConfigureAwait(false);
     }
 
     private static async Task CancelRunAsync(HttpContext context)

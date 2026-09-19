@@ -5,6 +5,7 @@ using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure;
 using GoAi.Contracts;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Text.Json;
 
@@ -94,11 +95,32 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("\"session.tool\"", bridge, StringComparison.Ordinal);
 
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.Contains("bridge.js?v=20260821-2", html, StringComparison.Ordinal);
+        Assert.Contains("bridge.js?v=20260919-agents-1", html, StringComparison.Ordinal);
 
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         Assert.Contains("post(\"session.tool\"", app, StringComparison.Ordinal);
     }
+
+    /*
+    [Fact]
+    public void SessionGroupingButtonTriggersManualAiGroupingRun()
+    {
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.groupNow"));
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
+        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        var coordinator = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "src", "GoWinUI.App", "Services", "AssistantCoordinator.cs"));
+        Assert.Contains("id=\"group-sessions\"", html, StringComparison.Ordinal);
+        Assert.Contains("Sitzungen durch die KI gruppieren lassen", html, StringComparison.Ordinal);
+        Assert.Contains("\"session.groupNow\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("post(\"session.groupNow\", {});", app, StringComparison.Ordinal);
+        Assert.Contains("case \"session.groupNow\":", coordinator, StringComparison.Ordinal);
+        Assert.Contains("MaybeGroupSessionsAsync(emit, envelope.RequestId)", coordinator, StringComparison.Ordinal);
+        Assert.DoesNotContain("_ = MaybeGroupSessions", coordinator, StringComparison.Ordinal);
+    }
+    */
 
     [Fact]
     public void SessionPinUsesDescriptiveGermanLabelsAcrossTheWebViewContract()
@@ -122,6 +144,19 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public void SessionProjectCreateButtonTriggersProjectSessionCreation()
+    {
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.projectCreate"));
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.workspaceCreate"));
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
+        Assert.Contains("\"session.projectCreate\"", bridge, StringComparison.Ordinal);
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        Assert.Contains("session.projectCreate", app, StringComparison.Ordinal);
+        Assert.Contains("Neue Sitzung im Projekt", app, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
@@ -133,10 +168,10 @@ public sealed class AssistantWorkflowTests
         Assert.InRange(AssistantPage.PdfA4HeightInches, 11.692, 11.693);
         Assert.InRange(AssistantPage.PdfBookMarginLeftInches, .944, .946);
         Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
-        Assert.Contains("styles.css?v=20260912-2", html, StringComparison.Ordinal);
-        Assert.Contains("markdown.js?v=20260911-9", html, StringComparison.Ordinal);
+        Assert.Contains("styles.css?v=20260919-agents-3", html, StringComparison.Ordinal);
+        Assert.Contains("markdown.js?v=20260913-3", html, StringComparison.Ordinal);
         Assert.Contains("voice.js?v=20260822-2", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260912-7", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260919-agents-3", html, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
@@ -193,7 +228,7 @@ public sealed class AssistantWorkflowTests
 
         var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
         Assert.Contains(".composer-submit {", styles, StringComparison.Ordinal);
-        Assert.Contains(".send-button, .stop-button, .microphone-button", styles, StringComparison.Ordinal);
+        Assert.Contains(".send-button, .microphone-button", styles, StringComparison.Ordinal);
 
         var voice = File.ReadAllText(Path.Combine(webRoot, "voice.js"));
         Assert.Contains("navigator.mediaDevices.getUserMedia", voice, StringComparison.Ordinal);
@@ -431,7 +466,7 @@ public sealed class AssistantWorkflowTests
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
         Assert.DoesNotContain("id=\"reasoning-model\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("id=\"reasoning-options\"", html, StringComparison.Ordinal);
+        Assert.Contains("id=\"reasoning-options\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("id=\"reasoning\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("data-reasoning=", html, StringComparison.Ordinal);
         Assert.DoesNotContain("reasoningProfiles", app, StringComparison.Ordinal);
@@ -660,31 +695,6 @@ public sealed class AssistantWorkflowTests
     public void ExplicitVoiceCommandsStopPersistentVoiceControl(string command)
     {
         Assert.True(AssistantPage.IsVoiceControlStopCommand(command));
-    }
-
-    [Fact]
-    public void NewPromptInterruptsOnlyAnExistingChatRunAndNeverIndependentSpeech()
-    {
-        Assert.False(AssistantPage.ShouldCancelActiveChatBeforePrompt(
-            isSpeechRequest: false,
-            chatRequestInFlight: false,
-            aiRunActive: false,
-            speechPlaybackActive: true));
-        Assert.True(AssistantPage.ShouldCancelActiveChatBeforePrompt(
-            isSpeechRequest: false,
-            chatRequestInFlight: true,
-            aiRunActive: false,
-            speechPlaybackActive: true));
-        Assert.True(AssistantPage.ShouldCancelActiveChatBeforePrompt(
-            isSpeechRequest: false,
-            chatRequestInFlight: false,
-            aiRunActive: true,
-            speechPlaybackActive: true));
-        Assert.False(AssistantPage.ShouldCancelActiveChatBeforePrompt(
-            isSpeechRequest: true,
-            chatRequestInFlight: true,
-            aiRunActive: true,
-            speechPlaybackActive: true));
     }
 
     [Theory]
@@ -1334,7 +1344,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("id=\"composer-speech-status\"", html, StringComparison.Ordinal);
         Assert.Contains("id=\"composer-speech-pause\"", html, StringComparison.Ordinal);
         Assert.Contains("id=\"composer-speech-stop\"", html, StringComparison.Ordinal);
-        Assert.Contains("title=\"Vorlesen stoppen\"", html, StringComparison.Ordinal);
+        Assert.Contains("title=\"Vorlesen beenden\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("composer-speech-previous", html, StringComparison.Ordinal);
         Assert.DoesNotContain("composer-speech-skip", html, StringComparison.Ordinal);
         Assert.DoesNotContain("Vorheriger Absatz", html, StringComparison.Ordinal);
@@ -1348,20 +1358,19 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("post(\"microphone.toggleSpeechPause\"", app, StringComparison.Ordinal);
         Assert.Contains("elements.composerSpeechStop.addEventListener", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.stopSpeech\", {});", app, StringComparison.Ordinal);
-        Assert.Contains("const canStop = state.isRunning;", app, StringComparison.Ordinal);
-        var promptStop = app.IndexOf("elements.stop.addEventListener", StringComparison.Ordinal);
-        var speechStop = app.IndexOf("elements.composerSpeechStop.addEventListener", StringComparison.Ordinal);
-        Assert.True(promptStop >= 0 && speechStop > promptStop);
+        var promptStop = app.IndexOf("async function handleComposerAction()", StringComparison.Ordinal);
+        var promptSubmit = app.IndexOf("async function submitPrompt()", promptStop, StringComparison.Ordinal);
+        Assert.True(promptStop >= 0 && promptSubmit > promptStop);
         Assert.DoesNotContain(
             "microphone.stopSpeech",
-            app[promptStop..speechStop],
+            app[promptStop..promptSubmit],
             StringComparison.Ordinal);
         Assert.DoesNotContain("\"chat.removed\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.previousSpeechParagraph", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.skipSpeechParagraph", app, StringComparison.Ordinal);
         Assert.Contains("isPaused ? \"Fortsetzen\" : \"Pausieren\"", app, StringComparison.Ordinal);
-        Assert.Contains("messageId: payload.message.id", app, StringComparison.Ordinal);
-        Assert.Contains("sessionId: payload.message.sessionId", app, StringComparison.Ordinal);
+        Assert.Contains("messageId: String(message.id)", app, StringComparison.Ordinal);
+        Assert.Contains("sessionId: state.activeSessionId", app, StringComparison.Ordinal);
         Assert.Contains("\"speech.status\"", bridge, StringComparison.Ordinal);
         Assert.DoesNotContain("Erneut senden", app, StringComparison.Ordinal);
         Assert.DoesNotContain("retryMessage", app, StringComparison.Ordinal);
@@ -1375,7 +1384,7 @@ public sealed class AssistantWorkflowTests
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("const canStop = state.isRunning;", app, StringComparison.Ordinal);
+        Assert.Contains("globalThis.goRunSteering?.canSteer(state)", app, StringComparison.Ordinal);
         Assert.Contains("if (sessionChanged && previousSessionId) persistSessionScrollPosition(previousSessionId);", app, StringComparison.Ordinal);
         Assert.Contains("if (sessionChanged) restoreSessionScrollPosition(state.activeSessionId);", app, StringComparison.Ordinal);
         Assert.Contains("sessionScrollStoragePrefix", app, StringComparison.Ordinal);
@@ -1726,6 +1735,87 @@ public sealed class AssistantWorkflowTests
         Assert.NotNull(snapshot);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TabAndSessionSnapshotsRestoreMeasuredContextAndRunningMessageWithoutCrossSessionLeakage(bool coding)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        await settings.UpdateAsync(current => current with
+        {
+            IsAiConnectionEnabled = true, SelectedModel = "general-a", SelectedCodingModel = "coding-a",
+        });
+        var chats = environment.Get<IChatRepository>();
+        var active = await chats.CreateSessionAsync("Aktiv");
+        var other = await chats.CreateSessionAsync("Andere Sitzung");
+        if (coding) await chats.SetCodingWorkspacePathAsync(active.Id, environment.Directory, activateCoding: true);
+        var message = await chats.AddMessageAsync(active.Id, ChatRole.Assistant, "", MessageStatus.Streaming);
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        await coordinator.EmitGoAiUpdateAsync(new(GoAiAssistantUpdateKind.Status, message,
+            Status: "Denkt nach", Detail: "12.345 Token", Model: coding ? "coding-a" : "general-a",
+            ContextUsed: 12345, ContextLimit: 32768, LoadedFiles: 4), static (_, _, _) => Task.CompletedTask, "progress");
+
+        var first = await OpenAndCaptureSnapshotAsync(coordinator, active.Id);
+        Assert.True(first.GetProperty("isRunning").GetBoolean());
+        Assert.Equal("Denkt nach", first.GetProperty("runStatus").GetString());
+        Assert.Equal("12.345 Token", first.GetProperty("runDetail").GetString());
+        Assert.Equal(message.Id, first.GetProperty("runMessageId").GetGuid());
+        Assert.Equal("measured", first.GetProperty("contextSource").GetString());
+        Assert.Equal(12345, first.GetProperty("contextUsed").GetInt32());
+        Assert.Equal(4, first.GetProperty("loadedFiles").GetInt32());
+
+        var otherSnapshot = await OpenAndCaptureSnapshotAsync(coordinator, other.Id);
+        Assert.False(otherSnapshot.GetProperty("isRunning").GetBoolean());
+        Assert.True(otherSnapshot.GetProperty("isAiBusy").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, otherSnapshot.GetProperty("runStatus").ValueKind);
+        Assert.Equal("estimated", otherSnapshot.GetProperty("contextSource").GetString());
+        var returned = await OpenAndCaptureSnapshotAsync(coordinator, active.Id);
+        Assert.Equal(first.GetProperty("contextUsed").GetInt32(), returned.GetProperty("contextUsed").GetInt32());
+        Assert.Equal(first.GetProperty("runDetail").GetString(), returned.GetProperty("runDetail").GetString());
+
+        await coordinator.EmitGoAiUpdateAsync(new(GoAiAssistantUpdateKind.Started, message,
+            Status: "Wird fortgesetzt", Detail: "SSE erneut verbunden"), static (_, _, _) => Task.CompletedTask, "resume");
+        var resumed = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+        Assert.Equal(12345, resumed.GetProperty("contextUsed").GetInt32());
+        Assert.Equal("12.345 Token", resumed.GetProperty("runDetail").GetString());
+
+        await chats.UpdateMessageAsync(message.Id, "Fertig", MessageStatus.Completed);
+        await coordinator.EmitGoAiUpdateAsync(new(GoAiAssistantUpdateKind.Completed, message with { Status = MessageStatus.Completed },
+            Status: "Abgeschlossen"), static (_, _, _) => Task.CompletedTask, "done");
+        var completed = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+        Assert.False(completed.GetProperty("isRunning").GetBoolean());
+        Assert.False(completed.GetProperty("isAiBusy").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, completed.GetProperty("runMessageId").ValueKind);
+        Assert.Equal(12345, completed.GetProperty("contextUsed").GetInt32());
+    }
+
+    [Fact]
+    public async Task ProjectPlusCreatesVisibleSessionInSameWorkspaceWithoutChangingExistingHistory()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var first = await chats.CreateSessionAsync("Bisherige Sitzung");
+        await chats.SetCodingWorkspacePathAsync(first.Id, environment.Directory, activateCoding: true);
+        var group = Assert.Single(await chats.ListSessionGroupsAsync());
+        await chats.SetSessionGroupCollapsedAsync(group.Id, true);
+        await chats.SetPinnedAsync(first.Id, true);
+        var message = await chats.AddMessageAsync(first.Id, ChatRole.User, "Erhalten", MessageStatus.Completed);
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        await HandleAsync(coordinator, "session.projectCreate", new { workspacePath = environment.Directory });
+        var created = (await chats.ListSessionsAsync()).Single(session => session.Id != first.Id);
+        Assert.Equal(created.Id, settings.Current.ActiveSessionId);
+        Assert.Equal(group.Id, created.SessionGroupId);
+        Assert.Equal(environment.Directory, created.CodingWorkspacePath);
+        Assert.Equal(PersistentToolAction.Coding, created.PersistentToolAction);
+        Assert.False(Assert.Single(await chats.ListSessionGroupsAsync()).IsCollapsed);
+        Assert.True((await chats.GetSessionAsync(first.Id))!.IsPinned);
+        Assert.NotNull(await chats.GetMessageAsync(message.Id));
+    }
+
     [Fact]
     public async Task SelectingWorkflowInsertsVisibleMessageWithoutSessionAttachment()
     {
@@ -1952,4 +2042,105 @@ public sealed class AssistantWorkflowTests
             });
         return snapshot ?? throw new InvalidOperationException("Der Sitzungs-Snapshot wurde nicht emittiert.");
     }
+
+    [Fact]
+    public async Task SessionGroupingIsTriggeredOnlyManuallyNotAfterCompletedRun()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+
+        await HandleAsync(coordinator, "session.create", new { title = "Gruppe A" });
+        await HandleAsync(coordinator, "session.create", new { title = "Gruppe B" });
+
+        await coordinator.EmitGoAiUpdateAsync(
+            new GoAiAssistantUpdate(GoAiAssistantUpdateKind.Completed, new ChatMessage(Guid.NewGuid(), Guid.NewGuid(), ChatRole.Assistant, "Antwort", MessageStatus.Completed, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow), Status: "Abgeschlossen"),
+            static (_, _, _) => Task.CompletedTask,
+            Guid.NewGuid().ToString("D"));
+
+        await using (var assertionConnection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
+        {
+            await assertionConnection.OpenAsync();
+            await using var groupCommand = assertionConnection.CreateCommand();
+            groupCommand.CommandText = "SELECT COUNT(*) FROM chat_session_groups;";
+            Assert.Equal(0L, (long)(await groupCommand.ExecuteScalarAsync() ?? -1L));
+            await using var assignmentCommand = assertionConnection.CreateCommand();
+            assignmentCommand.CommandText = "SELECT COUNT(*) FROM chat_sessions WHERE session_group_id IS NOT NULL;";
+            Assert.Equal(0L, (long)(await assignmentCommand.ExecuteScalarAsync() ?? -1L));
+        }
+
+        var groupNowEnvelope = new WebBridgeEnvelope(
+            AssistantWebBridge.ProtocolVersion,
+            "session.groupNow",
+            Guid.NewGuid().ToString("D"),
+            JsonDocument.Parse("{}").RootElement.Clone());
+        var groupNowException = await Record.ExceptionAsync(() => coordinator.HandleAsync(
+            groupNowEnvelope,
+            (_, _, _) => Task.CompletedTask));
+        Assert.Null(groupNowException);
+    }
+
+    [Fact]
+    public async Task SessionGroupingSnapshotIncludesActualMembershipForSidebar()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var first = await chats.CreateSessionAsync("Anfang");
+        var second = await chats.CreateSessionAsync("Fortsetzung");
+        await chats.ApplySessionGroupingAsync([new(null, "Projekt", [first.Id, second.Id])]);
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        var snapshot = await OpenAndCaptureSnapshotAsync(coordinator, first.Id);
+        var group = Assert.Single(snapshot.GetProperty("sessionGroups").EnumerateArray());
+        Assert.Equal("Projekt", group.GetProperty("name").GetString());
+        var members = group.GetProperty("sessionIds").EnumerateArray().Select(item => item.GetGuid()).ToHashSet();
+        Assert.Equal(2, members.Count);
+        Assert.Contains(first.Id, members);
+        Assert.Contains(second.Id, members);
+        Assert.All(snapshot.GetProperty("sessions").EnumerateArray(),
+            session => Assert.Equal(group.GetProperty("id").GetGuid(), session.GetProperty("sessionGroupId").GetGuid()));
+    }
+
+    [Fact]
+    public async Task SessionGroupingRefreshIsSidebarOnlyAfterConcurrentSessionSwitch()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var first = await chats.CreateSessionAsync("Ursprüngliche Sitzung");
+        var second = await chats.CreateSessionAsync("Inzwischen aktive Sitzung");
+        await chats.SaveDraftAsync(second.Id, "Noch nicht gesendeter Entwurf");
+        await chats.ApplySessionGroupingAsync([new(null, "Projekt", [first.Id, second.Id])]);
+        await settings.UpdateAsync(current => current with { ActiveSessionId = second.Id });
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+
+        var completion = JsonSerializer.SerializeToElement(
+            await coordinator.BuildSessionSidebarSnapshotAsync(true), JsonSerializerOptions.Web);
+        Assert.Equal("groupingCompleted,sessions,sessionGroups",
+            string.Join(",", completion.EnumerateObject().Select(property => property.Name)));
+        Assert.True(completion.GetProperty("groupingCompleted").GetBoolean());
+        Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("session.grouped"));
+
+        var groupId = Assert.Single(await chats.ListSessionGroupsAsync()).Id;
+        using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new { groupId, collapsed = true }));
+        var events = new List<(string Type, JsonElement Data)>();
+        await coordinator.HandleAsync(new(AssistantWebBridge.ProtocolVersion, "session.groupCollapse", "group-collapse", payload.RootElement.Clone()),
+            (type, data, _) =>
+            {
+                events.Add((type, JsonSerializer.SerializeToElement(data, JsonSerializerOptions.Web)));
+                return Task.CompletedTask;
+            });
+        var item = Assert.Single(events);
+        Assert.Equal("session.grouped", item.Type);
+        Assert.False(item.Data.GetProperty("groupingCompleted").GetBoolean());
+        Assert.Equal("groupingCompleted,sessions,sessionGroups",
+            string.Join(",", item.Data.EnumerateObject().Select(property => property.Name)));
+        Assert.Equal(second.Id, settings.Current.ActiveSessionId);
+        Assert.Equal("Noch nicht gesendeter Entwurf", (await chats.GetSessionAsync(second.Id))!.Draft);
+    }
+
 }

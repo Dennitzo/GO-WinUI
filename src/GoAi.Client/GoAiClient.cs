@@ -252,6 +252,9 @@ public sealed class GoAiClient : IDisposable
     public Task<RunSnapshot> GetRunAsync(string runId, CancellationToken cancellationToken = default) =>
         GetAsync<RunSnapshot>($"v1/runs/{Uri.EscapeDataString(runId)}", cancellationToken);
 
+    public Task<RunSteeringAccepted> SteerRunAsync(string runId, RunSteeringRequest request, CancellationToken cancellationToken = default) =>
+        PostAsync<RunSteeringRequest, RunSteeringAccepted>($"v1/runs/{Uri.EscapeDataString(runId)}/steer", request, cancellationToken);
+
     public async Task CancelRunAsync(string runId, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

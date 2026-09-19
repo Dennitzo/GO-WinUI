@@ -74,6 +74,13 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
     </Content>
+    <Content Include="..\..\workers\coding\session_cache.py">
+      <Link>Assets\NativeRuntime\workers\coding\session_cache.py</Link>
+      <TargetPath>Assets\NativeRuntime\workers\coding\session_cache.py</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

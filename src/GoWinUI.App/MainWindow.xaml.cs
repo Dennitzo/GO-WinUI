@@ -34,6 +34,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueueTimer _saveTimer;
     private readonly AppWindow _appWindow;
     private readonly nint _windowHandle;
+    private AssistantPage? _assistantPage;
     private bool _restored;
     private bool _isClosing;
     private bool _suppressSelection;
@@ -285,6 +286,11 @@ public sealed partial class MainWindow : Window
 
     private void OnNavigated(object sender, NavigationEventArgs e)
     {
+        if (e.Content is AssistantPage assistantPage)
+        {
+            _assistantPage = assistantPage;
+        }
+
         ViewModel.ActivePageTitle = e.SourcePageType.Name switch
         {
             nameof(AssistantPage) => "AI Assistent",
@@ -399,7 +405,7 @@ public sealed partial class MainWindow : Window
         }
 
         _closePreparationStarted = true;
-        if (ContentFrame.Content is AssistantPage assistantPage)
+        if (_assistantPage is { } assistantPage)
         {
             await assistantPage.FlushDraftAsync();
         }
@@ -415,6 +421,7 @@ public sealed partial class MainWindow : Window
 
         try
         {
+            DisposeAssistantPage();
             if (BeforeCloseAsync is not null)
             {
                 await BeforeCloseAsync();
@@ -470,6 +477,7 @@ public sealed partial class MainWindow : Window
         }
 
         _isClosing = true;
+        DisposeAssistantPage();
         _saveTimer.Stop();
         _saveTimer.Tick -= OnSaveTimerTick;
         AppTitleBar.ActualThemeChanged -= OnTitleBarActualThemeChanged;
@@ -477,6 +485,20 @@ public sealed partial class MainWindow : Window
         _appWindow.Closing -= OnAppWindowClosing;
         RootNavigation.PaneOpened -= OnPaneChanged;
         RootNavigation.PaneClosed -= OnPaneChanged;
+    }
+
+    private void DisposeAssistantPage()
+    {
+        var assistantPage = _assistantPage;
+        _assistantPage = null;
+        try
+        {
+            assistantPage?.Dispose();
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.ShutdownCleanupFailed(_logger, exception);
+        }
     }
 
     private WindowPlacement CaptureNormalPlacement()

@@ -112,6 +112,8 @@ public sealed partial class GoAiAssistantService(
 
     public bool IsRunning => _gate.CurrentCount == 0;
 
+    public string? ActiveRunId => Volatile.Read(ref _activeServerRunId);
+
     public bool IsSpeaking => Volatile.Read(ref _speechActive) != 0;
 
     public Guid? ActiveSessionId =>
@@ -242,7 +244,10 @@ public sealed partial class GoAiAssistantService(
         {
             if (!await _gate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
             {
-                return;
+                // Page disposal cancels the old stream asynchronously. A replacement
+                // page must wait for that reader instead of silently missing reattach.
+                if (_activeCancellation?.IsCancellationRequested != true) return;
+                await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
             Interlocked.Exchange(ref _explicitCancellation, 0);
             Volatile.Write(ref _activeSessionId, run.SessionId.ToString("D"));
@@ -254,6 +259,16 @@ public sealed partial class GoAiAssistantService(
                     cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
                 if (message is null || string.IsNullOrWhiteSpace(run.ServerRunId))
                 {
+                    continue;
+                }
+                if (message.Status == MessageStatus.Cancelled)
+                {
+                    // An explicit local cancellation is authoritative even if the
+                    // process stopped before its run record or remote job caught up.
+                    // Preserve the message and tool receipts exactly as cancelled.
+                    await runs.UpdateAsync(run.Id, run.ServerRunId, run.LastEventId, "cancelled",
+                        run.SelectedModel, "client.run_already_cancelled", CancellationToken.None).ConfigureAwait(false);
+                    await CancelPersistedServerRunsAsync([run.ServerRunId], _activeCancellation.Token).ConfigureAwait(false);
                     continue;
                 }
                 _activeServerRunId = run.ServerRunId;
@@ -1247,6 +1262,7 @@ public sealed partial class GoAiAssistantService(
     {
         public int ActiveTokens { get; set; }
         public int ProcessedPromptTokens { get; set; }
+        public int? CachedPromptTokens { get; set; }
         public int GeneratedTokens { get; set; }
         public bool HasStarted { get; set; }
     }
@@ -1261,6 +1277,7 @@ public sealed partial class GoAiAssistantService(
         {
             counter.ActiveTokens = 0;
             counter.ProcessedPromptTokens = 0;
+            counter.CachedPromptTokens = null;
             counter.GeneratedTokens = 0;
             counter.HasStarted = true;
             return "0 Token";
@@ -1272,11 +1289,18 @@ public sealed partial class GoAiAssistantService(
         if (progress.State == "promptProcessing")
         {
             counter.ProcessedPromptTokens = Math.Max(counter.ProcessedPromptTokens, progress.ProcessedPromptTokens ?? 0);
+            if (progress.CachedPromptTokens is >= 0)
+                counter.CachedPromptTokens = progress.CachedPromptTokens;
             counter.ActiveTokens = counter.ProcessedPromptTokens + counter.GeneratedTokens;
             counter.HasStarted = true;
-            return progress.PromptProgress is { } fraction
-                ? $"Kontext wird verarbeitet · {fraction:P0} · {counter.ProcessedPromptTokens:N0} Token"
-                : $"Kontext wird verarbeitet · {counter.ProcessedPromptTokens:N0} Token";
+            var ready = progress.PromptProgress is { } fraction
+                ? $"Kontext bereit · {fraction:P0}"
+                : "Kontext bereit";
+            // llama.cpp reports the available prefix including cached tokens as processed.
+            // Only its explicit cache counter can distinguish reused and freshly evaluated input.
+            return counter.CachedPromptTokens is { } cached
+                ? $"{ready} · {cached:N0} Token wiederverwendet · {Math.Max(0, counter.ProcessedPromptTokens - cached):N0} neu verarbeitet"
+                : $"{ready} · {counter.ProcessedPromptTokens:N0} Token";
         }
         if (progress.ToolName?.StartsWith("coding.", StringComparison.Ordinal) == true)
         {
@@ -1290,6 +1314,8 @@ public sealed partial class GoAiAssistantService(
             counter.HasStarted = true;
             if ((progress.ProcessedPromptTokens ?? progress.PromptTokens) is { } processed && processed > 0)
                 counter.ProcessedPromptTokens = processed;
+            if (progress.CachedPromptTokens is >= 0)
+                counter.CachedPromptTokens = progress.CachedPromptTokens;
             if (progress.GeneratedTokens is { } generated)
                 counter.GeneratedTokens = Math.Max(0, generated);
             else if (progress.CurrentTokens is { } total && counter.ProcessedPromptTokens > 0)
@@ -1308,11 +1334,22 @@ public sealed partial class GoAiAssistantService(
         return FormatCurrentModelTokens(counter);
     }
 
-    private static string FormatCurrentModelTokens(ModelTokenProgressState counter) => counter.GeneratedTokens > 0
-        ? counter.ProcessedPromptTokens > 0
-            ? $"{counter.ProcessedPromptTokens:N0} Kontexttoken · ca. {counter.GeneratedTokens:N0} erzeugte Token"
-            : $"ca. {counter.GeneratedTokens:N0} erzeugte Token"
-        : $"{counter.ActiveTokens:N0} Token";
+    private static string FormatCurrentModelTokens(ModelTokenProgressState counter)
+    {
+        if (counter.ProcessedPromptTokens > 0 && counter.CachedPromptTokens is { } cached)
+        {
+            var context = $"{cached:N0} Kontexttoken wiederverwendet · {Math.Max(0, counter.ProcessedPromptTokens - cached):N0} neu verarbeitet";
+            return counter.GeneratedTokens > 0
+                ? $"{context} · ca. {counter.GeneratedTokens:N0} erzeugte Token"
+                : context;
+        }
+
+        return counter.GeneratedTokens > 0
+            ? counter.ProcessedPromptTokens > 0
+                ? $"{counter.ProcessedPromptTokens:N0} Kontexttoken · ca. {counter.GeneratedTokens:N0} erzeugte Token"
+                : $"ca. {counter.GeneratedTokens:N0} erzeugte Token"
+            : $"{counter.ActiveTokens:N0} Token";
+    }
 
     private async Task<ChatMessage> StreamRunAsync(
         GoAiRunRecord localRun,
@@ -1330,30 +1367,46 @@ public sealed partial class GoAiAssistantService(
             cancellationToken).ConfigureAwait(false)).ToList();
         var modelTokenProgress = new ModelTokenProgressState();
         var commandProgressByStep = new Dictionary<string, CodingCommandProgress>(StringComparer.Ordinal);
-        var toolStartOffsets = (assistant.ToolSteps ?? []).Where(static step => step.ContentOffset is not null)
+        var toolStartOffsets = (assistant.ToolSteps ?? []).Where(static step => step.Tool != "assistant.steering" && step.ContentOffset is not null)
+            .ToDictionary(static step => step.Id, static step => step.ContentOffset!.Value, StringComparer.Ordinal);
+        // Steering events and persisted messages use canonical visible offsets.
+        // Ordinary live tool offsets refer to the raw model stream instead.
+        var steeringOffsets = (assistant.ToolSteps ?? []).Where(static step => step.Tool == "assistant.steering" && step.ContentOffset is not null)
             .ToDictionary(static step => step.Id, static step => step.ContentOffset!.Value, StringComparer.Ordinal);
 
         async Task RecordToolStepAsync(string id, string tool, string status, string? detail, bool appendResult = false,
             string? previewHtml = null, string? inputJson = null, string? outputJson = null, string? explanation = null,
-            DateTimeOffset? eventAt = null)
+            DateTimeOffset? eventAt = null, string? agentId = null)
         {
-            if (localRun.Action != PromptTriggerAction.Coding) return;
+            if (localRun.Action != PromptTriggerAction.Coding && tool != "assistant.steering") return;
             var previous = assistant.ToolSteps?.FirstOrDefault(step => step.Id == id);
             // Replayed terminal events must not append the same result a second time.
             if (appendResult && previous?.Status == status && status != "running") return;
             if (appendResult && !string.IsNullOrWhiteSpace(previous?.Detail))
                 detail = (previous.InputJson is not null ? FormatStoredToolInput(previous) : previous.Detail) + "\n\nErgebnis:\n" + detail;
-            if (!toolStartOffsets.TryGetValue(id, out var startOffset)) toolStartOffsets[id] = startOffset = content.Length;
+            int visibleOffset;
+            if (tool == "assistant.steering")
+            {
+                if (!steeringOffsets.TryGetValue(id, out visibleOffset))
+                    steeringOffsets[id] = visibleOffset = assistant.Content.Length;
+                visibleOffset = Math.Clamp(visibleOffset, 0, assistant.Content.Length);
+            }
+            else
+            {
+                if (!toolStartOffsets.TryGetValue(id, out var startOffset)) toolStartOffsets[id] = startOffset = content.Length;
+                visibleOffset = RebaseToolContentOffset(content, startOffset, assistant.Content);
+            }
             var now = NextToolStepUpdate(previous);
             var step = AssistantToolStep.Merge(previous, new AssistantToolStep(id, tool, status, detail, previewHtml,
-                inputJson, outputJson, explanation, RebaseToolContentOffset(content, startOffset, assistant.Content),
-                previous?.StartedAt ?? eventAt ?? now, status == "running" ? null : eventAt ?? now, now));
+                inputJson, outputJson, explanation, visibleOffset,
+                previous?.StartedAt ?? eventAt ?? now, status == "running" ? null : eventAt ?? now, now, agentId));
             var steps = await chats.SaveToolStepAsync(assistant.Id, step, CancellationToken.None).ConfigureAwait(false);
             assistant = assistant with { ToolSteps = steps };
             await update(new(GoAiAssistantUpdateKind.Status, assistant,
-                Status: tool == ReasoningStepTool ? "Modell generiert"
+                Status: step.AgentId is not null ? null : tool == ReasoningStepTool ? "Modell generiert"
                     : status == "running" ? "Werkzeug arbeitet" : status == "completed" ? "Werkzeug abgeschlossen" : "Werkzeug beendet",
-                Detail: tool == ReasoningStepTool ? null : tool, Model: model, ToolStep: steps.First(value => value.Id == id))).ConfigureAwait(false);
+                Detail: step.AgentId is not null || tool == ReasoningStepTool ? null : tool,
+                Model: step.AgentId is not null ? null : model, ToolStep: steps.First(value => value.Id == id))).ConfigureAwait(false);
         }
 
         async Task FinishOpenToolStepsAsync(string status)
@@ -1369,26 +1422,22 @@ public sealed partial class GoAiAssistantService(
 
         async Task PersistContentAsync(MessageStatus status, CancellationToken token)
         {
-            if (localRun.Action == PromptTriggerAction.Coding)
-            {
-                var visible = NormalizeCodingNarration(content);
-                var previousSteps = assistant.ToolSteps ?? [];
-                var rebased = visible.StartsWith(assistant.Content, StringComparison.Ordinal) ? previousSteps : previousSteps.Select(step =>
-                    {
-                        var offset = RebaseToolContentOffset(content, toolStartOffsets.GetValueOrDefault(step.Id, step.ContentOffset ?? 0), visible);
-                        return step.ContentOffset == offset ? step : step with { ContentOffset = offset, UpdatedAt = NextToolStepUpdate(step) };
-                    }).ToArray();
-                if (rebased.SequenceEqual(previousSteps))
-                    await chats.UpdateMessageAsync(assistant.Id, visible, status, cancellationToken: token).ConfigureAwait(false);
-                else
-                    await chats.UpdateMessageWithToolStepsAsync(assistant.Id, visible, status, rebased, token).ConfigureAwait(false);
-                assistant = assistant with { Content = visible, Status = status, ToolSteps = rebased, UpdatedAt = DateTimeOffset.UtcNow };
-            }
+            // The repository applies this normalization in both modes. Keep the
+            // live message and durable steering offsets in the same visible text.
+            var visible = NormalizeCodingNarration(content);
+            var previousSteps = assistant.ToolSteps ?? [];
+            var rebased = visible.StartsWith(assistant.Content, StringComparison.Ordinal) ? previousSteps : previousSteps.Select(step =>
+                {
+                    var offset = step.Tool == "assistant.steering"
+                        ? Math.Clamp(steeringOffsets.GetValueOrDefault(step.Id, step.ContentOffset ?? 0), 0, visible.Length)
+                        : RebaseToolContentOffset(content, toolStartOffsets.GetValueOrDefault(step.Id, step.ContentOffset ?? 0), visible);
+                    return step.ContentOffset == offset ? step : step with { ContentOffset = offset, UpdatedAt = NextToolStepUpdate(step) };
+                }).ToArray();
+            if (rebased.SequenceEqual(previousSteps))
+                await chats.UpdateMessageAsync(assistant.Id, visible, status, cancellationToken: token).ConfigureAwait(false);
             else
-            {
-                await chats.UpdateMessageAsync(assistant.Id, content, status, cancellationToken: token).ConfigureAwait(false);
-                assistant = assistant with { Content = content, Status = status, UpdatedAt = DateTimeOffset.UtcNow };
-            }
+                await chats.UpdateMessageWithToolStepsAsync(assistant.Id, visible, status, rebased, token).ConfigureAwait(false);
+            assistant = assistant with { Content = visible, Status = status, ToolSteps = rebased, UpdatedAt = DateTimeOffset.UtcNow };
         }
 
         async Task<ChatMessage> CompleteAsync(
@@ -1409,7 +1458,9 @@ public sealed partial class GoAiAssistantService(
             var parsed = GeneralAgentResponseParser.Parse(content, serverSessionTitle ?? string.Empty);
             // Coding narration and the tool offsets form one chronological record.
             // Keep that visible narration instead of replacing it with a parsed envelope.
-            if (localRun.Action != PromptTriggerAction.Coding) content = RemoveDocumentEvidenceFooter(parsed.Message);
+            if (localRun.Action != PromptTriggerAction.Coding
+                && !(assistant.ToolSteps ?? []).Any(step => step.Tool == "assistant.steering"))
+                content = RemoveDocumentEvidenceFooter(parsed.Message);
             await PersistContentAsync(MessageStatus.Completed, CancellationToken.None).ConfigureAwait(false);
             await chats.SetMessageContextSummaryAsync(
                 assistant.Id,
@@ -1507,8 +1558,36 @@ public sealed partial class GoAiAssistantService(
                 if (signal.Error is { } pumpError) throw pumpError;
                 if (signal.Apply is { } apply) { await apply().ConfigureAwait(false); continue; }
                 var item = signal.Event!;
-                switch (item.Type)
+                var childStepId = SubagentDisplayStepId(item);
+                if (childStepId is not null)
                 {
+                    var previous = assistant.ToolSteps?.FirstOrDefault(step => step.Id == childStepId);
+                    var childStep = ApplySubagentDisplayEvent(previous, item, childStepId,
+                        assistant.Content.Length, NextToolStepUpdate(previous));
+                    if (childStep is not null)
+                        await RecordToolStepAsync(childStep.Id, childStep.Tool, childStep.Status, childStep.Detail,
+                            inputJson: childStep.InputJson, outputJson: childStep.OutputJson,
+                            eventAt: item.CreatedAt, agentId: childStep.AgentId).ConfigureAwait(false);
+                }
+                else switch (item.Type)
+                {
+                    case RunSteeringEventTypes.Accepted:
+                    case RunSteeringEventTypes.Applied:
+                        var steering = item.Data.Deserialize<RunSteeringEvent>(JsonOptions)
+                            ?? throw new InvalidDataException("Die Umlenkung enthält ungültige Daten.");
+                        if (!Guid.TryParse(steering.SessionId, out var steeringSession) || steeringSession != assistant.SessionId)
+                            throw new InvalidDataException("Die Umlenkung gehört nicht zur aktiven Sitzung.");
+                        var steeringId = "steering-" + steering.InputId;
+                        if (steering.VisibleTextOffset is { } visibleOffset) steeringOffsets[steeringId] = visibleOffset;
+                        await RecordToolStepAsync(steeringId, "assistant.steering",
+                            item.Type == RunSteeringEventTypes.Applied ? "completed" : "running", steering.Text,
+                            inputJson: JsonSerializer.Serialize(new { steering.InputId, steering.Sequence, steering.Text }, JsonOptions),
+                            outputJson: JsonSerializer.Serialize(new { applied = item.Type == RunSteeringEventTypes.Applied,
+                                steering.VisibleTextOffset, lastEventId = item.Id }, JsonOptions), eventAt: item.CreatedAt).ConfigureAwait(false);
+                        await update(new(GoAiAssistantUpdateKind.Status, assistant,
+                            Status: item.Type == RunSteeringEventTypes.Applied ? "Lauf umgelenkt" : "Umlenkung angenommen",
+                            Detail: "Der bestehende Auftrag wird mit der neuen Eingabe fortgesetzt.", Model: model)).ConfigureAwait(false);
+                        break;
                     case RunEventTypes.QueueChanged:
                         var queue = item.Data.Deserialize<QueueChangedEvent>(JsonOptions);
                         await update(new(
@@ -1592,8 +1671,8 @@ public sealed partial class GoAiAssistantService(
                             StringProperty(item.Data, "tool") ?? "web.search", "running", StringProperty(item.Data, "target"),
                             inputJson: item.Data.TryGetProperty("arguments", out var serverArguments) ? serverArguments.GetRawText() : JsonSerializer.Serialize(new { target = StringProperty(item.Data, "target") }, JsonOptions),
                             explanation: StringProperty(item.Data, "message") ?? DescribeServerTool(StringProperty(item.Data, "tool") ?? "web.search", StringProperty(item.Data, "target")),
-                            eventAt: item.CreatedAt).ConfigureAwait(false);
-                        await update(new(
+                            eventAt: item.CreatedAt, agentId: StringProperty(item.Data, "agentId")).ConfigureAwait(false);
+                        if (StringProperty(item.Data, "agentId") is null) await update(new(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: "Serverwerkzeug",
@@ -1612,7 +1691,8 @@ public sealed partial class GoAiAssistantService(
                             outputJson: SerializeClientToolOutput(new ClientToolResult(serverStepId,
                                 item.Data.TryGetProperty("success", out var succeeded) && succeeded.ValueKind == JsonValueKind.False ? "failed" : "completed",
                                 serverResult.ValueKind == JsonValueKind.Undefined ? item.Data : serverResult,
-                                StringProperty(item.Data, "errorCode"), StringProperty(item.Data, "errorMessage"))), eventAt: item.CreatedAt).ConfigureAwait(false);
+                                StringProperty(item.Data, "errorCode"), StringProperty(item.Data, "errorMessage"))),
+                            eventAt: item.CreatedAt, agentId: StringProperty(item.Data, "agentId")).ConfigureAwait(false);
                         var extracted = ExtractToolResultText(item.Data);
                         if (localRun.Action != PromptTriggerAction.Coding && !string.IsNullOrWhiteSpace(extracted))
                         {
@@ -1653,7 +1733,7 @@ public sealed partial class GoAiAssistantService(
                             content = NormalizeCodingNarration(content);
                             // Earlier steps belong to the unchanged preceding turns. Their
                             // stored offsets already refer to sanitized, visible narration.
-                            foreach (var step in assistant.ToolSteps ?? [])
+                            foreach (var step in (assistant.ToolSteps ?? []).Where(step => step.Tool != "assistant.steering"))
                                 toolStartOffsets[step.Id] = step.ContentOffset ?? 0;
                         }
                         await PersistContentAsync(MessageStatus.Streaming, cancellationToken).ConfigureAwait(false);
@@ -1668,7 +1748,7 @@ public sealed partial class GoAiAssistantService(
                             throw new InvalidDataException(
                                 "Der Client-Toolvorschlag gehört nicht zum aktiven Serverlauf.");
                         }
-                        await update(new(
+                        if (proposal.ExecutionScope is null) await update(new(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: "Lokale Aktion",
@@ -1677,7 +1757,7 @@ public sealed partial class GoAiAssistantService(
                         await RecordToolStepAsync(proposal.ProposalId, proposal.Name, "running", FormatToolInputDetail(proposal),
                             previewHtml: GetToolPreviewHtml(proposal), inputJson: proposal.Arguments.GetRawText(),
                             explanation: proposal.Summary,
-                            eventAt: item.CreatedAt).ConfigureAwait(false);
+                            eventAt: item.CreatedAt, agentId: proposal.ExecutionScope?.AgentId).ConfigureAwait(false);
                         var claimed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                         if (pump.Start(proposal.ProposalId, async token =>
                         {
@@ -2582,7 +2662,7 @@ public sealed partial class GoAiAssistantService(
         int historyBudget)
     {
         var messages = new List<RunMessage>();
-        var eligibleHistory = history
+        var eligibleHistory = ExpandSteeringHistory(history)
             .Where(item => item.Status == MessageStatus.Completed
                 && item.Role is ChatRole.User or ChatRole.Assistant
                 && !string.IsNullOrWhiteSpace(item.Content))

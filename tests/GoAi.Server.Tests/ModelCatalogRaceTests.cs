@@ -160,6 +160,8 @@ public sealed class ModelCatalogRaceTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.RequestUri!.AbsolutePath is "/sessions/prepare" or "/sessions/save")
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
             if (request.RequestUri!.AbsolutePath == "/v1/models")
             {
                 CatalogReads++;

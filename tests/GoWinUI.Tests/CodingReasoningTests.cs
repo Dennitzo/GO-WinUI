@@ -64,6 +64,37 @@ public sealed class CodingReasoningTests
     }
 
     [Fact]
+    public async Task SteeringClosesOnlyThePreviousRoundAndSurvivesRepositoryReloadAndReplay()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Umgeleiteter Denkprozess");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "", MessageStatus.Streaming);
+        var first = Apply(null, new("Bereits empfangener Gedanke.", 1), 1, id: "reasoning-main-1");
+        await chats.SaveToolStepAsync(message.Id, first);
+        var steered = Apply(first, new("", 1, State: "steered"), 2, 99, "reasoning-main-1");
+        await chats.SaveToolStepAsync(message.Id, steered);
+        await chats.SaveToolStepAsync(message.Id, first);
+        var next = Apply(null, new("Ich bearbeite den neuen Auftrag.", 2), 3, id: "reasoning-main-2");
+        await chats.SaveToolStepAsync(message.Id, next);
+
+        var stored = (await chats.GetMessageAsync(message.Id))!;
+        var storedSteps = Assert.IsAssignableFrom<IReadOnlyList<AssistantToolStep>>(stored.ToolSteps);
+        var previousRound = storedSteps.Single(step => step.Id == first.Id);
+        Assert.Equal("interrupted", previousRound.Status);
+        Assert.Equal(first.Detail, previousRound.Detail);
+        Assert.Equal(first.ContentOffset, previousRound.ContentOffset);
+        Assert.NotNull(previousRound.CompletedAt);
+        using var metadata = JsonDocument.Parse(previousRound.OutputJson!);
+        Assert.Equal("steered", metadata.RootElement.GetProperty("state").GetString());
+        Assert.Equal(2, metadata.RootElement.GetProperty("lastEventId").GetInt64());
+        Assert.Equal("running", storedSteps.Single(step => step.Id == next.Id).Status);
+        Assert.Equal(MessageStatus.Streaming, stored.Status);
+        Assert.Null(GoAiAssistantService.ApplyReasoningDelta(previousRound, new(first.Detail!, 1),
+            first.Id, 1, 0, Started.AddMinutes(1)));
+    }
+
+    [Fact]
     public void EmptyCompletionDoesNotCreateAnEmptyReasoningCard()
     {
         Assert.Null(GoAiAssistantService.ApplyReasoningDelta(null, new("", 1, State: "completed"),

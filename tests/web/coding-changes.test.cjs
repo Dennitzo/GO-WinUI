@@ -47,7 +47,7 @@ function harness() {
   for (const script of ["coding-timeline.js", "coding-changes.js"])
     vm.runInContext(fs.readFileSync(path.join(webRoot, script), "utf8"), context, { filename: script });
   for (const name of ["renderCodingChanges", "applyCodingChanges", "updateContextStripVisibility",
-    "sortCommittedMessages", "conversationMessagesDiffer", "applyConversationSnapshot", "handleHostMessage",
+    "sortCommittedMessages", "conversationMessagesDiffer", "applyConversationSnapshot", "handleHostMessage", "belongsToActiveSession", "persistMeasuredContext",
     "cleanStatusMetadata", "uniqueStatusParts", "renderSpeechStatus"])
     loadAppFunction(context, name);
   context.renderMessages = () => context.renderCodingChanges();
@@ -285,8 +285,12 @@ test("the changes overview has one responsive outer scroller and all required ca
   assert.match(css, /@media \(max-width: 620px\)/);
   assert.match(css, /focus-visible/);
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
-  for (const asset of ["styles.css", "coding-changes.css", "coding-timeline.css", "bridge.js", "coding-timeline.js", "coding-changes.js", "app.js"])
-    assert.ok(html.includes(`${asset}?v=${["styles.css", "app.js"].includes(asset) ? "20260913-5" : asset === "bridge.js" ? "20260913-4" : "20260913-3"}`), `${asset} must use the deployed cache revision`);
+  for (const asset of ["styles.css", "coding-changes.css", "coding-timeline.css", "bridge.js", "coding-timeline.js", "coding-changes.js", "app.js"]) {
+    const revision = ["styles.css", "app.js"].includes(asset) ? "20260919-agents-3"
+      : asset === "coding-timeline.js" ? "20260919-agents-2"
+      : asset === "bridge.js" ? "20260919-agents-1" : "20260913-3";
+    assert.ok(html.includes(`${asset}?v=${revision}`), `${asset} must use the deployed cache revision`);
+  }
   assert.ok(html.indexOf('src="coding-timeline.js') < html.indexOf('src="coding-changes.js'));
   assert.ok(html.indexOf('src="coding-changes.js') < html.indexOf('src="app.js'));
   assert.ok(html.indexOf('id="active-tool-chips"') < html.indexOf('id="coding-changes"'));

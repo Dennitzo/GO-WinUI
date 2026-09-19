@@ -43,6 +43,7 @@ internal sealed class CodingTextReconciler(int baseOffset, string visibleText = 
             if (item.Type != RunEventTypes.TextDelta) continue;
             var delta = item.Data.Deserialize<TextDeltaEvent>(Json)
                 ?? throw new InvalidDataException("Das sichtbare Coding-Journal enthält ein ungültiges Textdelta.");
+            if (!string.IsNullOrWhiteSpace(delta.AgentId)) continue;
             if (delta.ReplaceFrom is { } replaceFrom)
             {
                 // Wire revisions always carry the entire authoritative run text.

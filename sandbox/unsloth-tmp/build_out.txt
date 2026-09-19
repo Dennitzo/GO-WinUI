@@ -1,0 +1,941 @@
+dotnet restore C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\GoWinUI.App.csproj --runtime win-x64 -p:Configuration=Release -p:Platform=x64 --nologo
+  Wiederherzustellende Projekte werden ermittelt...
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\GoWinUI.Core.csproj" wiederhergestellt (in 730 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoAi.Contracts\GoAi.Contracts.csproj" wiederhergestellt (in 730 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\GoWinUI.BricsCad.Protocol.csproj" wiederhergestellt (in 730 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoAi.Client\GoAi.Client.csproj" wiederhergestellt (in 733 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Infrastructure\GoWinUI.Infrastructure.csproj" wiederhergestellt (in 779 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\GoWinUI.App.csproj" wiederhergestellt (in 794 ms.).
+dotnet build C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\GoWinUI.App.csproj --configuration Release --no-restore -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --nologo
+  GoAi.Contracts -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoAi.Contracts\bin\x64\Release\net10.0\GoAi.Contracts.dll
+  GoWinUI.Core -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\bin\x64\Release\net10.0\GoWinUI.Core.dll
+  GoAi.Client -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoAi.Client\bin\x64\Release\net10.0\GoAi.Client.dll
+  GoWinUI.Infrastructure -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Infrastructure\bin\x64\Release\net10.0\GoWinUI.Infrastructure.dll
+  GoWinUI.BricsCad.Protocol -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\bin\x64\Release\net10.0\GoWinUI.BricsCad.Protocol.dll
+  GoWinUI.App -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\GO.dll
+
+Der Buildvorgang wurde erfolgreich ausgeführt.
+    0 Warnung(en)
+    0 Fehler
+
+Verstrichene Zeit 00:00:22.63
+dotnet build C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\GoWinUI.BricsCad.Protocol.csproj --configuration Release --framework net10.0 --nologo
+  Wiederherzustellende Projekte werden ermittelt...
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\GoWinUI.BricsCad.Protocol.csproj" wiederhergestellt (in 82 ms.).
+  GoWinUI.BricsCad.Protocol -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\bin\Release\net10.0\GoWinUI.BricsCad.Protocol.dll
+
+Der Buildvorgang wurde erfolgreich ausgeführt.
+    0 Warnung(en)
+    0 Fehler
+
+Verstrichene Zeit 00:00:00.47
+dotnet restore C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\GoWinUI.BricsCad.Protocol.csproj --nologo
+  Wiederherzustellende Projekte werden ermittelt...
+  Alle Projekte sind für die Wiederherstellung auf dem neuesten Stand.
+dotnet restore C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\windows\.protocol-smoke\ProtocolSmoke.csproj --nologo
+  Wiederherzustellende Projekte werden ermittelt...
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\windows\.protocol-smoke\ProtocolSmoke.csproj" wiederhergestellt (in 124 ms.).
+  1 von 2 Projekten sind für die Wiederherstellung auf dem neuesten Stand.
+dotnet restore C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Plugin\GoWinUI.BricsCad.Plugin.csproj --nologo
+  Wiederherzustellende Projekte werden ermittelt...
+  Alle Projekte sind für die Wiederherstellung auf dem neuesten Stand.
+dotnet restore C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\GoWinUI.Tests.csproj --nologo
+  Wiederherzustellende Projekte werden ermittelt...
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoAi.Contracts\GoAi.Contracts.csproj" wiederhergestellt (in 129 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\GoWinUI.Core.csproj" wiederhergestellt (in 129 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoAi.Client\GoAi.Client.csproj" wiederhergestellt (in 135 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Infrastructure\GoWinUI.Infrastructure.csproj" wiederhergestellt (in 286 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\GoWinUI.Tests.csproj" wiederhergestellt (in 337 ms.).
+  "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\GoWinUI.App.csproj" wiederhergestellt (in 338 ms.).
+  1 von 7 Projekten sind für die Wiederherstellung auf dem neuesten Stand.
+dotnet build C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\GoWinUI.BricsCad.Protocol.csproj --configuration Release --no-restore --nologo
+  GoWinUI.BricsCad.Protocol -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\bin\Release\net10.0\GoWinUI.BricsCad.Protocol.dll
+  GoWinUI.BricsCad.Protocol -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\bin\Release\net8.0\GoWinUI.BricsCad.Protocol.dll
+
+Der Buildvorgang wurde erfolgreich ausgeführt.
+    0 Warnung(en)
+    0 Fehler
+
+Verstrichene Zeit 00:00:00.81
+dotnet run --project C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\windows\.protocol-smoke\ProtocolSmoke.csproj --configuration Release --no-restore --nologo
+Protocol host smoke passed.
+dotnet build C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Plugin\GoWinUI.BricsCad.Plugin.csproj --configuration Release --no-restore --nologo
+  BricsCAD plugin is optional and was not compiled. Use windows\build-bricscad-plugin.ps1 for the V26 artifact.
+  GoWinUI.BricsCad.Plugin -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Plugin\bin\Release\net8.0-windows\GoWinUI.BricsCad.Plugin.BuildPlaceholder.dll
+
+Der Buildvorgang wurde erfolgreich ausgeführt.
+    0 Warnung(en)
+    0 Fehler
+
+Verstrichene Zeit 00:00:00.84
+dotnet test C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\GoWinUI.Tests.csproj --configuration Release --no-restore --nologo --logger console;verbosity=normal
+  GoAi.Contracts -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoAi.Contracts\bin\Release\net10.0\GoAi.Contracts.dll
+  GoWinUI.Core -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\bin\Release\net10.0\GoWinUI.Core.dll
+  GoAi.Client -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoAi.Client\bin\Release\net10.0\GoAi.Client.dll
+  GoWinUI.Infrastructure -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Infrastructure\bin\Release\net10.0\GoWinUI.Infrastructure.dll
+  GoWinUI.BricsCad.Protocol -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.BricsCad.Protocol\bin\Release\net10.0\GoWinUI.BricsCad.Protocol.dll
+  GoWinUI.App -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\GO.dll
+  GoWinUI.Tests -> C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\bin\Release\net10.0-windows10.0.19041.0\win-x64\GoWinUI.Tests.dll
+Testlauf für "C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\bin\Release\net10.0-windows10.0.19041.0\win-x64\GoWinUI.Tests.dll" (.NETCoreApp,Version=v10.0)
+Insgesamt 1 Testdateien stimmten mit dem angegebenen Muster überein.
+[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v3.1.5+1b188a7b0a (64-bit .NET 10.0.10)
+[xUnit.net 00:00:00.11]   Discovering: GoWinUI.Tests
+[xUnit.net 00:00:00.23]   Discovered:  GoWinUI.Tests
+[xUnit.net 00:00:00.32]   Starting:    GoWinUI.Tests
+  Bestanden GoWinUI.Tests.ModelTokenProgressTests.NativeFragmentsAdvanceImmediatelyAfterLargePromptProcessing [21 ms]
+  Bestanden GoWinUI.Tests.CodingParallelLiveTests.MainAndSecondaryModelsWriteTheirOwnFilesAndJoin [13 ms]
+  Bestanden GoWinUI.Tests.CodingHistoryRecoveryTests.UnfinishedRunRetainsFindingsAndCommittedReceipt(status: Interrupted) [34 ms]
+  Bestanden GoWinUI.Tests.CodingCapabilityNegotiationTests.PartialUpgradeNeverAdvertisesIncompleteEvidenceProtocol [19 ms]
+  Bestanden GoWinUI.Tests.CodingAgentLiveTests.LocalModelFixesPythonProjectRunsTestsAndStreamsProgress [12 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingLiveTests.CoordinatorPlaysRealSpeechBeforeCompletionWithMicrophoneDisabledAndExcludesTools [16 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.RunningTerminalShowsBothStreamsWithoutClaimingAnExitCode [15 ms]
+  Bestanden GoWinUI.Tests.StreamingTextRevisionTests.FullRevisionIsIndependentOfSanitizedReplayOffsetsAndPreservesUnicode [15 ms]
+  Bestanden GoWinUI.Tests.DockerClientEndToEndLiveTests.GeneralChatEmitsSeveralVisibleDeltasBeforeCompletion [11 ms]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.AssetFileNameNormalizationTrimsValidWindowsNames(input: "Foto_01.png", expected: "Foto_01.png") [16 ms]
+  Bestanden GoWinUI.Tests.DocumentContextPreparationTests.PreparedDossierLimitLeavesRoomForOriginalEvidence(documentBudget: 16384, expectedLimit: 16384) [16 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.LiveModelTokensPreferLlamaCurrentTokensForModelsWithoutReasoning [20 ms]
+  Bestanden GoWinUI.Tests.CodingContextToolsLiveTests.ModelRetrievesRealSessionSourcesAndPersistsItsInteractiveHtml [34 ms]
+  Bestanden GoWinUI.Tests.CodingPowerShellLiveTests.ModelReadsPowerShellScriptExecutesBothModesAndPersistsActualTerminalResults [34 ms]
+  Bestanden GoWinUI.Tests.CodingTimelineLiveTests.RealAssistantPersistsInlineFileDiffsAndTerminalProgressBeforeCompletion [34 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.FailedStartRetainsConcreteErrorAndRetriesAfterBackoff [36 ms]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.AssetFileNameNormalizationTrimsValidWindowsNames(input: "  plan final.pdf  ", expected: "plan final.pdf") [< 1 ms]
+  Bestanden GoWinUI.Tests.DocumentContextPreparationTests.PreparedDossierLimitLeavesRoomForOriginalEvidence(documentBudget: 4096, expectedLimit: 8000) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingHistoryRecoveryTests.UnfinishedRunRetainsFindingsAndCommittedReceipt(status: Failed) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingHistoryRecoveryTests.UnfinishedRunRetainsFindingsAndCommittedReceipt(status: Cancelled) [< 1 ms]
+  Bestanden GoWinUI.Tests.StreamingTextRevisionTests.RetryCorrectionReplacesTheAuthoritativeNarrationWithoutDuplicatingEarlierTurns [< 1 ms]
+  Bestanden GoWinUI.Tests.ModelTokenProgressTests.ANewModelAttemptResetsBothPromptAndGeneratedCounts(state: "generationStarted") [< 1 ms]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.AssetFileNameNormalizationRejectsUnsafeWindowsNames(input: "datei. ") [< 1 ms]
+  Bestanden GoWinUI.Tests.ModelTokenProgressTests.ANewModelAttemptResetsBothPromptAndGeneratedCounts(state: "generationRetry") [< 1 ms]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.AssetFileNameNormalizationRejectsUnsafeWindowsNames(input: "plan?.pdf") [< 1 ms]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.AssetFileNameNormalizationRejectsUnsafeWindowsNames(input: "CON.txt") [< 1 ms]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.AssetFileNameNormalizationRejectsUnsafeWindowsNames(input: "../plan.pdf") [< 1 ms]
+  Bestanden GoWinUI.Tests.ShellViewModelTests.ClientSpeechObservationUpdatesExistingStaticChip [38 ms]
+  Bestanden GoWinUI.Tests.ModelTokenProgressTests.NativePromptProgressSeparatesCachedPrefixFromNewlyEvaluatedTokens [1 ms]
+  Bestanden GoWinUI.Tests.ModelTokenProgressTests.ToolCallCompletionWithoutUsageRetainsTheKnownPromptCount [< 1 ms]
+  Bestanden GoWinUI.Tests.ModelTokenProgressTests.GeneratedOnlyAndLegacyAggregateEventsDoNotInventPromptCounts [< 1 ms]
+  Bestanden GoWinUI.Tests.ModelTokenProgressTests.UnknownNativeCacheCountDoesNotClaimThatWholePromptWasReprocessed [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PromptAndStreamRetryBackoffIsBounded [4 ms]
+  Bestanden GoWinUI.Tests.ModelTokenProgressTests.EmptyResponseRecoveryIsExplainedWithoutRestartingTheCodingPrompt [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.BrowserMicrophonePcmIsWrappedAsA16KhzMonoWave [1 ms]
+  Bestanden GoWinUI.Tests.DocumentContextPreparationTests.SerializedEvidenceHonorsModelBudgetIncludingDocumentHeaders [6 ms]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.FrameNavigationRejectsNetworkFilesAppAndMalformedRoutes(uri: "file:///C:/Windows/win.ini") [43 ms]
+  Bestanden GoWinUI.Tests.DocumentContextPreparationTests.EvidenceBudgetLeavesRoomForPolicyOutputAndSafetyReserve [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.FrameNavigationRejectsNetworkFilesAppAndMalformedRoutes(uri: "https://go.local/index.html") [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.FrameNavigationRejectsNetworkFilesAppAndMalformedRoutes(uri: "https://go-preview.local/image.png") [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingAgentLiveTests.LocalModelCreatesFileThenAppliesSeparateHashGuardedEditAndVerifiesContents [7 ms]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.FrameNavigationRejectsNetworkFilesAppAndMalformedRoutes(uri: "https://go-coding-preview.local/coding/invalid/htm"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.FrameNavigationRejectsNetworkFilesAppAndMalformedRoutes(uri: "https://example.com/") [< 1 ms]
+  Bestanden GoWinUI.Tests.LogsViewModelTests.RefreshBuildsTimestampedTextFromTheLatestFiveThousandEntries [45 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.OnlyThisComputerCanAutoStartTheRuntime(url: "http://[::1]:8080", expected: True) [8 ms]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.FrameNavigationRejectsNetworkFilesAppAndMalformedRoutes(uri: "https://go-coding-preview.local/coding/ca5c9cae-7c"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.FrameNavigationRejectsNetworkFilesAppAndMalformedRoutes(uri: "https://go-coding-preview.local/coding/ca5c9cae-7c"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.FrameNavigationRejectsNetworkFilesAppAndMalformedRoutes(uri: "https://go-coding-preview.local:444/coding/ca5c9ca"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.FrameNavigationRejectsNetworkFilesAppAndMalformedRoutes(uri: "data:text/html,hello") [< 1 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.OnlyThisComputerCanAutoStartTheRuntime(url: "http://localhost:8080", expected: True) [< 1 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.OnlyThisComputerCanAutoStartTheRuntime(url: "https://external.example:8080", expected: False) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.LargeHistoryKeepsTheNewest499MessagesAndReservesOneProtocolSlotForTheCurrentPrompt [49 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DocumentSpeechRecognizesGermanPageSelections(prompt: "Vorlesen Seite 3", start: 3, end: 3, description: "Seite 3") [8 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DocumentSpeechRecognizesGermanPageSelections(prompt: "Vorlesen ab Seite 3 bis Seite 5", start: 3, end: 5, description: "Seite 3 bis 5") [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DocumentSpeechRecognizesGermanPageSelections(prompt: "Vorlesen Seiten 3-5", start: 3, end: 5, description: "Seite 3 bis 5") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DocumentSpeechRecognizesGermanPageSelections(prompt: "Vorlesen Seiten 2 bis 4", start: 2, end: 4, description: "Seite 2 bis 4") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DocumentSpeechRecognizesGermanPageSelections(prompt: "Vorlesen ab Seite 7", start: 7, end: null, description: "ab Seite 7") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DocumentAnswersKeepInlineCitationsButRemoveTheEvidenceFooter [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechPlaybackOnsetTests.AudibleWaveValidationAndConversionDoNotConsumeTheStartOfSpeech [54 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitVoiceCommandsStopPersistentVoiceControl(command: "Sprachsteuerung abbrechen") [< 1 ms]
+  Bestanden GoWinUI.Tests.ShellViewModelTests.FooterAlwaysContainsEveryConfiguredService [15 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitVoiceCommandsStopPersistentVoiceControl(command: "Sprachsteuerung beenden.") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitVoiceCommandsStopPersistentVoiceControl(command: "  SPRACHSTEUERUNG   BEENDEN!  ") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.OrdinaryDictationNeverSendsItself(dictation: "Suche im Web") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.OrdinaryDictationNeverSendsItself(dictation: "Hörbuch erstellen") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.OrdinaryDictationNeverSendsItself(dictation: "Bitte diesen Text senden") [< 1 ms]
+  Bestanden GoWinUI.Tests.ShellViewModelTests.LegacyLeaseUsesGeneralChipInsteadOfCreatingAnotherChip [1 ms]
+  Bestanden GoWinUI.Tests.ShellViewModelTests.FooterUpdatesGeneralAndSpeechChipsWithoutChangingTheirOrder [2 ms]
+  Bestanden GoWinUI.Tests.ShellViewModelTests.ActiveAiRunKeepsAConfirmedOnlineStateAcrossATransientFailedProbe [1 ms]
+  Bestanden GoWinUI.Tests.ShellViewModelTests.ConnectionStateTracksOfflineReachableAndUnavailableModesWithoutATitleBarLabel [< 1 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.OnlyThisComputerCanAutoStartTheRuntime(url: "http://203.0.113.99:8080", expected: False) [60 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.OnlyThisComputerCanAutoStartTheRuntime(url: "http://127.0.0.1:8080", expected: True) [< 1 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerValidationTests.WorkspaceDocumentScopeIsRejected [108 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerValidationTests.UnicodeScalarNormalizationDropsUnpairedSurrogates [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingToolRiskMustMatchTheLocalContract(tool: "coding.list", expectedRisk: ReadOnly) [109 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingToolRiskMustMatchTheLocalContract(tool: "coding.command", expectedRisk: Process) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingToolRiskMustMatchTheLocalContract(tool: "coding.search", expectedRisk: ReadOnly) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingToolRiskMustMatchTheLocalContract(tool: "coding.write", expectedRisk: LocalMutation) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingToolRiskMustMatchTheLocalContract(tool: "coding.gitDiff", expectedRisk: ReadOnly) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingToolRiskMustMatchTheLocalContract(tool: "coding.edit", expectedRisk: LocalMutation) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingToolRiskMustMatchTheLocalContract(tool: "coding.read", expectedRisk: ReadOnly) [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechPlaybackOnsetTests.NewOutputHasWarmupBeforeEverySpeechSampleAndNoPauseBetweenBufferedChunks(sampleRate: 48000, channels: 2) [63 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.ShutdownStopsOnceAndPreventsRestart [10 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerValidationTests.BricsCadToolsKeepTheirBoundedContract [11 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingChipCreatesTheCodingTriggerWithoutRequiringAPromptPrefix [11 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerValidationTests.ExpiredOrDowngradedProposalsAreRejected [7 ms]
+  Bestanden GoWinUI.Tests.SpeechPlaybackOnsetTests.NewOutputHasWarmupBeforeEverySpeechSampleAndNoPauseBetweenBufferedChunks(sampleRate: 44100, channels: 1) [13 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerAutomaticExecutionTests.AutomaticAuthorizationStillRejectsInvalidCommandsBeforeAnyExecution(failure: "risk") [117 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerValidationTests.SessionDocumentToolsAreAccepted [4 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.WriteAndBatchEditKeepPathAndHashMetadataWithoutDuplicatingReplacementText(batch: False) [95 ms]
+  Bestanden GoWinUI.Tests.SpeechPlaybackOnsetTests.WarmupCannotBeInsertedAfterSpeechAlreadyEnteredTheBuffer [1 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.FailedEditKeepsPreviewAsPreviewAndNeverInventsAppliedState [132 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.ChatLimitsPreserveTheActualModelWindowWithoutSerializingAnOutputCap(actualContextLength: 49152) [83 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.ChatLimitsPreserveTheActualModelWindowWithoutSerializingAnOutputCap(actualContextLength: 131072) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.ChatLimitsPreserveTheActualModelWindowWithoutSerializingAnOutputCap(actualContextLength: 262144) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.ChatLimitsPreserveTheActualModelWindowWithoutSerializingAnOutputCap(actualContextLength: 32768) [< 1 ms]
+  Bestanden GoWinUI.Tests.OfflineAiConnectionTests.UnresponsiveGatewayProbeEndsAtTheDedicatedTimeout [130 ms]
+  Bestanden GoWinUI.Tests.AssistantRunEventPumpTests.SlowToolDoesNotBlockEventsAndCompletionIsAppliedByConsumer [132 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.CodingRunHasNoWallClockDeadlineAndKeepsTheFullModelWindow [< 1 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerAutomaticExecutionTests.AutomaticAuthorizationStillRejectsInvalidCommandsBeforeAnyExecution(failure: "missing-workspace") [< 1 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerAutomaticExecutionTests.AutomaticAuthorizationStillRejectsInvalidCommandsBeforeAnyExecution(failure: "expired") [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.WriteAndBatchEditKeepPathAndHashMetadataWithoutDuplicatingReplacementText(batch: True) [6 ms]
+  Bestanden GoWinUI.Tests.AssistantRunEventPumpTests.TerminalStopCancelsCommandBeforeSlowUiFinalizationOrDisposal [14 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.FinalCommandResultReplacesPartialStreamsInsteadOfAppendingThemAgain(exitCode: 0) [12 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerAutomaticExecutionTests.AutomaticAuthorizationStillRejectsInvalidCommandsBeforeAnyExecution(failure: "invalid-arguments") [12 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.FinalCommandResultReplacesPartialStreamsInsteadOfAppendingThemAgain(exitCode: 7) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.InterruptedStructuredOutputRetainsInputAndActualPartialStreams(status: "cancelled") [20 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.InterruptedStructuredOutputRetainsInputAndActualPartialStreams(status: "failed") [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.InterruptedStructuredOutputRetainsInputAndActualPartialStreams(status: "interrupted") [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechNarrationTests.ScreenshotFindingAsNarrativeStreamsWithoutTechnicalIdentifiers [154 ms]
+  Bestanden GoWinUI.Tests.SpeechNarrationTests.AbbreviationsDoNotSplitManualPlaybackOrModifyPathsAndDecimals [1 ms]
+  Bestanden GoWinUI.Tests.CodingSessionToolTests.KnowledgeResultsKeepSourceCoordinatesAndBoundExcerpts [155 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerAutomaticExecutionTests.AutomaticAuthorizationStillRejectsInvalidCommandsBeforeAnyExecution(failure: "outside-workspace") [3 ms]
+  Bestanden GoWinUI.Tests.SpeechNarrationTests.IncrementalAbbreviationsStayTogetherUntilTheActualSentenceEnds(abbreviation: "bzw.", spoken: "beziehungsweise") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantRunEventPumpTests.StopCancelsEveryActiveWorkerAndWaitsForCleanup [7 ms]
+  Bestanden GoWinUI.Tests.SpeechNarrationTests.IncrementalAbbreviationsStayTogetherUntilTheActualSentenceEnds(abbreviation: "z. B.", spoken: "zum Beispiel") [2 ms]
+  Bestanden GoWinUI.Tests.SpeechNarrationTests.IncrementalAbbreviationsStayTogetherUntilTheActualSentenceEnds(abbreviation: "ggf.", spoken: "gegebenenfalls") [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechNarrationTests.IncrementalAbbreviationsStayTogetherUntilTheActualSentenceEnds(abbreviation: "z.B.", spoken: "zum Beispiel") [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechNarrationTests.IncrementalAbbreviationsStayTogetherUntilTheActualSentenceEnds(abbreviation: "d. h.", spoken: "das heißt") [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechNarrationTests.AbbreviationBeforeAToolBoundaryIsExpandedWithoutAFalseSentenceEnd [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.PositionsUseJavascriptUtf16UnitsAfterNormalization(rawPrefix: "  Read.\nGO_SESSION_TITLE: Hidden\n", expected: 5) [10 ms]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.LiveReasoningIsNeverSpokenWhileActualAssistantTextKeepsStreaming [162 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.PositionsUseJavascriptUtf16UnitsAfterNormalization(rawPrefix: "😀 Read.\r\n", expected: 9) [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechPauseTests.CancellingWhilePausedUnblocksTheQueueAndNeverPlaysPendingText [162 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.CodingTokenStreamPreservesTheFirstWordThroughTheActualSpeechPlan(narration: "Ich prüfe jetzt die Datei.", expected: "Ich prüfe jetzt die Datei.") [168 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DirectSpeechSegmentsKeepSourceMappingAndStayBelowPlaybackLimit [114 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.FinalGitReceiptReplacesTransientSubprocessOutput(success: False) [6 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.FinalGitReceiptReplacesTransientSubprocessOutput(success: True) [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.CodingTokenStreamPreservesTheFirstWordThroughTheActualSpeechPlan(narration: "**Zuerst** prüfe ich die Datei.", expected: "Zuerst prüfe ich die Datei.") [1 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.ConcurrentFirstConnectionsStartOnceAndRecoverAfterRuntimeStops [59 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.CodingTokenStreamPreservesTheFirstWordThroughTheActualSpeechPlan(narration: "\n### Zunächst prüfe ich die Datei.", expected: "Zunächst prüfe ich die Datei.") [15 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.StreamingBoundariesPreserveDecimalAndInlineCodeAndLeaveUnfinishedTextForCompletion [3 ms]
+  Bestanden GoWinUI.Tests.SpeechPauseTests.HostCanPausePreparationAndQueueGapsWithoutAnAudioDeviceAndNestedChunksKeepThePause [34 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.RewritingAnAlreadySpokenPrefixStopsInsteadOfDuplicatingOrMisreadingTheReplacement [6 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoiceRecognitionUsesEditableComposerDictationWithoutWhisperHotwordsOrIntentDispatch [29 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PlainSpeechCommandsDoNotAccidentallySelectDocumentPages(prompt: "Vorlesen") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PlainSpeechCommandsDoNotAccidentallySelectDocumentPages(prompt: "Lies die letzte Nachricht vor") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PlainSpeechCommandsDoNotAccidentallySelectDocumentPages(prompt: "Lies vor") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.GeneralModelSelectionUsesThePersistedValue [< 1 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.ShutdownWaitsForPendingStart [14 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AutomaticVoiceOutputRemovesMarkdownNoise [2 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.ResumeSkipsStoredTextAndPreservesAnOpenLongFenceUntilItsActualClosingMarker [4 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DeterministicSpeechPlanSpeaksGermanValues(source: "Leistung 12 kW bei -5 °C.", expected: "Leistung zwölf Kilowatt bei minus fünf Grad Celsiu"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechPauseTests.PausingBeforeTheFirstChunkRetainsAllQueuedAndFinalTextAndResumesEachOnce [6 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DeterministicSpeechPlanSpeaksGermanValues(source: "Bereich 10-12 m.", expected: "Bereich zehn bis zwölf Meter.") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DeterministicSpeechPlanSpeaksGermanValues(source: "Stand 19.08.2026.", expected: "Stand neunzehnter August zweitausendsechsundzwanzi"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.AStoppedOrFailedRunNeverReadsItsFallbackError(kind: Cancelled) [2 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.CancellationDoesNotPoisonTheNextConnection [4 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DeterministicSpeechPlanSpeaksGermanValues(source: "Nach DIN 1946-6.", expected: "Nach DIN eintausendneunhundertsechsundvierzig Stri"···) [1 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.ExistingRuntimeAndRemoteGatewayNeverLaunchAnotherProcess [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DeterministicSpeechPlanSpeaksGermanValues(source: "Beginn: 09:23 Uhr.", expected: "Beginn: neun Uhr dreiundzwanzig.") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DeterministicSpeechPlanSpeaksGermanValues(source: "Der Wert ist 3,14.", expected: "Der Wert ist drei Komma eins vier.") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DeterministicSpeechPlanSpeaksGermanValues(source: "Der Anteil beträgt 2 %.", expected: "Der Anteil beträgt zwei Prozent.") [< 1 ms]
+  Bestanden GoWinUI.Tests.NativeModelRuntimeServiceTests.RemoteGatewayIsNotStopped [1 ms]
+  Bestanden GoWinUI.Tests.SpeechPauseTests.ReleasingTheLastLifetimeWakesWaitersAndANewSessionStartsUnpaused [3 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.AStoppedOrFailedRunNeverReadsItsFallbackError(kind: Failed) [2 ms]
+  Bestanden GoWinUI.Tests.CodingCapabilityNegotiationTests.LegacyGatewayReceivesNoNewFieldsOrCapabilityNames [176 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.LargestValidCommandArgumentSetFitsDisplayLimitWithUnicodeEscaping [61 ms]
+  Bestanden GoWinUI.Tests.CodingCapabilityNegotiationTests.WorkingStateAndMaximumReasoningAreAlwaysRequested [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.PreparationCharacterTargetsDoNotCutOffModelReasoningOrSetAnOutputTokenCap(targetCharacters: 1200) [79 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.PreparationCharacterTargetsDoNotCutOffModelReasoningOrSetAnOutputTokenCap(targetCharacters: 50000) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.PreparationCharacterTargetsDoNotCutOffModelReasoningOrSetAnOutputTokenCap(targetCharacters: 8000) [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.CodingAutomaticallyOffersResearchToolsWhileNormalChatKeepsItsOwnToolPolicy [1 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.OversizedCurrentPromptLeavesNoHistoryAndBudgetArithmeticRemainsBounded [< 1 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.ARealToolBoundaryFlushesFinishedNarrationButNeverSpeaksToolDetailsOrInputs [4 ms]
+  Bestanden GoWinUI.Tests.SpeechPauseTests.PausingBetweenChunksDoesNotRestartTheAlreadyPlayedText [5 ms]
+  Bestanden GoWinUI.Tests.CodingCapabilityNegotiationTests.ParallelModelIsSentOnlyToSupportingGateways [2 ms]
+  Bestanden GoWinUI.Tests.OfflineAiConnectionTests.DisablingConnectionModeCancelsAnAlreadyRunningRequest [80 ms]
+  Bestanden GoWinUI.Tests.CodingCapabilityNegotiationTests.CompleteGatewayUsesFixedCodingPolicy [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.UnreadableAndMissingBaselineContentAreExplicitlyPartial [219 ms]
+  Bestanden GoWinUI.Tests.ChatRunBudgetTests.LargerActualCodingWindowsRetainMoreCompleteHistoryInChronologicalOrder [4 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.FailedToolResultsRetainTheirDiagnosticAndActualOutcome [5 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.AssistantTextPlaysDuringTwoDeltasWithoutAMicrophoneSessionAndFinishesOnlyTheRemainingText [5 ms]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.BrokerReadsSameSessionHistoryButMissingOrForeignReferencesHaveSpecificNonRetryableFailure [219 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.BatchShapeAndCombinedTextLimitsRejectWithoutMutation [238 ms]
+  Bestanden GoWinUI.Tests.SpeechStreamingTests.StoppingCancelsCurrentAudioAndDiscardsQueuedAndFutureTextUntilANewSession [24 ms]
+  Bestanden GoWinUI.Tests.OfflineAiConnectionTests.RequestDrivenModelStateIsReportedAsReadyForClientUse [30 ms]
+  Bestanden GoWinUI.Tests.OfflineAiConnectionTests.MissingRequiredModelIsReportedAsReachableButDegraded [3 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.RejectedPreviewCannotMutateOrPublishAnAppliedDiff(cancel: True) [19 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.RejectedPreviewCannotMutateOrPublishAnAppliedDiff(cancel: False) [3 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.FileReplacedByDirectoryCountsOriginalDeletionAndNewNestedFile [52 ms]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.StreamChunksPreserveSplitSurrogatePairsAndPagingMakesForwardProgress [46 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.MissingOrInvalidResumeBaselineIsExplicitlyPartialAndNeverRecaptured(failure: "missing") [7 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.MissingOrInvalidResumeBaselineIsExplicitlyPartialAndNeverRecaptured(failure: "wrong-workspace") [31 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.MissingOrInvalidResumeBaselineIsExplicitlyPartialAndNeverRecaptured(failure: "corrupt") [12 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.MissingOrInvalidResumeBaselineIsExplicitlyPartialAndNeverRecaptured(failure: "null-arrays") [17 ms]
+  Bestanden GoWinUI.Tests.OfflineAiConnectionTests.NativeStartupHasItsOwnBudgetAndDoesNotHideAReachableGateway(nativeStartFails: False) [112 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.MissingOrInvalidResumeBaselineIsExplicitlyPartialAndNeverRecaptured(failure: "interrupted") [27 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.RestartLoadsOriginalBytesAndDoesNotAssumeCurrentWorkspaceAsBaseline [32 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerAutomaticExecutionTests.ActualPowerShellRunsAutomaticallyAndKeepsTheRealExitStatus(exitCode: 7) [259 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.GeneratedDirectoriesAndTrackerStorageAreExcludedWithoutSelfChanges [28 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.PollKeepsUnchangedSnapshotStableAndPeriodicAuditDetectsPreservedTimestampChange [27 ms]
+  Bestanden GoWinUI.Tests.OfflineAiConnectionTests.NativeStartupHasItsOwnBudgetAndDoesNotHideAReachableGateway(nativeStartFails: True) [117 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.LargeAndBinaryFilesAreNeverReportedAsCompleteTextDiffs [19 ms]
+[xUnit.net 00:00:00.87]     GoWinUI.Tests.LocalCodingToolExecutorTests.HighlyDifferentFileUsesBoundedSearchAndStillProducesAnApplicablePatch [FAIL]
+[xUnit.net 00:00:00.87]       Assert.Equal() Failure: Collections differ
+[xUnit.net 00:00:00.87]                  ↓ (pos 0)
+[xUnit.net 00:00:00.87]       Expected: [110, 101, 119, 32, 49, ···]
+[xUnit.net 00:00:00.87]       Actual:   [111, 108, 100, 32, 49, ···]
+[xUnit.net 00:00:00.87]                  ↑ (pos 0)
+[xUnit.net 00:00:00.87]       Stack Trace:
+[xUnit.net 00:00:00.87]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(316,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch)
+[xUnit.net 00:00:00.87]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(268,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.HighlyDifferentFileUsesBoundedSearchAndStillProducesAnApplicablePatch()
+[xUnit.net 00:00:00.87]         --- End of stack trace from previous location ---
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.HighlyDifferentFileUsesBoundedSearchAndStillProducesAnApplicablePatch [226 ms]
+  Fehlermeldung:
+   Assert.Equal() Failure: Collections differ
+           ↓ (pos 0)
+Expected: [110, 101, 119, 32, 49, ···]
+Actual:   [111, 108, 100, 32, 49, ···]
+           ↑ (pos 0)
+  Stapelverfolgung:
+     at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 316
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.HighlyDifferentFileUsesBoundedSearchAndStillProducesAnApplicablePatch() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 268
+--- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.LocalToolBrokerAutomaticExecutionTests.ActualPowerShellRunsAutomaticallyAndKeepsTheRealExitStatus(exitCode: 0) [255 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerAutomaticExecutionTests.ACancelledCommandIsNeverDispatched [1 ms]
+  Bestanden GoWinUI.Tests.AssistantRunEventPumpTests.ReconnectKeepsToolAliveAndSkipsReplayedEvents [523 ms]
+  Bestanden GoWinUI.Tests.LocalToolBrokerAutomaticExecutionTests.FileWriteAndReadExecuteAutomaticallyInTheSelectedProject [34 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.BaselineAbove64MiBRetainsAllFilesAndDetectsLaterEdits [271 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.ExternalFileCreatesDeletesAndEmptyFilesHaveCorrectNetKindsAndPatchHeaders [34 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.LongPathsAndMetadataVolumeHaveExplicitCoverageLimits [1 s]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.RepeatedEditsAndRevertCompareWithRunStartWithoutGit [34 ms]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.JunctionToOutsideWorkspaceIsSkippedAndNeverCreatesExternalDiffs [46 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.WindowsJobClosesChildrenAfterParentExitOrTimeout(parentSleep: 30, timeoutSeconds: 3, expectedTimeout: True) [3 s]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.WindowsJobClosesChildrenAfterParentExitOrTimeout(parentSleep: 0, timeoutSeconds: 15, expectedTimeout: False) [302 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.MultilineReplacementPreservesNewlinesBomAndUnchangedSections(newline: "\r\n", withBom: False) [19 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.MultilineReplacementPreservesNewlinesBomAndUnchangedSections(newline: "\n", withBom: True) [10 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.MultilineReplacementPreservesNewlinesBomAndUnchangedSections(newline: "\r\n", withBom: True) [10 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.WindowsJobClosesChildrenWhenUnboundedOrVeryLongCommandIsCancelled(timeoutSeconds: null) [314 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.WindowsJobClosesChildrenWhenUnboundedOrVeryLongCommandIsCancelled(timeoutSeconds: 2147483647) [322 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.WindowsJobClosesChildrenWhenUnboundedOrVeryLongCommandIsCancelled(timeoutSeconds: 0) [309 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AppliedCallbackFailureKeepsCommittedMutationAndSuccessfulReceipt [10 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.UserArtifactsAndNonCachePytestDirectoriesAreStillListed(directory: "results") [20 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.UserArtifactsAndNonCachePytestDirectoriesAreStillListed(directory: "pytest-plugin") [5 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.UserArtifactsAndNonCachePytestDirectoriesAreStillListed(directory: "runtime") [5 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.StaleHashCanBeCorrectedByRereadingWithoutLosingExternalChanges [21 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.CommandTimeoutTerminatesProcessAndReportsFailure [1 s]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.MixedLineEndingsMatchReadRepresentationAndPreserveUntouchedBytes(suppliedNewline: "\r\n") [14 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.MixedLineEndingsMatchReadRepresentationAndPreserveUntouchedBytes(suppliedNewline: "\n") [11 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.SearchSkipsLegacyEncodingAndDirectReadExplainsIt [17 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.GitDiffBeforeFirstCommitIncludesStagedAdditionsAndLaterEdits [262 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.InvalidBatchMatchLeavesEveryOriginalByteUntouched(first: "abc", second: "introduced") [11 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.InvalidBatchMatchLeavesEveryOriginalByteUntouched(first: "abc", second: "abc") [9 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.InvalidBatchMatchLeavesEveryOriginalByteUntouched(first: "abc", second: "absent") [9 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.InvalidBatchMatchLeavesEveryOriginalByteUntouched(first: "abc", second: "same") [9 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.InvalidBatchMatchLeavesEveryOriginalByteUntouched(first: "abc", second: "bcd") [9 ms]
+[xUnit.net 00:00:09.06]     GoWinUI.Tests.LocalCodingToolExecutorTests.LargeDiffStaysAvailableToUiWhileModelReceiptRetainsHashesAndAppliedState [FAIL]
+[xUnit.net 00:00:09.06]       System.IO.FileNotFoundException : Could not find file 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\go-coding-tests-b0e58b985b3f49e8b645f88d6abbb9b6\long.txt'.
+[xUnit.net 00:00:09.07]       Stack Trace:
+[xUnit.net 00:00:09.07]            at Microsoft.Win32.SafeHandles.SafeFileHandle.CreateFile(String fullPath, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+[xUnit.net 00:00:09.07]            at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+[xUnit.net 00:00:09.07]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(316,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch)
+[xUnit.net 00:00:09.07]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(245,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.LargeDiffStaysAvailableToUiWhileModelReceiptRetainsHashesAndAppliedState()
+[xUnit.net 00:00:09.07]         --- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.LiveCommandSnapshotsPreserveUtf8AndBoundBothHeadAndTail [1 s]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.ReadCharacterBoundaryPreservesWholeLinesAndJsonEscaping [12 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.ReadEditAndStaleHashPreserveExternalChanges [19 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AbsoluteCommandWorkingDirectoryStillRejectsJunctions(targetOutsideProject: False) [37 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AbsoluteCommandWorkingDirectoryStillRejectsJunctions(targetOutsideProject: True) [34 ms]
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.LargeDiffStaysAvailableToUiWhileModelReceiptRetainsHashesAndAppliedState [90 ms]
+  Fehlermeldung:
+   System.IO.FileNotFoundException : Could not find file 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\go-coding-tests-b0e58b985b3f49e8b645f88d6abbb9b6\long.txt'.
+  Stapelverfolgung:
+     at Microsoft.Win32.SafeHandles.SafeFileHandle.CreateFile(String fullPath, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+   at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 316
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.LargeDiffStaysAvailableToUiWhileModelReceiptRetainsHashesAndAppliedState() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 245
+--- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.GeneratedPathsAreExcludedByDefaultButExplicitListSearchAndReadRemainAvailable(generatedPath: "unsloth-tmp/pytest-of-AMD/pytest-9") [17 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.GeneratedPathsAreExcludedByDefaultButExplicitListSearchAndReadRemainAvailable(generatedPath: ".venv/Scripts") [11 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.GeneratedPathsAreExcludedByDefaultButExplicitListSearchAndReadRemainAvailable(generatedPath: "pytest-of-AMD/pytest-9") [10 ms]
+[xUnit.net 00:00:09.24]     GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(newline: "\r\n", withBom: True) [FAIL]
+[xUnit.net 00:00:09.24]       Assert.Equal() Failure: Collections differ
+[xUnit.net 00:00:09.24]                               ↓ (pos 39)
+[xUnit.net 00:00:09.24]       Expected: [···, 13, 10, 105, 110, 115, ···]
+[xUnit.net 00:00:09.24]       Actual:   [···, 13, 10, 108, 105, 110, ···]
+[xUnit.net 00:00:09.24]                               ↑ (pos 39)
+[xUnit.net 00:00:09.24]       Stack Trace:
+[xUnit.net 00:00:09.24]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(316,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch)
+[xUnit.net 00:00:09.24]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(167,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(String newline, Boolean withBom)
+[xUnit.net 00:00:09.24]         --- End of stack trace from previous location ---
+[xUnit.net 00:00:09.33]     GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(newline: "\n", withBom: False) [FAIL]
+[xUnit.net 00:00:09.33]       Assert.Equal() Failure: Collections differ
+[xUnit.net 00:00:09.33]                               ↓ (pos 32)
+[xUnit.net 00:00:09.33]       Expected: [···, 52, 10, 105, 110, 115, ···]
+[xUnit.net 00:00:09.33]       Actual:   [···, 52, 10, 108, 105, 110, ···]
+[xUnit.net 00:00:09.33]                               ↑ (pos 32)
+[xUnit.net 00:00:09.33]       Stack Trace:
+[xUnit.net 00:00:09.33]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(316,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch)
+[xUnit.net 00:00:09.33]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(167,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(String newline, Boolean withBom)
+[xUnit.net 00:00:09.33]         --- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.GeneratedPathsAreExcludedByDefaultButExplicitListSearchAndReadRemainAvailable(generatedPath: "pytest-9") [11 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.GeneratedPathsAreExcludedByDefaultButExplicitListSearchAndReadRemainAvailable(generatedPath: "freqai_wave_memory.egg-info") [13 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.GeneratedPathsAreExcludedByDefaultButExplicitListSearchAndReadRemainAvailable(generatedPath: ".pytest_cache/v/cache") [12 ms]
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(newline: "\r\n", withBom: True) [85 ms]
+  Fehlermeldung:
+   Assert.Equal() Failure: Collections differ
+                        ↓ (pos 39)
+Expected: [···, 13, 10, 105, 110, 115, ···]
+Actual:   [···, 13, 10, 108, 105, 110, ···]
+                        ↑ (pos 39)
+  Stapelverfolgung:
+     at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 316
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(String newline, Boolean withBom) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 167
+--- End of stack trace from previous location ---
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(newline: "\n", withBom: False) [84 ms]
+  Fehlermeldung:
+   Assert.Equal() Failure: Collections differ
+                        ↓ (pos 32)
+Expected: [···, 52, 10, 105, 110, 115, ···]
+Actual:   [···, 52, 10, 108, 105, 110, ···]
+                        ↑ (pos 32)
+  Stapelverfolgung:
+     at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 316
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.BatchDiffHasRealSeparateHunksAndRecreatesExactBytesIncludingBomAndEndOfFile(String newline, Boolean withBom) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 167
+--- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.FailedMixedNewlineEditExplainsRecoveryAndDoesNotWrite(oldText: "absent", error: "text_not_found") [15 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.FailedMixedNewlineEditExplainsRecoveryAndDoesNotWrite(oldText: "same\nline", error: "ambiguous_match") [12 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AbsoluteCommandWorkingDirectoryUsesTheSelectedWorkspaceOrItsChild(relative: "") [31 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AbsoluteCommandWorkingDirectoryUsesTheSelectedWorkspaceOrItsChild(relative: "nested folder") [33 ms]
+[xUnit.net 00:00:09.55]     GoWinUI.Tests.LocalCodingToolExecutorTests.GitDiffWithoutARepositoryKeepsTheRealErrorAndExplainsAvailableFileTools [FAIL]
+[xUnit.net 00:00:09.55]       Assert.False() Failure
+[xUnit.net 00:00:09.55]       Expected: False
+[xUnit.net 00:00:09.55]       Actual:   True
+[xUnit.net 00:00:09.55]       Stack Trace:
+[xUnit.net 00:00:09.55]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(796,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.GitDiffWithoutARepositoryKeepsTheRealErrorAndExplainsAvailableFileTools()
+[xUnit.net 00:00:09.55]         --- End of stack trace from previous location ---
+[xUnit.net 00:00:10.93]     GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(relative: "empty.txt", content: "") [FAIL]
+[xUnit.net 00:00:10.93]       System.IO.FileNotFoundException : Could not find file 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\go-coding-tests-24cba5b68c3448698ced16eff5d2be42\empty.txt'.
+[xUnit.net 00:00:10.93]       Stack Trace:
+[xUnit.net 00:00:10.93]            at Microsoft.Win32.SafeHandles.SafeFileHandle.CreateFile(String fullPath, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+[xUnit.net 00:00:10.93]            at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+[xUnit.net 00:00:10.93]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(316,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch)
+[xUnit.net 00:00:10.93]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(137,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(String relative, String content)
+[xUnit.net 00:00:10.93]         --- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AbsoluteCommandWorkingDirectoryUsesTheSelectedWorkspaceOrItsChild(relative: "nested folder/../nested folder") [32 ms]
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.GitDiffWithoutARepositoryKeepsTheRealErrorAndExplainsAvailableFileTools [81 ms]
+  Fehlermeldung:
+   Assert.False() Failure
+Expected: False
+Actual:   True
+  Stapelverfolgung:
+     at GoWinUI.Tests.LocalCodingToolExecutorTests.GitDiffWithoutARepositoryKeepsTheRealErrorAndExplainsAvailableFileTools() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 796
+--- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.ProgressCallbackFailureOrCancellationStopsTheOwnedProcessTree(cancel: True) [526 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.ProgressCallbackFailureOrCancellationStopsTheOwnedProcessTree(cancel: False) [516 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.RelativeExecutableUsesTheExplicitWorkingDirectoryAndCanReachSharedPrograms(executable: "tools/fixture-cmd.exe", workingDirectory: "project") [48 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.RelativeExecutableUsesTheExplicitWorkingDirectoryAndCanReachSharedPrograms(executable: "../../shared/fixture-cmd.exe", workingDirectory: "project/nested") [39 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.RelativeExecutableUsesTheExplicitWorkingDirectoryAndCanReachSharedPrograms(executable: "../tools/fixture-cmd.exe", workingDirectory: "project/nested") [39 ms]
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(relative: "empty.txt", content: "") [89 ms]
+  Fehlermeldung:
+   System.IO.FileNotFoundException : Could not find file 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\go-coding-tests-24cba5b68c3448698ced16eff5d2be42\empty.txt'.
+  Stapelverfolgung:
+     at Microsoft.Win32.SafeHandles.SafeFileHandle.CreateFile(String fullPath, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+   at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 316
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(String relative, String content) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 137
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:11.01]     GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(relative: "new file café.txt", content: "first\nsecond") [FAIL]
+[xUnit.net 00:00:11.01]       System.IO.FileNotFoundException : Could not find file 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\go-coding-tests-d035bbdf25e34c30a128d07a39b44a9e\new file café.txt'.
+[xUnit.net 00:00:11.01]       Stack Trace:
+[xUnit.net 00:00:11.01]            at Microsoft.Win32.SafeHandles.SafeFileHandle.CreateFile(String fullPath, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+[xUnit.net 00:00:11.01]            at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+[xUnit.net 00:00:11.01]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(316,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch)
+[xUnit.net 00:00:11.01]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs(137,0): at GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(String relative, String content)
+[xUnit.net 00:00:11.01]         --- End of stack trace from previous location ---
+  Fehler GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(relative: "new file café.txt", content: "first\nsecond") [84 ms]
+  Fehlermeldung:
+   System.IO.FileNotFoundException : Could not find file 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\go-coding-tests-d035bbdf25e34c30a128d07a39b44a9e\new file café.txt'.
+  Stapelverfolgung:
+     at Microsoft.Win32.SafeHandles.SafeFileHandle.CreateFile(String fullPath, FileMode mode, FileAccess access, FileShare share, FileOptions options)
+   at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.VerifyDiffAppliesAsync(String relative, Byte[] original, Byte[] expected, String patch) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 316
+   at GoWinUI.Tests.LocalCodingToolExecutorTests.WriteDiffIsPreviewedBeforeMutationAndAppliedOnlyAfterSuccessfulWrite(String relative, String content) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\LocalCodingToolExecutorTests.cs:line 137
+--- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.ExternalChangeAfterPreviewDiscardsPatchAndNeverPublishesApplied [15 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AbsoluteCommandWorkingDirectoryCannotEscapeToAParentOrSibling(relative: "project-neighbor") [4 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AbsoluteCommandWorkingDirectoryCannotEscapeToAParentOrSibling(relative: "outside") [4 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AbsoluteCommandWorkingDirectoryCannotEscapeToAParentOrSibling(relative: ".") [3 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.AbsoluteCommandWorkingDirectoryCannotEscapeToAParentOrSibling(relative: "project/../project-neighbor") [3 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.ReadLargerPagesPreservesStructuredContentAndContinuation [9 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.DriveRootAllowsItsExistingChildWithoutDoubleSeparator [6 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.WholeFileOverwriteRequiresCurrentHashAndReturnsUpdatedHash [19 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.OversizedSingleHunkIsExplicitlyOmittedWithoutPublishingABrokenPatchHunk [15 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.BatchEditsUseOriginalMatchesAndPreserveMultilineEncoding(newline: "\n", withBom: False) [14 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.BatchEditsUseOriginalMatchesAndPreserveMultilineEncoding(newline: "\r\n", withBom: True) [11 ms]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.SessionLogRedactsSensitiveStructuredValuesAndExports [11 s]
+  Bestanden GoWinUI.Tests.CodingToolJournalRecoveryTests.IncompleteLookupRequiresAnExplicitValidRunScope [11 s]
+  Bestanden GoWinUI.Tests.LocalDocumentToolServiceTests.DocxCodecRoundTripsReadableGermanContent [11 s]
+  Bestanden GoWinUI.Tests.CodingToolStepSettingsTests.NewAndExistingSettingsWithoutExpansionPreferenceDefaultToCollapsed [11 s]
+  Bestanden GoWinUI.Tests.CodingExperimentSettingsTests.RemovedPreferencesAreIgnoredAndDroppedOnSave(reasoning: "maximum", workingState: True) [11 s]
+  Bestanden GoWinUI.Tests.OfflineAiConnectionTests.ExplicitOnlineModeSurvivesASettingsRoundTrip [10 s]
+  Bestanden GoWinUI.Tests.ReasoningSelectionTests.ChoicesSurviveSettingsReloadAndStayScopedToModelAndRole [11 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.EmptyCodingSettingsNormalizeWithoutChangingGeneralSelection [10 s]
+  Bestanden GoWinUI.Tests.OfflineAiConnectionTests.OfflineOperationsReturnWithoutCreatingANetworkClient [1 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.GitDiffForOneFileIncludesItsChangesButExcludesSiblingChanges [293 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.ReadWholeFileBeyondFormerFileAndReceiptLimitsWithoutTruncation [194 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.InterruptedCommandPersistsLastActualStreamsWithoutInventingProcessCompletion(status: "failed") [11 s]
+  Bestanden GoWinUI.Tests.SessionGroupingTests.RegroupingPreservesOmittedAssignmentsMessagesPinsAndConversationState [11 s]
+  Bestanden GoWinUI.Tests.CodingSessionToolTests.HtmlPreviewPersistsExactlyAndHasAReceiptWithoutEchoingCodeToTheModel [11 s]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.AiMessageContextSummaryIsPersistedWithItsSessionMessage [11 s]
+  Bestanden GoWinUI.Tests.CodingSessionToolTests.SemanticOnlyKnowledgeHitLabelsItsBoundedPrefixWithoutInventingALexicalMatch [1 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.StructuredChronologySurvivesSnapshotsReplayAndOutOfOrderUpdates [11 s]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.StartupCleanupPreservesCancelledReasoningWithoutAnAnswerAndItsReplayCursor [11 s]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.CodingCompletionPreservesVisibleNarrationAndSourcesWithoutEnvelopeReplacement [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.ChatStatePersistsAndStreamingMessagesRecoverAsInterrupted [11 s]
+  Bestanden GoWinUI.Tests.CodingHistoryRecoveryTests.MultiTermRecallFindsFailedHistoryAndExcludesCurrentTurn [11 s]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.AppliedDiffSurvivesFailedProgressPersistenceAndCompactReceipt [8 ms]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.FullAppliedDiffSurvivesCompactModelReceiptWithoutReplacingGitStatusObject [3 ms]
+  Bestanden GoWinUI.Tests.CodingHistoryRecoveryTests.AvailableContextPreservesFullToolOutputAndLongAnswer [14 ms]
+  Bestanden GoWinUI.Tests.CodingHistoryRecoveryTests.ToolOnlyHistorySurvivesAndBudgetDoesNotDropTheNewestOversizedMessage [10 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.ContextAssemblerHonorsExplicitPageRangeAndDropsOldHistoryAtBudget [29 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.GeneralRequestsRetainTheirOriginalTopicWithoutAForcedSpecialty(prompt: "Überarbeite meinen Bewerbungstext.") [1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.GeneralRequestsRetainTheirOriginalTopicWithoutAForcedSpecialty(prompt: "Prüfe diesen C#-Algorithmus auf Fehler.") [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.GeneralRequestsRetainTheirOriginalTopicWithoutAForcedSpecialty(prompt: "Plane meinen Lernplan für Englisch.") [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.GeneralRequestsRetainTheirOriginalTopicWithoutAForcedSpecialty(prompt: "Erkläre Interfaces in Go.") [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.BuiltInPoliciesDoNotAssumeAnIndustryOrExcludeProgramming(hasDocumentContext: False) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.BuiltInPoliciesDoNotAssumeAnIndustryOrExcludeProgramming(hasDocumentContext: True) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.WorkflowMetadataConvertsMarkdownToShortPlainText [1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.LegacySessionTitleMarkerIsRemovedFromTheVisibleAnswer [2 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.ShortProgrammingTopicsAreNotMistakenForGreetings(prompt: "Go") [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.ShortProgrammingTopicsAreNotMistakenForGreetings(prompt: "C#") [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.ShortProgrammingTopicsAreNotMistakenForGreetings(prompt: "SQL") [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.ShortProgrammingTopicsAreNotMistakenForGreetings(prompt: "R") [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.ShortProgrammingTopicsAreNotMistakenForGreetings(prompt: "C++") [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.GenericGreetingNeverBecomesTheSessionTitleFallback [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.EscapedMarkdownSessionTitleMarkerIsNeverRendered [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.CentralChatBoundaryRemovesEveryLegacyTitleMarkerVariant(content: "**Annahmen:** GO_SESSION_TITLE: A **GO_SESSION_TIT"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.CentralChatBoundaryRemovesEveryLegacyTitleMarkerVariant(content: "Vorwort GO_SESSION_TITLE: Zwischentitel\n\nErgebni"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.CentralChatBoundaryRemovesEveryLegacyTitleMarkerVariant(content: "## **GO_SESSION_TITLE:** Technischer Titel\n\nSich"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.CentralChatBoundaryRemovesEveryLegacyTitleMarkerVariant(content: "**Aktion:** **GO\\_SESSION\\_TITLE:** Arbeitsstand"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.ProductionCSharpNeverEmitsTheReservedLegacyTitleToken [144 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.MarkdownFormattedEmptySessionTitleMarkerIsNeverRendered [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.StructuredAgentResponseSeparatesVisibleMarkdownAndSpecificSessionTitle [< 1 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.GeneralChatEnvelopeUsesGeneralPoliciesAndStructuredResponseContract [2 ms]
+  Bestanden GoWinUI.Tests.ChatAndContextTests.SessionTitleNormalizationPreservesLanguageNamesAndLimitsWords [< 1 ms]
+  Bestanden GoWinUI.Tests.ProjectReorderingTests.MoveChecklistItemNormalizesTiesAndBoundaryIsANoOp [11 s]
+  Bestanden GoWinUI.Tests.V1AcceptanceGapTests.BackupWithForeignKeyViolationIsRejectedBeforeActiveDatabaseIsReplaced [11 s]
+  Bestanden GoWinUI.Tests.V1AcceptanceGapTests.VeryLongPromptStaysInsideContextBudgetAndReportsTruncation [1 ms]
+  Bestanden GoWinUI.Tests.ProjectsViewModelTests.AssetTitleSaveTrimsPersistsAndReplacesOnlyTheChangedObservableItem [11 s]
+  Bestanden GoWinUI.Tests.CodingGitChangeTrackerTests.LargeWorkspaceAndTextFilesHaveNoOldSnapshotLimits [12 s]
+  Bestanden GoWinUI.Tests.BlobProjectAndDocumentTests.BlobStoreStreamsTwoMiBChunksDeduplicatesAndVerifies [12 s]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.PreviewResolvesOnlyPersistedCompletedHtmlFromTheActiveSession [12 s]
+  Bestanden GoWinUI.Tests.CodingHtmlPreviewTests.PreviewResponseAllowsInlineInteractionWithoutOriginNetworkOrEmbeddingPrivileges [< 1 ms]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.ReimportDetectsChangesInvalidatesThumbnailAndCleansOldBlobs [12 s]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.RetryingTheSameAssistantMessageAtomicallyRebindsItsLocalRun [12 s]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.OnlyGeneratedScreenCapturesAreBoundToTheSentMessage [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SelectingWorkflowInsertsVisibleMessageWithoutSessionAttachment [12 s]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.QuotedSentenceEndingMapsToOneVisibleSentenceAtATime [2 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SessionProjectCreateButtonTriggersProjectSessionCreation [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.LiveModelTokensDeriveLlamaCurrentTokensFromOlderGatewayEvents [< 1 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.NaturalMediaQuestionsRouteTheLatestAttachedMediumWithoutAnUploadIdPrompt [5 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AudiobookPromptCreatesOneChapterAndContinuationStartsAtTheLatestScene [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.WebAssetsExposeTheSameMicrophoneContractAndPlaceItAboveSend [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DeterministicSpeechPlanNormalizesInlineMathematicsAndRemovesQuotes [10 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AutomaticVoiceOutputSpeaksLatexAsGermanMathematics(markdown: "Die Kantenlänge lautet \\(\\sqrt[3]{x_1}\\).", expectedPhrase: "dritte Wurzel aus x Index eins") [4 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AutomaticVoiceOutputSpeaksLatexAsGermanMathematics(markdown: "Volumenstrom: $$\\dot{V} = A \\cdot v$$", expectedPhrase: "V Punkt gleich A mal v") [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AutomaticVoiceOutputSpeaksLatexAsGermanMathematics(markdown: "Die Druckdifferenz ist \\(\\Delta p = \\frac{\\rho"···, expectedPhrase: "Delta p gleich Rho geteilt durch zwei mal v hoch z"···) [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AutomaticVoiceOutputSpeaksLatexAsGermanMathematics(markdown: "Einheit: \\frac{\\mathrm{m}^3}{\\mathrm{h}}", expectedPhrase: "Kubikmeter pro Stunde") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AutomaticVoiceOutputSpeaksLatexAsGermanMathematics(markdown: "Für den Druck gilt Δp = ρ · v².", expectedPhrase: "Delta p gleich Rho mal v hoch zwei") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.NewPromptInterruptsOnlyAnExistingChatRunAndNeverIndependentSpeech [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AnalysisToolsOwnCaptureAndSidebarDeleteRemainsInteractiveDuringRuns [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ArtifactImagePreviewUsesAnEmbeddedPngDataUrl [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoicePlaybackCommandsAreHandledLocallyWhileSpeechIsActive(command: "Pausieren", paused: False, expected: "Pause") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoicePlaybackCommandsAreHandledLocallyWhileSpeechIsActive(command: "Abbrechen", paused: False, expected: "Cancel") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoicePlaybackCommandsAreHandledLocallyWhileSpeechIsActive(command: "Weiterlesen!", paused: True, expected: "Resume") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoicePlaybackCommandsAreHandledLocallyWhileSpeechIsActive(command: "Vorlesen pausieren.", paused: False, expected: "Pause") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoicePlaybackCommandsAreHandledLocallyWhileSpeechIsActive(command: "Fortsetzen", paused: True, expected: "Resume") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.WebViewAnnotatesReadableBlocksForTheNativeReadFromHereMenu [1 ms]
+  Bestanden GoWinUI.Tests.CodingRunWorkspaceTests.LegacyResumePersistsAnExplicitFailureAndCancelsOnlyItsRunWithoutStreamingOrDispatchingTools [12 s]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.CommittedSessionDeletionCleansOnlyItsEvidenceAndRetainsPinnedSessions(bulkDelete: False) [12 s]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.CommandPublishesRealOutputBeforeExitAndAwaitsThrottledCallbacks [1 s]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.NegativeCommandDeadlineIsRejectedBeforeStartingAProcess [4 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.SearchAndListSkipDependenciesAndReturnBoundedResults [12 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.CancellationStopsChildProcess [1 s]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.NewFileCanBeListedSearchedReadReplacedAndVerifiedByCommand [206 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.CommandReturnsExitCodeAndDrainsBoundedOutput [188 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.StaleBatchHashRejectsAllEditsAndRereadRetainsExternalChanges [22 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.SourcePackagesPrecedeBulkDataWhenTheStructuredListHitsItsOutputBudget [192 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.TraversalGitMutationAndAmbiguousEditAreRejected [11 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.NoOpEditReportsEmptyActualDiff [12 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.OverlappingMatchesAreRejectedAndUniqueCorrectionCanDeleteText [18 ms]
+  Bestanden GoWinUI.Tests.LocalCodingToolExecutorTests.EnvironmentReportsAMissingVenvInterpreterAndCommandNamesItsExactMissingPath [6 ms]
+[xUnit.net 00:00:16.47]     GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(cancelBlockedRefresh: True) [FAIL]
+[xUnit.net 00:00:16.47]       System.TimeoutException : The operation has timed out.
+[xUnit.net 00:00:16.47]       Stack Trace:
+[xUnit.net 00:00:16.47]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(39,0): at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh)
+[xUnit.net 00:00:16.47]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(58,0): at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh)
+[xUnit.net 00:00:16.47]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(58,0): at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh)
+[xUnit.net 00:00:16.47]         --- End of stack trace from previous location ---
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(cancelBlockedRefresh: True) [16 s]
+  Fehlermeldung:
+   System.TimeoutException : The operation has timed out.
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 39
+   at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 58
+   at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 58
+--- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.CodingExperimentSettingsTests.RemovedPreferencesAreIgnoredAndDroppedOnSave(reasoning: "adaptive", workingState: False) [7 s]
+  Bestanden GoWinUI.Tests.CodingToolJournalRecoveryTests.CompleteFileReadLargerThanProtocolDefaultSurvivesJournalRestart [7 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.FolderPickerResultStaysBoundToItsCapturedSession [7 s]
+  Bestanden GoWinUI.Tests.CodingToolStepSettingsTests.ToolStepExpansionSavedByViewModelSurvivesRestartAndBothWebSnapshots(expanded: True) [7 s]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.FileLimitDoesNotMislabelPreviouslyUnobservedFilesAsNewOrDeleted [16 s]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.CancellationBeforeCaptureDoesNotCreateAFalsePersistedBaseline [4 ms]
+  Bestanden GoWinUI.Tests.CodingSessionToolTests.HistorySearchCannotReadAnotherSessionOrTheCurrentPromptAndKeepsChronology [7 s]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.InterruptedCommandPersistsLastActualStreamsWithoutInventingProcessCompletion(status: "cancelled") [7 s]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.CallbackFailureReceiptRetainsAllDeliveredPartialStreamsAndDiagnostic [< 1 ms]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.BackupRestoreReturnsDatabaseAndSettingsToSnapshot [8 s]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.BatchedEditShowsAllReplacementPairs [1 ms]
+  Bestanden GoWinUI.Tests.CodingSessionToolTests.ContextToolCannotChooseAForeignSessionOrExceedResultLimit(tool: "coding.searchHistory") [3 ms]
+  Bestanden GoWinUI.Tests.CodingSessionToolTests.ContextToolCannotChooseAForeignSessionOrExceedResultLimit(tool: "coding.searchKnowledge") [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingSessionToolTests.KnowledgeExcerptKeepsTheActualMatchDeepInsideTheRetrievedChunk(query: "Präzisionskapazität", kind: "query-match") [6 ms]
+  Bestanden GoWinUI.Tests.CodingSessionToolTests.KnowledgeExcerptKeepsTheActualMatchDeepInsideTheRetrievedChunk(query: "Wie hoch ist die Präzisionskapazität?", kind: "query-term") [< 1 ms]
+  Bestanden GoWinUI.Tests.LocalDocumentToolServiceTests.SessionDocumentIsVersionedAndReadInBoundedUnits [8 s]
+  Bestanden GoWinUI.Tests.CodingWorkspaceChangeTrackerTests.TotalDiffPayloadIsBoundedWhileAllChangedFilesAndLineCountsRemain [268 ms]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.ReasoningSurvivesRepositoryReloadAndRemainsOrderedWithActualToolSteps [7 s]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.LiveDeltasPreserveMarkdownAndTheirOriginalPositionInTheAnswer [< 1 ms]
+  Bestanden GoWinUI.Tests.ProjectReorderingTests.MoveAssetNormalizesTiesAndEnforcesRevisionAndDirection [7 s]
+  Bestanden GoWinUI.Tests.CodingStructuredToolStepTests.SanitizedTextAndRebasedPositionsAreCommittedTogether [7 s]
+  Bestanden GoWinUI.Tests.V1AcceptanceGapTests.BackupWithManipulatedPayloadHashIsRejected [7 s]
+  Bestanden GoWinUI.Tests.ProjectsViewModelTests.ExplicitArchiveFilterCanSwitchRepeatedlyWithoutLosingProjects [7 s]
+  Bestanden GoWinUI.Tests.BlobProjectAndDocumentTests.DocumentGroupStateTracksPreparationAndReturnsToReady [7 s]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.TriggerEditsUseOptimisticRevisionsAndImmediatelyChangeRouting [7 s]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.AttachmentMediaTypeFallsBackToKnownFileExtensions(fileName: "daten.bin", reported: null, expected: "application/octet-stream") [< 1 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.AttachmentMediaTypeFallsBackToKnownFileExtensions(fileName: "foto.webp", reported: null, expected: "image/webp") [< 1 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.AttachmentMediaTypeFallsBackToKnownFileExtensions(fileName: "anlage.MKV", reported: "", expected: "video/x-matroska") [< 1 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.AttachmentMediaTypeFallsBackToKnownFileExtensions(fileName: "aufnahme.wav", reported: "application/octet-stream", expected: "audio/wav") [< 1 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.ScreenClipWriterProducesIndexedUncompressedAvi [7 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.CompletedCaptionStatesBecomePersistentChatMessages(transcript: "", error: null, expectedTitle: "**Live-Untertitel**", expectedDetail: "Es wurde kein Sprachinhalt erkannt") [7 s]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.MigrationThirtyOneLeavesExistingChatsUnboundAndPreservesTheirContent [9 s]
+  Bestanden GoWinUI.Tests.CodingRunWorkspaceTests.OriginalWorkspaceSurvivesSessionChangesReloadsAndRunUpdatesAndCannotBeReboundByRetry [8 s]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.CommittedSessionDeletionCleansOnlyItsEvidenceAndRetainsPinnedSessions(bulkDelete: True) [8 s]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.BrokerEvidenceSchemasRejectExtraScopeFieldsAndMutationRisk [3 ms]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.FullMiddleOutputSurvivesRestartAndIdempotentJournalCompletionWithoutReexecution [57 ms]
+  Bestanden GoWinUI.Tests.CodingGitChangeTrackerTests.RestartPreservesRunStartAndNextRunStartsEmpty [8 s]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.EvidenceIdsNeverSelectPathsOrReadAnotherRunOrSessionAndCleanupOnlyRemovesTheDeletedSession [64 ms]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.EvidenceStorageFailureAfterCommittedWritePreservesAppliedReceiptAndAddsWarning [22 ms]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.UpfrontEvidenceStorageFailurePreventsMutation [65 ms]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.WatchedWorkingCopyAutomaticallySynchronizesChangesBackToTheDatabase [8 s]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.RealCommandKeepsBoundedLiveHeadTailButItsMiddleCanBeReadAndSearchedViaTheBroker [1 s]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.NewTurnCanReadExactPreviousRunReferenceAfterRestartWithoutImportingOldOutputs [55 ms]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.HistoricalLookupRejectsCopiedScopeAndHonorsCancellation [24 ms]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.BothByteQuotasRemainBoundedAcrossStepsAndRestartAndMarkMissingTailsHonestly [43 ms]
+  Bestanden GoWinUI.Tests.CodingRunEvidenceTests.EvidenceSymlinkCannotReadOrWriteOutsideTheCache [20 ms]
+  Bestanden GoWinUI.Tests.CodingToolJournalRecoveryTests.UnknownOutcomeCanBeSubmittedOnceWithoutExecutingAgainAndDeletionPreservesOtherSessionClaims [6 s]
+  Bestanden GoWinUI.Tests.CodingToolStepSettingsTests.ToolStepExpansionSavedByViewModelSurvivesRestartAndBothWebSnapshots(expanded: False) [6 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.InvalidWorkspaceDoesNotChangeTheSelectedModeOrExistingFolder [6 s]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.VersionThreeSettingsMigrateToTheShared120BDefault [6 s]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.FullEditDetailsOverTwelveThousandCharactersSurviveDatabaseAndSnapshot [6 s]
+  Bestanden GoWinUI.Tests.LocalDocumentToolServiceTests.SessionDocumentRejectsUnsafeWindowsFileNames [6 s]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.RealOutputWithMarkdownFencesAndHtmlStaysInsideALongerLiteralCodeBlock [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.NewProviderRetryCanReplaceAnAlreadyStoredCompletionWithoutReopeningOtherTools [6 s]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.ReplayedAndOutOfOrderEventsDoNotDuplicateTextOrReopenACompletedStep [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.ReasoningUpdatesDoNotFlushAnUnfinishedAnswerSentenceIntoSpeech [3 ms]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.ProviderRetryReplacesPartialReasoningAndKeepsTheSameTimelineStep [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.StoredReasoningIsExcludedFromFutureModelHistoryWithoutCrowdingOutToolEvidence [1 ms]
+  Bestanden GoWinUI.Tests.CodingReasoningTests.EmptyCompletionDoesNotCreateAnEmptyReasoningCard [< 1 ms]
+  Bestanden GoWinUI.Tests.ProjectReorderingTests.MoveChecklistItemSwapsNeighboursAndRejectsAStaleRevision [6 s]
+  Bestanden GoWinUI.Tests.V1AcceptanceGapTests.CancelledDocumentImportAfterBlobCommitLeavesNoBlob [6 s]
+  Bestanden GoWinUI.Tests.ProjectsViewModelTests.AssetTitleSaveMergesOntoTheLatestRevisionAfterAConcurrentFileUpdate [5 s]
+  Bestanden GoWinUI.Tests.ProjectsViewModelTests.AssetModifiedDisplayIncludesSecondsSoImmediateEditsAreVisible [< 1 ms]
+[xUnit.net 00:00:26.66]     GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex [FAIL]
+[xUnit.net 00:00:26.66]       System.IO.DirectoryNotFoundException : Could not find a part of the path 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\GO-tests-5d2d51eb324745f9a27b5c4b4c1e4da7\workspace\.git\index'.
+[xUnit.net 00:00:26.67]       Stack Trace:
+[xUnit.net 00:00:26.67]            at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+[xUnit.net 00:00:26.67]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingGitChangeTrackerTests.cs(17,0): at GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex()
+[xUnit.net 00:00:26.67]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingGitChangeTrackerTests.cs(36,0): at GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex()
+[xUnit.net 00:00:26.67]         --- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.AttachmentAndArtifactMetadataCannotInjectResourceHeaders [5 s]
+  Bestanden GoWinUI.Tests.BlobProjectAndDocumentTests.PreparedDocumentsAreReusedAndSearchRemainsDiversifiedAcrossAttachments [5 s]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.CompletedCaptionStatesBecomePersistentChatMessages(transcript: "Person 1: Die Lüftungsanlage läuft.", error: null, expectedTitle: "**Live-Untertitel**", expectedDetail: "Die Lüftungsanlage läuft") [5 s]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.AssistantMessageCanBeResetForAutomaticRetry [5 s]
+  Fehler GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex [5 s]
+  Fehlermeldung:
+   System.IO.DirectoryNotFoundException : Could not find a part of the path 'C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\sandbox\unsloth-tmp\GO-tests-5d2d51eb324745f9a27b5c4b4c1e4da7\workspace\.git\index'.
+  Stapelverfolgung:
+     at System.IO.File.ReadAllBytesAsync(String path, CancellationToken cancellationToken)
+   at GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingGitChangeTrackerTests.cs:line 17
+   at GoWinUI.Tests.CodingGitChangeTrackerTests.GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingGitChangeTrackerTests.cs:line 36
+--- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.MaterializedWorkingCopyUsesTheExactOriginalFileName [5 s]
+  Bestanden GoWinUI.Tests.CodingRunWorkspaceTests.MigrationThirtyThreeLeavesLegacyRunWorkspaceUnknownInsteadOfUsingTheCurrentSession [6 s]
+[xUnit.net 00:00:28.64]     GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(cancelBlockedRefresh: False) [FAIL]
+[xUnit.net 00:00:28.64]       System.TimeoutException : The operation has timed out.
+[xUnit.net 00:00:28.64]       Stack Trace:
+[xUnit.net 00:00:28.64]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(39,0): at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh)
+[xUnit.net 00:00:28.64]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(58,0): at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh)
+[xUnit.net 00:00:28.64]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(58,0): at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh)
+[xUnit.net 00:00:28.64]         --- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.CodingToolJournalRecoveryTests.RestartFindsOnlyUnfinishedClaimsForExactLocalAndServerRunWithoutRewindingTheCursor [3 s]
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(cancelBlockedRefresh: False) [12 s]
+  Fehlermeldung:
+   System.TimeoutException : The operation has timed out.
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 39
+   at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 58
+   at GoWinUI.Tests.CodingChangesIntegrationTests.TransientReaderLockPreservesTheLastSummaryUntilAnAtomicReplacementCanFinish(Boolean cancelBlockedRefresh) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 58
+--- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.CurrentSettingsPreserveDynamicallyDiscoveredModelIds(dynamicGeneralModel: "coding/qwen3-coder-next-Q8_0~c012") [3 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.SessionSwitchRestoresOnlyThatSessionsCodingWorkspace [3 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.WorkspaceCommitHoldsTheChatGateUntilTheAtomicSaveFinishes [6 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.StepsPersistInTheAtomicConversationSnapshotWithoutChangingMessageContent [3 s]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.EditingAndGitOutputProduceBoundedRealDiffsForTheActivityView [5 ms]
+  Bestanden GoWinUI.Tests.ProjectsViewModelTests.ChecklistMoveAndAssetDeletionRefreshTheObservableState [3 s]
+  Bestanden GoWinUI.Tests.BlobProjectAndDocumentTests.ProjectChecklistAndAssetRoundTripEnforceRevisions [3 s]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.DurableChatBoundaryRemovesLegacyTitleMarkersAndEmptyTerminalCards [3 s]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.CompletedCaptionStatesBecomePersistentChatMessages(transcript: "", error: "GO AI Server ist nicht erreichbar.", expectedTitle: "**Live-Untertitel fehlgeschlagen**", expectedDetail: "GO AI Server ist nicht erreichbar") [3 s]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.MaterializeNeverOverwritesAnExternallyModifiedCopy [3 s]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.ScreenClipTranscoderProducesBrowserCompatibleMp4 [5 s]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.TriggerEditorOnlyMarksActualDatabaseChangesAsDirty [2 ms]
+  Bestanden GoWinUI.Tests.CodingChangesIntegrationTests.LegacyResumeNeverReplacesAMissingBaselineWithTheCurrentFiles [3 s]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.CurrentSettingsPreserveDynamicallyDiscoveredModelIds(dynamicGeneralModel: "vendor/new-general-model:q8_0") [3 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.WorkspaceAndCodingModeRollbackTogetherWhenActivationFails [3 s]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.LongRunningToolJournalPersistsBeyondPreviousLimitsAndReplaysWithoutDuplicates [3 s]
+  Bestanden GoWinUI.Tests.ProjectsViewModelTests.SynchronizedAssetReplacesModifiedTimeInBothObservableCollections [3 s]
+  Bestanden GoWinUI.Tests.BlobProjectAndDocumentTests.PreparedSessionHistoryIsPersistedByRevisionAndModelBudget [3 s]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.CompletedCaptionStatesBecomePersistentChatMessages(transcript: "Person 1: Die Lüftungsanlage läuft.\nPerson 2: Ich"···, error: null, expectedTitle: "**Live-Untertitel**", expectedDetail: "Person 1: Die Lüftungsanlage läuft.\n\nPerson 2: I"···) [3 s]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.AutomaticRetryRejectsUserMessageWithoutAdvancingConversationRevision [3 s]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.ClientToolJournalPreventsDuplicateMutationAfterSseReconnect [2 s]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.CurrentSettingsPreserveDynamicallyDiscoveredModelIds(dynamicGeneralModel: "coding/gpt-oss-120b-MXFP4~f00a") [2 s]
+  Bestanden GoWinUI.Tests.CodingChangesIntegrationTests.UnavailableCacheProducesAPartialNoticeWithoutBlockingTheRunOrPollingAnUninitializedTracker [2 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingChipPersistsToTheSessionAndSurvivesSnapshotRecreation [2 s]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.MissingMessagesAndOversizedStepPayloadsCannotBePersisted [2 s]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.GitDetailsKeepFullDiffsStatusAndFailureDiagnostics [3 ms]
+  Bestanden GoWinUI.Tests.CodingToolStepTests.TerminalDetailsKeepArgumentsExitCodeAndBothOutputTailsVisible [1 ms]
+  Bestanden GoWinUI.Tests.BlobProjectAndDocumentTests.SchemaThirteenStoresCpdbAndIfcProjectAssets [2 s]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ArtifactImagesCanBeMaterializedAndOpenedThroughTheBridge [2 s]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ModelCatalogRefreshKeepsCurrentOrPersistedSelectionInsteadOfFallingBack [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AudiobookToolRemainsPersistentInTheComposer [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SpeechProgressBridgeCarriesVisibleSourceMappingWithoutSpokenRewrite [6 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PlaybackNormalizationNeverCreatesEmptySegmentsAtCommasOrQuotes(source: "Natascha ließ das Steuer sanft nach vorne gleiten "···) [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PlaybackNormalizationNeverCreatesEmptySegmentsAtCommasOrQuotes(source: "Natascha ließ das Steuer sanft nach vorne gleiten "···) [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PlaybackNormalizationNeverCreatesEmptySegmentsAtCommasOrQuotes(source: "„Alles bleibt ruhig“, sagte Natascha, „während wir"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.CodingModePersistsAcrossDatabaseReopenAndKeepsExistingSessionData [2 s]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.MigrationSeedsEditableServiceTriggersAndMatchesOnlyPhraseBoundaries [2 s]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.GeneralModelSelectionSurvivesCoordinatorRestart [2 s]
+  Bestanden GoWinUI.Tests.CodingChangesIntegrationTests.OnlyActuallyDeletedSessionsLoseTheirChangesCache(bulkDelete: False) [2 s]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.EveryLegacyReasoningSettingIsResetToRuntimeAutomatic [306 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.ToolSelectionUsesItsRequestedSessionAfterTheActiveSessionChanges [2 s]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.AttachmentsArtifactsAndResumableRunsRemainLinkedToLocalChatState [561 ms]
+  Bestanden GoWinUI.Tests.BlobProjectAndDocumentTests.TextHtmlXmlAndRtfAreStoredWithOriginalAndExtractedContext [1 s]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.ConversationSnapshotReadsVisibleMessagesAndArtifactsFromOneDatabaseRevision [1 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingSettingsSurviveRestartIndependentlyFromGeneralModel [273 ms]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.NewAndLegacySettingsStartOnlineAndMigrateTheDockerGateway [273 ms]
+  Bestanden GoWinUI.Tests.CodingChangesIntegrationTests.OnlyActuallyDeletedSessionsLoseTheirChangesCache(bulkDelete: True) [495 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.BulkSessionDeletionPreservesPinnedSessionsUntilExplicitlyDeleted [2 s]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitComposerToolCreatesOneShotTrigger(tool: "bricsCad", expected: BricsCad) [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitComposerToolCreatesOneShotTrigger(tool: "imageGeneration", expected: ImageGeneration) [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitComposerToolCreatesOneShotTrigger(tool: "webSearch", expected: WebSearch) [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitComposerToolCreatesOneShotTrigger(tool: "audiobook", expected: Audiobook) [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitComposerToolCreatesOneShotTrigger(tool: "textToSpeech", expected: TextToSpeech) [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitComposerToolCreatesOneShotTrigger(tool: "youTubeSearch", expected: YouTubeSearch) [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SpeechSourceUnitsPreserveMarkdownStructureAndStableOrder [4 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PlaybackBatchesContainExactlyOneSentenceAndPreserveSourceOrder [3 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoiceCanFinishAnActiveMediaCaptureWithoutAnIntentModelRun(command: "Aufnahme beenden.") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoiceCanFinishAnActiveMediaCaptureWithoutAnIntentModelRun(command: "Beenden") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoiceCanFinishAnActiveMediaCaptureWithoutAnIntentModelRun(command: "Abschließen!") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoiceCanFinishAnActiveMediaCaptureWithoutAnIntentModelRun(command: "Aufnahme abschließen") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MediaTransportButtonsMapToSpeechControls [2 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.LiveModelTokensKeepPromptAndGeneratedCountsForTheCurrentModelRun [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MediaAnalysisPrefersDocumentsAndOtherwiseRequiresMatchingMedia [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitVoiceCommandSendsTheCurrentComposerDraft(command: "Prompt senden.") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitVoiceCommandSendsTheCurrentComposerDraft(command: "  PROMPT   SENDEN!  ") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ExplicitVoiceCommandSendsTheCurrentComposerDraft(command: "Senden") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SpeechAnchorSelectsTheRequestedBlockAndEverythingAfterIt [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.NormalChatReceivesNoImageOrMediaTool [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.WebViewAllowsStaticAudioAndVideoPreviewResources [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.FooterSpeechAcceptsEveryStableStoredAssistantMessage [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PlaybackNormalizationDropsPunctuationOnlyTechnicalFragments [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SessionPinUsesDescriptiveGermanLabelsAcrossTheWebViewContract [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PersistedProcessReportCanAlwaysBeReadAloud [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ReadFromHereOnlyAcceptsStableAuthoritativeAssistantBlocks [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MicrophoneMessagesAreAcceptedByTheWebBridge(messageType: "microphone.speak") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MicrophoneMessagesAreAcceptedByTheWebBridge(messageType: "microphone.stop") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MicrophoneMessagesAreAcceptedByTheWebBridge(messageType: "microphone.cancel") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MicrophoneMessagesAreAcceptedByTheWebBridge(messageType: "microphone.start") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MicrophoneMessagesAreAcceptedByTheWebBridge(messageType: "microphone.stopSpeech") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MicrophoneMessagesAreAcceptedByTheWebBridge(messageType: "microphone.toggleSpeechPause") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MicrophoneMessagesAreAcceptedByTheWebBridge(messageType: "microphone.audio") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.GenericCommandsDoNotDisablePersistentVoiceControl(command: "Vorlesen abbrechen") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.GenericCommandsDoNotDisablePersistentVoiceControl(command: "Beenden") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.GenericCommandsDoNotDisablePersistentVoiceControl(command: "Abbrechen") [< 1 ms]
+[xUnit.net 00:00:37.01]     GoWinUI.Tests.AssistantWorkflowTests.ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout [FAIL]
+[xUnit.net 00:00:37.01]       Assert.Contains() Failure: Sub-string not found
+[xUnit.net 00:00:37.01]       String:    "<!doctype html>\r\n<html lang="de">\r\n<head>"···
+[xUnit.net 00:00:37.01]       Not found: "styles.css?v=20260913-5"
+[xUnit.net 00:00:37.01]       Stack Trace:
+[xUnit.net 00:00:37.01]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\AssistantWorkflowTests.cs(170,0): at GoWinUI.Tests.AssistantWorkflowTests.ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout()
+[xUnit.net 00:00:37.01]            at System.RuntimeMethodHandle.InvokeMethod(ObjectHandleOnStack target, Void** arguments, ObjectHandleOnStack sig, BOOL isConstructor, ObjectHandleOnStack result)
+[xUnit.net 00:00:37.01]            at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.GenericCommandsDoNotDisablePersistentVoiceControl(command: "Sprachsteuerung starten") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.AudiobookContextIncludesInterruptedStoryTextButExcludesEarlierGeneralConversation [3 ms]
+  Fehler GoWinUI.Tests.AssistantWorkflowTests.ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout [3 ms]
+  Fehlermeldung:
+   Assert.Contains() Failure: Sub-string not found
+String:    "<!doctype html>\r\n<html lang="de">\r\n<head>"···
+Not found: "styles.css?v=20260913-5"
+  Stapelverfolgung:
+     at GoWinUI.Tests.AssistantWorkflowTests.ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\AssistantWorkflowTests.cs:line 170
+   at System.RuntimeMethodHandle.InvokeMethod(ObjectHandleOnStack target, Void** arguments, ObjectHandleOnStack sig, BOOL isConstructor, ObjectHandleOnStack result)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SpeechUsesComposerStatusWithoutRetryOrChatRendering [1 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.RunAttemptRejectsNonAssistantAndCrossSessionMessageAnchorsAtomically [342 ms]
+  Bestanden GoWinUI.Tests.BlobProjectAndDocumentTests.PdfAndDocxAreExtractedInTheDotNetBackend [1 s]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.ChatTurnAndEveryCommittedMutationAdvanceDatabaseRevisions [1 s]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.FormerTerminalModelRemainsSelectableForGeneralChat [1 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.NativeCatalogPopulatesBothTextSelectorsWithoutReplacingTheirSelections [1 s]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.WorkspaceCommitRejectsPendingOrActiveRunsAndAlwaysReleasesItsGate [1 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.ClientStartupStopsGeneralRunsAndPreservesCodingRunAndEventCursorForResume [1 s]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SessionGroupingIsTriggeredOnlyManuallyNotAfterCompletedRun [1 s]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ToolsReasoningSelectionAndBridgeHandlerAreRemoved [1 ms]
+[xUnit.net 00:00:38.21]     GoWinUI.Tests.AssistantWorkflowTests.PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts [FAIL]
+[xUnit.net 00:00:38.21]       Assert.Contains() Failure: Sub-string not found
+[xUnit.net 00:00:38.21]       String:    "<!doctype html>\r\n<html lang="de">\r\n<head>"···
+[xUnit.net 00:00:38.21]       Not found: "bridge.js?v=20260915-grouping-1"
+[xUnit.net 00:00:38.21]       Stack Trace:
+[xUnit.net 00:00:38.21]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\AssistantWorkflowTests.cs(98,0): at GoWinUI.Tests.AssistantWorkflowTests.PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts()
+[xUnit.net 00:00:38.21]            at System.RuntimeMethodHandle.InvokeMethod(ObjectHandleOnStack target, Void** arguments, ObjectHandleOnStack sig, BOOL isConstructor, ObjectHandleOnStack result)
+[xUnit.net 00:00:38.21]            at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+  Fehler GoWinUI.Tests.AssistantWorkflowTests.PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts [< 1 ms]
+  Fehlermeldung:
+   Assert.Contains() Failure: Sub-string not found
+String:    "<!doctype html>\r\n<html lang="de">\r\n<head>"···
+Not found: "bridge.js?v=20260915-grouping-1"
+  Stapelverfolgung:
+     at GoWinUI.Tests.AssistantWorkflowTests.PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\AssistantWorkflowTests.cs:line 98
+   at System.RuntimeMethodHandle.InvokeMethod(ObjectHandleOnStack target, Void** arguments, ObjectHandleOnStack sig, BOOL isConstructor, ObjectHandleOnStack result)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.HiddenSpeechTextRemovesQuotationFormsAndPreservesWordApostrophes [< 1 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.SystemAudioWindowsAreEncodedAsValidClampedPcm16Wave [4 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SpeechStatusHidesHardwareAndSelectedMessageDetails [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DictationCaptureSchedulesAtFiveHundredMillisecondsAndKeepsSixSeconds [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.DocumentHistoryReserveAndBlockTargetsScaleWithAvailableHistory [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MathematicsUsesTheSameDeterministicPipelineAsProse(source: "\\(x^2 + \\sqrt{x}=4\\)") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MathematicsUsesTheSameDeterministicPipelineAsProse(source: "$$\\int_0^1 \\frac{x^2 + 1}{\\sqrt{x}}\\,dx = 2$$") [< 1 ms]
+[xUnit.net 00:00:38.30]     GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation [FAIL]
+[xUnit.net 00:00:38.30]       Assert.Single() Failure: The collection was empty
+[xUnit.net 00:00:38.30]       Stack Trace:
+[xUnit.net 00:00:38.30]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(82,0): at GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation()
+[xUnit.net 00:00:38.30]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(99,0): at GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation()
+[xUnit.net 00:00:38.30]         --- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MathematicsUsesTheSameDeterministicPipelineAsProse(source: "\\(f(x)=x\\)") [< 1 ms]
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation [1 s]
+  Fehlermeldung:
+   Assert.Single() Failure: The collection was empty
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 82
+   at GoWinUI.Tests.CodingChangesIntegrationTests.RestartLoadsTheOriginalBaselineAndFinalScanIncludesChangesAfterCancellation() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 99
+--- End of stack trace from previous location ---
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.CodingWorkspaceIsBoundToOneSessionAndPersistsAcrossDatabaseReopen [806 ms]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.VersionOneSettingsUseTheirAccentAsInitialBackgroundColor [778 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingSnapshotRestoresItsRuntimeContextWindowIndependentlyFromGeneralModel [843 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.RemovingAnAttachmentTwiceIsIdempotent [909 ms]
+  Bestanden GoWinUI.Tests.AiClientPersistenceTests.TriggerEditorTracksAnEditedServiceCategory [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.BuildingSessionSnapshotUsesGoAiServerStateOnly [934 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ToolOnlyAssistantCardsAreExcludedFromTheNextServerRunHistory [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.GeneralWebSearchReadsRelevantPagesBeforePreparingTheAnswer [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ReadAloudRemainsIndependentAndScrollIsPersistedOnlyAcrossSessionChanges [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.CurrentQuestionsTriggerResearchWithoutWebSearchChip(prompt: "Was ist die aktuellste Version von WebView2?") [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.CurrentQuestionsTriggerResearchWithoutWebSearchChip(prompt: "Welche Karten sind heute im Pokémon 30th Anniversa"···) [< 1 ms]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.SettingsAreAtomicAndNormalized [522 ms]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.MigrationThirtyPreservesUserOwnedWorkflowEvenWithRetiredSeedId(id: "7ceee4f5-8c41-5ce3-9332-7ccbb7d8d3fb") [546 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CancelledOrDeletedWorkspaceActivationCannotPartiallyChangeTheSession [458 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.UnknownAndExpiredCodingProposalsAreRejected [< 1 ms]
+  Bestanden GoWinUI.Tests.CodingIntegrationTests.CodingWaitingShowsElapsedTimeBeforeTheFirstTokenWithoutInventingProgress [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ArtifactAudioPreviewIsMaterializedForTheStaticWebViewHost [309 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.MediaTransportControllerRegistersAndReleasesNativeControls [58 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.GeneralPromptOnlyRetriesFailuresMarkedAsRecoverable [< 1 ms]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.RecentActivitySurvivesASettingsReload [167 ms]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.MigrationThirtyPreservesUserOwnedWorkflowEvenWithRetiredSeedId(id: "0e2fd00a-aa2e-5b23-9e06-3a0645a2ecad") [175 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.OpeningSessionsAlwaysEmitsTheExactVisibleDatabaseRowsForThatSession [193 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ComposerCollapsesTwoOrMoreAttachedFilesIntoAnUpwardOverlayMenu [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.WebSpeechProgressHighlightsSourcesWithoutAutomaticScrolling [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.PlaybackNormalizationPreservesBatchAcrossLongSegmentSplits [1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SettingsExposeIndependentGeneralAndCodingModelSelectors [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.LongSentenceBelowThreeThousandCharactersRemainsOneSpeechRequest [9 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.VoiceDictationRemainsVisibleWhileSpeechPlaybackIsActive [9 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.YouTubeSearchActionReceivesYouTubeAndFetchTools [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SseReconnectBudgetResetsAfterPersistedEventProgress [< 1 ms]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.LegacyProviderMigratesWithoutLosingModelSelectionsOrSessionSettings(legacyProvider: "\"lmStudio\"") [183 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ToolsMenuLeavesReasoningAtTheNativeModelDefault [16 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ScreenClipEventsRenderOnlyInTheComposerContext [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.LegacySpeechToolMessagesAreExcludedFromPersistentSessionContext [< 1 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SystemAudioAnalysisCaptureProducesAValidTenMinuteBoundedWave [< 1 ms]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.CustomWorkflowUsesOptimisticRevisionAndBuiltInsStayReadOnly [173 ms]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.LegacyProviderMigratesWithoutLosingModelSelectionsOrSessionSettings(legacyProvider: "1") [176 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.SessionActionsUseTheNewDefaultTitleAndUpdateRecentActivity [211 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ComposerKeepsLiveDraftAndPersistentSessionToolsAcrossHostUpdates [< 1 ms]
+  Bestanden GoWinUI.Tests.SettingsLoggingAndBackupTests.VersionFourGermanCaptionsMigrateToAutomaticLanguageDetection [180 ms]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.MigrationTwentyNineRemovesLegacyCodingSchemaAndPreservesVisibleChatAndGeneralRuns [344 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.ReadAloudPromptIsClassifiedWithoutBecomingAChatRun [175 ms]
+  Bestanden GoWinUI.Tests.AssistantWorkflowTests.RunningMessageShowsItsModelAndPreservesContextWhenUpdatesOmitTokenCounts [< 1 ms]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.FreshDatabaseStartsWithAnEmptyWorkflowLibraryIdempotently [91 ms]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.CurrentSchemaPersistsAudiobookStateAndRemovesLegacySpeechCache [86 ms]
+  Bestanden GoWinUI.Tests.DatabaseAndWorkflowTests.MigrationThirtyRemovesOnlyRetiredSeedsAndPreservesUserWorkflowsAndChats [97 ms]
+  Bestanden GoWinUI.Tests.ProjectAssetWorkingCopyTests.WatchedWorkingCopySynchronizesAfterAnExtendedExclusiveFileLock [11 s]
+[xUnit.net 00:00:49.33]     GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange [FAIL]
+[xUnit.net 00:00:49.33]       System.TimeoutException : The operation has timed out.
+[xUnit.net 00:00:49.33]       Stack Trace:
+[xUnit.net 00:00:49.33]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(147,0): at GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange()
+[xUnit.net 00:00:49.33]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(150,0): at GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange()
+[xUnit.net 00:00:49.33]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(153,0): at GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange()
+[xUnit.net 00:00:49.33]         --- End of stack trace from previous location ---
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange [11 s]
+  Fehlermeldung:
+   System.TimeoutException : The operation has timed out.
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 147
+   at GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 150
+   at GoWinUI.Tests.CodingChangesIntegrationTests.PollPublishesActualChangesAndFinalRevertRemovesTheNetChange() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 153
+--- End of stack trace from previous location ---
+[xUnit.net 00:00:49.58]     GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding [FAIL]
+[xUnit.net 00:00:49.58]       System.InvalidOperationException : Unexpected tracker error
+[xUnit.net 00:00:49.58]       ---- System.IO.IOException : Git-Dateivergleich fehlgeschlagen: fatal: '$GIT_DIR' too big
+[xUnit.net 00:00:49.58]       Stack Trace:
+[xUnit.net 00:00:49.58]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(167,0): at GoWinUI.Tests.CodingChangesIntegrationTests.<>c.<SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding>b__4_3(Exception exception)
+[xUnit.net 00:00:49.58]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\Services\GoAiAssistantService.FileChanges.cs(144,0): at GoWinUI.App.Services.CodingChangesMonitor.StartAsync(Boolean resume, CancellationToken cancellationToken)
+[xUnit.net 00:00:49.58]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(169,0): at GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding()
+[xUnit.net 00:00:49.58]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(170,0): at GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding()
+[xUnit.net 00:00:49.58]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs(208,0): at GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding()
+[xUnit.net 00:00:49.58]         --- End of stack trace from previous location ---
+[xUnit.net 00:00:49.58]         ----- Inner Stack Trace -----
+[xUnit.net 00:00:49.58]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\Coding\CodingGitChangeTracker.cs(148,0): at GoWinUI.Core.Coding.CodingGitChangeTracker.GitAsync(String[] arguments, CancellationToken cancellationToken, Boolean isolated, String input)
+[xUnit.net 00:00:49.58]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\Coding\CodingGitChangeTracker.cs(82,0): at GoWinUI.Core.Coding.CodingGitChangeTracker.CaptureTreeAsync(CancellationToken cancellationToken)
+[xUnit.net 00:00:49.58]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\Coding\CodingGitChangeTracker.cs(58,0): at GoWinUI.Core.Coding.CodingGitChangeTracker.StartAsync(Boolean resume, CancellationToken cancellationToken)
+[xUnit.net 00:00:49.58]         C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\Services\GoAiAssistantService.FileChanges.cs(136,0): at GoWinUI.App.Services.CodingChangesMonitor.StartAsync(Boolean resume, CancellationToken cancellationToken)
+[xUnit.net 00:00:49.58]   Finished:    GoWinUI.Tests
+  Fehler GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding [244 ms]
+  Fehlermeldung:
+   System.InvalidOperationException : Unexpected tracker error
+---- System.IO.IOException : Git-Dateivergleich fehlgeschlagen: fatal: '$GIT_DIR' too big
+  Stapelverfolgung:
+     at GoWinUI.Tests.CodingChangesIntegrationTests.<>c.<SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding>b__4_3(Exception exception) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 167
+   at GoWinUI.App.Services.CodingChangesMonitor.StartAsync(Boolean resume, CancellationToken cancellationToken) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\Services\GoAiAssistantService.FileChanges.cs:line 144
+   at GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 169
+   at GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 170
+   at GoWinUI.Tests.CodingChangesIntegrationTests.SnapshotReloadsTheLastCodingSummaryAndBridgePublishesTheSameMessageBinding() in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\tests\GoWinUI.Tests\CodingChangesIntegrationTests.cs:line 208
+--- End of stack trace from previous location ---
+----- Inner Stack Trace -----
+   at GoWinUI.Core.Coding.CodingGitChangeTracker.GitAsync(String[] arguments, CancellationToken cancellationToken, Boolean isolated, String input) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\Coding\CodingGitChangeTracker.cs:line 148
+   at GoWinUI.Core.Coding.CodingGitChangeTracker.CaptureTreeAsync(CancellationToken cancellationToken) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\Coding\CodingGitChangeTracker.cs:line 82
+   at GoWinUI.Core.Coding.CodingGitChangeTracker.StartAsync(Boolean resume, CancellationToken cancellationToken) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.Core\Coding\CodingGitChangeTracker.cs:line 58
+   at GoWinUI.App.Services.CodingChangesMonitor.StartAsync(Boolean resume, CancellationToken cancellationToken) in C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\src\GoWinUI.App\Services\GoAiAssistantService.FileChanges.cs:line 136
+
+Fehler beim Testlauf.
+Gesamtzahl Tests: 591
+     Bestanden: 576
+     Nicht bestanden: 15
+ Gesamtzeit: 50,1130 Sekunden
+dotnet failed with exit code 1.
+In C:\Users\AMD\Documents\Unsloth Studio\Projects\GO-WinUI-bf162f5d\windows\common.ps1:156 Zeichen:9
++         throw "dotnet failed with exit code $LASTEXITCODE."
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (dotnet failed with exit code 1.:String) [], RuntimeException
+    + FullyQualifiedErrorId : dotnet failed with exit code 1.
+ 
