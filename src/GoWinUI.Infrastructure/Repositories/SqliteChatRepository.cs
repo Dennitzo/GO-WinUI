@@ -152,7 +152,13 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         {
             while (await reader.ReadAsync(token).ConfigureAwait(false)) blobIds.Add(reader.GetString(0));
         }
+        // Remove only the now-empty group of this deletion, in the same transaction.
+        command.CommandText = "SELECT session_group_id FROM chat_sessions WHERE id=$id;";
+        var deletedGroup = await command.ExecuteScalarAsync(token).ConfigureAwait(false);
         command.CommandText = "DELETE FROM chat_sessions WHERE id=$id;";
+        await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        command.CommandText = "DELETE FROM chat_session_groups WHERE id=$group AND NOT EXISTS (SELECT 1 FROM chat_sessions WHERE session_group_id=$group);";
+        command.Parameters.AddWithValue("$group", deletedGroup ?? DBNull.Value);
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         await DeleteOrphanedBinaryObjectsAsync(command, blobIds, token).ConfigureAwait(false);
     }, cancellationToken);
@@ -179,6 +185,8 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
 
             command.CommandText = "DELETE FROM chat_sessions WHERE is_pinned=0;";
             var deletedCount = await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            command.CommandText = "DELETE FROM chat_session_groups WHERE NOT EXISTS (SELECT 1 FROM chat_sessions WHERE session_group_id=chat_session_groups.id);";
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
             await DeleteOrphanedBinaryObjectsAsync(command, blobIds, token).ConfigureAwait(false);
             return deletedCount;
         }, cancellationToken);

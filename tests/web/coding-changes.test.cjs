@@ -286,8 +286,9 @@ test("the changes overview has one responsive outer scroller and all required ca
   assert.match(css, /focus-visible/);
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
   for (const asset of ["styles.css", "coding-changes.css", "coding-timeline.css", "bridge.js", "coding-timeline.js", "coding-changes.js", "app.js"]) {
-    const revision = ["styles.css", "app.js"].includes(asset) ? "20260919-agents-3"
-      : asset === "coding-timeline.js" ? "20260919-agents-2"
+    const revision = asset === "app.js" ? "20260919-workspace-1"
+      : asset === "styles.css" ? "20260919-agents-3"
+      : asset === "coding-timeline.js" ? "20260919-workspace-1"
       : asset === "bridge.js" ? "20260919-agents-1" : "20260913-3";
     assert.ok(html.includes(`${asset}?v=${revision}`), `${asset} must use the deployed cache revision`);
   }

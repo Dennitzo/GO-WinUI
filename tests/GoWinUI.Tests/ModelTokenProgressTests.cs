@@ -6,26 +6,27 @@ namespace GoWinUI.Tests;
 public sealed class ModelTokenProgressTests
 {
     [Fact]
-    public void NativePromptProgressSeparatesCachedPrefixFromNewlyEvaluatedTokens()
+    public void NativeProgressShowsCombinedTotalAndRetainsInternalCacheCounters()
     {
         var counter = new GoAiAssistantService.ModelTokenProgressState();
         var first = GoAiAssistantService.FormatModelTokenProgress(new("promptProcessing",
             PromptProgress: 0.94, PromptTokens: 9_262, ProcessedPromptTokens: 8_746,
             CachedPromptTokens: 8_622), counter);
 
-        Assert.Contains($"{8_622:N0} Token wiederverwendet", first);
-        Assert.Contains("124 neu verarbeitet", first);
+        Assert.Contains($"{8_746:N0} Token", first);
+        Assert.DoesNotContain("wiederverwendet", first);
+        Assert.Equal(8_622, counter.CachedPromptTokens);
         Assert.DoesNotContain("Kontext wird verarbeitet", first);
         Assert.Equal(8_746, counter.ActiveTokens);
         var waiting = GoAiAssistantService.FormatModelTokenProgress(new("codingWaiting",
             Attempt: 1, ElapsedSeconds: 2), counter);
-        Assert.Contains($"{8_622:N0} Kontexttoken wiederverwendet · 124 neu verarbeitet", waiting);
+        Assert.Contains($"{8_746:N0} Token", waiting);
 
         // The final usage frame is authoritative; generation keeps the known cache split.
         var final = GoAiAssistantService.FormatModelTokenProgress(new("tokenProgress",
             PromptTokens: 9_262, ProcessedPromptTokens: 9_262, GeneratedTokens: 51,
             CurrentTokens: 9_313, CachedPromptTokens: 8_622), counter);
-        Assert.Equal($"{8_622:N0} Kontexttoken wiederverwendet · 640 neu verarbeitet · ca. 51 erzeugte Token", final);
+        Assert.Equal($"{9_313:N0} Token", final);
         Assert.Equal(9_313, counter.ActiveTokens);
 
         _ = GoAiAssistantService.FormatModelTokenProgress(new("generationStarted"), counter);
@@ -44,8 +45,8 @@ public sealed class ModelTokenProgressTests
 
         var cold = GoAiAssistantService.FormatModelTokenProgress(new("promptProcessing",
             PromptTokens: 9_262, ProcessedPromptTokens: 8_746, CachedPromptTokens: 0), counter);
-        Assert.Contains("0 Token wiederverwendet", cold);
-        Assert.Contains($"{8_746:N0} neu verarbeitet", cold);
+        Assert.Equal(0, counter.CachedPromptTokens);
+        Assert.Contains($"{8_746:N0} Token", cold);
     }
 
     [Fact]
@@ -71,11 +72,11 @@ public sealed class ModelTokenProgressTests
 
         var first = GoAiAssistantService.FormatModelTokenProgress(new("tokenProgress",
             GeneratedTokens: 8, CurrentTokens: 8), counter);
-        Assert.Equal($"{5_544:N0} Kontexttoken · ca. 8 erzeugte Token", first);
+        Assert.Equal($"{5_552:N0} Token", first);
         Assert.Equal(5_552, counter.ActiveTokens);
         var later = GoAiAssistantService.FormatModelTokenProgress(new("tokenProgress",
             GeneratedTokens: 2_300, CurrentTokens: 2_300), counter);
-        Assert.Equal($"{5_544:N0} Kontexttoken · ca. {2_300:N0} erzeugte Token", later);
+        Assert.Equal($"{7_844:N0} Token", later);
         Assert.Equal(7_844, counter.ActiveTokens);
         Assert.NotEqual(first, later);
         Assert.Contains(later!, GoAiAssistantService.FormatModelTokenProgress(
@@ -84,7 +85,7 @@ public sealed class ModelTokenProgressTests
         // Final native usage includes the prompt; it must not be added a second time.
         var usage = GoAiAssistantService.FormatModelTokenProgress(new("tokenProgress",
             PromptTokens: 5_544, ProcessedPromptTokens: 5_544, GeneratedTokens: 2_298, CurrentTokens: 7_842), counter);
-        Assert.Equal($"{5_544:N0} Kontexttoken · ca. {2_298:N0} erzeugte Token", usage);
+        Assert.Equal($"{7_842:N0} Token", usage);
         Assert.Equal(7_842, counter.ActiveTokens);
     }
 
@@ -105,7 +106,7 @@ public sealed class ModelTokenProgressTests
             ProcessedPromptTokens: 300), counter);
         var detail = GoAiAssistantService.FormatModelTokenProgress(new("tokenProgress",
             GeneratedTokens: 8, CurrentTokens: 8), counter);
-        Assert.Equal("300 Kontexttoken · ca. 8 erzeugte Token", detail);
+        Assert.Equal("308 Token", detail);
         Assert.Equal(308, counter.ActiveTokens);
     }
 
@@ -120,7 +121,7 @@ public sealed class ModelTokenProgressTests
 
         var detail = GoAiAssistantService.FormatModelTokenProgress(new("tokenProgress",
             PromptTokens: 0, ProcessedPromptTokens: 0, GeneratedTokens: 2_308, CurrentTokens: 2_308), counter);
-        Assert.Equal($"{5_544:N0} Kontexttoken · ca. {2_308:N0} erzeugte Token", detail);
+        Assert.Equal($"{7_852:N0} Token", detail);
         Assert.Equal(5_544, counter.ProcessedPromptTokens);
         Assert.Equal(7_852, counter.ActiveTokens);
     }
@@ -132,14 +133,14 @@ public sealed class ModelTokenProgressTests
         Assert.Null(GoAiAssistantService.FormatModelTokenProgress(new("toolSelected"), counter));
         var generated = GoAiAssistantService.FormatModelTokenProgress(new("tokenProgress",
             GeneratedTokens: 12, CurrentTokens: 12), counter);
-        Assert.Equal("ca. 12 erzeugte Token", generated);
+        Assert.Equal("12 Token", generated);
         Assert.Equal(0, counter.ProcessedPromptTokens);
 
         _ = GoAiAssistantService.FormatModelTokenProgress(new("generationStarted"), counter);
         _ = GoAiAssistantService.FormatModelTokenProgress(new("promptProcessing", ProcessedPromptTokens: 100), counter);
         var legacy = GoAiAssistantService.FormatModelTokenProgress(new ModelGenerationEvent("tokenProgress",
             CurrentTokens: 112), counter);
-        Assert.Equal("100 Kontexttoken · ca. 12 erzeugte Token", legacy);
+        Assert.Equal("112 Token", legacy);
         Assert.Equal(112, counter.ActiveTokens);
     }
 }

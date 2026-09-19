@@ -18,7 +18,7 @@ using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
 
 namespace GoAi.Server.Core.Research;
 
-public sealed partial class WebResearchService
+public sealed partial class WebResearchService : IDisposable
 {
     private const int MaximumFetchBytes = 25 * 1024 * 1024;
     private const int MaximumExtractedCharacters = 512_000;
@@ -32,6 +32,13 @@ public sealed partial class WebResearchService
     private readonly GoAiServerOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, EngineCooldown> _engineCooldowns = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _searchGate = new(1, 1);
+    private readonly Dictionary<string, (DateTimeOffset Until, WebSearchResponse Response)> _searchCache = new(StringComparer.Ordinal);
+    private DateTimeOffset _lastSearchStarted;
+    private static readonly Regex SiteRestriction = new(@"(?<![\w-])site:(?<host>[a-z0-9][a-z0-9.-]*\.[a-z]{2,})(?=[/\s]|$)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    public void Dispose() => _searchGate.Dispose();
 
     public WebResearchService(
         IHttpClientFactory httpClientFactory,
@@ -47,6 +54,29 @@ public sealed partial class WebResearchService
         WebSearchRequest request,
         bool youtubeFallback,
         CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var key = JsonSerializer.Serialize(new { request, youtubeFallback });
+        await _searchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var now = _timeProvider.GetUtcNow();
+            foreach (var expired in _searchCache.Where(pair => pair.Value.Until <= now).Select(pair => pair.Key).ToArray())
+                _searchCache.Remove(expired);
+            if (_searchCache.TryGetValue(key, out var cached)) return cached.Response;
+            var result = await SearchCoreAsync(request, youtubeFallback, allowLanguageRetry: true, cancellationToken).ConfigureAwait(false);
+            if (result.Results.Count > 0)
+            {
+                if (_searchCache.Count >= 64) _searchCache.Remove(_searchCache.MinBy(pair => pair.Value.Until).Key);
+                _searchCache[key] = (_timeProvider.GetUtcNow() + TimeSpan.FromSeconds(45), result);
+            }
+            return result;
+        }
+        finally { _searchGate.Release(); }
+    }
+
+    private async Task<WebSearchResponse> SearchCoreAsync(WebSearchRequest request, bool youtubeFallback,
+        bool allowLanguageRetry, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (string.IsNullOrWhiteSpace(request.Query) || request.Query.Length > 500)
@@ -72,7 +102,7 @@ public sealed partial class WebResearchService
         // SearXNG's CSE engine turns de-DE into a strict document-language filter.
         var language = youtubeFallback ? request.Language ?? "de-DE"
             : SearxngSearchProfiles.SearchLanguage(request.Profile, query, request.Language);
-        var profileEngines = youtubeFallback ? null : SearxngSearchProfiles.Engines(request.Profile, query)?.Split(',');
+        var profileEngines = SearxngSearchProfiles.Engines(youtubeFallback ? "general" : request.Profile, query)?.Split(',');
         var skipped = new List<SearchEngineFailure>();
         var selectedEngines = profileEngines?.Where(engine =>
         {
@@ -88,15 +118,21 @@ public sealed partial class WebResearchService
         };
         if (selectedEngines is not null)
             builder.Query += "&engines=" + Uri.EscapeDataString(string.Join(',', selectedEngines));
-        var client = _httpClientFactory.CreateClient(nameof(WebResearchService));
+        // Space outbound searches and coalesce identical successful requests above.
+        // A blocked engine must never be hammered by concurrent agent/tool retries.
+        var delay = _lastSearchStarted + TimeSpan.FromSeconds(1) - _timeProvider.GetUtcNow();
+        if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+        _lastSearchStarted = _timeProvider.GetUtcNow();
+        using var client = _httpClientFactory.CreateClient(nameof(WebResearchService));
         client.Timeout = TimeSpan.FromSeconds(20);
         using var response = await client.GetAsync(builder.Uri, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
         var results = new List<WebSearchResult>();
+        var restrictedHosts = SiteRestriction.Matches(query).Select(match => match.Groups["host"].Value).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (document.RootElement.TryGetProperty("results", out var rawResults))
         {
-            foreach (var raw in rawResults.EnumerateArray().Take(maximum))
+            foreach (var raw in rawResults.EnumerateArray().Take(100))
             {
                 var url = GetString(raw, "url");
                 var title = GetString(raw, "title");
@@ -104,6 +140,9 @@ public sealed partial class WebResearchService
                 {
                     continue;
                 }
+                if (restrictedHosts.Length > 0 && (!Uri.TryCreate(url, UriKind.Absolute, out var target)
+                    || !restrictedHosts.Any(host => target.Host.Equals(host, StringComparison.OrdinalIgnoreCase)
+                        || target.Host.EndsWith("." + host, StringComparison.OrdinalIgnoreCase)))) continue;
 
                 results.Add(new WebSearchResult(
                     title,
@@ -114,6 +153,9 @@ public sealed partial class WebResearchService
                     GetString(raw, "img_src") ?? GetString(raw, "thumbnail_src") ?? GetString(raw, "thumbnail")));
             }
         }
+        // Bing sometimes broadens multiword/site queries. Preserve it as an
+        // additional source, but prefer the more exact CSE/specialist hits.
+        results = results.OrderBy(result => result.Source == "bing" ? 1 : 0).Take(maximum).ToList();
 
         var failures = ReadEngineFailures(document.RootElement);
         foreach (var failure in failures)
@@ -130,6 +172,14 @@ public sealed partial class WebResearchService
         if (results.Count == 0 && failures.Count > 0 && (selectedEngines is null
             || selectedEngines.All(engine => failures.Any(failure => failure.Engine.Equals(engine, StringComparison.OrdinalIgnoreCase)))))
             throw new SearxngEngineUnavailableException(failures);
+        if (results.Count == 0 && allowLanguageRetry && language != "all" && request.Profile != "images")
+        {
+            var retried = await SearchCoreAsync(request with { Language = "all" }, youtubeFallback,
+                allowLanguageRetry: false, cancellationToken).ConfigureAwait(false);
+            var combined = failures.Concat(retried.EngineFailures ?? []).DistinctBy(failure => failure.Engine, StringComparer.OrdinalIgnoreCase).ToArray();
+            return retried with { EngineFailures = combined.Length > 0 ? combined : null,
+                SearchGuidance = "Keine Treffer mit Sprachfilter; einmal innerhalb derselben lokalen SearXNG-Instanz ohne Sprachfilter gesucht. Gesperrte Engines wurden ausgelassen. " + retried.SearchGuidance };
+        }
         return new WebSearchResponse(
             request.Query,
             results,

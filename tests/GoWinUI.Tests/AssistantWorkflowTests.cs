@@ -40,10 +40,10 @@ public sealed class AssistantWorkflowTests
             counter);
 
         Assert.Equal("0 Token", started);
-        Assert.Equal("900 Kontexttoken · ca. 42 erzeugte Token", firstTurn);
-        Assert.Equal("900 Kontexttoken · ca. 42 erzeugte Token", selectedTool);
+        Assert.Equal("942 Token", firstTurn);
+        Assert.Equal("942 Token", selectedTool);
         Assert.Equal("0 Token", nextTurn);
-        Assert.Equal("ca. 8 erzeugte Token", secondTurn);
+        Assert.Equal("8 Token", secondTurn);
         Assert.DoesNotContain("Prompt", secondTurn, StringComparison.Ordinal);
         Assert.DoesNotContain("Token/s", secondTurn, StringComparison.Ordinal);
     }
@@ -171,7 +171,7 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("styles.css?v=20260919-agents-3", html, StringComparison.Ordinal);
         Assert.Contains("markdown.js?v=20260913-3", html, StringComparison.Ordinal);
         Assert.Contains("voice.js?v=20260822-2", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260919-agents-3", html, StringComparison.Ordinal);
+        Assert.Contains("app.js?v=20260919-workspace-1", html, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
@@ -292,6 +292,8 @@ public sealed class AssistantWorkflowTests
     [InlineData("bricsCad", PromptTriggerAction.BricsCad)]
     [InlineData("audiobook", PromptTriggerAction.Audiobook)]
     [InlineData("textToSpeech", PromptTriggerAction.TextToSpeech)]
+    [InlineData("documentCreate", PromptTriggerAction.DocumentCreate)]
+    [InlineData("blender", PromptTriggerAction.Blender)]
     public void ExplicitComposerToolCreatesOneShotTrigger(string tool, PromptTriggerAction expected)
     {
         var match = AssistantCoordinator.CreateToolMatch(tool, "Aufgabe ohne Präfix");
@@ -1173,11 +1175,11 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void NormalChatReceivesNoImageOrMediaTool()
+    public void NormalChatCanAutonomouslyUseImageAndMediaTools()
     {
         var tools = GoAiAssistantService.GetAllowedServerTools(null);
-        Assert.DoesNotContain("image.generate", tools);
-        Assert.DoesNotContain("media.analyze", tools);
+        Assert.Contains("image.generate", tools);
+        Assert.Contains("media.analyze", tools);
         Assert.Contains("web.search", tools);
         Assert.Contains("web.fetch", tools);
     }

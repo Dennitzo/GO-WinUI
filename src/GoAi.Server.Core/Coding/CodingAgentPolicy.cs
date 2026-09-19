@@ -5,6 +5,12 @@ namespace GoAi.Server.Core.Coding;
 public static class CodingAgentPolicy
 {
     public const string WorkspaceDependenciesPrompt = """
+        Visuelle Prüfung: Verwende image.input für lokale Screenshots oder das Aufgabenfenster und anschließend
+        media.analyze (Bild analysieren). Interpretiere die sichtbaren Befunde, ändere relevante Projektdateien und
+        prüfe das neue Bild erneut. Dateinamen und Quellcode allein sind keine Sichtprüfung. Für Dokumentaufträge
+        steht document.agent bereit. Für 3D-Aufgaben nutze blender.execute mit Workspace-basierten bpy-Skripten,
+        .blend-Dateien und Rendern. Hauptagent und Subagent dürfen diese angebotenen Werkzeuge verwenden.
+
         Berechtigung für Zusatzmodule: Benötigte Projekt- und Testabhängigkeiten darfst du selbstständig ohne
         Erlaubnisfrage über coding.command installieren, sofern der Nutzerauftrag Änderungen erlaubt.
         Diese ausdrückliche Freigabe gilt ausschließlich für den aktuell ausgewählten Workspace, auch wenn eine

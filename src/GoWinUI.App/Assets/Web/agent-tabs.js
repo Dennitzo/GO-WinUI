@@ -22,7 +22,7 @@
     if (step?.agentId) return String(step.agentId);
     // Older persisted receipts predate the explicit agentId property.
     if (/^agent-[a-f0-9]+(?:\/|$)/i.test(String(step?.id || ""))) return String(step.id).split("/")[0];
-    if (step?.tool === "coding.agentStart") return json(step.outputJson)?.agentId || null;
+    if (["coding.agentStart", "document.agent"].includes(step?.tool)) return json(step.outputJson)?.agentId || null;
     return null;
   }
 
@@ -45,7 +45,8 @@
       const group = ensure(id);
       group.steps.push(step);
       group.first ||= step;
-      if (step.tool === "coding.agentStart") {
+      if (["coding.agentStart", "document.agent"].includes(step.tool)) {
+        if (step.tool === "document.agent") group.label = "Dokumenten-Agent";
         const input = json(step.inputJson), output = json(step.outputJson);
         if (input?.task) group.task = String(input.task);
         if (Array.isArray(input?.writePaths)) group.paths = input.writePaths;
@@ -90,13 +91,13 @@
       if (group && !emitted.has(group.id)) {
         emitted.add(group.id);
         output.push({ ...step, id: `${group.id}-notice-start`, tool: "assistant.agentNotice", agentNotice: {
-          kind: "start", task: group.task, paths: group.paths, status: "completed" }, status: "completed" });
+          kind: "start", label: group.label, task: group.task, paths: group.paths, status: "completed" }, status: "completed" });
       }
-      if (!isChild(step) && !["coding.agentStart", "coding.agentWait", "coding.agentCancel"].includes(step.tool)) output.push(step);
+      if (!isChild(step) && !["coding.agentStart", "document.agent", "coding.agentWait", "coding.agentCancel"].includes(step.tool)) output.push(step);
       for (const finished of groups.filter(item => terminal.has(item.status) && lastIndices.get(item.id) === index)) {
         output.push({ ...step, id: `${finished.id}-notice-result`, tool: "assistant.agentNotice",
           contentOffset: Math.max(step.contentOffset || 0, ...finished.steps.map(item => item.contentOffset || 0)),
-          agentNotice: { kind: "result", result: finished.result, status: finished.status }, status: finished.status });
+          agentNotice: { kind: "result", label: finished.label, result: finished.result, status: finished.status }, status: finished.status });
       }
     }
     return output;
@@ -108,9 +109,10 @@
     section.dataset.timelineKey = `tool-${step.id}`;
     section.dataset.stepId = String(step.id);
     const heading = node("div", "agent-notice__heading");
-    heading.append(node("strong", "", data.kind === "start" ? "Subagent gestartet" : "Subagent-Ergebnis"));
+    const agentLabel = data.label || "Subagent";
+    heading.append(node("strong", "", data.kind === "start" ? `${agentLabel} gestartet` : `${agentLabel}-Ergebnis`));
     if (data.kind === "result") heading.append(node("span", `agent-state agent-state--${data.status}`, labels[data.status] || data.status));
-    const open = node("button", "agent-notice__open", "Subagent öffnen");
+    const open = node("button", "agent-notice__open", `${agentLabel} öffnen`);
     open.type = "button";
     open.addEventListener("click", () => controller?.select("subagent"));
     heading.append(open);
@@ -146,7 +148,7 @@
     const body = node("div", "message-body");
     const createdAt = group.first?.startedAt || group.source.createdAt || group.source.updatedAt;
     const time = options.timeLabel?.(createdAt);
-    const meta = node("div", "message-meta", time ? `Subagent - ${time}` : "Subagent");
+    const meta = node("div", "message-meta", time ? `${group.label || "Subagent"} - ${time}` : (group.label || "Subagent"));
     if (!terminal.has(group.status)) {
       const spinner = node("span", "message-status-spinner");
       spinner.setAttribute("aria-hidden", "true");
@@ -154,10 +156,10 @@
     }
     meta.append(node("span", `message-status ${group.status}`, labels[group.status] || "Arbeitet"));
     body.append(meta);
-    const detailSteps = group.steps.filter(step => step.tool !== "coding.agentStart").map(step => ({ ...step, contentOffset: 0 }));
+    const detailSteps = group.steps.filter(step => !["coding.agentStart", "document.agent"].includes(step.tool)).map(step => ({ ...step, contentOffset: 0 }));
     // Earlier builds stored content progress on the lifecycle receipt itself.
     if (!detailSteps.some(step => step.tool === "assistant.narration")) {
-      const legacy = group.steps.find(step => step.tool === "coding.agentStart" && step.explanation
+      const legacy = group.steps.find(step => ["coding.agentStart", "document.agent"].includes(step.tool) && step.explanation
         && !/^Serverwerkzeug|^Subagent GPU1/.test(step.explanation));
       if (legacy) detailSteps.push({ ...legacy, id: `${legacy.id}-legacy-text`, tool: "assistant.narration", detail: legacy.explanation, contentOffset: 0 });
     }

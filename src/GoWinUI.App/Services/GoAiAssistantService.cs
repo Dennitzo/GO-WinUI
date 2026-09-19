@@ -1061,7 +1061,8 @@ public sealed partial class GoAiAssistantService(
             var attempt = new GoAiRunRecord(
                 Guid.NewGuid(), assistant.SessionId, assistant.Id, action, idempotencyKey, null, 0, "queued",
                 null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
-                WorkspacePath: action == PromptTriggerAction.Coding ? _activeCodingWorkspace : null);
+                WorkspacePath: action == PromptTriggerAction.Coding ? _activeCodingWorkspace
+                    : (await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false))?.CodingWorkspacePath);
             localRun = await runs.BeginAttemptAsync(attempt, cancellationToken).ConfigureAwait(false);
             await StartFileChangesAsync(localRun, assistant, resume: false, update, cancellationToken).ConfigureAwait(false);
             if (action == PromptTriggerAction.ImageGeneration)
@@ -1100,7 +1101,7 @@ public sealed partial class GoAiAssistantService(
                     update,
                     cancellationToken).ConfigureAwait(false);
                 accepted = await client.CreateRunAsync(request, idempotencyKey, cancellationToken).ConfigureAwait(false);
-                if (request.Mode == RunMode.Coding && localRun.WorkspacePath is { } workspace)
+                if (localRun.WorkspacePath is { } workspace)
                 {
                     _codingWorkspaces[accepted.RunId] = workspace;
                 }
@@ -1296,11 +1297,7 @@ public sealed partial class GoAiAssistantService(
             var ready = progress.PromptProgress is { } fraction
                 ? $"Kontext bereit · {fraction:P0}"
                 : "Kontext bereit";
-            // llama.cpp reports the available prefix including cached tokens as processed.
-            // Only its explicit cache counter can distinguish reused and freshly evaluated input.
-            return counter.CachedPromptTokens is { } cached
-                ? $"{ready} · {cached:N0} Token wiederverwendet · {Math.Max(0, counter.ProcessedPromptTokens - cached):N0} neu verarbeitet"
-                : $"{ready} · {counter.ProcessedPromptTokens:N0} Token";
+            return $"{ready} · {counter.ActiveTokens:N0} Token";
         }
         if (progress.ToolName?.StartsWith("coding.", StringComparison.Ordinal) == true)
         {
@@ -1334,22 +1331,8 @@ public sealed partial class GoAiAssistantService(
         return FormatCurrentModelTokens(counter);
     }
 
-    private static string FormatCurrentModelTokens(ModelTokenProgressState counter)
-    {
-        if (counter.ProcessedPromptTokens > 0 && counter.CachedPromptTokens is { } cached)
-        {
-            var context = $"{cached:N0} Kontexttoken wiederverwendet · {Math.Max(0, counter.ProcessedPromptTokens - cached):N0} neu verarbeitet";
-            return counter.GeneratedTokens > 0
-                ? $"{context} · ca. {counter.GeneratedTokens:N0} erzeugte Token"
-                : context;
-        }
-
-        return counter.GeneratedTokens > 0
-            ? counter.ProcessedPromptTokens > 0
-                ? $"{counter.ProcessedPromptTokens:N0} Kontexttoken · ca. {counter.GeneratedTokens:N0} erzeugte Token"
-                : $"ca. {counter.GeneratedTokens:N0} erzeugte Token"
-            : $"{counter.ActiveTokens:N0} Token";
-    }
+    private static string FormatCurrentModelTokens(ModelTokenProgressState counter) =>
+        $"{counter.ActiveTokens:N0} Token";
 
     private async Task<ChatMessage> StreamRunAsync(
         GoAiRunRecord localRun,
@@ -2171,7 +2154,7 @@ public sealed partial class GoAiAssistantService(
                 proposal,
                 localRun.SessionId,
                 localRun.AssistantMessageId,
-                codingWorkspacePath: _codingWorkspaces.GetValueOrDefault(item.RunId),
+                codingWorkspacePath: _codingWorkspaces.GetValueOrDefault(item.RunId) ?? localRun.WorkspacePath,
                 commandProgress: commandProgress,
                 evidenceStore: evidenceStore,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -2466,6 +2449,8 @@ public sealed partial class GoAiAssistantService(
         var codingSession = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
         var action = trigger?.Trigger.Action;
+        if (action == PromptTriggerAction.DocumentCreate) originalPrompt = "Nutze document.agent für diesen Dokumentauftrag: " + originalPrompt;
+        if (action == PromptTriggerAction.Blender) originalPrompt = "Nutze blender.execute und die Workspace-Werkzeuge für diesen Blender-Auftrag: " + originalPrompt;
         var audiobook = action == PromptTriggerAction.Audiobook;
         if (action == PromptTriggerAction.Coding)
         {
@@ -2494,7 +2479,8 @@ public sealed partial class GoAiAssistantService(
                 GoAiProtocol.Version,
                 RunMode.Coding,
                 codingMessages,
-                ClientCapabilities: codingConfiguration.Capabilities,
+                ClientCapabilities: codingConfiguration.Capabilities.Concat(WorkspaceClientCapabilities)
+                    .Concat(toolBroker.IsBricsCadAvailable ? BricsCadClientCapabilities : []).Distinct().ToArray(),
                 Limits: CreateChatRunLimits(availableCodingModel.ContextTokens, unlimitedDuration: true),
                 SessionId: sessionId.ToString("D"),
                 AllowedServerTools: GetAllowedServerTools(PromptTriggerAction.Coding),
@@ -2589,9 +2575,11 @@ public sealed partial class GoAiAssistantService(
         }
         var capabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "documentIo",
+            "documentIo", "documents", "document-agent", "visual-tools", "coding-isolated-subagents",
         };
-        if (action == PromptTriggerAction.BricsCad && toolBroker.IsBricsCadAvailable)
+        if (!string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath) && Directory.Exists(codingSession.CodingWorkspacePath))
+            capabilities.UnionWith(["coding", "coding.evidence", "workspace", "blender"]);
+        if (toolBroker.IsBricsCadAvailable)
         {
             capabilities.Add("bricscad");
         }
@@ -2703,15 +2691,18 @@ public sealed partial class GoAiAssistantService(
         return messages;
     }
 
+    private static readonly string[] WorkspaceClientCapabilities = ["documentIo", "documents", "document-agent", "visual-tools", "blender", "workspace"];
+    private static readonly string[] BricsCadClientCapabilities = ["bricscad"];
+
     internal static IReadOnlyList<string> GetAllowedServerTools(
         PromptTriggerAction? action,
         string? prompt = null) => action switch
     {
         PromptTriggerAction.WebSearch => ["web.search", "web.fetch"],
-        PromptTriggerAction.Coding => ["web.search", "web.fetch", "web.deepResearch"],
+        PromptTriggerAction.Coding => ["web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze", "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve"],
         PromptTriggerAction.YouTubeSearch => ["youtube.search", "web.fetch"],
         PromptTriggerAction.Audiobook => [],
-        _ => ["math.evaluate", "context.embed", "context.retrieve", "web.search", "web.fetch"],
+        _ => ["math.evaluate", "context.embed", "context.retrieve", "web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze", "image.generate", "speech.synthesize"],
     };
 
     internal static string BuildWebResearchPrompt(string prompt)

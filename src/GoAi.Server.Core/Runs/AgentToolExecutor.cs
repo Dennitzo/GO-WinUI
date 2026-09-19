@@ -74,6 +74,7 @@ public sealed class AgentToolExecutor
                 "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, cancellationToken).ConfigureAwait(false),
                 "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, cancellationToken).ConfigureAwait(false),
                 "image.generate" => await GenerateImagesAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
+                "speech.synthesize" => await SynthesizeSpeechAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "math.evaluate" => EvaluateMath(arguments),
                 "context.embed" => await EmbedAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "context.retrieve" => await RetrieveAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
@@ -109,7 +110,13 @@ public sealed class AgentToolExecutor
             or TaskCanceledException
             or IOException
             or InvalidDataException
-            or JsonException;
+                or JsonException;
+
+    private async Task<AgentToolExecutionResult> SynthesizeSpeechAsync(JsonElement args, string runId, CancellationToken token)
+    {
+        var speech = await _workers.SynthesizeAsync(new SpeechRequest(args.GetProperty("text").GetString()!), runId, token).ConfigureAwait(false);
+        return Result(new { speech.Provider, artifact = speech.Artifact }, [speech.Artifact]);
+    }
 
     internal static ResearchToolFailure DescribeResearchFailure(string toolName, Exception exception)
     {

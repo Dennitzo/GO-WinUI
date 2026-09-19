@@ -50,6 +50,8 @@ public sealed class GoAiServerOptions
 
     public int MaximumToolCalls { get; set; } = 30;
 
+    public int WorkspaceMaximumModelRounds { get; set; } = 64;
+
     public int CodingMaximumModelRounds { get; set; }
 
     public int CodingMaximumToolCalls { get; set; }

@@ -30,7 +30,9 @@ public sealed class CodingDeepResearchTests
         Assert.Contains("Entscheide selbstständig", CodingAgentPolicy.SystemPrompt, StringComparison.Ordinal);
         Assert.Contains("Bei Arbeiten am lokalen Projekt", CodingAgentPolicy.SystemPrompt, StringComparison.Ordinal);
         Assert.Contains("keinen Zugriff auf lokale Dateien", CodingAgentPolicy.SystemPrompt, StringComparison.Ordinal);
-        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request with { Mode = RunMode.General }));
+        var general = request with { Mode = RunMode.General };
+        RunRequestValidator.Validate(general);
+        Assert.Contains(new AgentToolCatalog().GetAvailableTools(general), tool => tool.Name == "web.deepResearch");
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request with { AllowedServerTools = ["web.deepResearch"] }));
     }
 

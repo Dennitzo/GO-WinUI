@@ -22,6 +22,8 @@ public enum PromptTriggerAction
     LiveTranslation,
     Audiobook,
     Coding,
+    DocumentCreate,
+    Blender,
 }
 
 public enum PromptTriggerMatchMode

@@ -135,7 +135,8 @@ test("project-local compose preserves each workspace and pins stay first inside 
     const icon = compose.querySelector(".session-group__compose");
     assert.equal(icon.tagName, "SVG");
     assert.equal(icon.getAttribute("aria-hidden"), "true");
-    assert.equal(icon.querySelectorAll("path").length, 2, "the compose icon has its square outline and pencil");
+    assert.equal(icon.querySelectorAll("path").length, 1);
+    assert.equal(icon.querySelector("path").getAttribute("d"), "M12 5v14M5 12h14");
     assert.equal(group.querySelector(".session-item__date"), null);
     for (const row of rows) {
       const main = row.querySelector(".session-item__main");

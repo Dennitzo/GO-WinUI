@@ -41,6 +41,14 @@ public sealed class LocalToolBroker(
         {
             cancellationToken.ThrowIfCancellationRequested();
             ValidateProposal(proposal);
+            if (WorkspaceTools.IsLocal(proposal.Name))
+            {
+                var workspaceResult = await new WorkspaceToolService(connection).ExecuteAsync(proposal, codingWorkspacePath, commandProgress, cancellationToken).ConfigureAwait(false);
+                var workspaceJson = JsonSerializer.SerializeToElement(workspaceResult, JsonOptions);
+                var failed = workspaceJson.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False;
+                return Result(proposal, failed ? "failed" : "completed", workspaceResult,
+                    failed ? "client.workspace_tool_failed" : null, failed ? "Workspace-Werkzeug fehlgeschlagen; Belege beachten." : null);
+            }
             var coding = proposal.Name.StartsWith("coding.", StringComparison.Ordinal);
             if (coding && string.IsNullOrWhiteSpace(codingWorkspacePath))
             {
@@ -164,7 +172,7 @@ public sealed class LocalToolBroker(
         if (proposal.ExecutionScope is { } scope)
         {
             ValidateIdentifier(scope.AgentId, "agentId");
-            if (!proposal.Name.StartsWith("coding.", StringComparison.Ordinal) && proposal.RiskClass != ToolRiskClass.ReadOnly)
+            if (!proposal.Name.StartsWith("coding.", StringComparison.Ordinal) && proposal.Name is not (WorkspaceTools.Blender or WorkspaceTools.Open or ClientToolNames.DocumentCreate) && proposal.RiskClass != ToolRiskClass.ReadOnly)
                 throw new InvalidDataException("Subagent-Mutationen außerhalb des Coding-Workspaces sind nicht delegierbar.");
             if (!scope.IsolatedWorkspace || scope.WritePaths is null || scope.WritePaths.Length > 32)
                 throw new InvalidDataException("Ungültiger isolierter Subagent-Schreibbereich.");
@@ -193,7 +201,8 @@ public sealed class LocalToolBroker(
                 or "coding.searchHistory" or "coding.searchKnowledge" or "coding.renderHtml"
                 or "coding.readOutput" or "coding.searchRunEvidence" => ToolRiskClass.ReadOnly,
             "coding.write" or "coding.edit" => ToolRiskClass.LocalMutation,
-            "coding.command" => ToolRiskClass.Process,
+            "coding.command" or WorkspaceTools.Blender or WorkspaceTools.Open => ToolRiskClass.Process,
+            WorkspaceTools.ImageInput => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentRead or ClientToolNames.DocumentsList
                 or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages
                 or ClientToolNames.BricsCadGeometryQuery or ClientToolNames.BricsCadMeasure => ToolRiskClass.ReadOnly,
@@ -208,6 +217,7 @@ public sealed class LocalToolBroker(
         }
 
         var arguments = proposal.Arguments;
+        if (WorkspaceTools.IsLocal(proposal.Name)) { WorkspaceTools.Validate(proposal.Name, arguments); return; }
         switch (proposal.Name)
         {
             case "coding.readOutput":

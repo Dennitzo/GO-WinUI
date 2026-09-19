@@ -471,7 +471,7 @@ public sealed class CodingIntegrationTests
         var continuedWaiting = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent("codingWaiting", Attempt: 2, ElapsedSeconds: 42),
             counter);
-        Assert.Equal("Runde 2 · 42 s · 150 Kontexttoken · ca. 12 erzeugte Token", continuedWaiting);
+        Assert.Equal("Runde 2 · 42 s · 162 Token", continuedWaiting);
         Assert.True(counter.HasStarted);
         Assert.Equal(162, counter.ActiveTokens);
     }

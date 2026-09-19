@@ -26,3 +26,15 @@ outgoing:
   max_request_timeout: 30.0
   pool_connections: 50
   pool_maxsize: 10
+
+# Keep independent working web engines available. CAPTCHA-prone defaults must
+# not dominate every general query; the gateway also tracks engine cooldowns.
+engines:
+  - name: google cse
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: true
+  - name: startpage
+    disabled: true

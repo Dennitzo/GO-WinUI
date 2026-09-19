@@ -510,6 +510,33 @@ public sealed class ParallelCodingTests
         await harness.Agents.ValidateParentMutationAsync(run, first, deadline.Token);
     }
 
+    [Fact]
+    public async Task DocumentAgentWaitsForOwnWorkerAndPersistsItsKindWithoutSecondaryModel()
+    {
+        using var harness = new AgentHarness();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var request = harness.Request with { Mode = RunMode.General, CodingOptions = null,
+            PreferredGeneralModelId = PairHandler.Main, ClientCapabilities = ["documentIo", "document-agent"] };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        LmChatMessage[] parent = [new("system", "Gemeinsamer Ausgangskontext"), new("user", "Erstelle ein Dokument")];
+        var work = harness.Agents.ExecuteAsync(WorkspaceTools.DocumentAgent, run, "document-start",
+            JsonSerializer.SerializeToElement(new { task = "Erstelle den Bericht." }), request, deadline.Token, parent);
+        await harness.Handler.FirstEntered.Task.WaitAsync(deadline.Token);
+        Assert.False(work.IsCompleted);
+        var pending = Assert.Single(await harness.Repository.GetAgentsAsync(run, deadline.Token));
+        Assert.Equal("document", pending.Kind);
+        Assert.Equal(PairHandler.Main, pending.Model);
+        Assert.Equal(parent, pending.Messages.Take(parent.Length));
+        Assert.Contains(pending.Messages, message => message.Content == CodingSubagentService.DocumentAgentPolicy);
+        harness.Handler.Release.TrySetResult();
+        Assert.True((await work).Succeeded);
+        var completed = Assert.Single(await harness.Repository.GetAgentsAsync(run, deadline.Token));
+        Assert.Equal("document", completed.Kind);
+        Assert.Equal("completed", completed.Status);
+        Assert.Contains(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.ServerToolCompleted
+            && item.Data.GetProperty("tool").GetString() == WorkspaceTools.DocumentAgent);
+    }
+
     private sealed class AgentHarness : IDisposable
     {
         private readonly TestServerContext _context = new();

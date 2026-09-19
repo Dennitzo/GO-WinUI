@@ -8,7 +8,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 36;
+    public const int CurrentSchemaVersion = 37;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -83,6 +83,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationThirtyFourAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtySixAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtySevenAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -1307,6 +1308,25 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             command.CommandText = """
                 ALTER TABLE chat_session_groups ADD COLUMN workspace_path TEXT NULL;
                 INSERT INTO schema_migrations(version,applied_at) VALUES(35,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtySevenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=37;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                DELETE FROM chat_session_groups
+                WHERE NOT EXISTS (SELECT 1 FROM chat_sessions WHERE session_group_id=chat_session_groups.id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(37,$now);
                 """;
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);

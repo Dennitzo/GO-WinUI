@@ -53,7 +53,7 @@ public sealed class SubagentContextAndScopesTests
         Assert.Contains("web.deepResearch", available);
         Assert.Contains("math.evaluate", available);
         Assert.Contains(ClientToolNames.DocumentRead, available);
-        Assert.DoesNotContain(ClientToolNames.DocumentCreate, available);
+        Assert.Contains(ClientToolNames.DocumentCreate, available);
         Assert.DoesNotContain(CodingSubagentTools.Start, available);
         Assert.DoesNotContain(CodingSubagentTools.Wait, available);
         Assert.DoesNotContain(CodingSubagentTools.Cancel, available);

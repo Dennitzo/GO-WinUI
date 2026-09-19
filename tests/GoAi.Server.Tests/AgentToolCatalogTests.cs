@@ -21,9 +21,9 @@ public sealed class AgentToolCatalogTests
         Assert.All(available, tool =>
         {
             Assert.Contains($"- {tool.Name}", selector.Description, StringComparison.Ordinal);
-            Assert.DoesNotContain(tool.Description, selector.Description, StringComparison.Ordinal);
+            Assert.Contains(tool.Description[..Math.Min(180, tool.Description.Length)], selector.Description, StringComparison.Ordinal);
         });
-        Assert.DoesNotContain(": ", selector.Description, StringComparison.Ordinal);
+        Assert.Contains(": ", selector.Description, StringComparison.Ordinal);
     }
 
     [Fact]

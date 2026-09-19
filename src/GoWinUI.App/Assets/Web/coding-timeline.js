@@ -601,11 +601,10 @@
       const generation = data?.generation || {}, context = data?.context || {}, measured = data?.metrics?.metrics || data?.metrics || {};
       const inputTokens = data?.metrics?.inputTokens ?? measured.inputTokens ?? generation.inputTokens ?? generation.promptTokens;
       const outputTokens = data?.metrics?.outputTokens ?? measured.outputTokens ?? generation.outputTokens ?? generation.generatedTokens;
-      const cachedTokens = measured.cachedInputTokens ?? measured.cachedPromptTokens ?? generation.cachedPromptTokens;
+      const hasTokens = Number.isFinite(inputTokens) || Number.isFinite(outputTokens);
+      const totalTokens = (Number.isFinite(inputTokens) ? inputTokens : 0) + (Number.isFinite(outputTokens) ? outputTokens : 0);
       const metrics = [
-        Number.isFinite(inputTokens) ? `${inputTokens.toLocaleString("de-DE")} Eingabetoken` : "",
-        Number.isFinite(outputTokens) ? `${outputTokens.toLocaleString("de-DE")} Ausgabetoken` : "",
-        Number.isFinite(cachedTokens) ? `${cachedTokens.toLocaleString("de-DE")} wiederverwendet` : "",
+        hasTokens ? `${totalTokens.toLocaleString("de-DE")} Token` : "",
         Number.isFinite(context.contextLimit) ? `Kontext: ${(context.estimatedInputTokens ?? inputTokens ?? 0).toLocaleString("de-DE")} / ${context.contextLimit.toLocaleString("de-DE")}` : ""
       ].filter(Boolean);
       if (metrics.length) section.append(node("p", "subagent-activity__metrics", metrics.join(" · ")));

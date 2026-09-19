@@ -223,7 +223,10 @@ public sealed partial class RunProcessor : BackgroundService
                 await _subagents.RestoreAsync(runId, request, cancellationToken).ConfigureAwait(false);
             }
             else
+            {
                 await _modelRuntime.DisablePairAsync(isCoding ? request.PreferredCodingModelId ?? _options.CodingModelId : request.PreferredGeneralModelId ?? _options.GeneralModelId, cancellationToken).ConfigureAwait(false);
+                await _subagents.RestoreAsync(runId, request, cancellationToken).ConfigureAwait(false);
+            }
         }
         catch (Exception exception) when (isCoding && ModelRuntimeClient.IsTransientInferenceFailure(exception))
         {
@@ -241,7 +244,8 @@ public sealed partial class RunProcessor : BackgroundService
             request.Limits?.MaximumContextTokens ?? selection.ContextLength);
         var maximumOutputTokens = request.Limits?.MaximumOutputTokens;
         var codingBudget = CodingRunBudget.FromOptions(_options);
-        var maximumModelRounds = isCoding ? codingBudget.ModelRounds : _options.MaximumModelRounds;
+        var maximumModelRounds = isCoding ? codingBudget.ModelRounds
+            : request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true ? _options.WorkspaceMaximumModelRounds : _options.MaximumModelRounds;
         var maximumToolCalls = isCoding ? codingBudget.ToolCalls : _options.MaximumToolCalls;
         var effectiveTools = _toolCatalog.GetAvailableTools(request);
         var stagedWebResearchRequested = !isCoding && StagedWebResearchPipeline.IsRequested(request, effectiveTools);
@@ -457,7 +461,7 @@ public sealed partial class RunProcessor : BackgroundService
                     AgentToolSpec tool;
                     try
                     {
-                        if (isCoding) await _subagents.ValidateParentMutationAsync(runId, call, cancellationToken).ConfigureAwait(false);
+                        await _subagents.ValidateParentMutationAsync(runId, call, cancellationToken).ConfigureAwait(false);
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
                         if (isCoding && string.IsNullOrWhiteSpace(pendingProposalId))
@@ -531,7 +535,7 @@ public sealed partial class RunProcessor : BackgroundService
                             new { tool = tool.Name, toolCallId = operationId, callId = operationId, target = serverToolTarget, arguments = call.Arguments },
                             cancellationToken).ConfigureAwait(false)) continue;
                         AgentToolExecutionResult result;
-                        if (CodingSubagentTools.IsTool(tool.Name))
+                        if (CodingSubagentTools.IsTool(tool.Name) || tool.Name == WorkspaceTools.DocumentAgent)
                             result = await _subagents.ExecuteAsync(tool.Name, runId, operationId, call.Arguments, request, cancellationToken, parentMessages: messages).ConfigureAwait(false);
                         else if (tool.Name == CodingWorkingStateTools.PlanTool)
                         {
@@ -1167,7 +1171,7 @@ public sealed partial class RunProcessor : BackgroundService
                 throw new InvalidOperationException("Model returned neither text nor a structured tool call.");
             }
 
-            if (isCoding && await _subagents.CollectUnseenAsync(runId, messages, cancellationToken).ConfigureAwait(false) is { } agentResults)
+            if (await _subagents.CollectUnseenAsync(runId, messages, cancellationToken).ConfigureAwait(false) is { } agentResults)
             {
                 messages.Add(new LmChatMessage("assistant", response.Content, ReasoningContent: response.ReasoningContent));
                 messages.Add(new LmChatMessage("user", agentResults + "\nPrüfe die Ergebnisse und integriere sie in den Abschluss des Nutzerauftrags."));
@@ -1225,7 +1229,6 @@ public sealed partial class RunProcessor : BackgroundService
                 if (!string.IsNullOrWhiteSpace(interruptedText)) messages.Add(new LmChatMessage("assistant", interruptedText));
             }
             string? childResults = null;
-            if (isCoding)
             {
                 await _subagents.WaitAsync(runId, cancellationToken).ConfigureAwait(false);
                 childResults = await _subagents.CollectUnseenAsync(runId, messages, cancellationToken).ConfigureAwait(false);

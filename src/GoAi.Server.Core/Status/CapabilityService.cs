@@ -53,8 +53,8 @@ public sealed class CapabilityService
         ],
         [
             "web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze",
-            "image.generate", "math.evaluate", "context.embed", "context.retrieve",
-            "coding.updatePlan",
+            "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve",
+            "coding.updatePlan", WorkspaceTools.DocumentAgent,
         ],
         [
             ClientToolNames.CodingList,
@@ -69,6 +69,7 @@ public sealed class CapabilityService
             ClientToolNames.CodingSearchHistory,
             ClientToolNames.CodingSearchKnowledge,
             ClientToolNames.CodingRenderHtml,
+            WorkspaceTools.ImageInput, WorkspaceTools.Blender, WorkspaceTools.Open,
             ClientToolNames.DocumentRead,
             ClientToolNames.DocumentCreate,
             ClientToolNames.DocumentsList,

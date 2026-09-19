@@ -12,11 +12,12 @@ internal sealed record CodingSubagentState(string Id, string RunId, string Model
     IReadOnlyList<LmChatMessage> Messages, string Status = "running", string? Result = null,
     LmToolCall[]? PendingCalls = null, int NextCall = 0, string? ProposalId = null, int Round = 0, int IncompleteResponses = 0,
     CodingWorkingState? WorkingState = null, bool HtmlRenderUsed = false, long InputTokens = 0, long OutputTokens = 0,
-    long CachedInputTokens = 0, int SharedContextMessages = 0);
+    long CachedInputTokens = 0, int SharedContextMessages = 0, string Kind = "coding");
 
 public sealed class CodingSubagentService(RunRepository repository, ModelRuntimeClient runtime,
     AgentToolCatalog catalog, AgentToolExecutor executor, GpuLeaseScheduler scheduler) : IDisposable
 {
+    internal const string DocumentAgentPolicy = "Du bist der spezialisierte Dokumenten-Agent. Lies, bearbeite und erstelle die verlangten Dokumente tatsächlich mit Werkzeugen. Für DOCX, PDF, Markdown und Text nutze document.read/create und versionierte Sitzungsartefakte. Für Tabellen, Präsentationen und andere Formate nutze die vorhandenen Workspace-Werkzeuge mit geeigneten Bibliotheken (python-docx, openpyxl, python-pptx, pypdf, reportlab, odfpy); installiere fehlende Pakete nur in einer projektlokalen .venv. Bewahre bestehende Inhalte, Formeln und Layout soweit gefordert. Prüfe erzeugte Dateien durch erneutes Öffnen, Struktur-/Inhaltsprüfung und bei Layoutaufgaben eine gerenderte Sichtprüfung über image.input und media.analyze. Binärdateien niemals als UTF-8 lesen oder schreiben. Für fehlende Schreibbereiche oder nicht verfügbare Formatprogramme melde die konkrete Grenze. Erfinde keine erfolgreichen Exporte. Keine Unterdelegation. Antworte und erläutere auf Deutsch.";
     internal const string IsolatedWorkspaceCapability = "coding-isolated-subagents";
     private sealed record Worker(CancellationTokenSource Cancellation, Task Work);
     private readonly ConcurrentDictionary<string, Worker> _workers = new(StringComparer.Ordinal);
@@ -41,7 +42,8 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
     internal static IReadOnlyList<AgentToolSpec> DelegatableTools(AgentToolCatalog tools, RunRequest request) =>
         tools.GetAvailableTools(request).Where(tool => !CodingSubagentTools.IsTool(tool.Name)
             && (tool.Name != ClientToolNames.CodingCommand || SupportsIsolatedWorkspace(request))
-            && (tool.Name.StartsWith("coding.", StringComparison.Ordinal) || tool.ServerSide || tool.RiskClass == ToolRiskClass.ReadOnly)).ToArray();
+            && tool.Name != WorkspaceTools.DocumentAgent
+            && (tool.Name.StartsWith("coding.", StringComparison.Ordinal) || tool.Name is WorkspaceTools.Blender or WorkspaceTools.Open or ClientToolNames.DocumentCreate || tool.ServerSide || tool.RiskClass == ToolRiskClass.ReadOnly)).ToArray();
     private static bool SupportsIsolatedWorkspace(RunRequest request) =>
         request.ClientCapabilities?.Contains(IsolatedWorkspaceCapability, StringComparer.OrdinalIgnoreCase) == true;
 
@@ -73,9 +75,10 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
     internal async Task<AgentToolExecutionResult> ExecuteAsync(string name, string runId, string operationId, JsonElement args,
         RunRequest request, CancellationToken token, IReadOnlyList<LmChatMessage>? parentMessages = null)
     {
-        if (name == CodingSubagentTools.Start)
+        if (name is CodingSubagentTools.Start or WorkspaceTools.DocumentAgent)
         {
-            if (!SupportsIsolatedWorkspace(request))
+            var documentAgent = name == WorkspaceTools.DocumentAgent;
+            if (!documentAgent && !SupportsIsolatedWorkspace(request))
                 return Failure("Dieser Client unterstützt keine isolierten Subagenten-Arbeitskopien. Aktualisiere die App, bevor du Schreib- oder Terminalaufträge delegierst.", "agent.client_update_required");
             var id = "agent-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(runId + "/" + operationId)))[..24].ToLowerInvariant();
             CodingSubagentState state;
@@ -87,20 +90,38 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
                 if (existing is null)
                 {
                     if (states.Any(s => s.Status == "running")) return Failure("Ein Subagent arbeitet bereits. Nutze agentWait oder agentCancel.");
-                    CodingSubagentTools.Validate(name, args);
+                    if (documentAgent) WorkspaceTools.Validate(name, args);
+                    CodingSubagentTools.Validate(CodingSubagentTools.Start, args);
                     var task = args.GetProperty("task").GetString()!;
                     var paths = args.TryGetProperty("writePaths", out var list)
                         ? list.EnumerateArray().Select(v => CodingSubagentTools.NormalizeScope(v.GetString()!)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() : [];
                     var parent = parentMessages ?? (await repository.GetCheckpointAsync(runId, token).ConfigureAwait(false))?.Messages
                         ?? RunProcessor.CreateInitialMessages(request, "coding", catalog.GetAvailableTools(request).Select(t => t.Name).ToArray());
-                    state = new(id, runId, request.CodingOptions!.ParallelModelId! + "~secondary", task, paths,
-                        CodingSubagentContext.Fork(parent, task, paths), WorkingState: CodingWorkingState.Create(task), SharedContextMessages: parent.Count);
+                    var model = documentAgent
+                        ? request.PreferredCodingModelId ?? request.PreferredGeneralModelId
+                            ?? (await repository.GetAsync(runId, token).ConfigureAwait(false))?.SelectedModel
+                            ?? throw new InvalidOperationException("Kein Modell für den Dokumenten-Agenten verfügbar.")
+                        : request.CodingOptions!.ParallelModelId! + "~secondary";
+                    var fork = CodingSubagentContext.Fork(parent, task, paths).ToList();
+                    if (documentAgent) fork.Add(new("system", DocumentAgentPolicy));
+                    state = new(id, runId, model, task, paths,
+                        fork, WorkingState: CodingWorkingState.Create(task), SharedContextMessages: parent.Count,
+                        Kind: documentAgent ? "document" : "coding");
                     await repository.SaveAgentAsync(state, token).ConfigureAwait(false);
                 }
                 else state = existing;
             }
             finally { _startGate.Release(); }
             await LaunchAsync(state, request, token).ConfigureAwait(false);
+            if (documentAgent)
+            {
+                await WaitAsync(runId, token).ConfigureAwait(false);
+                var completed = (await repository.GetAgentsAsync(runId, token).ConfigureAwait(false)).Single(a => a.Id == id);
+                return Receipt(new { success = completed.Status == "completed", agentId = id, kind = "document",
+                    status = completed.Status, result = completed.Result, evidenceMarker = "GO_AGENT_RESULT:" + id,
+                    evidence = completed.WorkingState?.Evidence }) with { Succeeded = completed.Status == "completed",
+                        ErrorCode = completed.Status == "completed" ? null : "document.agent_failed", ErrorMessage = completed.Status == "completed" ? null : completed.Result };
+            }
             return Receipt(new { success = true, agentId = id, status = state.Status, gpu = 1, writePaths = state.WritePaths,
                 sharedContextMessages = state.SharedContextMessages,
                 capabilities = new { terminal = true, isolatedWorkspace = true, tools = DelegatableTools(catalog, request).Select(t => t.Name) },
@@ -137,7 +158,7 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
     {
         var active = (await repository.GetAgentsAsync(runId, token).ConfigureAwait(false)).Where(s => s.Status == "running").ToArray();
         if (active.Length == 0) return;
-        if (call.Name == "coding.command")
+        if (call.Name is "coding.command" or WorkspaceTools.Blender or WorkspaceTools.Open)
             throw new ArgumentException("Während der Subagent Dateien bearbeitet, zuerst agentWait vor Terminalbefehlen nutzen; parallele Lese- und getrennte Dateiwerkzeuge bleiben verfügbar.");
         if (call.Name is "coding.edit" or "coding.write")
         {
@@ -158,7 +179,7 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
             if (_workers.ContainsKey(key)) return;
             var cancel = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
             await repository.AppendEventAsync(state.RunId, RunEventTypes.ServerToolStarted,
-                new { agentId = state.Id, tool = CodingSubagentTools.Start, toolCallId = state.Id, target = "Subagent GPU1", arguments = new { task = state.Task, writePaths = state.WritePaths } }, token).ConfigureAwait(false);
+                new { agentId = state.Id, tool = state.Kind == "document" ? WorkspaceTools.DocumentAgent : CodingSubagentTools.Start, toolCallId = state.Id, target = state.Kind == "document" ? "Dokumenten-Agent" : "Subagent GPU1", arguments = new { task = state.Task, writePaths = state.WritePaths } }, token).ConfigureAwait(false);
             var work = Task.Run(() => RunAsync(state, request, cancel.Token), CancellationToken.None);
             _workers[key] = new(cancel, work);
         }
@@ -167,6 +188,8 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
     private async Task RunAsync(CodingSubagentState state, RunRequest request, CancellationToken token)
     {
         var tools = DelegatableTools(catalog, request);
+        if (state.Kind == "document") tools = tools.Where(t => t.Name.StartsWith("document", StringComparison.Ordinal)
+            || t.Name.StartsWith("coding.", StringComparison.Ordinal) || t.Name is WorkspaceTools.ImageInput or WorkspaceTools.Open or "media.analyze" or "media.inspect").ToArray();
         ProgressPublisher? activeProgress = null;
         try
         {
@@ -203,7 +226,7 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
                             {
                                 proposalId = "proposal-" + Guid.NewGuid().ToString("N");
                                 var proposal = new ToolProposal(proposalId, state.RunId, spec.Name, call.Arguments, spec.RiskClass,
-                                    BuildToolSummary(state.Task, spec.Name), DateTimeOffset.MaxValue,
+                                    (state.Kind == "document" ? BuildToolSummary(state.Task, spec.Name).Replace("Subagent GPU1", "Dokumenten-Agent", StringComparison.Ordinal) : BuildToolSummary(state.Task, spec.Name)), DateTimeOffset.MaxValue,
                                     ExecutionScope: new(state.Id, state.WritePaths));
                                 await repository.SaveToolProposalAsync(proposal, token).ConfigureAwait(false);
                                 state = state with { ProposalId = proposalId, NextCall = index };
@@ -223,7 +246,7 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
                         {
                             var stepId = state.Id + "/" + state.Round + "/" + index;
                             if (!await repository.TryJournalToolDispatchAsync(state.RunId, RunEventTypes.ServerToolStarted,
-                                new { agentId = state.Id, tool = call.Name, toolCallId = stepId, target = "Subagent GPU1", arguments = call.Arguments }, token).ConfigureAwait(false))
+                                new { agentId = state.Id, tool = call.Name, toolCallId = stepId, target = state.Kind == "document" ? "Dokumenten-Agent" : "Subagent GPU1", arguments = call.Arguments }, token).ConfigureAwait(false))
                                 throw new RunSteeringBoundaryException();
                             AgentToolExecutionResult result;
                             if (call.Name == CodingWorkingStateTools.PlanTool)
@@ -242,7 +265,7 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
                             foreach (var artifact in result.Artifacts)
                                 await repository.AppendEventAsync(state.RunId, RunEventTypes.ArtifactCreated, artifact, token).ConfigureAwait(false);
                             await repository.AppendEventAsync(state.RunId, RunEventTypes.ServerToolCompleted,
-                                new { agentId = state.Id, tool = call.Name, toolCallId = stepId, target = "Subagent GPU1", success = result.Succeeded, result = result.Result }, token).ConfigureAwait(false);
+                                new { agentId = state.Id, tool = call.Name, toolCallId = stepId, target = state.Kind == "document" ? "Dokumenten-Agent" : "Subagent GPU1", success = result.Succeeded, result = result.Result }, token).ConfigureAwait(false);
                         }
                         messages.Add(new("tool", CodingLoopGuard.BoundToolResult(output, call.Name), ToolCallId: call.Id));
                         state = state with { Messages = messages.ToArray(), NextCall = index + 1, ProposalId = null,
@@ -258,7 +281,7 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
                 await using var steeringCall = repository.WatchSteering(state.RunId, token);
                 try
                 {
-                await using var lease = await scheduler.AcquireAsync("coding-subagent", state.RunId, GpuLeaseMode.CodingSecondary, steeringCall.Token).ConfigureAwait(false);
+                await using var lease = await scheduler.AcquireAsync("coding-subagent", state.RunId, state.Kind == "document" ? GpuLeaseMode.Shared : GpuLeaseMode.CodingSecondary, steeringCall.Token).ConfigureAwait(false);
                 var preparation = await runtime.EnsureModelPreparedAsync(state.Model, 0, null, steeringCall.Token).ConfigureAwait(false);
                 var wasCompacted = false;
                 if (CodingContextCompactor.Plan(messages, preparation.ContextLength) is { } compact)
@@ -356,7 +379,7 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
         if (activeProgress is not null) await activeProgress.StopAsync(state.Status, CancellationToken.None).ConfigureAwait(false);
         await repository.SaveAgentAsync(state, CancellationToken.None).ConfigureAwait(false);
         await repository.AppendEventAsync(state.RunId, RunEventTypes.ServerToolCompleted,
-            new { agentId = state.Id, tool = "coding.agentStart", toolCallId = state.Id, target = "Subagent GPU1", success = state.Status == "completed", result = new { state.Status, state.Result } }, CancellationToken.None).ConfigureAwait(false);
+            new { agentId = state.Id, tool = state.Kind == "document" ? WorkspaceTools.DocumentAgent : CodingSubagentTools.Start, toolCallId = state.Id, target = state.Kind == "document" ? "Dokumenten-Agent" : "Subagent GPU1", success = state.Status == "completed", result = new { state.Status, state.Result } }, CancellationToken.None).ConfigureAwait(false);
         await repository.AppendEventAsync(state.RunId, RunEventTypes.ModelGeneration,
             new { agentId = state.Id, round = state.Round, phase = "subagent", state = state.Status }, CancellationToken.None).ConfigureAwait(false);
     }
@@ -414,15 +437,15 @@ public sealed class CodingSubagentService(RunRepository repository, ModelRuntime
                 if (call.Name is not ("web.search" or "web.fetch")) throw new ArgumentException("Ungültiges Recherchewerkzeug.");
                 var id = state.Id + "/research/" + state.Round + "/" + ordinal++;
                 if (!await repository.TryJournalToolDispatchAsync(state.RunId, RunEventTypes.ServerToolStarted,
-                    new { agentId = state.Id, tool = call.Name, toolCallId = id, target = "Subagent GPU1", arguments = call.Arguments }, cancellation).ConfigureAwait(false))
+                    new { agentId = state.Id, tool = call.Name, toolCallId = id, target = state.Kind == "document" ? "Dokumenten-Agent" : "Subagent GPU1", arguments = call.Arguments }, cancellation).ConfigureAwait(false))
                     throw new RunSteeringBoundaryException();
                 var result = await executor.ExecuteAsync(call.Name, call.Arguments, state.RunId, cancellation).ConfigureAwait(false);
                 await repository.AppendEventAsync(state.RunId, RunEventTypes.ServerToolCompleted,
-                    new { agentId = state.Id, tool = call.Name, toolCallId = id, target = "Subagent GPU1", success = result.Succeeded, result = result.Result }, cancellation).ConfigureAwait(false);
+                    new { agentId = state.Id, tool = call.Name, toolCallId = id, target = state.Kind == "document" ? "Dokumenten-Agent" : "Subagent GPU1", success = result.Succeeded, result = result.Result }, cancellation).ConfigureAwait(false);
                 return result;
             }, catalog.Validate,
             (progress, cancellation) => repository.AppendEventAsync(state.RunId, RunEventTypes.ServerToolStarted,
-                new { agentId = state.Id, tool = CodingSubagentTools.Start, toolCallId = state.Id, target = "Subagent GPU1", message = "Recherche läuft: " + progress.State }, cancellation),
+                new { agentId = state.Id, tool = state.Kind == "document" ? WorkspaceTools.DocumentAgent : CodingSubagentTools.Start, toolCallId = state.Id, target = state.Kind == "document" ? "Dokumenten-Agent" : "Subagent GPU1", message = "Recherche läuft: " + progress.State }, cancellation),
             token).ConfigureAwait(false);
         return research;
         }

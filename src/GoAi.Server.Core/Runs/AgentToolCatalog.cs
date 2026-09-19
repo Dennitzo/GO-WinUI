@@ -7,14 +7,14 @@ using System.Text.RegularExpressions;
 
 namespace GoAi.Server.Core.Runs;
 
-public sealed class AgentToolCatalog
+public sealed partial class AgentToolCatalog
 {
     public const string SelectorToolName = "go.selectTool";
     private static readonly string[] SelectorRequiredProperties = ["name"];
     private static readonly string[] DefaultServerTools =
     [
         "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
-        "image.generate", "math.evaluate", "context.embed", "context.retrieve",
+        "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve",
     ];
     private readonly Dictionary<string, AgentToolSpec> _tools = CreateTools();
 
@@ -22,9 +22,9 @@ public sealed class AgentToolCatalog
     {
         var requestedServerTools = request.AllowedServerTools ?? (request.Mode == RunMode.Coding ? [] : DefaultServerTools);
         if (requestedServerTools.Contains(CodingDeepResearchPipeline.ToolName, StringComparer.Ordinal)
-            && (request.Mode != RunMode.Coding || !requestedServerTools.Contains("web.search", StringComparer.Ordinal)
+            && (!requestedServerTools.Contains("web.search", StringComparer.Ordinal)
                 || !requestedServerTools.Contains("web.fetch", StringComparer.Ordinal)))
-            throw new ArgumentException("web.deepResearch requires Coding mode and explicit web.search/web.fetch permission.");
+            throw new ArgumentException("web.deepResearch requires explicit web.search/web.fetch permission.");
         var names = new HashSet<string>(StringComparer.Ordinal);
         foreach (var name in requestedServerTools)
         {
@@ -37,7 +37,7 @@ public sealed class AgentToolCatalog
         if (names.Contains(CodingWorkingStateTools.PlanTool))
             throw new ArgumentException("Coding state tools are selected by coding capabilities/options, not server-tool permissions.");
         var capabilities = request.ClientCapabilities ?? [];
-        if (request.Mode == RunMode.Coding && HasCapability(capabilities, "coding"))
+        if (HasCapability(capabilities, "coding") && (request.Mode == RunMode.Coding || HasCapability(capabilities, "workspace")))
         {
             names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => tool.Name is not ("coding.readOutput" or "coding.searchRunEvidence")
                 || HasCapability(capabilities, "coding.evidence")).Select(static tool => tool.Name));
@@ -47,11 +47,15 @@ public sealed class AgentToolCatalog
         if (HasCapability(capabilities, "documentIo"))
         {
             names.UnionWith([ClientToolNames.DocumentRead, ClientToolNames.DocumentCreate]);
+            if (HasCapability(capabilities, "document-agent")) names.Add(WorkspaceTools.DocumentAgent);
         }
         if (HasCapability(capabilities, "documents"))
         {
             names.UnionWith([ClientToolNames.DocumentsList, ClientToolNames.DocumentsSearch, ClientToolNames.DocumentsReadPages]);
         }
+        if (HasCapability(capabilities, "visual-tools")) names.Add(WorkspaceTools.ImageInput);
+        if (HasCapability(capabilities, "blender")) names.Add(WorkspaceTools.Blender);
+        if (HasCapability(capabilities, "workspace")) names.Add(WorkspaceTools.Open);
         // PDF bytes are never model-generated. document.create edits a bounded
         // canonical source and delegates rendering to GO's deterministic path.
         if (HasCapability(capabilities, "bricscad"))
@@ -90,7 +94,7 @@ public sealed class AgentToolCatalog
             throw new ArgumentException("A tool selector requires at least one available tool.", nameof(available));
         }
         var ordered = available.OrderBy(static tool => tool.Name, StringComparer.Ordinal).ToArray();
-        var catalog = string.Join("\n", ordered.Select(static tool => $"- {tool.Name}"));
+        var catalog = string.Join("\n", ordered.Select(static tool => $"- {tool.Name}: {tool.Description[..Math.Min(180, tool.Description.Length)]}"));
         var schema = JsonSerializer.SerializeToElement(new
         {
             type = "object",
@@ -158,6 +162,7 @@ public sealed class AgentToolCatalog
 
     private static void ValidateToolSpecific(string name, JsonElement value)
     {
+        if (WorkspaceTools.IsLocal(name) || name == WorkspaceTools.DocumentAgent) { WorkspaceTools.Validate(name, value); return; }
         if (CodingSubagentTools.IsTool(name)) { CodingSubagentTools.Validate(name, value); return; }
         if (name == CodingWorkingStateTools.PlanTool)
         {
@@ -175,6 +180,9 @@ public sealed class AgentToolCatalog
                 RequireString(value, "task", 1, 4_000);
                 OptionalInteger(value, "maximumSearches", 2, 3);
                 OptionalInteger(value, "maximumSources", 2, 6);
+                break;
+            case "speech.synthesize":
+                RequireString(value, "text", 1, 20_000);
                 break;
             case "web.fetch":
                 RequireString(value, "url", 1, 2_048);
@@ -322,7 +330,7 @@ public sealed class AgentToolCatalog
             Client(ClientToolNames.BricsCadMove, "Führe eine typisierte BricsCAD-Verschiebung automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
             Client(ClientToolNames.BricsCadAction, "Führe eine typisierte BricsCAD-Aktion automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
         };
-        return tools.Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).Concat(CodingSubagentTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
+        return tools.Concat(WorkspaceToolSpecs()).Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).Concat(CodingSubagentTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
     }
 
     private static AgentToolSpec Server(string name, string description, ToolRiskClass risk, JsonElement schema) =>

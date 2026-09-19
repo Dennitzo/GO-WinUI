@@ -960,6 +960,8 @@ public sealed class AssistantCoordinator(
             "bricsCad" => PromptTriggerAction.BricsCad,
             "audiobook" => PromptTriggerAction.Audiobook,
             "coding" => PromptTriggerAction.Coding,
+            "documentCreate" => PromptTriggerAction.DocumentCreate,
+            "blender" => PromptTriggerAction.Blender,
             "textToSpeech" => PromptTriggerAction.TextToSpeech,
             "translation" => PromptTriggerAction.Translation,
             "videoAnalysis" => PromptTriggerAction.VideoAnalysis,

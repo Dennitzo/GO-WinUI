@@ -11,7 +11,35 @@ namespace GoWinUI.Tests;
 public sealed class SessionGroupingTests
 {
     [Fact]
-    public async Task WorkspaceAssignmentCreatesOneProjectForNormalizedPathsAndPreservesEmptyProjects()
+    public async Task UpgradeRemovesExistingEmptyGroupsAndPreservesPinnedHistory()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Behalten");
+        await chats.SetCodingWorkspacePathAsync(session.Id, Path.Combine(environment.Directory, "Behalten"));
+        await chats.SetPinnedAsync(session.Id, true);
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.User, "Unverändert", MessageStatus.Completed);
+        await chats.GetOrCreateSessionGroupForWorkspaceAsync(Path.Combine(environment.Directory, "Leer"));
+        await using (var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM schema_migrations WHERE version=37;";
+            await command.ExecuteNonQueryAsync();
+        }
+        await using var reopened = new SqliteDatabase(new GoInfrastructureOptions { DataDirectory = environment.Directory }, NullLogger<SqliteDatabase>.Instance);
+        await reopened.InitializeAsync();
+        var restored = new SqliteChatRepository(reopened);
+        Assert.Equal("Behalten", Assert.Single(await restored.ListSessionGroupsAsync()).Name);
+        Assert.True(Assert.Single(await restored.ListSessionsAsync()).IsPinned);
+        var restoredMessage = Assert.IsType<ChatMessage>(await restored.GetMessageAsync(message.Id));
+        Assert.Equal(message with { ToolSteps = restoredMessage.ToolSteps }, restoredMessage);
+        Assert.Empty(restoredMessage.ToolSteps!);
+        Assert.True(await reopened.CheckIntegrityAsync());
+    }
+
+    [Fact]
+    public async Task WorkspaceAssignmentKeepsGroupUntilLastSessionIsDeleted()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -26,10 +54,11 @@ public sealed class SessionGroupingTests
         Assert.Equal(project.Id, (await chats.GetOrCreateSessionGroupForWorkspaceAsync(workspace)).Id);
 
         await chats.DeleteSessionAsync(first.Id);
+        Assert.Equal(project.Id, Assert.Single(await chats.ListSessionGroupsAsync()).Id);
         await chats.DeleteSessionAsync(second.Id);
         await chats.ApplySessionGroupingAsync([]);
-        Assert.Equal(project.Id, Assert.Single(await chats.ListSessionGroupsAsync()).Id);
-        Assert.Equal(project.Id, (await chats.GetOrCreateSessionGroupForWorkspaceAsync(workspace)).Id);
+        Assert.Empty(await chats.ListSessionGroupsAsync());
+        Assert.NotEqual(project.Id, (await chats.GetOrCreateSessionGroupForWorkspaceAsync(workspace)).Id);
     }
 
     [Fact]

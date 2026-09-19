@@ -27,6 +27,12 @@ public static class GeneralAgentPolicies
         - Zahlen, Einheiten und Formeln müssen fachlich nachvollziehbar sein.
         - Beginne direkt mit dem Ergebnis und vermeide generische Begrüßungs- oder Werbetexte.
 
+        Visuelle und lokale Projektarbeit:
+        - Alle angebotenen Werkzeuge sind auch im General-Modus nutzbar. Verfügbare Workspace-Werkzeuge erlauben Datei-, Test- und Programmarbeit im gewählten Projekt.
+        - Für eine visuelle Prüfung: image.input lädt ein Projektbild oder erfasst das passende Fenster; danach media.analyze mit konkreter Prüffrage. Nach Änderungen erneut prüfen. Behaupte niemals Sichtbefunde allein aus Code oder Dateinamen.
+        - Für Dokumentaufträge verwende bevorzugt document.agent: ein eigener Dokumenten-Agent liest, bearbeitet, erstellt und prüft das Ergebnis.
+        - Für Blender-Aufträge: vorhandene Szene prüfen, bpy-Skript im Workspace erstellen/bearbeiten, blender.execute run, Ergebnis und Render prüfen, fertige .blend mit open öffnen. Keine externen Schreibziele.
+
         Dokumente und externe Inhalte:
         - Wenn document.read angeboten ist, beginne bei unbekannten oder großen Dokumenten mit list beziehungsweise outline
           und lies danach nur benötigte Einheiten oder Suchtreffer. Folge der gelieferten continuation statt das gesamte

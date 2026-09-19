@@ -11,6 +11,7 @@ public static class RunRequestValidator
         "screenCapture",
         "documents",
         "documentIo",
+        "workspace", "visual-tools", "document-agent", "blender",
         "pdf",
         "coding",
         "coding.evidence",
@@ -19,7 +20,7 @@ public static class RunRequestValidator
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
         "web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze",
-        "image.generate", "math.evaluate", "context.embed", "context.retrieve",
+        "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve",
     };
 
     public static void Validate(RunRequest request)
@@ -151,9 +152,9 @@ public static class RunRequestValidator
             throw new ArgumentException("The run contains unknown or excessive allowed server tools.");
         }
         if (request.AllowedServerTools?.Contains("web.deepResearch", StringComparer.Ordinal) == true
-            && (request.Mode != RunMode.Coding || !request.AllowedServerTools.Contains("web.search", StringComparer.Ordinal)
+            && (!request.AllowedServerTools.Contains("web.search", StringComparer.Ordinal)
                 || !request.AllowedServerTools.Contains("web.fetch", StringComparer.Ordinal)))
-            throw new ArgumentException("web.deepResearch requires Coding mode and explicit web.search/web.fetch permission.");
+            throw new ArgumentException("web.deepResearch requires explicit web.search/web.fetch permission.");
         if (request.SessionId?.Length > 128)
         {
             throw new ArgumentException("sessionId may contain at most 128 characters.");

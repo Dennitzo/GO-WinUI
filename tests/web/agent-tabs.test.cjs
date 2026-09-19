@@ -78,7 +78,10 @@ test("subagent tab renders persisted reasoning, narration, plan, tool receipts a
   assert.ok(body.textContent.includes("Die Testdatei wird ergänzt."));
   assert.ok(body.textContent.includes("Randfälle prüfen"));
   assert.ok(body.textContent.includes("Tests laufen"));
-  assert.ok(body.textContent.includes("90 wiederverwendet"));
+  assert.ok(body.textContent.includes("140 Token"));
+  assert.equal(body.textContent.includes("wiederverwendet"), false);
+  assert.equal(body.textContent.includes("Eingabetoken"), false);
+  assert.equal(body.textContent.includes("Ausgabetoken"), false);
   assert.equal(body.textContent.includes("Hauptagent intern"), false);
   assert.equal(body.querySelectorAll(".coding-reasoning").length, 1);
   assert.equal(body.querySelectorAll(".subagent-activity--progress").length, 1);
@@ -258,4 +261,23 @@ test("untrusted child task and reasoning render as text without executing markup
   assert.equal(h.elements.subagentList.querySelector("script"), null);
   assert.equal(h.context.compromised, undefined);
   assert.ok(h.elements.subagentList.textContent.includes(malicious));
+});
+
+
+test("document agent has a distinct label and its own tool transcript", () => {
+  const h = harness();
+  const source = message({ status: "completed", toolSteps: [
+    lifecycle({ tool: "document.agent", status: "completed",
+      outputJson: '{"status":"completed","result":"Bericht geprüft."}' }),
+    child("doc-read", "document.read", { outputJson: '{"content":"Verifizierter Dokumentinhalt"}' })
+  ] });
+  const main = h.context.goAgentTabs.mainSteps(source, source.toolSteps);
+  const view = h.context.goCodingTimeline.render(source, main, h.options);
+  assert.ok(view.textContent.includes("Dokumenten-Agent gestartet"));
+  assert.ok(view.textContent.includes("Dokumenten-Agent-Ergebnis"));
+  assert.equal(view.textContent.includes("Verifizierter Dokumentinhalt"), false);
+  h.tabs.refresh(state([source]));
+  h.tabs.select("subagent");
+  assert.ok(h.elements.subagentList.textContent.includes("Dokumenten-Agent"));
+  assert.ok(h.elements.subagentList.textContent.includes("Verifizierter Dokumentinhalt"));
 });

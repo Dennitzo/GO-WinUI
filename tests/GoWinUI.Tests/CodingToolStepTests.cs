@@ -194,13 +194,13 @@ public sealed class CodingToolStepTests
     }
 
     [Fact]
-    public void CodingAutomaticallyOffersResearchToolsWhileNormalChatKeepsItsOwnToolPolicy()
+    public void GeneralAndCodingAutomaticallyOfferResearchTools()
     {
         var coding = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.Coding);
         Assert.Contains("web.search", coding);
         Assert.Contains("web.fetch", coding);
         Assert.Contains("web.deepResearch", coding);
-        Assert.DoesNotContain("web.deepResearch", GoAiAssistantService.GetAllowedServerTools(null));
+        Assert.Contains("web.deepResearch", GoAiAssistantService.GetAllowedServerTools(null));
     }
 
     [Fact]

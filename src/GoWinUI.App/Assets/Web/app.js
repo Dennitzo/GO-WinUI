@@ -106,6 +106,8 @@
   const toolVisuals = Object.freeze({
     coding: ["Coding", "M8 6l-6 6 6 6M16 6l6 6-6 6M14 3l-4 18"],
     audioAnalysis: ["Audio analysieren", "M4 12h2m2-5 4 10 3-7 2 4h3"],
+    documentCreate: ["Dokument erstellen", "M6 3h8l4 4v14H6zM14 3v5h4M9 12h6M9 16h6"],
+    blender: ["Blender", "M12 3l9 5v9l-9 5-9-5V8zM3 8l9 5 9-5M12 13v9"],
     imageAnalysis: ["Bild analysieren", "M4 5h16v14H4zM7 15l3-3 3 3 2-2 2 2"],
     imageGeneration: ["Bild erstellen", "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
     bricsCad: ["BricsCAD", "M4 18V6l8-3 8 3v12l-8 3zM12 3v18M4 6l8 4 8-4"],
@@ -492,8 +494,7 @@
       compose.setAttribute("viewBox", "0 0 24 24");
       compose.setAttribute("aria-hidden", "true");
       compose.classList.add("session-group__compose");
-      for (const shape of ["M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7",
-        "m16 3 5 5-10 10-5 1 1-5ZM14 5l5 5"]) {
+      for (const shape of ["M12 5v14M5 12h14"]) {
         const path = document.createElementNS(compose.namespaceURI, "path");
         path.setAttribute("d", shape);
         compose.append(path);
@@ -1314,6 +1315,15 @@
     const name = String(value || "");
     return ({
       "assistant.reasoning": "Denkprozess",
+      "document.agent": "Dokumenten-Agent",
+      "document.create": "Dokument erstellen oder bearbeiten",
+      "document.read": "Dokument lesen",
+      "image.input": "Bild oder Screenshot laden",
+      "media.analyze": "Bild analysieren",
+      "media.inspect": "Medien prüfen",
+      "blender.execute": "Blender",
+      "workspace.open": "Projektanwendung öffnen",
+      "speech.synthesize": "Audio erstellen",
       "coding.list": "Projekt erkunden",
       "coding.read": "Datei lesen",
       "coding.readOutput": "Ausgabe nachlesen",
