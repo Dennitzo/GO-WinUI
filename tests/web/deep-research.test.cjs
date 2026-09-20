@@ -24,7 +24,7 @@ function harness(storage = new Map()) {
       querySelectorAll: selector => body.querySelectorAll(selector), querySelector: selector => body.querySelector(selector) },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     persistentToolActions: new Set(["coding", "bricsCad", "audiobook"]),
-    toolVisuals: { coding: ["Coding", "code"], webSearch: ["Websuche", "search"], imageAnalysis: ["Bild analysieren", "image"] },
+    toolVisuals: { coding: ["Coding", "code"], blender: ["Blender", "cube"], webSearch: ["Websuche", "search"], imageAnalysis: ["Bild analysieren", "image"] },
     createToolIcon: () => new TestNode("svg"),
     isAudioCaptureActive: () => false, isScreenClipActive: () => false,
     renderStatus: noOp, renderMessages: noOp, chatScroll: { jump: noOp }, clearTimeout: noOp,
@@ -36,7 +36,7 @@ function harness(storage = new Map()) {
   context.renderContext = () => { elements.activeTools.replaceChildren(); context.renderDeepResearch(); };
   vm.runInContext("let draftTimer = 0; let pendingDraft = null;", context);
   for (const name of ["normalizeToolAction", "ensureEditableContext", "persistDeepResearch", "restoreDeepResearch",
-    "selectDeepResearch", "renderDeepResearch", "selectToolAction", "postChatRequest", "submitPrompt", "updateContextStripVisibility"]) {
+    "selectDeepResearch", "renderDeepResearch", "selectToolAction", "clearCompletedOneShotToolAction", "postChatRequest", "submitPrompt", "updateContextStripVisibility"]) {
     const start = source.search(new RegExp(`  (?:async )?function ${name}\\(`));
     const ending = source.slice(start).match(/\r?\n {2}\}(?:\r?\n|$)/);
     assert.ok(start >= 0 && ending, name);
@@ -89,6 +89,32 @@ test("research selection is scoped to its session and survives tab recreation wi
   const reopened = harness(restored.storage);
   reopened.context.restoreDeepResearch();
   assert.equal(reopened.state.deepResearch, false);
+});
+
+test("Blender and research coexist in either selection order and the next request uses confirmed Coding", async () => {
+  for (const researchFirst of [true, false]) {
+    const { context, state, elements, posts } = harness();
+    if (researchFirst) context.selectDeepResearch(true);
+    context.selectToolAction("blender");
+    if (!researchFirst) context.selectDeepResearch(true);
+    assert.equal(state.selectedToolAction, "blender");
+    assert.equal(state.deepResearch, true);
+    assert.equal(state.persistentToolAction, null, "only the backend accepts the Coding transition");
+    assert.equal(posts.some(item => item.type === "session.tool"), false);
+    elements.prompt.value = "Recherchiere und modelliere das Gebäude in Blender.";
+    await context.submitPrompt();
+    assert.equal(posts.at(-1).payload.toolAction, "blender");
+    assert.equal(posts.at(-1).payload.deepResearch, true);
+    state.pendingChatSend = null;
+    state.persistentToolAction = "coding";
+    context.clearCompletedOneShotToolAction();
+    assert.equal(state.selectedToolAction, "coding");
+    assert.equal(state.deepResearch, true);
+    elements.prompt.value = "Verbreitere jetzt nur den Eingang.";
+    await context.submitPrompt();
+    assert.equal(posts.at(-1).payload.toolAction, "coding");
+    assert.equal(posts.at(-1).payload.deepResearch, true);
+  }
 });
 
 test("incompatible media actions clear research while Coding and ordinary chat preserve it", () => {

@@ -588,7 +588,7 @@
 
   function renderMessages(scrollToEnd) {
     renderCodingChanges();
-    if (state.selectedToolAction === "coding" || state.messages.some(message => message.toolSteps?.length
+    if (["coding", "blender"].includes(state.selectedToolAction) || state.messages.some(message => message.toolSteps?.length
       || state.codingActivity.get(String(message.id))?.some(step => step.kind === "tool"))) {
       renderCodingMessages(scrollToEnd);
       return;
@@ -602,7 +602,7 @@
     if (!state.messages.length && state.activeSessionId) {
       const empty = document.createElement("div");
       empty.className = "chat-empty-state";
-      if (state.selectedToolAction === "coding") {
+      if (["coding", "blender"].includes(state.selectedToolAction)) {
         const heading = document.createElement("h2");
         heading.textContent = "Woran arbeiten wir?";
         const description = document.createElement("p");
@@ -1100,7 +1100,7 @@
 
   function createMessage(message, previousArticle = null) {
     const role = String(message.role).toLowerCase();
-    const hasTimeline = role === "assistant" && (state.selectedToolAction === "coding" || message.toolSteps?.length
+    const hasTimeline = role === "assistant" && (["coding", "blender"].includes(state.selectedToolAction) || message.toolSteps?.length
       || state.codingActivity.get(String(message.id))?.some(step => step.kind === "tool"));
     // Failed runs without generated text store their error as a content fallback.
     // Display it once; retain the original message for copy/export and persistence.
@@ -1124,7 +1124,7 @@
       const meta = document.createElement("div");
       meta.className = "message-meta";
       const messageTime = timeLabel(message.createdAt || message.updatedAt);
-      const assistantLabel = state.selectedToolAction === "coding" ? "Coding Agent" : "AI";
+      const assistantLabel = ["coding", "blender"].includes(state.selectedToolAction) ? "Coding Agent" : "AI";
       meta.textContent = messageTime ? `${assistantLabel} - ${messageTime}` : assistantLabel;
       const liveStatus = state.messageRunStatus.get(String(message.id));
       if (message.status && !message.tool && !liveStatus && !["completed", "Completed"].includes(message.status)) {
@@ -1155,7 +1155,7 @@
     content.className = "message-content";
     if (["streaming", "Streaming"].includes(message.status)) content.classList.add("stream-cursor");
     content.append(globalThis.goMarkdown.render(sanitizeVisibleMessageContent(contentMessage.content)));
-    if (state.selectedToolAction === "coding") enhanceCodingCodeBlocks(content);
+    if (["coding", "blender"].includes(state.selectedToolAction)) enhanceCodingCodeBlocks(content);
     annotateReadableSpeechBlocks(contentMessage, article, content);
     body.append(content);
     }
@@ -1313,8 +1313,17 @@
       : model;
   }
 
-  function codingToolLabel(value) {
+  function codingToolLabel(value, inputJson) {
     const name = String(value || "");
+    if (name === "blender.execute") {
+      try {
+        const input = typeof inputJson === "string" ? JSON.parse(inputJson) : inputJson;
+        const label = ({ info: "Blender und Szenenstand prüfen", scaffold: "3D-Projekt vorbereiten",
+          run: "3D-Modell aufbauen oder ändern", stage: "3D-Etappe modellieren", preview: "Blender-Zwischenstand anzeigen", inspect: "3D-Geometrie prüfen",
+          render: "3D-Ansichten rendern", open: "Blender-Szene öffnen" })[input?.operation];
+        if (label) return label;
+      } catch { /* Historic entries retain the general tool label. */ }
+    }
     return ({
       "assistant.reasoning": "Denkprozess",
       "document.agent": "Historischer Dokumentauftrag",
@@ -1357,7 +1366,7 @@
 
   function normalizeCodingStep(tool) {
     return { ...tool, id: String(tool.id), kind: "tool", tool: String(tool.tool),
-      label: codingToolLabel(tool.tool), status: codingStepState(tool.status),
+      label: codingToolLabel(tool.tool, tool.inputJson), status: codingStepState(tool.status),
       detail: String(tool.detail || ""), previewHtml: codingPreviewHtml(tool) };
   }
 
@@ -1531,7 +1540,7 @@
   }
 
   function renderCodingWorkspace() {
-    const coding = state.selectedToolAction === "coding";
+    const coding = ["coding", "blender"].includes(state.selectedToolAction);
     elements.appShell.classList.toggle("coding-mode", coding);
     elements.prompt.placeholder = coding ? "Änderung beschreiben oder Frage zum Projekt stellen …" : "Nachricht eingeben …";
     renderCodingChanges();
@@ -1544,7 +1553,7 @@
       host: elements.codingChanges, onLayout: schedulePromptResize
     });
     view.update(state.changesSummary, { sessionId: state.activeSessionId, messageId: latest?.id,
-      workspacePath: state.codingWorkspacePath, isCoding: state.selectedToolAction === "coding", toolSteps: latest?.toolSteps });
+      workspacePath: state.codingWorkspacePath, isCoding: ["coding", "blender"].includes(state.selectedToolAction), toolSteps: latest?.toolSteps });
     updateContextStripVisibility();
   }
 
@@ -2454,7 +2463,7 @@
       && persistentFallback
         ? persistentFallback
         : requested;
-    if (state.deepResearch && state.selectedToolAction && state.selectedToolAction !== "coding") {
+    if (state.deepResearch && state.selectedToolAction && !["coding", "blender"].includes(state.selectedToolAction)) {
       state.deepResearch = false;
       persistDeepResearch();
     }
@@ -2499,7 +2508,7 @@
 
   function selectDeepResearch(enabled) {
     if (!ensureEditableContext()) return;
-    if (enabled && state.selectedToolAction && state.selectedToolAction !== "coding") {
+    if (enabled && state.selectedToolAction && !["coding", "blender"].includes(state.selectedToolAction)) {
       selectToolAction(state.persistentToolAction === "coding" ? "coding" : null, false);
     }
     state.deepResearch = Boolean(enabled);
@@ -2659,7 +2668,10 @@
     const serverToolAction = normalizeToolAction(payload.selectedToolAction);
     state.persistentToolAction = persistentToolActions.has(serverToolAction) ? serverToolAction : null;
     const activeOneShotTool = state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction);
-    if (previousSessionId !== state.activeSessionId || !activeOneShotTool) {
+    // Blender launches Coding; consume its chip only after the backend confirms
+    // the running mode, not on an idle refresh while the user is still composing.
+    const blenderStartedCoding = state.selectedToolAction === "blender" && serverToolAction === "coding" && state.isRunning;
+    if (previousSessionId !== state.activeSessionId || !activeOneShotTool || blenderStartedCoding) {
       selectToolAction(serverToolAction, false);
     } else {
       selectToolAction(state.selectedToolAction, false);
@@ -2885,7 +2897,6 @@
         state.isRunning = false;
         state.pendingCaptureRequest = null;
         state.waitingForCapture = false;
-        clearCompletedOneShotToolAction();
         state.runStatus = payload.runStatus || null;
         state.runDetail = payload.runDetail || null;
         persistMeasuredContext();
@@ -2904,6 +2915,9 @@
             }
           }
         }
+        // A Blender send can change the persistent mode on the backend. Apply
+        // that session state before choosing the completed one-shot fallback.
+        clearCompletedOneShotToolAction();
         renderSessions();
         renderMessages(false);
         renderStatus();

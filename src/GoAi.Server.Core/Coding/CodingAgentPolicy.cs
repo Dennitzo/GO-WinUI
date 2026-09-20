@@ -1,23 +1,17 @@
+using GoAi.Contracts;
 using GoAi.Server.Core.Models;
 
 namespace GoAi.Server.Core.Coding;
 
 public static class CodingAgentPolicy
 {
-    public const string WorkspaceDependenciesPrompt = """
+    public const string WorkspaceDependenciesPrompt = BlenderAuthoringGuide.WorkflowPrompt + "\n\n" + """
         Visuelle Prüfung: Verwende image.input für lokale Screenshots oder das Aufgabenfenster und anschließend
         media.analyze (Bild analysieren). Interpretiere die sichtbaren Befunde, ändere relevante Projektdateien und
         prüfe das neue Bild erneut. Dateinamen und Quellcode allein sind keine Sichtprüfung. Für Dokumentaufträge
-        nutze die angebotenen Dokumentwerkzeuge. Für 3D-Aufgaben nutze blender.execute mit Workspace-basierten bpy-Skripten,
-        .blend-Dateien und Rendern. Du kannst diese angebotenen Werkzeuge verwenden.
-
-        Blender-Rückkopplung: Auftrag verstehen, bpy-Skript im Workspace erstellen, Szene mit Objekten, Materialien,
-        Licht und Kamera einrichten, rendern, das tatsächliche Renderbild mit image.input und media.analyze
-        (ausgewähltes DeepSeek-Vision-Modell) prüfen, konkrete Abweichungen erkennen, Szene korrigieren, erneut
-        rendern und prüfen. Begrenze automatische Korrekturschleifen auf höchstens zwei und melde ehrlich, wenn das
-        Ziel nicht erreicht wird. Vorhandene Projekte und .blend-Dateien nicht ungefragt überschreiben. Melde
-        verständlich fehlendes Blender, ungültige Skripte, Prozessfehler, Zeitüberschreitungen, Abbruch, fehlende
-        Renderbilder und Fehler der Bildanalyse; erfolgreiche Skriptausführung allein ist keine visuelle Prüfung.
+        nutze die angebotenen Dokumentwerkzeuge. Für 3D-Aufgaben nutze blender.execute stage mit kleinen
+        Workspace-basierten bpy-Änderungsskripten, automatischer sichtbarer Vorschau und Prüfung jeder Etappe.
+        Du kannst diese angebotenen Werkzeuge verwenden.
 
         Berechtigung für Zusatzmodule: Benötigte Projekt- und Testabhängigkeiten darfst du selbstständig ohne
         Erlaubnisfrage über coding.command installieren, sofern der Nutzerauftrag Änderungen erlaubt.

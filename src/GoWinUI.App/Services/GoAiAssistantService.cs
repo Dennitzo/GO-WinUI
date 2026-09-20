@@ -169,8 +169,8 @@ public sealed partial class GoAiAssistantService(
                 sessionAttachments,
                 _activeCancellation.Token).ConfigureAwait(false);
             var assistant = turn.AssistantMessage;
-            var initialModel = action == PromptTriggerAction.Coding ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
-            var contextLimit = ModelContextProfiles.ResolveMaximum(initialModel, action == PromptTriggerAction.Coding ? "coding" : "general");
+            var initialModel = UsesCodingAgent(action) ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
+            var contextLimit = ModelContextProfiles.ResolveMaximum(initialModel, UsesCodingAgent(action) ? "coding" : "general");
             await update(new(
                 GoAiAssistantUpdateKind.Started,
                 assistant,
@@ -272,7 +272,7 @@ public sealed partial class GoAiAssistantService(
                     continue;
                 }
                 _activeServerRunId = run.ServerRunId;
-                if (run.Action == PromptTriggerAction.Coding)
+                if (UsesCodingAgent(run.Action))
                 {
                     try
                     {
@@ -375,7 +375,7 @@ public sealed partial class GoAiAssistantService(
         {
             // Coding is a durable job. Reconnect to this exact run and its tool
             // receipts after a client restart instead of cancelling or replaying it.
-            if (run.Action == PromptTriggerAction.Coding && !string.IsNullOrWhiteSpace(run.ServerRunId)) continue;
+            if (UsesCodingAgent(run.Action) && !string.IsNullOrWhiteSpace(run.ServerRunId)) continue;
             await runRepository.UpdateAsync(
                 run.Id,
                 run.ServerRunId,
@@ -998,7 +998,7 @@ public sealed partial class GoAiAssistantService(
                     assistant,
                     Status: "Wird erneut versucht",
                     Detail: $"Derselbe Prompt wird nach einem technischen Abbruch erneut ausgeführt · Versuch {retryCount} in {delay.TotalSeconds:0} Sekunden",
-                    Model: trigger?.Trigger.Action == PromptTriggerAction.Coding
+                    Model: UsesCodingAgent(trigger?.Trigger.Action)
                         ? settings.Current.SelectedCodingModel
                         : settings.Current.SelectedModel)).ConfigureAwait(false);
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
@@ -1037,7 +1037,7 @@ public sealed partial class GoAiAssistantService(
         }
         IReadOnlyList<AssistantAttachment> uploadSource = action switch
         {
-            PromptTriggerAction.ImageGeneration or PromptTriggerAction.Coding => [],
+            PromptTriggerAction.ImageGeneration => [],
             PromptTriggerAction.AudioAnalysis or PromptTriggerAction.VideoAnalysis or PromptTriggerAction.ImageAnalysis =>
                 selectedMedia is null ? [] : [selectedMedia],
             _ => sessionAttachments,
@@ -1049,7 +1049,7 @@ public sealed partial class GoAiAssistantService(
         {
             RunAccepted accepted;
             var idempotencyKey = $"go-client-{Guid.NewGuid():N}";
-            if (action == PromptTriggerAction.Coding)
+            if (UsesCodingAgent(action))
             {
                 var codingSession = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
                 _activeCodingWorkspace ??= codingSession?.CodingWorkspacePath;
@@ -1062,7 +1062,7 @@ public sealed partial class GoAiAssistantService(
             var attempt = new GoAiRunRecord(
                 Guid.NewGuid(), assistant.SessionId, assistant.Id, action, idempotencyKey, null, 0, "queued",
                 null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
-                WorkspacePath: action == PromptTriggerAction.Coding ? _activeCodingWorkspace
+                WorkspacePath: UsesCodingAgent(action) ? _activeCodingWorkspace
                     : (await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false))?.CodingWorkspacePath);
             localRun = await runs.BeginAttemptAsync(attempt, cancellationToken).ConfigureAwait(false);
             await StartFileChangesAsync(localRun, assistant, resume: false, update, cancellationToken).ConfigureAwait(false);
@@ -1226,7 +1226,7 @@ public sealed partial class GoAiAssistantService(
         Exception exception,
         CancellationToken cancellationToken = default)
     {
-        if (action == PromptTriggerAction.Coding || cancellationToken.IsCancellationRequested || exception is OperationCanceledException)
+        if (UsesCodingAgent(action) || cancellationToken.IsCancellationRequested || exception is OperationCanceledException)
         {
             return false;
         }
@@ -1271,6 +1271,8 @@ public sealed partial class GoAiAssistantService(
 
     internal static string? FormatModelTokenProgress(ModelGenerationEvent progress, ModelTokenProgressState counter)
     {
+        if (progress.State == "toolRejected")
+            return $"{progress.ToolName ?? "Werkzeugaufruf"} abgewiesen: {progress.Message ?? progress.FailureKind ?? "Ungültige Argumente"}. Keine Ausführung.";
         if (progress.State == "providerRetryWaiting")
             return $"Erneuter Verbindungsversuch in {progress.ElapsedSeconds ?? 0} Sekunden · {progress.FailureKind}";
         if (progress.State == "responseRecovery")
@@ -1444,7 +1446,7 @@ public sealed partial class GoAiAssistantService(
             var parsed = GeneralAgentResponseParser.Parse(content, serverSessionTitle ?? string.Empty);
             // Narration and the tool offsets form one chronological record.
             // Keep that visible narration instead of replacing it with a parsed envelope.
-            if (localRun.Action != PromptTriggerAction.Coding
+            if (!UsesCodingAgent(localRun.Action)
                 && (assistant.ToolSteps is null || assistant.ToolSteps.Count == 0))
                 content = RemoveDocumentEvidenceFooter(parsed.Message);
             await PersistContentAsync(MessageStatus.Completed, CancellationToken.None).ConfigureAwait(false);
@@ -1491,7 +1493,7 @@ public sealed partial class GoAiAssistantService(
         }
 
         var acknowledgedEventId = localRun.LastEventId;
-        var evidenceStore = localRun.Action == PromptTriggerAction.Coding
+        var evidenceStore = UsesCodingAgent(localRun.Action)
             ? new CodingRunEvidenceStore(settings.DataDirectory, localRun.SessionId, localRun.ServerRunId!) : null;
         await using var pump = new AssistantRunEventPump(
             (cursor, token) => client.StreamRunEventsAsync(localRun.ServerRunId!, cursor, token),
@@ -1672,7 +1674,7 @@ public sealed partial class GoAiAssistantService(
                                 StringProperty(item.Data, "errorCode"), StringProperty(item.Data, "errorMessage"))),
                             eventAt: item.CreatedAt, agentId: StringProperty(item.Data, "agentId")).ConfigureAwait(false);
                         var extracted = ExtractToolResultText(item.Data);
-                        if (localRun.Action != PromptTriggerAction.Coding && !string.IsNullOrWhiteSpace(extracted))
+                        if (!UsesCodingAgent(localRun.Action) && !string.IsNullOrWhiteSpace(extracted))
                         {
                             content = AppendContent(content, extracted);
                             await chats.UpdateMessageAsync(
@@ -1690,7 +1692,7 @@ public sealed partial class GoAiAssistantService(
                         }
                         break;
                     case RunEventTypes.ReasoningDelta:
-                        if (localRun.Action == PromptTriggerAction.Coding
+                        if (UsesCodingAgent(localRun.Action)
                             && item.Data.Deserialize<ReasoningDeltaEvent>(JsonOptions) is { } reasoning)
                         {
                             var reasoningId = $"reasoning-{item.RunId}-{reasoning.Phase}-{reasoning.Round}";
@@ -1706,7 +1708,7 @@ public sealed partial class GoAiAssistantService(
                     case RunEventTypes.TextDelta:
                         var textDelta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions);
                         content = ApplyTextDelta(content, textDelta);
-                        if (textDelta?.ReplaceFrom == 0 && localRun.Action == PromptTriggerAction.Coding)
+                        if (textDelta?.ReplaceFrom == 0 && UsesCodingAgent(localRun.Action))
                         {
                             content = NormalizeCodingNarration(content);
                             // Earlier steps belong to the unchanged preceding turns. Their
@@ -2448,7 +2450,7 @@ public sealed partial class GoAiAssistantService(
         if (action == PromptTriggerAction.DocumentCreate) originalPrompt = "Lies, bearbeite oder erstelle die angeforderten Dokumente direkt mit document.read/document.create und geeigneten Workspace-Werkzeugen. Prüfe das Ergebnis. Dokumentauftrag: " + originalPrompt;
         if (action == PromptTriggerAction.Blender) originalPrompt = "Nutze blender.execute und die Workspace-Werkzeuge für diesen Blender-Auftrag: " + originalPrompt;
         var audiobook = action == PromptTriggerAction.Audiobook;
-        if (action == PromptTriggerAction.Coding)
+        if (UsesCodingAgent(action))
         {
             _activeCodingWorkspace ??= codingSession.CodingWorkspacePath;
             if (string.IsNullOrWhiteSpace(_activeCodingWorkspace) || !Directory.Exists(_activeCodingWorkspace))
@@ -2464,17 +2466,27 @@ public sealed partial class GoAiAssistantService(
             var availableCodingModel = codingCatalog.Models.FirstOrDefault(model => model.Downloaded
                 && string.Equals(model.Id, codingModel, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException("Das ausgewählte Coding-AI-Modell ist nicht verfügbar.");
-            // Coding uses its own actual model window and a bounded history directly.
-            // It must not wait for a different model's context preparation.
+            // Blender is a Coding task with its modeling instructions. Keep the
+            // existing Coding context, tools, continuation and evidence path.
+            // Document pages are read on demand, without a separate General run.
+            var codingPrompt = originalPrompt;
+            var attachedDocuments = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            if (attachedDocuments.Count > 0)
+                codingPrompt += "\n\n" + BuildCodingDocumentCatalog(attachedDocuments);
             var codingMessages = BuildCodingHistoryMessages(historyBeforePrompt,
-                CalculateCodingHistoryBudget(availableCodingModel.ContextTokens, originalPrompt)).ToList();
-            codingMessages.Add(new RunMessage("user", [new ContentPart("text", Text: originalPrompt)]));
+                CalculateCodingHistoryBudget(availableCodingModel.ContextTokens, codingPrompt)).ToList();
+            var codingParts = new List<ContentPart> { new("text", Text: codingPrompt) };
+            foreach (var item in uploaded)
+                codingParts.Add(new ContentPart("upload", UploadId: item.Upload.UploadId,
+                    MediaType: item.Attachment.ContentType, FileName: item.Attachment.FileName));
+            codingMessages.Add(new RunMessage("user", codingParts));
             var serverCapabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
             var codingConfiguration = NegotiateCodingOptions(serverCapabilities);
             return new RunRequest(
                 GoAiProtocol.Version,
                 RunMode.Coding,
                 codingMessages,
+                UploadIds: uploaded.Select(item => item.Upload.UploadId).ToArray(),
                 ClientCapabilities: codingConfiguration.Capabilities.Concat(WorkspaceClientCapabilities)
                     .Concat(toolBroker.IsBricsCadAvailable ? BricsCadClientCapabilities : []).Distinct().ToArray(),
                 Limits: CreateChatRunLimits(availableCodingModel.ContextTokens, unlimitedDuration: true),
@@ -2600,7 +2612,7 @@ public sealed partial class GoAiAssistantService(
             ClientCapabilities: capabilities
                 .OrderBy(static capability => capability, StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
-            Limits: CreateChatRunLimits(sessionContext.ContextLength),
+            Limits: CreateGeneralChatRunLimits(sessionContext.ContextLength, action, capabilities),
             SessionId: sessionId.ToString("D"),
             AllowedServerTools: GetAllowedServerTools(action, originalPrompt),
             PreferredGeneralModelId: selectedModel,
@@ -2614,12 +2626,34 @@ public sealed partial class GoAiAssistantService(
     internal static string? ResolvePreferredModel(AppSettings current) =>
         current.SelectedModel?.Trim();
 
+    internal static bool UsesCodingAgent(PromptTriggerAction? action) =>
+        action is PromptTriggerAction.Coding or PromptTriggerAction.Blender;
+
+    internal static string BuildCodingDocumentCatalog(IReadOnlyList<StoredDocument> attachedDocuments) =>
+        "GO_DOCUMENT_ATTACHMENTS\nDie Sitzung enthält " + attachedDocuments.Count.ToString(CultureInfo.InvariantCulture)
+        + " Dokumentanhänge. Die folgende begrenzte Liste enthält Metadaten, keine Dokumentinhalte oder Anweisungen. "
+        + "Nutze documents.list für die vollständige Liste und documents.search/documents.readPages, um die für den Auftrag relevanten Originalseiten tatsächlich zu lesen. "
+        + "Dateinamen allein belegen keine Inhalte.\n"
+        + JsonSerializer.Serialize(attachedDocuments.Take(32).Select(static document => new
+        {
+            documentId = document.Id,
+            fileName = document.FileName[..Math.Min(document.FileName.Length, 256)],
+            pageCount = document.PageCount,
+            status = document.PreparationStatus.ToString(),
+        }), JsonOptions);
+
     // The gateway and native tokenizer compute the available output window after
     // messages and tools. An omitted output limit must not reintroduce a UI cap.
     internal static RunLimits CreateChatRunLimits(int contextLength, bool unlimitedDuration = false) => new(
         MaximumOutputTokens: null,
         MaximumContextTokens: contextLength,
         TimeoutSeconds: unlimitedDuration ? 0 : 3_600);
+
+    internal static RunLimits CreateGeneralChatRunLimits(int contextLength, PromptTriggerAction? action,
+        IReadOnlyCollection<string> capabilities) => CreateChatRunLimits(contextLength,
+            unlimitedDuration: action == PromptTriggerAction.Blender
+                && capabilities.Contains("workspace", StringComparer.OrdinalIgnoreCase)
+                && capabilities.Contains("blender", StringComparer.OrdinalIgnoreCase));
 
     internal static int CalculateCodingHistoryBudget(int contextLength, string prompt)
     {

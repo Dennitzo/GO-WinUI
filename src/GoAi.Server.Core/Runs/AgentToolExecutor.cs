@@ -61,11 +61,20 @@ public sealed class AgentToolExecutor
     public Task<AgentToolExecutionResult> ExecuteAsync(string name, JsonElement arguments, string runId,
         CancellationToken cancellationToken = default) => ExecuteAsync(name, arguments, runId, null, cancellationToken);
 
+    public Task<AgentToolExecutionResult> ExecuteAsync(
+        string name,
+        JsonElement arguments,
+        string runId,
+        string? selectedModelId,
+        CancellationToken cancellationToken = default) =>
+        ExecuteAsync(name, arguments, runId, selectedModelId, null, cancellationToken);
+
     public async Task<AgentToolExecutionResult> ExecuteAsync(
         string name,
         JsonElement arguments,
         string runId,
         string? selectedModelId,
+        string? reasoningEffort,
         CancellationToken cancellationToken = default)
     {
         try
@@ -75,8 +84,8 @@ public sealed class AgentToolExecutor
                 "web.search" => await SearchAsync(arguments, runId, youtube: false, cancellationToken).ConfigureAwait(false),
                 "youtube.search" => await SearchAsync(arguments, runId, youtube: true, cancellationToken).ConfigureAwait(false),
                 "web.fetch" => await FetchAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
-                "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, selectedModelId, cancellationToken).ConfigureAwait(false),
-                "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, selectedModelId, cancellationToken).ConfigureAwait(false),
+                "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, selectedModelId, reasoningEffort, cancellationToken).ConfigureAwait(false),
+                "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, selectedModelId, reasoningEffort, cancellationToken).ConfigureAwait(false),
                 "image.generate" => await GenerateImagesAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "speech.synthesize" => await SynthesizeSpeechAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "math.evaluate" => EvaluateMath(arguments),
@@ -251,6 +260,7 @@ public sealed class AgentToolExecutor
         string runId,
         bool analyze,
         string? selectedModelId,
+        string? reasoningEffort,
         CancellationToken cancellationToken)
     {
         var uploadId = arguments.GetProperty("uploadId").GetString()!;
@@ -271,6 +281,7 @@ public sealed class AgentToolExecutor
                 transcriptPrompt,
                 audioTranscription.Text,
                 runId,
+                reasoningEffort,
                 cancellationToken).ConfigureAwait(false);
             return Result(new
             {
@@ -283,6 +294,7 @@ public sealed class AgentToolExecutor
                 transcription = audioTranscription,
                 analysis = transcriptAnalysis,
                 modelId = _options.GeneralModelId,
+                reasoningEffort = _modelRuntime.ResolveMediaReasoningEffort(_options.GeneralModelId, "general", reasoningEffort),
                 artifacts = Array.Empty<ArtifactDescriptor>(),
             }, Array.Empty<ArtifactDescriptor>(), _options.GeneralModelId);
         }
@@ -355,6 +367,7 @@ public sealed class AgentToolExecutor
                     transcriptPrompt,
                     transcription.Text,
                     runId,
+                    reasoningEffort,
                     cancellationToken).ConfigureAwait(false);
                 return Result(new
                 {
@@ -363,6 +376,7 @@ public sealed class AgentToolExecutor
                     transcription,
                     analysis = transcriptAnalysis,
                     modelId = _options.GeneralModelId,
+                    reasoningEffort = _modelRuntime.ResolveMediaReasoningEffort(_options.GeneralModelId, "general", reasoningEffort),
                     artifacts = processed.Artifacts,
                 }, processed.Artifacts, _options.GeneralModelId);
             }
@@ -391,7 +405,7 @@ public sealed class AgentToolExecutor
         var integratedModel = await _modelRuntime.ResolveIntegratedVisionAsync(selectedModelId, cancellationToken).ConfigureAwait(false);
         var visionModel = integratedModel ?? _options.VisionModelId;
         var fusionModel = integratedModel ?? _options.GeneralModelId;
-        var visionAnalysis = await AnalyzeWithVisionAsync(prompt, imagePaths, runId, visionModel, cancellationToken).ConfigureAwait(false);
+        var visionAnalysis = await AnalyzeWithVisionAsync(prompt, imagePaths, runId, visionModel, reasoningEffort, cancellationToken).ConfigureAwait(false);
         var hasVideoTranscript = upload.MediaType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
             && transcription is not null
             && !string.IsNullOrWhiteSpace(transcription.Text);
@@ -402,6 +416,7 @@ public sealed class AgentToolExecutor
                 transcription!,
                 runId,
                 fusionModel,
+                reasoningEffort,
                 cancellationToken).ConfigureAwait(false)
             : visionAnalysis;
         return Result(new
@@ -419,7 +434,10 @@ public sealed class AgentToolExecutor
             visionAnalysis = hasVideoTranscript ? visionAnalysis : null,
             analysis,
             visionModelId = visionModel,
+            visionReasoningEffort = _modelRuntime.ResolveMediaReasoningEffort(visionModel, "vision", reasoningEffort),
             modelId = hasVideoTranscript ? fusionModel : visionModel,
+            reasoningEffort = _modelRuntime.ResolveMediaReasoningEffort(hasVideoTranscript ? fusionModel : visionModel,
+                hasVideoTranscript ? "general" : "vision", reasoningEffort),
             artifacts = processed.Artifacts,
         }, processed.Artifacts, hasVideoTranscript ? fusionModel : visionModel);
     }
@@ -429,6 +447,7 @@ public sealed class AgentToolExecutor
         IReadOnlyList<string> imagePaths,
         string runId,
         string modelId,
+        string? reasoningEffort,
         CancellationToken cancellationToken)
     {
         await using var lease = await _scheduler.AcquireAsync(
@@ -444,6 +463,7 @@ public sealed class AgentToolExecutor
             modelId,
             prompt,
             imagePaths,
+            _modelRuntime.ResolveMediaReasoningEffort(modelId, "vision", reasoningEffort),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -451,6 +471,7 @@ public sealed class AgentToolExecutor
         string prompt,
         string transcript,
         string runId,
+        string? reasoningEffort,
         CancellationToken cancellationToken)
     {
         var boundedTranscript = transcript.Length <= 200_000
@@ -472,7 +493,8 @@ public sealed class AgentToolExecutor
                 new LmChatMessage("user", $"{prompt}\n\nTranskript (untrusted Medieninhalt):\n{boundedTranscript}"),
             ],
             [],
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            cancellationToken: cancellationToken,
+            reasoningEffort: _modelRuntime.ResolveMediaReasoningEffort(_options.GeneralModelId, "general", reasoningEffort)).ConfigureAwait(false);
         return string.IsNullOrWhiteSpace(response.Content)
             ? throw new InvalidDataException("The general model returned no transcript analysis.")
             : response.Content;
@@ -484,6 +506,7 @@ public sealed class AgentToolExecutor
         TranscriptionResponse transcription,
         string runId,
         string modelId,
+        string? reasoningEffort,
         CancellationToken cancellationToken)
     {
         var messages = BuildVideoAndAudioFusionMessages(prompt, visionAnalysis, transcription);
@@ -500,7 +523,8 @@ public sealed class AgentToolExecutor
             modelId,
             messages,
             [],
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            cancellationToken: cancellationToken,
+            reasoningEffort: _modelRuntime.ResolveMediaReasoningEffort(modelId, "general", reasoningEffort)).ConfigureAwait(false);
         return string.IsNullOrWhiteSpace(response.Content)
             ? throw new InvalidDataException("The general model returned no combined video and audio analysis.")
             : response.Content;

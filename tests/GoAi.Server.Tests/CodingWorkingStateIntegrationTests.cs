@@ -17,6 +17,9 @@ public sealed class CodingWorkingStateIntegrationTests
     private static readonly string[] Capabilities = ["coding", "coding.evidence"];
     private static readonly string[] ForbiddenArguments = ["delete"];
     private static readonly string[] WebTools = ["web.search", "web.fetch"];
+    private static readonly string[] BlenderCapabilities = ["coding", "coding.evidence", "workspace", "blender", "visual-tools", "documents", "documentIo"];
+    private static readonly string[] BlenderServerTools = ["web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze", "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve"];
+    private static readonly string[] BlenderSupportingTools = [WorkspaceTools.Blender, "web.search", "web.fetch", "image.input", "media.analyze", "documents.list", "documents.search", "documents.readPages", "document.read", "document.create", "coding.read", "coding.write", "coding.edit", "coding.command", "coding.updatePlan"];
     private static RunRequest Request(string text = "Implementiere die Aufgabe mit zwei unabhängigen lesenden Prüfungen.") => new(
         GoAiProtocol.Version, RunMode.Coding, [new("user", [new("text", text)])], ClientCapabilities: Capabilities,
         AllowedServerTools: WebTools, PreferredCodingModelId: NativeHandler.ModelId,
@@ -395,6 +398,224 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Empty(harness.Handler.Requests);
     }
 
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("completed")]
+    public async Task GeneralBlenderRejectsThirdIdenticalFailedStageButAllowsCorrectedStage(string receiptStatus)
+    {
+        using var harness = new Harness();
+        var request = new RunRequest(GoAiProtocol.Version, RunMode.General,
+            [new("user", [new("text", "Baue einen Rover in kleinen geprüften Etappen.")])],
+            ClientCapabilities: ["workspace", "blender"], AllowedServerTools: [],
+            PreferredGeneralModelId: NativeHandler.ModelId, Limits: new(TimeoutSeconds: 0));
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt >= 9
+            ? harness.Handler.CompleteResponse()
+            : attempt % 2 == 1
+                ? harness.Handler.ToolResponse("select-" + attempt, AgentToolCatalog.SelectorToolName, new { name = WorkspaceTools.Blender })
+                : harness.Handler.ToolResponse("stage-" + attempt, WorkspaceTools.Blender, new
+                {
+                    operation = "stage", path = "rover/steps/01_blockout.py", label = "01 Hauptformen",
+                    expectedSha256 = new string(attempt == 8 ? 'b' : 'a', 64), outputPath = "rover/scene_v001.blend",
+                }));
+
+        for (var failedAttempt = 0; failedAttempt < 2; failedAttempt++)
+        {
+            await harness.TickAsync(run);
+            var checkpoint = (await harness.Repository.GetCheckpointAsync(run))!;
+            Assert.NotNull(checkpoint.PendingProposalId);
+            await harness.Repository.SaveClientToolResultAsync(run, new(checkpoint.PendingProposalId, receiptStatus,
+                JsonSerializer.SerializeToElement(new { success = false, operation = "stage", error = "SyntaxError in the unchanged stage script" })));
+        }
+
+        await harness.TickAsync(run);
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        var rejection = Assert.Single(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "toolRejected");
+        Assert.Equal(WorkspaceTools.Blender, rejection.Data.GetProperty("toolName").GetString());
+        Assert.Equal("agent.repeated_tool_failure", rejection.Data.GetProperty("failureKind").GetString());
+        var proposals = events.Where(item => item.Type == RunEventTypes.ClientToolProposed).ToArray();
+        Assert.Equal(3, proposals.Length); // Two failed originals, then the corrected script; the third original never reaches the client.
+        Assert.Equal(new string('b', 64), proposals[^1].Data.GetProperty("arguments").GetProperty("expectedSha256").GetString());
+        var corrected = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.Contains(corrected.Messages, message => message.Role == "tool" && message.ToolCallId == "stage-6"
+            && message.Content!.Contains("agent.repeated_tool_failure", StringComparison.Ordinal));
+        await harness.Repository.SaveClientToolResultAsync(run, new(corrected.PendingProposalId!, "completed",
+            JsonSerializer.SerializeToElement(new { success = true, operation = "stage", valid = true, outputPath = "rover/scene_v001.blend" })));
+        await harness.TickAsync(run);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+        Assert.Equal(9, harness.Handler.Requests.Count);
+        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.RunFailed);
+    }
+
+    [Theory]
+    [InlineData(WorkspaceTools.Blender)]
+    [InlineData("coding.command")]
+    public async Task GeneralBoundsOnlyBlenderRenderBeforeTheNextNativeRequestAndPreservesTheOriginalReceipt(string toolName)
+    {
+        using var harness = new Harness();
+        var request = new RunRequest(GoAiProtocol.Version, RunMode.General,
+            [new("user", [new("text", "Prüfe den aktuellen Zwischenstand der Forschungsstation.")])],
+            ClientCapabilities: ["workspace", "blender", "coding"], AllowedServerTools: [],
+            PreferredGeneralModelId: NativeHandler.ModelId, Limits: new(TimeoutSeconds: 0));
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        object arguments = toolName == WorkspaceTools.Blender
+            ? new { operation = "render", path = "station_blockout_v01.blend", expectedSha256 = BlenderReceiptFixture.SourceHash,
+                outputDirectory = "renders_blockout_v01" }
+            : new { executable = "python", arguments = new[] { "inspect_station.py" } };
+        harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt switch
+        {
+            1 => harness.Handler.ToolResponse("select-review", AgentToolCatalog.SelectorToolName, new { name = toolName }),
+            2 => harness.Handler.ToolResponse("review-station", toolName, arguments),
+            _ => harness.Handler.CompleteResponse(),
+        });
+
+        await harness.TickAsync(run);
+        var pending = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.NotNull(pending.PendingProposalId);
+        var fullReport = BlenderReceiptFixture.Render();
+        Assert.True(fullReport.GetRawText().Length > CodingLoopGuard.MaximumToolResultCharacters);
+        await harness.Repository.SaveClientToolResultAsync(run, new(pending.PendingProposalId, "completed", fullReport));
+        await harness.TickAsync(run);
+
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+        Assert.Equal(3, harness.Handler.Requests.Count);
+        var delivered = Assert.Single(harness.Handler.Requests[^1].GetProperty("messages").EnumerateArray(),
+            message => message.GetProperty("role").GetString() == "tool"
+                && message.GetProperty("tool_call_id").GetString() == "review-station");
+        var content = delivered.GetProperty("content").GetString()!;
+        var receipt = JsonSerializer.Deserialize<JsonElement>(content);
+        var report = receipt.GetProperty("result");
+        if (toolName == WorkspaceTools.Blender)
+        {
+            Assert.True(content.Length <= CodingLoopGuard.MaximumToolResultCharacters);
+            Assert.True(receipt.GetProperty("truncated").GetBoolean());
+            Assert.False(report.GetProperty("valid").GetBoolean());
+            Assert.True(JsonElement.DeepEquals(fullReport.GetProperty("counts"), report.GetProperty("counts")));
+            Assert.True(JsonElement.DeepEquals(fullReport.GetProperty("bounds"), report.GetProperty("bounds")));
+            Assert.True(JsonElement.DeepEquals(fullReport.GetProperty("units"), report.GetProperty("units")));
+            Assert.Equal("zero_scale", report.GetProperty("issues")[0].GetProperty("code").GetString());
+            Assert.True(report.GetProperty("issuesTruncated").GetBoolean());
+            Assert.Equal(BlenderReceiptFixture.SourceHash, report.GetProperty("sourceSha256").GetString());
+            Assert.Equal("renders_blockout_v01/report.json", report.GetProperty("reportPath").GetString());
+            Assert.Equal("ready", report.GetProperty("preview").GetProperty("state").GetString());
+            Assert.True(JsonElement.DeepEquals(fullReport.GetProperty("images"), report.GetProperty("images")));
+            Assert.False(report.TryGetProperty("objects", out _));
+        }
+        else
+        {
+            Assert.True(content.Length > CodingLoopGuard.MaximumToolResultCharacters);
+            Assert.True(JsonElement.DeepEquals(fullReport, report));
+        }
+        // Context optimization must never replace the persisted original evidence.
+        var persisted = await harness.Repository.GetClientToolResultAsync(pending.PendingProposalId!);
+        Assert.NotNull(persisted);
+        Assert.True(JsonElement.DeepEquals(fullReport, persisted.Result));
+    }
+
+    [Fact]
+    public async Task CodingBlenderKeepsAllSupportingSchemasAndAttachmentReferencesAcrossClientToolContinuations()
+    {
+        using var harness = new Harness();
+        const string uploadId = "upload-11111111111111111111111111111111";
+        const string documentId = "22222222-2222-2222-2222-222222222222";
+        var hash = new string('a', 64);
+        var request = Request("Nutze Blender für eine Figur nach Bild und Dokument.") with
+        {
+            Messages = [new("user", [new("text", "Nutze Blender für eine Figur nach Bild und Dokument."),
+                new("upload", UploadId: uploadId, MediaType: "image/png", FileName: "figur-reference.png"),
+                new("document", Text: "Dokument figur-brief.pdf, Seite 1, documentId=" + documentId + ": Zwei lange Ohren und ein gezackter Schwanz.",
+                    FileName: "figur-brief.pdf", MediaType: "application/pdf")])],
+            UploadIds = [uploadId], ClientCapabilities = BlenderCapabilities, AllowedServerTools = BlenderServerTools,
+            PreferredGeneralModelId = "general/must-not-be-selected", Limits = new(TimeoutSeconds: 0), ReasoningEffort = "low",
+        };
+        RunRequestValidator.Validate(request);
+        var catalog = new AgentToolCatalog();
+        var available = catalog.GetAvailableTools(request);
+        catalog.Validate(catalog.Resolve("web.search", available),
+            JsonSerializer.SerializeToElement(new { query = "Pikachu reference front side", profile = "images", maximumResults = 20 }));
+        catalog.Validate(catalog.Resolve("media.analyze", available),
+            JsonSerializer.SerializeToElement(new { uploadId, prompt = "Beschreibe sichtbare Silhouette, Ohren und Schwanzform." }));
+        (string Name, object Arguments, JsonElement Result)[] steps =
+        [
+            (WorkspaceTools.Blender, new { operation = "info" }, JsonSerializer.SerializeToElement(new { available = true })),
+            ("documents.readPages", new { documentId, startPage = 1, endPage = 1 },
+                JsonSerializer.SerializeToElement(new { pages = new[] { new { page = 1, text = "Zwei lange Ohren und ein gezackter Schwanz." } } })),
+            (WorkspaceTools.ImageInput, new { operation = "file", path = "figur-reference.png" },
+                JsonSerializer.SerializeToElement(new { uploadId, mediaType = "image/png", source = "file" })),
+            (ClientToolNames.CodingRead, new { path = "figur/steps/01_blockout.py" },
+                JsonSerializer.SerializeToElement(new { path = "figur/steps/01_blockout.py", sha256 = hash, content = "import go_blender as g\ng.sphere('Head')", truncated = false })),
+            (WorkspaceTools.Blender, new { operation = "stage", path = "figur/steps/01_blockout.py", expectedSha256 = hash,
+                label = "01 Hauptformen", outputPath = "figur/scene_v001.blend" },
+                JsonSerializer.SerializeToElement(new { success = true, operation = "stage", valid = true, outputPath = "figur/scene_v001.blend",
+                    sceneSha256 = hash, preview = new { state = "ready" } })),
+        ];
+        harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt <= steps.Length
+            ? harness.Handler.ToolResponse("blender-step-" + attempt, steps[attempt - 1].Name, steps[attempt - 1].Arguments)
+            : harness.Handler.CompleteResponse());
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        for (var index = 0; index < steps.Length; index++)
+        {
+            await harness.TickAsync(run);
+            var pending = (await harness.Repository.GetCheckpointAsync(run))!;
+            Assert.Null(pending.SelectedToolName);
+            Assert.NotNull(pending.PendingProposalId);
+            var proposal = await harness.Repository.GetToolProposalAsync(pending.PendingProposalId, run);
+            Assert.Equal(steps[index].Name, proposal!.Name);
+            Assert.Equal(DateTimeOffset.MaxValue, proposal.ExpiresAt);
+            await harness.Repository.SaveClientToolResultAsync(run, new(pending.PendingProposalId, "completed", steps[index].Result));
+        }
+        await harness.TickAsync(run);
+
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+        Assert.Equal(steps.Length + 1, harness.Handler.Requests.Count);
+        Assert.All(harness.Handler.Requests, body =>
+        {
+            Assert.Equal(NativeHandler.ModelId, body.GetProperty("model").GetString());
+            Assert.True(body.GetProperty("parallel_tool_calls").GetBoolean());
+            Assert.Equal("low", body.GetProperty("chat_template_kwargs").GetProperty("reasoning_effort").GetString());
+            var definitions = body.GetProperty("tools").EnumerateArray()
+                .Select(tool => tool.GetProperty("function")).ToArray();
+            var names = definitions.Select(tool => tool.GetProperty("name").GetString()).ToArray();
+            Assert.DoesNotContain(ModelRuntimeClient.ToTransportToolName(AgentToolCatalog.SelectorToolName), names);
+            Assert.Equal(available.Count, names.Length);
+            foreach (var name in BlenderSupportingTools)
+                Assert.Contains(ModelRuntimeClient.ToTransportToolName(name), names);
+            var search = Assert.Single(definitions, tool => tool.GetProperty("name").GetString() == ModelRuntimeClient.ToTransportToolName("web.search"));
+            Assert.Contains(search.GetProperty("parameters").GetProperty("properties").GetProperty("profile").GetProperty("enum").EnumerateArray(),
+                profile => profile.GetString() == "images");
+            var messages = string.Join("\n", body.GetProperty("messages").EnumerateArray()
+                .Select(message => message.GetProperty("content").GetString()));
+            Assert.Contains(uploadId, messages, StringComparison.Ordinal);
+            Assert.Contains("figur-reference.png", messages, StringComparison.Ordinal);
+            Assert.Contains(documentId, messages, StringComparison.Ordinal);
+            Assert.Contains("Zwei lange Ohren und ein gezackter Schwanz.", messages, StringComparison.Ordinal);
+            Assert.Contains(BlenderAuthoringGuide.WorkflowPrompt, messages, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task CodingBlenderDoesNotExpandExplicitlyRestrictedServerPermissions()
+    {
+        using var harness = new Harness();
+        var request = Request("Prüfe die Blender-Datei ohne Websuche.") with
+        {
+            ClientCapabilities = BlenderCapabilities, AllowedServerTools = ["media.analyze"],
+        };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        await harness.TickAsync(run);
+        var body = Assert.Single(harness.Handler.Requests);
+        var names = body.GetProperty("tools").EnumerateArray()
+            .Select(tool => tool.GetProperty("function").GetProperty("name").GetString()).ToArray();
+        Assert.Contains(ModelRuntimeClient.ToTransportToolName(WorkspaceTools.Blender), names);
+        Assert.Contains(ModelRuntimeClient.ToTransportToolName("media.analyze"), names);
+        Assert.Contains(ModelRuntimeClient.ToTransportToolName("coding.read"), names);
+        Assert.DoesNotContain(ModelRuntimeClient.ToTransportToolName("web.search"), names);
+        Assert.DoesNotContain(ModelRuntimeClient.ToTransportToolName("web.fetch"), names);
+        Assert.DoesNotContain(ModelRuntimeClient.ToTransportToolName("image.generate"), names);
+        Assert.DoesNotContain(ModelRuntimeClient.ToTransportToolName(AgentToolCatalog.SelectorToolName), names);
+    }
+
     private static void AssertGermanReasoningInstruction(JsonElement request)
     {
         var systemText = string.Join("\n", request.GetProperty("messages").EnumerateArray()
@@ -603,6 +824,48 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.DoesNotContain("erforderliche Operation", message, StringComparison.Ordinal);
         Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunCompleted || item.Type == RunEventTypes.ClientToolProposed);
         Assert.Equal(3, (await harness.Repository.GetCheckpointAsync(run))!.EmptyResponseRetryCount);
+    }
+
+    [Fact]
+    public async Task ReasoningLoopFailureIsNotRetriedAndPreservesInterruptedContext()
+    {
+        using var harness = new Harness();
+        var run = await harness.CreateAsync();
+        var reasoning = string.Concat(Enumerable.Repeat(ReasoningLoopGuardTests.NightPassage, 100));
+        harness.Handler.CompletionOverride = (_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("data: " + JsonSerializer.Serialize(new
+            {
+                choices = new[] { new { delta = new { reasoning_content = reasoning } } },
+            }) + "\n\n", Encoding.UTF8, "text/event-stream"),
+        });
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var subscription = harness.Notifier.Subscribe(run);
+        await harness.Processor.StartAsync(deadline.Token);
+        try
+        {
+            while (!(await harness.Repository.GetEventsAfterAsync(run, 0, deadline.Token))
+                .Any(item => item.Type == RunEventTypes.RunFailed))
+                await subscription.Reader.ReadAsync(deadline.Token);
+        }
+        finally { await harness.Processor.StopAsync(CancellationToken.None); }
+
+        Assert.Single(harness.Handler.Requests);
+        var snapshot = (await harness.Repository.GetAsync(run))!;
+        Assert.Equal(RunState.Failed, snapshot.State);
+        Assert.Equal("provider.reasoning_loop", snapshot.ErrorCode);
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        var failure = Assert.Single(events, item => item.Type == RunEventTypes.RunFailed);
+        Assert.False(failure.Data.GetProperty("retryable").GetBoolean());
+        var interruption = Assert.Single(events, item => item.Type == RunProcessor.InterruptedTurnEventType);
+        Assert.Contains("Bericht erstellen", interruption.Data.GetProperty("reasoningContent").GetString());
+        var diagnostics = Assert.Single(events, item => item.Type == "reasoning.guard_stopped");
+        Assert.Equal("reasoning_repetition", diagnostics.Data.GetProperty("failureKind").GetString());
+        Assert.InRange(diagnostics.Data.GetProperty("reasoningTail").GetString()!.Length, 1, 16_384);
+        Assert.Contains(events, item => item.Type == RunEventTypes.ReasoningDelta
+            && item.Data.TryGetProperty("state", out var state) && state.GetString() == "failed");
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunCompleted || item.Type == RunEventTypes.ClientToolProposed);
+        Assert.NotNull((await harness.Repository.GetCheckpointAsync(run))!.StreamingTurnStartEventId);
     }
 
     [Fact]
@@ -963,6 +1226,13 @@ public sealed class CodingWorkingStateIntegrationTests
         internal bool EmitReasoning { get; set; }
         internal const string EmptyTurnReasoning = "REASONING_ONLY_NOT_AN_EXECUTABLE_CALL: Die gespeicherte Änderung als Nächstes prüfen.";
         internal HttpResponseMessage CompleteResponse() => Answer("Verified result.");
+        internal HttpResponseMessage ToolResponse(string id, string name, object arguments) => Answer(null, new
+        {
+            id, type = "function", function = new
+            {
+                name = ModelRuntimeClient.ToTransportToolName(name), arguments = JsonSerializer.Serialize(arguments),
+            },
+        });
         internal HttpResponseMessage AnnouncementResponse() => Answer("Ich erstelle zunächst einen strukturierten Arbeitsplan für diese mehrstufige Aufgabe, um die verschiedenen Teilschritte nachvollziehbar zu halten.");
         internal HttpResponseMessage ReadResponse(string id) => Answer(null, new
         {

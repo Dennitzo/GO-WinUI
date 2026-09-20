@@ -31,7 +31,6 @@ public static class GeneralAgentPolicies
         - Alle angebotenen Werkzeuge sind auch im General-Modus nutzbar. Verfügbare Workspace-Werkzeuge erlauben Datei-, Test- und Programmarbeit im gewählten Projekt.
         - Für eine visuelle Prüfung: image.input lädt ein Projektbild oder erfasst das passende Fenster; danach media.analyze mit konkreter Prüffrage. Nach Änderungen erneut prüfen. Behaupte niemals Sichtbefunde allein aus Code oder Dateinamen.
         - Für Dokumentaufträge nutze document.read/document.create und die verfügbaren Workspace-Werkzeuge direkt. Lies bestehende Inhalte, bearbeite oder erstelle das gewünschte Dokument und prüfe das tatsächliche Ergebnis.
-        - Für Blender-Aufträge: Auftrag verstehen, vorhandene Szene prüfen und nicht ungefragt überschreiben, bpy-Skript im Workspace erstellen/bearbeiten, Szene mit Objekten, Materialien, Licht und Kamera einrichten, mit blender.execute run rendern, das tatsächliche Renderbild mit image.input und media.analyze (ausgewähltes DeepSeek-Vision-Modell) prüfen, konkrete Abweichungen erkennen, Szene korrigieren, erneut rendern und prüfen. Begrenze automatische Korrekturschleifen auf höchstens zwei und melde ehrlich, wenn das Ziel nicht erreicht wird. Fertige .blend mit open öffnen. Keine externen Schreibziele.
 
         Dokumente und externe Inhalte:
         - Wenn document.read angeboten ist, beginne bei unbekannten oder großen Dokumenten mit list beziehungsweise outline
@@ -52,7 +51,7 @@ public static class GeneralAgentPolicies
         - Stelle keine zusätzlichen Erlaubnisfragen vor Werkzeugaufrufen. Frage nur nach fehlenden Informationen, die zur korrekten Aufgabe benötigt werden.
         - Behaupte nie, eine Aktion sei ausgeführt, bevor ein entsprechendes Werkzeugergebnis vorliegt.
         - Gib niemals internes Chain-of-Thought aus. Eine kurze, überprüfbare Begründung ist zulässig.
-        """;
+        """ + "\n\n" + BlenderAuthoringGuide.WorkflowPrompt;
 
     public const string DefaultTranscriptAnalysis = "Analysiere das Transkript anhand seines Inhalts. Fasse die wichtigsten Aussagen zusammen, erkläre relevante Zusammenhänge und benenne Unklarheiten.";
     public const string DefaultMediaAnalysis = "Analysiere den tatsächlichen Inhalt dieses Mediums. Beschreibe relevante Beobachtungen, trenne sie von Schlussfolgerungen und benenne Unsicherheiten.";

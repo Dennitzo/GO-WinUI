@@ -25,7 +25,7 @@ public sealed partial class GoAiAssistantService
     private async Task StartFileChangesAsync(GoAiRunRecord run, ChatMessage message, bool resume,
         Func<GoAiAssistantUpdate, Task> update, CancellationToken cancellationToken)
     {
-        if (run.Action != PromptTriggerAction.Coding || run.WorkspacePath is not { } workspace) return;
+        if (!UsesCodingAgent(run.Action) || run.WorkspacePath is not { } workspace) return;
         var directory = CodingChangesMonitor.StorageDirectory(settings.DataDirectory, run.SessionId, run.AssistantMessageId);
         var monitor = new CodingChangesMonitor(workspace, directory, run.SessionId, run.AssistantMessageId, run.Id,
             summary => update(new(GoAiAssistantUpdateKind.FileChangesChanged, message, ChangesSummary: summary)),

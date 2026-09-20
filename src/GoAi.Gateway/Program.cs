@@ -15,6 +15,7 @@ var options = new GoAiServerOptions
     CodingModelId = Environment.GetEnvironmentVariable("GO_AI_CODING_MODEL_ID") ?? string.Empty,
     CodingMaximumModelRounds = ReadCodingBudget("GO_AI_CODING_MAXIMUM_MODEL_ROUNDS", 0, 2),
     CodingMaximumToolCalls = ReadCodingBudget("GO_AI_CODING_MAXIMUM_TOOL_CALLS", 0, 1),
+    ReasoningOnlyTimeoutMinutes = ReadReasoningOnlyTimeout(),
     SearxngUri = ResolveUri("GO_AI_SEARXNG_URL", "http://searxng:8080"),
     SpeechWorkerUri = ResolveUri("GO_AI_SPEECH_WORKER_URL", "http://speech:8080"),
     MediaWorkerUri = ResolveUri("GO_AI_MEDIA_WORKER_URL", "http://media:8080"),
@@ -44,6 +45,7 @@ var builder = Host.CreateDefaultBuilder(args)
         destination.CodingModelId = options.CodingModelId;
         destination.CodingMaximumModelRounds = options.CodingMaximumModelRounds;
         destination.CodingMaximumToolCalls = options.CodingMaximumToolCalls;
+        destination.ReasoningOnlyTimeoutMinutes = options.ReasoningOnlyTimeoutMinutes;
         destination.SearxngUri = options.SearxngUri;
         destination.SpeechWorkerUri = options.SpeechWorkerUri;
         destination.MediaWorkerUri = options.MediaWorkerUri;
@@ -78,6 +80,16 @@ static int ReadCodingBudget(string variable, int fallback, int minimum)
     return int.TryParse(configured, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value)
         && (value == 0 || value >= minimum) ? value
         : throw new InvalidOperationException($"{variable} must be 0 (unlimited) or an integer of at least {minimum}.");
+}
+
+static int ReadReasoningOnlyTimeout()
+{
+    const string variable = "GO_AI_REASONING_ONLY_TIMEOUT_MINUTES";
+    var configured = Environment.GetEnvironmentVariable(variable);
+    if (string.IsNullOrWhiteSpace(configured)) return 30;
+    return int.TryParse(configured, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value)
+        && value is >= 1 and <= 1440 ? value
+        : throw new InvalidOperationException($"{variable} must be an integer between 1 and 1440 minutes.");
 }
 
 static Uri ResolveUri(string variableName, string fallback)

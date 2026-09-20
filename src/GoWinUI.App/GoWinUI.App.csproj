@@ -85,6 +85,10 @@
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
+    <EmbeddedResource Include="Assets\Blender\*.py" />
+    <EmbeddedResource Include="Assets\Blender\MODELING_GUIDE.md" />
+    <Content Remove="Assets\Blender\**\*.pyc" />
+    <None Remove="Assets\Blender\**\*.pyc" />
   </ItemGroup>
 
   <ItemGroup>

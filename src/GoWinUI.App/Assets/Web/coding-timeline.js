@@ -142,6 +142,16 @@
   function describe(tool, input) {
     const target = input?.path || input?.workingDirectory || ".";
     const query = input?.query;
+    if (tool === "blender.execute") return ({
+      info: `Blender und den aktuellen Dateistand von ${target} prüfen.`,
+      scaffold: `Ein editierbares 3D-Projekt mit Entwurfsnotizen in ${target} vorbereiten.`,
+      run: `Die Modelländerungen aus ${target} in Blender ausführen.`,
+      stage: `Die Etappe „${input?.label || target}“ ausführen, als neue Szene speichern und in Blender darstellen.`,
+      preview: `Den Zwischenstand ${target} im Blender-Fenster anzeigen.`,
+      inspect: `Geometrie, Baugruppen und Materialien von ${target} untersuchen.`,
+      render: `Mehrere Ansichten von ${target} für die anschließende Bildanalyse rendern.`,
+      open: `Die fertige Szene ${target} in Blender öffnen.`
+    })[input?.operation] || "Die Blender-Szene bearbeiten und prüfen.";
     return ({
       "coding.list": `Dateien in ${target} erfassen.`,
       "coding.read": `Den aktuellen Inhalt von ${target} lesen.`,
@@ -256,6 +266,25 @@
       }
       return body;
     }
+    if (step.tool === "blender.execute") {
+      if (input) body.append(fields({ Etappe: input.label, Szene: input.path, Ausgangsszene: input.baseScene, Zwischenstand: input.outputPath, Ansichten: input.views,
+        Auflösung: input.resolution, Ausgabeordner: input.outputDirectory }));
+      if (output) {
+        const process = output.execution || output;
+        const preview = output.preview || (output.operation === "preview" ? output : null);
+        if (process.stdout || process.stderr || process.exitCode != null) body.append(processOutput(process, running));
+        body.append(fields({ Prüfbericht: output.reportPath, Objekte: output.counts,
+          Zwischenstand: output.outputPath, Vorschau: preview ? ({ ready: "Im Blender-Fenster angezeigt", blocked: "Eigene Änderungen in Blender bleiben erhalten", pending: "Blender lädt noch", error: "Vorschau nicht verfügbar" })[preview.state] || preview.state : null,
+          Vorschauhinweis: preview?.message,
+          Geometrieprüfung: typeof output.valid === "boolean" ? output.valid ? "Keine strukturellen Fehler erkannt" : "Befunde prüfen" : null,
+          Befunde: output.issues, Renderbilder: output.images?.map(image => image.path),
+          Projekt: output.projectPath, Entwurfsnotizen: output.designPath,
+          Verfügbar: output.available, Anwendung: output.executable, Datei: output.file?.path,
+          Dateiprüfsumme: output.file?.sha256, Dateigröße: output.file?.bytes,
+          Hinweis: output.error || output.message || output.errorCode }));
+      } else body.append(node("p", "coding-note", input?.operation === "render" ? "Blender rendert die Prüfansichten …" : "Blender wird vorbereitet …"));
+      return body;
+    }
     if (step.tool === "coding.command") {
       if (input) {
         const quote = value => /[\s"']/.test(String(value)) ? `'${String(value).replace(/'/g, "''")}'` : String(value);
@@ -342,6 +371,18 @@
         stdout ? `stdout: ${shorten(stdout, lineLimit)}` : "",
         stderr ? `stderr: ${shorten(stderr, lineLimit)}` : "",
         !stdout && !stderr ? output?.error || output?.errorCode || "" : ""].filter(Boolean).join(" · ");
+    } else if (step.tool === "blender.execute") {
+      target = input?.label || input?.outputPath || target;
+      const process = output?.execution || output;
+      const preview = output?.preview || (output?.operation === "preview" ? output : null);
+      const stdout = lastLine(process?.stdout), stderr = lastLine(process?.stderr);
+      progress = [output?.error || output?.message || output?.errorCode || "",
+        preview?.state === "ready" ? "In Blender angezeigt" : preview?.state === "blocked" ? "Vorschau schützt eigene Änderungen" : preview?.state === "error" ? "Vorschau fehlgeschlagen" : "",
+        Array.isArray(output?.images) && output.images.length ? `${output.images.length} Ansichten gerendert` : "",
+        Number.isFinite(output?.issueCount) && output.issueCount ? `${output.issueCount} Befunde` : "",
+        process?.timedOut ? "Zeitlimit erreicht" : "",
+        stdout ? shorten(stdout, stderr ? 70 : 110) : "",
+        stderr ? `stderr: ${shorten(stderr, stdout ? 40 : 100)}` : ""].filter(Boolean).join(" · ");
     } else if (output?.error || output?.errorCode) {
       progress = output.error || output.errorCode;
     } else if (Array.isArray(output?.entries)) {

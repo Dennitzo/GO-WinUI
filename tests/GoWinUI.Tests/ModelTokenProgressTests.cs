@@ -6,6 +6,19 @@ namespace GoWinUI.Tests;
 public sealed class ModelTokenProgressTests
 {
     [Fact]
+    public void RejectedToolArgumentsShowTheirCauseInsteadOfPreparedOrTokenProgress()
+    {
+        var counter = new GoAiAssistantService.ModelTokenProgressState();
+        var detail = GoAiAssistantService.FormatModelTokenProgress(new("toolRejected",
+            ToolName: "coding.write", FailureKind: "agent.invalid_tool_call",
+            Message: "content exceeds its maximum length"), counter);
+        Assert.Contains("coding.write abgewiesen", detail);
+        Assert.Contains("content exceeds its maximum length", detail);
+        Assert.Contains("Keine Ausführung", detail);
+        Assert.DoesNotContain("vorbereitet", detail);
+    }
+
+    [Fact]
     public void NativeProgressShowsCombinedTotalAndRetainsInternalCacheCounters()
     {
         var counter = new GoAiAssistantService.ModelTokenProgressState();

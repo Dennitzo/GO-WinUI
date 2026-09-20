@@ -10,6 +10,7 @@ namespace GoWinUI.Core.Coding;
 public sealed class LocalCodingToolExecutor
 {
     public const int MaximumOutputCharacters = 12_000;
+    public const int MaximumWriteContentCharacters = 64_000;
     private const int MaximumFileBytes = 2 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private static readonly HashSet<string> IgnoredDirectories = new(StringComparer.OrdinalIgnoreCase)
@@ -176,7 +177,7 @@ public sealed class LocalCodingToolExecutor
             throw new InvalidOperationException("Die Datei wurde verändert oder expectedSha256 fehlt. Lies die aktuelle Datei vor der Änderung erneut.");
         if (!exists && (edit || expected is not null))
             throw new FileNotFoundException("Die erwartete vorhandene Datei existiert nicht.", path);
-        var text = edit ? ApplyEdits(Decode(original!), args) : RequiredString(args, "content", 0, 16_000);
+        var text = edit ? ApplyEdits(Decode(original!), args) : RequiredString(args, "content", 0, MaximumWriteContentCharacters);
         var bytes = Encode(text, original);
         if (bytes.Length > MaximumFileBytes) throw new InvalidDataException("Die Änderung überschreitet das Dateigrößenlimit.");
         var relative = Relative(path);

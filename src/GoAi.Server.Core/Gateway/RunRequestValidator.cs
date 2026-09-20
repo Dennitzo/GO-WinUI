@@ -242,10 +242,15 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("maximumContextTokens must be at least 2048; the model catalog bounds the effective limit.");
         }
+        var supportsUnlimitedDuration = request.Mode == RunMode.Coding
+            || request.Mode == RunMode.General
+                && request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
+                && request.ClientCapabilities?.Contains("blender", StringComparer.OrdinalIgnoreCase) == true;
         if (request.Limits?.TimeoutSeconds is { } timeoutSeconds
-            && (request.Mode == RunMode.Coding ? timeoutSeconds != 0 && timeoutSeconds < 30 : timeoutSeconds is < 30 or > 14_400))
+            && (timeoutSeconds == 0 ? !supportsUnlimitedDuration
+                : timeoutSeconds < 30 || request.Mode != RunMode.Coding && timeoutSeconds > 14_400))
         {
-            throw new ArgumentException("timeoutSeconds must be 0 (unlimited Coding) or at least 30; non-Coding runs support 30 through 14400 seconds.");
+            throw new ArgumentException("timeoutSeconds must be 0 for Coding or General with Blender/workspace capabilities, or at least 30; finite non-Coding limits support up to 14400 seconds.");
         }
     }
 

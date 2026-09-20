@@ -16,8 +16,12 @@ Schemas werden anschließend gezielt bereitgestellt.
   daraus folgt keine Zusage für jedes proprietäre Dateiformat.
 - **Blender** nutzt die installierte Blender-Anwendung. `info` prüft die
   Installation; `run` führt ein zuvor geschriebenes und per SHA-256 bestätigtes
-  Python-Skript aus; `open` öffnet die `.blend`-Datei sichtbar. Szenen und Render
-  gehören in den ausgewählten Workspace.
+  Python-Skript aus; `open` öffnet die `.blend`-Datei sichtbar. `scaffold` legt einen
+  Projektbaukasten mit Designbrief an. `inspect` untersucht echte Szenengeometrie;
+  `render` erstellt mehrere Ansichten für anschließende Vision-Prüfungen.
+  Szenen und Render gehören in den ausgewählten Workspace. Den vollständigen
+  Vertrag und die komplexe Mehrturn-Abnahme beschreibt
+  [BLENDER-COMPLEX-WORKFLOW.md](BLENDER-COMPLEX-WORKFLOW.md).
 - **Bild analysieren** kombiniert `image.input` (lokales Bild oder Aufnahme eines
   ausdrücklich zur Aufgabe gehörenden Fensters) mit `media.analyze`. Das Hochladen
   allein gilt nicht als Bildanalyse. `workspace.open` startet erzeugte HTML/PDF-

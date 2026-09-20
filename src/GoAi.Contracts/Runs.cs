@@ -190,7 +190,8 @@ public sealed record ModelGenerationEvent(
     int? ContentCharacters = null,
     bool? FinishObserved = null,
     int? ElapsedSeconds = null,
-    int? CachedPromptTokens = null);
+    int? CachedPromptTokens = null,
+    string? Message = null);
 
 /// <summary>Measured values only; unavailable provider counters remain null.</summary>
 public sealed record ModelTurnMetrics(

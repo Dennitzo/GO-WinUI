@@ -1,5 +1,11 @@
 # Blender-Modul: Übergabe an die lokale AI
 
+> Weiterentwicklung vom 20.09.2026: Der aktuelle Vertrag mit Projektbaukasten,
+> gespeicherten Designentscheidungen, Szenendiagnose, mehreren Renderansichten
+> und der komplexen Mehrturn-Abnahme steht in
+> [BLENDER-COMPLEX-WORKFLOW.md](BLENDER-COMPLEX-WORKFLOW.md).
+> Die folgenden Ergebnisse beschreiben den früheren Stand vom 19.09.2026.
+
 Stand: 19.09.2026. Repository/Workspace: `C:\Users\AMD\Documents\GitHub\GO-WinUI`.
 Die Implementierung ist vorhanden und der General-Blender-Modelltest ist bestanden.
 Weitere Modelltests wurden auf Nutzerwunsch beendet bzw. nicht mehr gestartet.

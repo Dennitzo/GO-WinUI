@@ -1,6 +1,4 @@
 using System.Diagnostics;
-using System.Security.Cryptography;
-using System.Text.Json;
 using GoAi.Contracts;
 using GoWinUI.Core.Coding;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -78,43 +76,10 @@ public sealed class WorkspaceToolService(GoAiConnectionService connection)
             finally { if (temporary) File.Delete(path); }
         }
 
-        var executable = FindBlender();
-        if (operation == "info") return new { available = executable is not null, executable,
-            instruction = "Blender Python/bpy. Skript mit coding.write/edit im Workspace erstellen, mit coding.read den SHA-256 ermitteln, dann run. .blend und Renderbilder ebenfalls im Workspace speichern. Vollständiger Rückkopplungsablauf: Auftrag verstehen, Szene mit Objekten, Materialien, Licht und Kamera erstellen, rendern, das tatsächliche Renderbild mit image.input + media.analyze (ausgewähltes DeepSeek-Vision-Modell) prüfen, Abweichungen erkennen, korrigieren, erneut rendern und prüfen. Begrenze Korrekturschleifen auf höchstens zwei. Vorhandene Projekte nicht ungefragt überschreiben. Erfolgreiche Skriptausführung allein ist keine visuelle Prüfung. open startet die fertige .blend in Blender." };
-        if (executable is null) throw new FileNotFoundException("Blender wurde nicht gefunden. Installiere Blender oder setze GO_BLENDER_EXECUTABLE.");
-        var relative = args.GetProperty("path").GetString()!;
-        var fullPath = WorkspaceFilePath.Resolve(workspace ?? "", relative);
-        if (!File.Exists(fullPath)) throw new FileNotFoundException("Blender-Eingabedatei fehlt.", fullPath);
-        if (operation == "open")
-        {
-            if (!Path.GetExtension(fullPath).Equals(".blend", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("open benötigt eine .blend-Datei.");
-            // A visible long-lived app must not inherit the broker/test host's
-            // redirected output pipes, otherwise the finished caller cannot exit.
-            var start = new ProcessStartInfo(executable) { WorkingDirectory = workspace!, UseShellExecute = true };
-            start.ArgumentList.Add("--disable-autoexec"); start.ArgumentList.Add(fullPath);
-            using var process = Process.Start(start) ?? throw new IOException("Blender konnte nicht gestartet werden.");
-            return new { opened = true, path = relative, processId = process.Id };
-        }
-        if (!Path.GetExtension(fullPath).Equals(".py", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("run benötigt ein Python-Skript.");
-        var hash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(fullPath, token).ConfigureAwait(false)));
-        if (!hash.Equals(args.GetProperty("expectedSha256").GetString(), StringComparison.OrdinalIgnoreCase))
-            throw new IOException("Blender-Skript wurde seit dem Lesen verändert.");
-        var command = JsonSerializer.SerializeToElement(new { executable,
-            arguments = new[] { "--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1", "--python", relative },
-            timeoutSeconds = args.TryGetProperty("timeoutSeconds", out var duration) ? duration.GetInt32() : 300 });
-        return await new LocalCodingToolExecutor(workspace!, progress).ExecuteAsync("coding.command", command, token).ConfigureAwait(false);
+        return await new BlenderToolService().ExecuteAsync(args, workspace, progress, token).ConfigureAwait(false);
     }
 
-    public static string? FindBlender()
-    {
-        if (Environment.GetEnvironmentVariable("GO_BLENDER_EXECUTABLE") is { Length: > 0 } configured && File.Exists(configured))
-            return Path.GetFullPath(configured);
-        var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Blender Foundation");
-        return Directory.Exists(directory) ? Directory.EnumerateDirectories(directory).OrderByDescending(p => p, StringComparer.OrdinalIgnoreCase)
-            .Select(p => Path.Combine(p, "blender.exe")).FirstOrDefault(File.Exists) : null;
-    }
-
+    public static string? FindBlender() => BlenderToolService.FindBlender();
     private static string? FindBrowser()
     {
         foreach (var directory in new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),

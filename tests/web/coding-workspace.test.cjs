@@ -332,6 +332,22 @@ test("empty General chat greets without an industry focus and Coding keeps its p
   assert.equal(elements.messageList.textContent, "Wobei kann ich dich unterstützen?");
 });
 
+test("Blender capability uses the Coding workspace and timeline before its backend mode transition", () => {
+  const { context, state, elements } = harness();
+  state.selectedToolAction = "blender";
+  context.renderCodingWorkspace();
+  assert.equal(elements.appShell.classList.contains("coding-mode"), true);
+  assert.match(elements.prompt.placeholder, /Frage zum Projekt/);
+  context.renderMessages(false);
+  assert.match(elements.messageList.textContent, /Woran arbeiten wir/);
+  state.messages = [message({ status: "streaming", content: "Ich prüfe zuerst die Szene." })];
+  state.messageRunStatus.set("answer-1", { status: "Szene prüfen" });
+  context.renderMessages(false);
+  assert.ok(elements.messageList.querySelector(".coding-timeline"));
+  assert.match(elements.messageList.querySelector(".message-meta").textContent, /Coding Agent/);
+  assert.equal(state.selectedToolAction, "blender", "rendering must not rewrite the outgoing tool capability");
+});
+
 test("stored HTML creates an isolated frame only after a click and survives message rerenders", () => {
   const { context, state } = harness({ codingToolStepsExpanded: true });
   const html = "<script>parent.goBridge.post('session.clear', {});</script><button onclick=\"this.textContent='OK'\">Test</button>";

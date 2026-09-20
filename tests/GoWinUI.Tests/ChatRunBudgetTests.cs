@@ -21,6 +21,25 @@ public sealed class ChatRunBudgetTests
     }
 
     [Theory]
+    [InlineData(PromptTriggerAction.Blender, true, true, 0)]
+    [InlineData(PromptTriggerAction.Blender, false, true, 3600)]
+    [InlineData(PromptTriggerAction.Blender, true, false, 3600)]
+    [InlineData(PromptTriggerAction.WebSearch, true, true, 3600)]
+    [InlineData(null, true, true, 3600)]
+    public void OnlyExplicitBlenderWorkspaceActionRemovesGeneralWallClockDeadline(
+        PromptTriggerAction? action, bool workspace, bool blender, int expectedTimeout)
+    {
+        var capabilities = new List<string>();
+        if (workspace) capabilities.Add("workspace");
+        if (blender) capabilities.Add("blender");
+        var limits = GoAiAssistantService.CreateGeneralChatRunLimits(131_072, action, capabilities);
+        Assert.Equal(expectedTimeout, limits.TimeoutSeconds);
+        Assert.Equal(131_072, limits.MaximumContextTokens);
+        Assert.Null(limits.MaximumOutputTokens);
+        Assert.Equal(limits, JsonSerializer.SerializeToElement(limits, ProtocolJson).Deserialize<RunLimits>(ProtocolJson));
+    }
+
+    [Theory]
     [InlineData(32_768)]
     [InlineData(49_152)]
     [InlineData(131_072)]

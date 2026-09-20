@@ -850,7 +850,7 @@ public sealed class AssistantCoordinator(
             cancellationToken).ConfigureAwait(false);
         if (envelope.Payload.TryGetProperty("deepResearch", out var deepResearch) && deepResearch.ValueKind == JsonValueKind.True)
         {
-            if (match is not null && match.Trigger.Action is not (PromptTriggerAction.Coding or PromptTriggerAction.WebSearch))
+            if (match is not null && match.Trigger.Action is not (PromptTriggerAction.Coding or PromptTriggerAction.Blender or PromptTriggerAction.WebSearch))
                 throw new ArgumentException("Deep Research ist mit General oder Coding nutzbar. Wähle andere einmalige Tools zuerst ab.");
             match = (match ?? CreateToolMatch("webSearch", prompt)) with { DeepResearch = true };
         }
@@ -1044,7 +1044,7 @@ public sealed class AssistantCoordinator(
     {
         PromptTriggerAction.BricsCad => PersistentToolAction.BricsCad,
         PromptTriggerAction.Audiobook => PersistentToolAction.Audiobook,
-        PromptTriggerAction.Coding => PersistentToolAction.Coding,
+        PromptTriggerAction.Coding or PromptTriggerAction.Blender => PersistentToolAction.Coding,
         _ => null,
     };
 

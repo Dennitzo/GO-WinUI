@@ -157,7 +157,7 @@ public sealed partial class RunProcessor : BackgroundService
 
             if (request.Workload?.Kind == RunWorkloadKind.MediaAnalysis)
             {
-                await ProcessMediaAnalysisAsync(runId, request.Workload, request.PreferredGeneralModelId, runCancellationToken).ConfigureAwait(false);
+                await ProcessMediaAnalysisAsync(runId, request.Workload, request.PreferredGeneralModelId, request.ReasoningEffort, runCancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -195,6 +195,30 @@ public sealed partial class RunProcessor : BackgroundService
         return remaining > TimeSpan.FromSeconds(timeoutSeconds) ? TimeSpan.FromSeconds(timeoutSeconds) : remaining;
     }
 
+    internal static int ResolveMaximumToolCalls(RunRequest request, GoAiServerOptions options,
+        IReadOnlyList<AgentToolSpec> effectiveTools)
+    {
+        if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ToolCalls;
+        return UsesBlenderGeneralBudget(request, effectiveTools)
+            ? Math.Max(options.MaximumToolCalls, options.BlenderMaximumToolCalls)
+            : options.MaximumToolCalls;
+    }
+
+    internal static int ResolveMaximumModelRounds(RunRequest request, GoAiServerOptions options,
+        IReadOnlyList<AgentToolSpec> effectiveTools)
+    {
+        if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ModelRounds;
+        var generalRounds = request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
+            ? options.WorkspaceMaximumModelRounds : options.MaximumModelRounds;
+        return UsesBlenderGeneralBudget(request, effectiveTools)
+            ? Math.Max(generalRounds, options.BlenderMaximumModelRounds) : generalRounds;
+    }
+
+    private static bool UsesBlenderGeneralBudget(RunRequest request, IReadOnlyList<AgentToolSpec> effectiveTools) =>
+        request.Mode == RunMode.General
+        && request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
+        && effectiveTools.Any(static tool => tool.Name == WorkspaceTools.Blender);
+
     private async Task ProcessConversationAsync(
         string runId,
         RunRequest request,
@@ -211,10 +235,9 @@ public sealed partial class RunProcessor : BackgroundService
             request.Limits?.MaximumContextTokens ?? selection.ContextLength);
         var maximumOutputTokens = request.Limits?.MaximumOutputTokens;
         var codingBudget = CodingRunBudget.FromOptions(_options);
-        var maximumModelRounds = isCoding ? codingBudget.ModelRounds
-            : request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true ? _options.WorkspaceMaximumModelRounds : _options.MaximumModelRounds;
-        var maximumToolCalls = isCoding ? codingBudget.ToolCalls : _options.MaximumToolCalls;
         var effectiveTools = _toolCatalog.GetAvailableTools(request);
+        var maximumModelRounds = ResolveMaximumModelRounds(request, _options, effectiveTools);
+        var maximumToolCalls = ResolveMaximumToolCalls(request, _options, effectiveTools);
         var stagedWebResearchRequested = !isCoding && StagedWebResearchPipeline.IsRequested(request, effectiveTools);
         var availableTools = stagedWebResearchRequested
             ? StagedWebResearchPipeline.RemoveFromMainAgentTools(effectiveTools)
@@ -433,7 +456,8 @@ public sealed partial class RunProcessor : BackgroundService
                     {
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
-                        if (isCoding && string.IsNullOrWhiteSpace(pendingProposalId))
+                        if ((isCoding || call.Name == WorkspaceTools.Blender && UsesBlenderGeneralBudget(request, effectiveTools))
+                            && string.IsNullOrWhiteSpace(pendingProposalId))
                             CodingLoopGuard.ThrowIfRepeatedFailure(messages, call, workingState);
                         tool = _toolCatalog.Resolve(call.Name, availableTools);
                         _toolCatalog.Validate(tool, call.Arguments);
@@ -443,10 +467,15 @@ public sealed partial class RunProcessor : BackgroundService
                     }
                     catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException or AgentRunLimitException)
                     {
+                        var rejectionCode = exception is AgentRunLimitException ? "agent.repeated_tool_failure" : "agent.invalid_tool_call";
+                        await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                            new ModelGenerationEvent("toolRejected", ToolName: call.Name,
+                                FailureKind: rejectionCode, Message: exception.Message), cancellationToken).ConfigureAwait(false);
+                        _runtime.WriteLog("Warning", rejectionCode, $"Werkzeug {call.Name} in Lauf {runId} abgelehnt: {exception.Message}");
                         var invalidReceipt = JsonSerializer.Serialize(new
                         {
                             status = "failed",
-                            errorCode = exception is AgentRunLimitException ? "agent.repeated_tool_failure" : "agent.invalid_tool_call",
+                            errorCode = rejectionCode,
                             message = exception.Message,
                         }, GoAiProtocol.CreateJsonOptions());
                         messages.Add(new LmChatMessage("tool", invalidReceipt, ToolCallId: call.Id));
@@ -477,7 +506,8 @@ public sealed partial class RunProcessor : BackgroundService
                         }
                         messages.Add(new LmChatMessage(
                             "tool",
-                            isCoding ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult), call.Name) : SerializeClientToolResult(clientResult),
+                            isCoding || call.Name == WorkspaceTools.Blender
+                                ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult), call.Name) : SerializeClientToolResult(clientResult),
                             ToolCallId: call.Id));
                         if (workingState is not null)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), SerializeClientToolResult(clientResult));
@@ -531,7 +561,7 @@ public sealed partial class RunProcessor : BackgroundService
                         else
                         {
                             result = await _toolExecutor.ExecuteAsync(tool.Name, call.Arguments, runId,
-                                selection.ModelId, cancellationToken).ConfigureAwait(false);
+                                selection.ModelId, request.ReasoningEffort, cancellationToken).ConfigureAwait(false);
                         }
                         foreach (var artifact in result.Artifacts)
                         {
@@ -565,7 +595,8 @@ public sealed partial class RunProcessor : BackgroundService
                         }
                         messages.Add(new LmChatMessage(
                             "tool",
-                            isCoding ? CodingLoopGuard.BoundToolResult(result.Result.GetRawText(), call.Name) : result.Result.GetRawText(),
+                            isCoding || call.Name == WorkspaceTools.Blender
+                                ? CodingLoopGuard.BoundToolResult(result.Result.GetRawText(), call.Name) : result.Result.GetRawText(),
                             ToolCallId: call.Id));
                         if (workingState is not null && tool.Name != CodingWorkingStateTools.PlanTool)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());
@@ -984,6 +1015,20 @@ public sealed partial class RunProcessor : BackgroundService
                 continue;
             }
 
+            catch (ReasoningLoopDetectedException exception)
+            {
+                if (lastNativePrompt is not null && streamingTurnStartEventId is { } turnStart
+                    && (exactNativeTailRecovered || interruptedContent.Length > 0 || interruptedReasoning.Length > 0))
+                    await _repository.AppendEventAsync(runId, InterruptedTurnEventType,
+                        new { turnStartEventId = turnStart, content = interruptedContent.ToString(),
+                            reasoningContent = interruptedReasoning.ToString(), exactNativeTailRecovered,
+                            failureKind = exception.FailureKind }, CancellationToken.None).ConfigureAwait(false);
+                if (reasoningPublished)
+                    await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
+                        new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue), State: "failed"),
+                        CancellationToken.None).ConfigureAwait(false);
+                throw;
+            }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 // Historical fragments preserve append-only provider context after
@@ -1321,6 +1366,7 @@ public sealed partial class RunProcessor : BackgroundService
         string runId,
         RunWorkload workload,
         string? selectedModelId,
+        string? reasoningEffort,
         CancellationToken cancellationToken)
     {
         var uploadId = workload.UploadId ?? throw new InvalidOperationException("Media upload ID is missing.");
@@ -1342,7 +1388,7 @@ public sealed partial class RunProcessor : BackgroundService
             "media.analyze",
             arguments,
             runId,
-            selectedModelId, cancellationToken).ConfigureAwait(false);
+            selectedModelId, reasoningEffort, cancellationToken).ConfigureAwait(false);
         await _repository.AppendEventAsync(
             runId,
             RunEventTypes.ServerToolCompleted,
@@ -1822,11 +1868,21 @@ public sealed partial class RunProcessor : BackgroundService
 
     private async Task MarkFailedAsync(string runId, Exception exception)
     {
+        if (exception is ReasoningLoopDetectedException guard)
+            await _repository.AppendEventAsync(runId, "reasoning.guard_stopped", new
+            {
+                failureKind = guard.FailureKind, guard.ReasoningCharacters, guard.ReasoningWords,
+                reasoningTail = guard.ReasoningTail, retryable = false,
+            }).ConfigureAwait(false);
         var failedMode = exception is TimeoutException
             ? (await _repository.GetRequestAsync(runId).ConfigureAwait(false))?.Mode ?? RunMode.Auto
             : RunMode.Auto;
         var failure = exception switch
         {
+            ReasoningLoopDetectedException guardFailure => (
+                Code: guardFailure.FailureKind == "reasoning_watchdog" ? "provider.reasoning_watchdog" : "provider.reasoning_loop",
+                Message: guardFailure.Message,
+                Retryable: false),
             CodingReadContextBudgetException context => (Code: "coding.read_context_exceeded", Message: context.Message, Retryable: false),
             DocumentContextBudgetException context => (
                 Code: "document.context_preparation_failed",

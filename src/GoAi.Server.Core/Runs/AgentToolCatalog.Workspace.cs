@@ -21,9 +21,28 @@ public sealed partial class AgentToolCatalog
             {"type":"object","properties":{"operation":{"type":"string","enum":["file","windows","capture"]},"path":{"type":"string"},"windowId":{"type":"string"}},"required":["operation"],"additionalProperties":false}
             """)),
         Client(WorkspaceTools.Blender,
-            "Blender: info prüft die lokale Installation. Erstelle oder bearbeite ein bpy-Python-Skript mit coding.write/edit im gewählten Workspace; run führt dessen durch expectedSha256 bestätigten Stand mit Blender aus. Speichere .blend-Dateien und Renderbilder mit relativen Workspace-Pfaden. Vollständiger Rückkopplungsablauf: Auftrag verstehen, Szene mit Objekten, Materialien, Licht und Kamera erstellen, rendern, das tatsächliche Renderbild mit image.input und media.analyze (ausgewähltes DeepSeek-Vision-Modell) prüfen, konkrete Abweichungen erkennen, Szene korrigieren, erneut rendern und prüfen. Begrenze automatische Korrekturschleifen auf höchstens zwei. Vorhandene Projekte und .blend-Dateien nicht ungefragt überschreiben. Melde verständlich fehlendes Blender, ungültige Skripte, Prozessfehler, Zeitüberschreitungen, Abbruch, fehlende Renderbilder und Fehler der Bildanalyse; erfolgreiche Skriptausführung allein ist keine visuelle Prüfung. open öffnet eine fertige .blend in der Blender-Oberfläche.",
+            BlenderAuthoringGuide.ToolDescription,
             ToolRiskClass.Process, Parse("""
-            {"type":"object","properties":{"operation":{"type":"string","enum":["info","run","open"]},"path":{"type":"string"},"expectedSha256":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600}},"required":["operation"],"additionalProperties":false}
+            {
+              "type":"object",
+              "properties":{
+                "operation":{"type":"string","enum":["info","scaffold","stage","preview","run","inspect","render","open"]},
+                "path":{"type":"string","minLength":1,"maxLength":1024,"description":"Relativer Workspace-Pfad: scaffold neuer Projektordner; stage kleines .py-Etappenskript mit höchstens 12000 Zeichen; run vorhandenes Python-Skript; preview/inspect/render/open vorhandene .blend; info optional .py/.blend für aktuellen SHA-256 und Dateigröße."},
+                "brief":{"type":"string","minLength":1,"maxLength":8000,"description":"Nur scaffold: knapper Designauftrag einschließlich vorhandener harter Anforderungen."},
+                "expectedSha256":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-fA-F]{64}$","description":"Pflicht für stage/preview/run/inspect/render: tatsächlicher aktueller SHA-256 der path-Datei; Skripte aus coding.read, .blend-Dateien aus info path oder unverändertem sourceSha256 eines Reports."},
+                "outputPath":{"type":"string","minLength":1,"maxLength":1024,"description":"Pflicht nur für stage: neuer relativer .blend-Pfad. Der Wrapper speichert und prüft automatisch, vorhandene Revisionen bleiben erhalten."},
+                "label":{"type":"string","minLength":1,"maxLength":200,"description":"Pflicht für stage, optional für preview: verständlicher Etappenname, etwa 01 Hauptformen oder 03 Fahrwerk korrigiert."},
+                "baseScene":{"type":"string","minLength":1,"maxLength":1024,"description":"Nur stage, bei Folgeschritten: bestätigte vorhandene .blend. Nur zusammen mit baseSceneSha256. Der Wrapper lädt sie vor dem kleinen Änderungsskript."},
+                "baseSceneSha256":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-fA-F]{64}$","description":"Nur stage: tatsächlicher aktueller Hash der baseScene, zwingend zusammen mit baseScene. Niemals erfinden."},
+                "outputDirectory":{"type":"string","minLength":1,"maxLength":1024,"description":"Pflicht für inspect/render: neuer relativer Ausgabeordner; vorhandene Ordner werden nicht überschrieben."},
+                "views":{"type":"array","minItems":1,"maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["perspective","front","right","top","back","left"]},"description":"Nur render: gewünschte Ansichten; bei komplexen Objekten perspektivisch plus geeignete orthogonale Ansichten."},
+                "resolution":{"type":"integer","minimum":128,"maximum":2048,"default":768,"description":"Nur render: Kantenlänge der quadratischen Ansichten in Pixeln."},
+                "samples":{"type":"integer","minimum":1,"maximum":128,"default":32,"description":"Nur render: Abtastungen je Ansicht."},
+                "timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600}
+              },
+              "required":["operation"],
+              "additionalProperties":false
+            }
             """)),
     ];
 }

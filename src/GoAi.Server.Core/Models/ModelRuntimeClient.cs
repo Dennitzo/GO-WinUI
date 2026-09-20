@@ -297,20 +297,16 @@ public sealed partial class ModelRuntimeClient : IDisposable
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ModelTurnTimeout);
-            var stallProgress = coding ? new NativeInferenceStallProgress(() => timeout.CancelAfter(ModelTurnTimeout)) : null;
+            var stallProgress = new NativeInferenceStallProgress(() => timeout.CancelAfter(ModelTurnTimeout));
             async ValueTask ReportProgressAsync(ModelRuntimeProgress progress, CancellationToken token)
             {
                 if (progress.PromptTokens is > 0) evaluatedPromptTokens = progress.PromptTokens;
                 if (nativeProgress is not null) await nativeProgress(progress, token).ConfigureAwait(false);
             }
-            Func<ModelRuntimeProgress, CancellationToken, ValueTask> progressWithDeadline = ReportProgressAsync;
-            if (stallProgress is not null)
+            async ValueTask ProgressWithDeadlineAsync(ModelRuntimeProgress progress, CancellationToken token)
             {
-                progressWithDeadline = async (progress, token) =>
-                {
-                    stallProgress.Observe(progress);
-                    await ReportProgressAsync(progress, token).ConfigureAwait(false);
-                };
+                stallProgress.Observe(progress);
+                await ReportProgressAsync(progress, token).ConfigureAwait(false);
             }
             var transportToolNames = tools.ToDictionary(
                 static tool => ToTransportToolName(tool.Name),
@@ -319,7 +315,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             var result = await CompleteStreamingChatWithBoundedRetryAsync(
                 body,
                 transportToolNames,
-                progressWithDeadline,
+                ProgressWithDeadlineAsync,
                 structuredToolOnly,
                 context,
                 maximumOutputTokens,
@@ -354,6 +350,18 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 TotalMilliseconds = turnClock.Elapsed.TotalMilliseconds,
             } };
         }
+        catch (ReasoningLoopDetectedException)
+        {
+            // Dispose/cancel only this inference request. Preserve its native
+            // prefix just as for a deliberate interruption, without replaying it.
+            var exactTail = await SaveInterruptedSessionCacheAsync(preparedInstanceId, sessionCacheKey,
+                modelId.Contains("deepseek-v4", StringComparison.OrdinalIgnoreCase) ? evaluatedPromptTokens : null).ConfigureAwait(false);
+            if (exactTail is not null && nativeProgress is not null)
+                await nativeProgress(new ModelRuntimeProgress("interruptedNativeTail", ContentDelta: exactTail,
+                    ReasoningDelta: ResolveReasoningEffort(modelId, modelRole, reasoningEffort) == "none" ? "off" : "on"),
+                    CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             var exactTail = await SaveInterruptedSessionCacheAsync(preparedInstanceId, sessionCacheKey,
@@ -366,7 +374,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new ModelGenerationTerminatedException(coding ? "model_stall_timeout" : "model_turn_timeout", exception);
+            throw new ModelGenerationTerminatedException("model_stall_timeout", exception);
         }
         finally
         {
@@ -408,10 +416,18 @@ public sealed partial class ModelRuntimeClient : IDisposable
         finally { turnGate.Release(); }
     }
 
+    public Task<string> AnalyzeImagesAsync(
+        string modelId,
+        string prompt,
+        IReadOnlyList<string> imagePaths,
+        CancellationToken cancellationToken = default) =>
+        AnalyzeImagesAsync(modelId, prompt, imagePaths, reasoningEffort: null, cancellationToken);
+
     public async Task<string> AnalyzeImagesAsync(
         string modelId,
         string prompt,
         IReadOnlyList<string> imagePaths,
+        string? reasoningEffort,
         CancellationToken cancellationToken = default)
     {
         if (imagePaths.Count is < 1 or > 48)
@@ -445,7 +461,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
         var body = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["model"] = preparation.InstanceId,
-            ["stream"] = false,
+            ["stream"] = true,
+            ["return_progress"] = true,
+            ["stream_options"] = new { include_usage = true },
             ["messages"] = new object[]
             {
                 new { role = "system", content = CodingAgentPolicy.ReasoningLanguagePrompt + "\n\nAnalysiere ausschließlich die bereitgestellten Medien fachlich. Erfinde keine sichtbaren Details." },
@@ -453,15 +471,27 @@ public sealed partial class ModelRuntimeClient : IDisposable
             },
         };
         await UpdateSessionCacheAsync("prepare", preparation.InstanceId, null, cancellationToken).ConfigureAwait(false);
-        ApplyReasoningSettings(body, preparation.InstanceId, "vision", null);
-        var budgetedBody = await ApplyTokenBudgetAsync(body, preparation.ContextLength, null, null, cancellationToken).ConfigureAwait(false);
-        using var response = await SendJsonAsync(HttpMethod.Post, "v1/chat/completions", budgetedBody, cancellationToken).ConfigureAwait(false);
-        using var document = JsonDocument.Parse(
-            await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-        var text = ReadContent(document.RootElement.GetProperty("choices")[0].GetProperty("message"));
+        ApplyReasoningSettings(body, preparation.InstanceId, "vision", reasoningEffort);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(ModelTurnTimeout);
+        var stallProgress = new NativeInferenceStallProgress(() => timeout.CancelAfter(ModelTurnTimeout));
+        ValueTask ObserveVisionProgressAsync(ModelRuntimeProgress progress, CancellationToken token)
+        {
+            stallProgress.Observe(progress);
+            return ValueTask.CompletedTask;
+        }
+        var result = await CompleteStreamingChatWithBoundedRetryAsync(body,
+            new Dictionary<string, string>(StringComparer.Ordinal), ObserveVisionProgressAsync,
+            structuredToolOnly: false, preparation.ContextLength, maximumOutputTokens: null,
+            timeout.Token).ConfigureAwait(false);
+        var text = result.Content;
         return string.IsNullOrWhiteSpace(text)
             ? throw new JsonException("Das Vision-Modell lieferte keine Textantwort.")
             : text;
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new ModelGenerationTerminatedException("model_stall_timeout", exception);
         }
         finally { turnGate.Release(); }
     }
@@ -692,8 +722,17 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     structuredToolOnly,
                     body.TryGetValue("parallel_tool_calls", out var parallelCalls) && parallelCalls is true
                         ? CodingRunBudget.MaximumNativeCallsPerTurn : 1,
-                    requestClock, cancellationToken).ConfigureAwait(false);
+                    requestClock, cancellationToken,
+                    new ReasoningLoopGuard(TimeSpan.FromMinutes(Math.Clamp(_options.ReasoningOnlyTimeoutMinutes, 1, 1440)))).ConfigureAwait(false);
                 return result with { Metrics = (result.Metrics ?? new ModelTurnMetrics()) with { TokenCountingMilliseconds = tokenCountingMilliseconds } };
+            }
+            catch (ReasoningLoopDetectedException exception)
+            {
+                if (nativeProgress is not null)
+                    await nativeProgress(new ModelRuntimeProgress("reasoningGuardStopped",
+                        FailureKind: exception.FailureKind, ContentCharacters: exception.ReasoningCharacters),
+                        CancellationToken.None).ConfigureAwait(false);
+                throw;
             }
             catch (Exception exception) when (
                 IsTransientInferenceFailure(exception)
@@ -776,29 +815,34 @@ public sealed partial class ModelRuntimeClient : IDisposable
         return repaired;
     }
 
-    private static async Task<LmChatResult> ParseStreamingChatResponseAsync(
+    internal static async Task<LmChatResult> ParseStreamingChatResponseAsync(
         HttpResponseMessage response,
         IReadOnlyDictionary<string, string> transportToolNames,
         Func<ModelRuntimeProgress, CancellationToken, ValueTask>? nativeProgress,
         bool structuredToolOnly,
         int maximumToolCalls,
         Stopwatch requestClock,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ReasoningLoopGuard? reasoningGuard = null)
     {
+        reasoningGuard ??= new ReasoningLoopGuard();
         var mediaType = response.Content.Headers.ContentType?.MediaType;
         if (!string.Equals(mediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase))
         {
             try
             {
-                using var document = JsonDocument.Parse(
-                    await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-                if (nativeProgress is not null
-                    && document.RootElement.TryGetProperty("choices", out var choices)
+                // Some providers ignore stream=true. Async parsing remains bound
+                // by the caller's native inactivity deadline, including blocked reads.
+                await using var jsonStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                using var document = await JsonDocument.ParseAsync(jsonStream, cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (document.RootElement.TryGetProperty("choices", out var choices)
                     && choices.ValueKind == JsonValueKind.Array && choices.GetArrayLength() > 0
                     && choices[0].TryGetProperty("message", out var message)
                     && ReadReasoningDelta(message) is { Length: > 0 } reasoning)
                 {
-                    await nativeProgress(new ModelRuntimeProgress("reasoningDelta", ReasoningDelta: reasoning), cancellationToken).ConfigureAwait(false);
+                    if (nativeProgress is not null)
+                        await nativeProgress(new ModelRuntimeProgress("reasoningDelta", ReasoningDelta: reasoning), cancellationToken).ConfigureAwait(false);
+                    reasoningGuard.ObserveReasoning(reasoning, requestClock.Elapsed);
                 }
                 return ParseChatResult(document.RootElement, transportToolNames, structuredToolOnly, maximumToolCalls);
             }
@@ -811,7 +855,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
         }
 
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var reasoningDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var readToken = reasoningDeadline.Token;
+        await using var stream = await response.Content.ReadAsStreamAsync(readToken).ConfigureAwait(false);
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: false);
         var accumulator = new StreamingChatAccumulator(structuredToolOnly, maximumToolCalls, requestClock);
         var eventData = new StringBuilder();
@@ -823,7 +869,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
 
         try
         {
-            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            while (await reader.ReadLineAsync(readToken).ConfigureAwait(false) is { } line)
             {
                 if (line.Length == 0)
                 {
@@ -842,9 +888,14 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
             await ProcessEventAsync().ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && reasoningDeadline.IsCancellationRequested)
+        {
+            throw reasoningGuard.WatchdogFailure();
+        }
         catch (Exception exception) when (
             exception is not OperationCanceledException
             && exception is not OutOfMemoryException
+            && exception is not ReasoningLoopDetectedException
             && exception is not IncompleteStreamingChatException)
         {
             throw new IncompleteStreamingChatException(
@@ -922,6 +973,18 @@ public sealed partial class ModelRuntimeClient : IDisposable
             {
                 pendingReasoning.Append(reasoningDelta);
             }
+            if (accumulator.LastReasoningDelta is { Length: > 0 } observedReasoning)
+                reasoningGuard.ObserveReasoning(observedReasoning, requestClock.Elapsed);
+            reasoningGuard.ObserveResponseProgress(contentDelta);
+            reasoningGuard.ObserveResponseProgress(accumulator.LastToolDelta);
+            if (reasoningGuard.Remaining(requestClock.Elapsed) is { } remaining)
+            {
+                reasoningGuard.ThrowIfWatchdogExpired(requestClock.Elapsed);
+                // The timer interrupts a silent/blocked stream as well as an
+                // actively reasoning model. Empty events cannot extend it.
+                reasoningDeadline.CancelAfter(remaining > TimeSpan.Zero ? remaining : TimeSpan.FromMilliseconds(1));
+            }
+            else reasoningDeadline.CancelAfter(Timeout.InfiniteTimeSpan);
             if (!reasoningReported || reasoningClock.Elapsed >= TimeSpan.FromMilliseconds(180)
                 || !string.IsNullOrEmpty(contentDelta) || accumulator.FinishObserved)
                 await FlushReasoningAsync(cancellationToken).ConfigureAwait(false);
@@ -997,6 +1060,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         public bool FinishObserved { get; private set; }
         public bool Done { get; set; }
         public string? LastReasoningDelta { get; private set; }
+        public string? LastToolDelta { get; private set; }
 
         public StreamingAttemptSnapshot CreateSnapshot(IReadOnlyDictionary<string, string> transportToolNames)
         {
@@ -1024,6 +1088,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         public string? Add(JsonElement root)
         {
             LastReasoningDelta = null;
+            LastToolDelta = null;
             _measurement.Observe(root);
             if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
             {
@@ -1088,6 +1153,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 }
                 var nameFragment = AppendString(function, "name", target.Name);
                 var argumentsFragment = AppendString(function, "arguments", target.Arguments);
+                LastToolDelta += nameFragment + argumentsFragment;
                 if (!string.IsNullOrEmpty(nameFragment) || !string.IsNullOrEmpty(argumentsFragment)) _measurement.ObserveGeneratedFragment();
             }
             return contentDelta;

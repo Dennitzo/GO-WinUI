@@ -12,6 +12,7 @@ class Node extends TestNode {
 
 function harness(storage = new Map()) {
   const posts = [];
+  const toolSelections = [];
   const state = { sessions: [], sessionGroups: [], messages: [], messageRunStatus: new Map(),
     contextSource: "estimated", contextProfile: null, activeSessionId: null, codingActivity: new Map() };
   const elements = Object.fromEntries(["sessionList", "sessionSearch", "overlay", "prompt", "send",
@@ -30,7 +31,7 @@ function harness(storage = new Map()) {
     sessionShortLabel: value => value[0],
     persistentToolActions: new Set(["coding"]), normalizeToolAction: value => value,
     closeCodingPreview: noOp, persistSessionScrollPosition: noOp, resetTransientVoiceStateForSessionChange: noOp,
-    applyCodingChanges: noOp, selectToolAction: value => { state.selectedToolAction = value; },
+    applyCodingChanges: noOp, selectToolAction: value => { toolSelections.push(value); state.selectedToolAction = value; },
     setSessionsCollapsed: noOp, setPromptValue: value => { elements.prompt.value = value; },
     renderMessages: noOp, restoreSessionScrollPosition: noOp, renderContext: noOp,
     renderCodingWorkspace: noOp, renderLiveCaption: noOp, renderMicrophone: noOp,
@@ -39,14 +40,14 @@ function harness(storage = new Map()) {
   });
   for (const name of ["readUngroupedCollapsed", "persistUngroupedCollapsed", "createSessionItem", "createProjectRow",
     "createWorkspaceProject", "renderSessions", "renderSessionPin", "contextProfileForSnapshot", "persistMeasuredContext", "restoreSnapshotContext",
-    "belongsToActiveSession", "restoreDeepResearch", "applySnapshot", "handleHostMessage", "isTerminalMessageStatus",
+    "belongsToActiveSession", "restoreDeepResearch", "clearCompletedOneShotToolAction", "applySnapshot", "handleHostMessage", "isTerminalMessageStatus",
     "pruneTerminalMessageRunStatuses", "conversationMessagesDiffer", "renderComposerAction", "renderStatus"]) {
     const start = source.indexOf(`  function ${name}(`);
     const ending = source.slice(start).match(/\r?\n {2}\}(?:\r?\n|$)/);
     assert.ok(start >= 0 && ending, name);
     vm.runInContext(source.slice(start, start + ending.index + ending[0].length), context);
   }
-  return { state, elements, context, posts, storage,
+  return { state, elements, context, posts, storage, toolSelections,
     emit: (type, payload) => context.handleHostMessage({ detail: { type, payload } }) };
 }
 
@@ -110,6 +111,36 @@ test("full snapshots restore only the research preference of the selected sessio
   assert.equal(state.deepResearch, true);
   context.applySnapshot(snapshot({ contextUsed: 500 }));
   assert.equal(state.deepResearch, true, "ordinary status snapshots do not clear the active chip");
+});
+
+test("Blender selection survives idle snapshots but a running backend Coding snapshot consumes it", () => {
+  const { context, state } = harness();
+  context.applySnapshot(snapshot({ selectedToolAction: "coding" }));
+  state.selectedToolAction = "blender";
+  context.applySnapshot(snapshot({ selectedToolAction: "coding", isRunning: false }));
+  assert.equal(state.selectedToolAction, "blender", "idle refresh must retain the unsent request capability");
+  context.applySnapshot(snapshot({ selectedToolAction: "coding", isRunning: true }));
+  assert.equal(state.selectedToolAction, "coding");
+  assert.equal(state.persistentToolAction, "coding");
+  context.applySnapshot(snapshot({ selectedToolAction: "coding", isRunning: false }));
+  assert.equal(state.selectedToolAction, "coding", "later idle snapshots retain the accepted persistent mode");
+});
+
+test("all terminal Blender events apply backend Coding before clearing their one-shot capability", () => {
+  for (const type of ["chat.completed", "chat.cancelled", "chat.failed"]) {
+    for (const priorMode of [null, "bricsCad"]) {
+      const { context, state, emit, toolSelections } = harness();
+      context.applySnapshot(snapshot({ isRunning: true }));
+      state.selectedToolAction = "blender";
+      state.persistentToolAction = priorMode;
+      toolSelections.length = 0;
+      emit(type, { message: { id: "answer-a", sessionId: "session-a" },
+        session: { id: "session-a", title: "Blender-Projekt", persistentToolAction: "coding" } });
+      assert.equal(state.persistentToolAction, "coding");
+      assert.equal(state.selectedToolAction, "coding");
+      assert.deepEqual(toolSelections, ["coding"], "never render the stale General/BricsCAD fallback");
+    }
+  }
 });
 
 test("global project plus requests the native folder picker before creating anything", () => {

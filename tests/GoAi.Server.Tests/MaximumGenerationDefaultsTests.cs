@@ -150,6 +150,46 @@ public sealed class MaximumGenerationDefaultsTests
     }
 
     [Theory]
+    [InlineData("none")]
+    [InlineData("low")]
+    [InlineData("medium")]
+    public async Task VisionPreservesExplicitRunReasoningInsteadOfEnablingItsDefault(string effort)
+    {
+        const string modelId = "vision/Qwen3.8-27B~test";
+        using var handler = new BudgetHandler(modelId, 32_768, 700);
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        var imagePath = Path.Combine(Path.GetTempPath(), "go-vision-effort-" + Guid.NewGuid().ToString("N") + ".png");
+        await File.WriteAllBytesAsync(imagePath, Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="));
+        try
+        {
+            Assert.Equal("OK", await client.AnalyzeImagesAsync(modelId, "Describe the image", [imagePath], reasoningEffort: effort));
+            var body = Assert.Single(handler.ChatBodies);
+            var kwargs = body.GetProperty("chat_template_kwargs");
+            Assert.Equal(effort != "none", kwargs.GetProperty("enable_thinking").GetBoolean());
+            if (effort != "none") Assert.Equal(effort, kwargs.GetProperty("reasoning_effort").GetString());
+            Assert.True(body.GetProperty("stream").GetBoolean());
+            Assert.Equal(32_067, body.GetProperty("max_tokens").GetInt32());
+        }
+        finally { File.Delete(imagePath); }
+    }
+
+    [Theory]
+    [InlineData("vision/Qwen3VL-30B-Instruct~test", "high", null)]
+    [InlineData("vision/Qwen3.8-27B~test", "high", "xhigh")]
+    [InlineData("vision/Qwen3.8-27B~test", "none", "none")]
+    [InlineData("coding/gpt-oss-120b~test", "none", "low")]
+    [InlineData("coding/gpt-oss-120b~test", "xhigh", "high")]
+    [InlineData("coding/gpt-oss-120b~test", "low", "low")]
+    public void MediaFallbackUsesOnlyReasoningLevelsSupportedByItsActualModel(string modelId, string requested, string? expected)
+    {
+        using var http = new HttpClient();
+        using var client = CreateClient(http);
+        var role = modelId.StartsWith("vision/", StringComparison.Ordinal) ? "vision" : "general";
+        Assert.Equal(expected, client.ResolveMediaReasoningEffort(modelId, role, requested));
+    }
+
+    [Theory]
     [InlineData(262_144, 1_000, null, 261_143)]
     [InlineData(131_072, 100, 512, 512)]
     [InlineData(32_768, 100, int.MaxValue, 32_667)]

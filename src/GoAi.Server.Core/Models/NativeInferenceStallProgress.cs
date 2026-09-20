@@ -1,8 +1,9 @@
 namespace GoAi.Server.Core.Models;
 
 // Heartbeats and unchanged counters cannot keep a stalled inference alive.
-// Real prompt/generation progress renews the Coding idle deadline independently
-// of whether the caller subscribes to visible progress events.
+// Real prompt/generation progress renews the native idle deadline independently
+// of whether the caller subscribes to visible progress events. ReasoningLoopGuard
+// separately bounds repetitive or uninterrupted reasoning despite token arrival.
 internal sealed class NativeInferenceStallProgress(Action renewDeadline)
 {
     private int _promptTokens;

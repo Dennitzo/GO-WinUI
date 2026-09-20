@@ -44,9 +44,23 @@ public sealed partial class ModelRuntimeClient
     }
 
     private static readonly string[] HighestReasoningLevels = ["max", "ultra", "xhigh", "high", "medium", "low", "minimal"];
+    private static readonly string[] LowestReasoningLevels = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on"];
     internal string? ResolveReasoningEffort(string modelId, string role, string? requested) =>
         !string.IsNullOrWhiteSpace(requested) && !string.Equals(requested.Trim(), "auto", StringComparison.OrdinalIgnoreCase) ? requested.Trim().ToLowerInvariant()
             : ResolveRuntimeReasoningProfile(modelId, role).DefaultEffort;
+
+    internal string? ResolveMediaReasoningEffort(string modelId, string role, string? requested)
+    {
+        // Media workers can use a different model family from the conversation.
+        // Carry supported selections across, without sending an invalid enum to
+        // another model or inventing a thinking toggle an instruct model lacks.
+        var profile = ResolveRuntimeReasoningProfile(modelId, role);
+        var effort = requested?.Trim().ToLowerInvariant();
+        if (!string.IsNullOrEmpty(effort) && profile.Supports(effort)) return effort;
+        if (effort == "none")
+            return LowestReasoningLevels.FirstOrDefault(profile.Supports) ?? profile.DefaultEffort;
+        return profile.DefaultEffort;
+    }
 
     internal static ModelReasoningProfile? ReadReasoningMetadata(JsonElement data)
     {

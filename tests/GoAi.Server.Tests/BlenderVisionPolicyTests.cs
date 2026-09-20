@@ -8,6 +8,9 @@ namespace GoAi.Server.Tests;
 
 public sealed class BlenderVisionPolicyTests
 {
+    private static readonly string[] BlenderOperations = ["info", "scaffold", "stage", "preview", "run", "inspect", "render", "open"];
+    private static readonly string[] AllViews = ["perspective", "front", "right", "top", "back", "left"];
+
     [Fact]
     public void BlenderAndVisualToolsAreAvailableForReportedWorkspaceCapabilities()
     {
@@ -51,6 +54,8 @@ public sealed class BlenderVisionPolicyTests
     [Fact]
     public void GeneralAndCodingPoliciesDescribeTheBlenderFeedbackLoop()
     {
+        Assert.Contains(BlenderAuthoringGuide.WorkflowPrompt, CodingAgentPolicy.WorkspaceDependenciesPrompt, StringComparison.Ordinal);
+        Assert.Contains(BlenderAuthoringGuide.WorkflowPrompt, GeneralAgentPolicies.GeneralCoordinator, StringComparison.Ordinal);
         Assert.Contains("Blender-Rückkopplung", CodingAgentPolicy.WorkspaceDependenciesPrompt, StringComparison.Ordinal);
         Assert.Contains("höchstens zwei", CodingAgentPolicy.WorkspaceDependenciesPrompt, StringComparison.Ordinal);
         Assert.Contains("nicht ungefragt überschreiben", CodingAgentPolicy.WorkspaceDependenciesPrompt, StringComparison.Ordinal);
@@ -65,7 +70,7 @@ public sealed class BlenderVisionPolicyTests
     {
         var invalidOperation = JsonSerializer.SerializeToElement(new
         {
-            operation = "render",
+            operation = "bake",
             path = "scene.py",
             expectedSha256 = new string('a', 64),
             timeoutSeconds = 300,
@@ -90,6 +95,222 @@ public sealed class BlenderVisionPolicyTests
         });
         Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender, zeroTimeout));
     }
+
+    [Theory]
+    [InlineData(RunMode.General)]
+    [InlineData(RunMode.Coding)]
+    public void BothModesExposeAndValidateTheCompleteBlenderWorkflow(RunMode mode)
+    {
+        var request = CreateRequest(["workspace", "coding", "blender", "visual-tools"]) with { Mode = mode };
+        var catalog = new AgentToolCatalog();
+        var tool = catalog.Resolve(WorkspaceTools.Blender, catalog.GetAvailableTools(request));
+        var arguments = new[]
+        {
+            """{"operation":"info"}""",
+            """{"operation":"info","path":"rover/scene_v001.blend"}""",
+            """{"operation":"scaffold","path":"rover","brief":"Sechsrädriger Forschungsrover mit zwei Solarpaneelen."}""",
+            """{"operation":"stage","path":"rover/01_blockout.py","expectedSha256":"HASH","outputPath":"rover/scene_v001.blend","label":"01 Hauptformen"}""",
+            """{"operation":"stage","path":"rover/02_fahrwerk.py","expectedSha256":"HASH","baseScene":"rover/scene_v001.blend","baseSceneSha256":"HASH","outputPath":"rover/scene_v002.blend","label":"02 Fahrwerk","timeoutSeconds":3600}""",
+            """{"operation":"preview","path":"rover/scene_v002.blend","expectedSha256":"HASH","label":"Fahrwerk prüfen"}""",
+            """{"operation":"run","path":"rover/scene.py","expectedSha256":"HASH","timeoutSeconds":300}""",
+            """{"operation":"inspect","path":"rover/scene_v001.blend","expectedSha256":"HASH","outputDirectory":"rover/checks/v001"}""",
+            """{"operation":"render","path":"rover/scene_v001.blend","expectedSha256":"HASH","outputDirectory":"rover/renders/v001","views":["perspective","front","right","top"],"resolution":768,"samples":32,"timeoutSeconds":3600}""",
+            """{"operation":"open","path":"rover/scene_v001.blend"}""",
+        };
+
+        foreach (var json in arguments)
+        {
+            using var document = JsonDocument.Parse(json.Replace("HASH", new string('a', 64), StringComparison.Ordinal));
+            catalog.Validate(tool, document.RootElement);
+        }
+        Assert.Equal(BlenderAuthoringGuide.ToolDescription, tool.Description);
+        Assert.Equal(BlenderOperations,
+            tool.Schema.GetProperty("properties").GetProperty("operation").GetProperty("enum")
+                .EnumerateArray().Select(static value => value.GetString()).ToArray());
+    }
+
+    [Theory]
+    [InlineData("inspect", "expectedSha256")]
+    [InlineData("inspect", "path")]
+    [InlineData("inspect", "outputDirectory")]
+    [InlineData("render", "expectedSha256")]
+    [InlineData("render", "path")]
+    [InlineData("render", "outputDirectory")]
+    public void SceneInspectionAndRenderingRequireAnIdentifiedSourceAndFreshOutputTarget(string operation, string missing)
+    {
+        var arguments = new Dictionary<string, object>
+        {
+            ["operation"] = operation,
+            ["path"] = "rover/scene_v001.blend",
+            ["expectedSha256"] = new string('a', 64),
+            ["outputDirectory"] = "rover/checks/v001",
+        };
+        arguments.Remove(missing);
+
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender,
+            JsonSerializer.SerializeToElement(arguments)));
+    }
+
+    [Theory]
+    [InlineData("views", "[]")]
+    [InlineData("views", "[\"front\",\"front\"]")]
+    [InlineData("views", "[\"underside\"]")]
+    [InlineData("views", "[1]")]
+    [InlineData("views", "\"front\"")]
+    [InlineData("resolution", "127")]
+    [InlineData("resolution", "2049")]
+    [InlineData("resolution", "768.5")]
+    [InlineData("samples", "0")]
+    [InlineData("samples", "129")]
+    [InlineData("samples", "\"32\"")]
+    [InlineData("expectedSha256", "\"abc\"")]
+    [InlineData("outputDirectory", "\"\"")]
+    public void RenderRejectsInvalidViewsQualityAndSourceArguments(string property, string invalidJson)
+    {
+        var arguments = new Dictionary<string, object>
+        {
+            ["operation"] = "render",
+            ["path"] = "rover/scene_v001.blend",
+            ["expectedSha256"] = new string('a', 64),
+            ["outputDirectory"] = "rover/renders/v001",
+        };
+        using var invalid = JsonDocument.Parse(invalidJson);
+        arguments[property] = invalid.RootElement;
+
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender,
+            JsonSerializer.SerializeToElement(arguments)));
+    }
+
+    [Theory]
+    [InlineData(128, 1)]
+    [InlineData(2048, 128)]
+    public void RenderAcceptsQualityBoundariesAndAllDistinctViews(int resolution, int samples)
+    {
+        WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(new
+        {
+            operation = "render",
+            path = "rover/scene_v001.blend",
+            expectedSha256 = new string('a', 64),
+            outputDirectory = "rover/renders/v001",
+            views = AllViews,
+            resolution,
+            samples,
+        }));
+    }
+
+    [Fact]
+    public void ScaffoldRequiresAProjectPathAndBoundsTheBrief()
+    {
+        WorkspaceTools.Validate(WorkspaceTools.Blender,
+            JsonSerializer.SerializeToElement(new { operation = "scaffold", path = "rover", brief = new string('x', 8000) }));
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender,
+            JsonSerializer.SerializeToElement(new { operation = "scaffold" })));
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender,
+            JsonSerializer.SerializeToElement(new { operation = "scaffold", path = "rover", brief = new string('x', 8001) })));
+    }
+
+    [Theory]
+    [InlineData("path")]
+    [InlineData("expectedSha256")]
+    [InlineData("outputPath")]
+    [InlineData("label")]
+    public void StageRequiresAnIdentifiedSmallScriptNewSceneAndVisibleLabel(string missing)
+    {
+        var arguments = StageArguments();
+        arguments.Remove(missing);
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(arguments)));
+    }
+
+    [Theory]
+    [InlineData("baseScene")]
+    [InlineData("baseSceneSha256")]
+    public void FollowupStageRequiresBothBaseSceneAndItsActualHash(string missing)
+    {
+        var arguments = StageArguments();
+        arguments["baseScene"] = "rover/scene_v001.blend";
+        arguments["baseSceneSha256"] = new string('a', 64);
+        arguments.Remove(missing);
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(arguments)));
+    }
+
+    [Theory]
+    [InlineData("path", "\"rover/scene.blend\"")]
+    [InlineData("outputPath", "\"rover/output.py\"")]
+    [InlineData("baseScene", "\"rover/base.py\"")]
+    [InlineData("baseScene", "\"ROVER\\\\SCENE_V002.BLEND\"")]
+    [InlineData("expectedSha256", "\"invalid\"")]
+    [InlineData("baseSceneSha256", "\"invalid\"")]
+    [InlineData("label", "null")]
+    [InlineData("label", "\"  \"")]
+    [InlineData("timeoutSeconds", "0")]
+    [InlineData("outputDirectory", "\"rover/checks\"")]
+    public void StageRejectsInvalidInputsAndCannotReplaceItsBaseScene(string property, string valueJson)
+    {
+        var arguments = StageArguments();
+        arguments["baseScene"] = "rover/scene_v001.blend";
+        arguments["baseSceneSha256"] = new string('a', 64);
+        using var value = JsonDocument.Parse(valueJson);
+        arguments[property] = value.RootElement;
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(arguments)));
+    }
+
+    [Theory]
+    [InlineData("stage")]
+    [InlineData("preview")]
+    public void StageAndPreviewAcceptReadableLabelsUpToTwoHundredCharacters(string operation)
+    {
+        var arguments = operation == "stage" ? StageArguments() : new Dictionary<string, object>
+        {
+            ["operation"] = "preview", ["path"] = "rover/scene_v002.blend", ["expectedSha256"] = new string('a', 64),
+        };
+        arguments["label"] = new string('x', 200);
+        WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(arguments));
+        arguments["label"] = new string('x', 201);
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(arguments)));
+    }
+
+    [Theory]
+    [InlineData("path", "null")]
+    [InlineData("path", "\"rover/step.py\"")]
+    [InlineData("expectedSha256", "null")]
+    [InlineData("expectedSha256", "\"abc\"")]
+    [InlineData("outputPath", "\"rover/new.blend\"")]
+    [InlineData("baseScene", "\"rover/old.blend\"")]
+    [InlineData("baseSceneSha256", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"")]
+    public void PreviewRequiresAnIdentifiedBlendAndRejectsStageOnlyFields(string property, string valueJson)
+    {
+        var arguments = new Dictionary<string, object>
+        {
+            ["operation"] = "preview", ["path"] = "rover/scene_v002.blend", ["expectedSha256"] = new string('a', 64),
+        };
+        using var value = JsonDocument.Parse(valueJson);
+        arguments[property] = value.RootElement;
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(arguments)));
+    }
+
+    [Fact]
+    public void SharedPoliciesRequireVisibleIncrementalAuthoringAndPerStageValidation()
+    {
+        Assert.Contains("12000 Zeichen", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("01_blockout.py", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("02_baugruppen.py", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("baseSceneSha256", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("stageHistory", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("preview.state", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("steps/01_blockout.py (scriptPath)", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("Prüfung nach jeder Etappe", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("Qualität hat Vorrang vor Zeit", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("kein großes Komplettskript", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("neue Nutzerhinweise", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("kein Gesamtlimit", BlenderAuthoringGuide.WorkflowPrompt.Replace("\r", "", StringComparison.Ordinal)
+            .Replace("\n", " ", StringComparison.Ordinal), StringComparison.Ordinal);
+    }
+
+    private static Dictionary<string, object> StageArguments() => new()
+    {
+        ["operation"] = "stage", ["path"] = "rover/02_fahrwerk.py", ["expectedSha256"] = new string('a', 64),
+        ["outputPath"] = "rover/scene_v002.blend", ["label"] = "02 Fahrwerk",
+    };
 
     [Fact]
     public void ImageInputRejectsMissingPathForFileOperation()
