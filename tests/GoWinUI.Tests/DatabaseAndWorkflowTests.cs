@@ -363,6 +363,7 @@ public sealed class DatabaseAndWorkflowTests
                 artifactBytes.LongLength,
                 "test",
                 null,
+                null,
                 content);
         }
 

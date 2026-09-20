@@ -233,7 +233,7 @@ public sealed class CodingDeepResearchTests
         };
         var execution = await harness.RunAsync();
         Assert.False(execution.Result.Succeeded);
-        Assert.Equal(4, execution.ToolCalls);
+        Assert.Equal(noMatches ? 6 : 4, execution.ToolCalls);
         Assert.Empty(execution.Result.Result.GetProperty("sources").EnumerateArray());
         Assert.Empty(execution.Result.Result.GetProperty("findings").EnumerateArray());
         Assert.DoesNotContain("deepResearchSynthesis", harness.Progress);

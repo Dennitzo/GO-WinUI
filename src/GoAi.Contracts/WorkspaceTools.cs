@@ -7,7 +7,6 @@ public static class WorkspaceTools
 {
     public const string ImageInput = "image.input";
     public const string Blender = "blender.execute";
-    public const string DocumentAgent = "document.agent";
     public const string Open = "workspace.open";
     public static bool IsLocal(string name) => name is ImageInput or Blender or Open;
 
@@ -18,22 +17,12 @@ public static class WorkspaceTools
         {
             ImageInput => ["operation", "path", "windowId"],
             Blender => ["operation", "path", "expectedSha256", "timeoutSeconds"],
-            DocumentAgent => ["task", "writePaths"],
             Open => ["path"],
             _ => throw new ArgumentException("Unbekanntes Workspace-Werkzeug."),
         };
         if (args.EnumerateObject().Any(p => !allowed.Contains(p.Name, StringComparer.Ordinal)))
             throw new ArgumentException("Unbekannte Werkzeugeigenschaft.");
         if (name == Open) { Text(args, "path", 1024); return; }
-        if (name == DocumentAgent)
-        {
-            Text(args, "task", 16000);
-            if (args.TryGetProperty("writePaths", out var paths)
-                && (paths.ValueKind != JsonValueKind.Array || paths.GetArrayLength() > 32
-                    || paths.EnumerateArray().Any(p => p.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(p.GetString()) || p.GetString()!.Length > 1024)))
-                throw new ArgumentException("Ungültige Dokument-Schreibbereiche.");
-            return;
-        }
         var operation = Text(args, "operation", 20);
         if (name == ImageInput)
         {

@@ -12,15 +12,11 @@ public sealed class IntegratedVisionTests
     {
         const string id = "coding/DeepSeek-Vision~hash";
         var baseModel = new ModelRuntimeStatus(id, "general", true, false, "unloaded", 32768, SupportsVision: true);
-        Assert.Equal(id + "~main", ModelRuntimeClient.SelectIntegratedVision(
-            [baseModel, baseModel with { Id = id + "~main", Loaded = true, State = "loaded" }], id));
         Assert.Equal(id, ModelRuntimeClient.SelectIntegratedVision(
-            [baseModel, baseModel with { Id = id + "~secondary", Loaded = true, State = "loaded" }], id));
+            [baseModel with { Loaded = true, State = "loaded" }], id));
     }
     [Theory]
     [InlineData("")]
-    [InlineData("~main")]
-    [InlineData("~secondary")]
     public void SelectedDeepSeekKeepsExactNativeInstanceForVision(string suffix)
     {
         var id = "coding/DeepSeek-Vision~hash" + suffix;

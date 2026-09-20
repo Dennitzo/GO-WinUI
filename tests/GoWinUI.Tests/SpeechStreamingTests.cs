@@ -6,6 +6,31 @@ namespace GoWinUI.Tests;
 
 public sealed class SpeechStreamingTests
 {
+    [Fact]
+    public async Task AutomaticNarrationWaitsForCompleteBlockAndSpeaksBothSentencesTogether()
+    {
+        const string first = "Die neuen Tests bestehen.";
+        const string second = "Ich prüfe jetzt zusätzlich die vorhandenen Modellrouting-Tests, um die Regression zu bestätigen.";
+        var initial = Message();
+        var spoken = new ConcurrentQueue<string>();
+        using var session = new SpeechStreamingSession(initial, (text, _) =>
+        {
+            spoken.Enqueue(text);
+            return Task.CompletedTask;
+        }) { WaitForActionBoundary = true };
+        session.Observe(new(GoAiAssistantUpdateKind.Delta, initial with { Content = first + " " }));
+        Assert.Empty(spoken);
+        var full = initial with { Content = first + " " + second };
+        session.Observe(new(GoAiAssistantUpdateKind.Delta, full));
+        Assert.Empty(spoken);
+        var tool = new AssistantToolStep("test", "coding.command", "running", "Tests");
+        session.Observe(new(GoAiAssistantUpdateKind.Status, full, ToolStep: tool));
+        session.Observe(new(GoAiAssistantUpdateKind.Status, full, ToolStep: tool));
+        session.Observe(new(GoAiAssistantUpdateKind.Completed, full));
+        await session.Completion;
+        Assert.Equal(first + " " + second, Assert.Single(spoken));
+    }
+
     [Theory]
     [InlineData("Ich prüfe jetzt die Datei.", "Ich prüfe jetzt die Datei.")]
     [InlineData("**Zuerst** prüfe ich die Datei.", "Zuerst prüfe ich die Datei.")]

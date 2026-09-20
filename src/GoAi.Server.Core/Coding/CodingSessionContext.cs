@@ -32,6 +32,11 @@ internal static class CodingSessionContext
                 + "Nutze bestätigte Befunde weiter, prüfe betroffene Dateien vor Änderungen erneut. "
                 + "Nicht abgeschlossene Aufrufe haben einen unbekannten Ausgang und dürfen nicht blind wiederholt werden. "
                 + "Der folgende neue Nutzerauftrag ist maßgeblich.\n" + CodingEvidenceContext.Build(state).Content));
+        result.Add(new LmChatMessage("user", "GO_CODING_RUN_PLAN_SCOPE\n"
+            + "Aktueller Lauf: steps und acceptanceCriteria starten leer. Plan-IDs und Planbestätigungen oben gehören zum vorherigen Lauf. "
+            + "Wenn der aktuelle Auftrag einen Plan benötigt, lege seine Einträge zuerst mit id, title und status an; "
+            + "erst nach erfolgreicher Bestätigung genügen Updates per id. Historische Befunde und Belege bleiben verfügbar. "
+            + "Dies beschreibt den Speicherzustand und ändert den folgenden Nutzerauftrag nicht."));
         result.Add(initial.Last(message => message.Role == "user"));
         return result;
 

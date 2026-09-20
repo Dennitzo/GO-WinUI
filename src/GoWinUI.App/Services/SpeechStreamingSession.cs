@@ -40,6 +40,7 @@ internal sealed class SpeechStreamingSession : IDisposable
     public Exception? Failure { get; private set; }
     public bool HasPlayed { get; private set; }
     public bool WasCancelled => _token.IsCancellationRequested;
+    public bool WaitForActionBoundary { get; init; }
 
     public void Observe(GoAiAssistantUpdate update)
     {
@@ -52,11 +53,21 @@ internal sealed class SpeechStreamingSession : IDisposable
         var flushSentence = update.Kind == GoAiAssistantUpdateKind.Status
             && update.ToolStep is { AgentId: null, Tool: not GoAiAssistantService.ReasoningStepTool };
         if (update.Kind is not (GoAiAssistantUpdateKind.Delta or GoAiAssistantUpdateKind.Completed) && !flushSentence) return;
+        // A sentence boundary is not a completed narration block. The next
+        // main-agent tool status (or run completion) seals the preceding text.
+        if (WaitForActionBoundary && update.Kind == GoAiAssistantUpdateKind.Delta) return;
         lock (_gate)
         {
             if (_finished || _token.IsCancellationRequested) return;
             var complete = update.Kind == GoAiAssistantUpdateKind.Completed;
-            foreach (var text in _buffer.Take(update.Message.Content, complete, flushSentence)) _queue.Writer.TryWrite(text);
+            var chunks = _buffer.Take(update.Message.Content, complete, flushSentence,
+                flushBlock: WaitForActionBoundary && flushSentence);
+            if (WaitForActionBoundary)
+            {
+                var block = string.Join(" ", chunks.Select(static text => text.Trim()));
+                if (!string.IsNullOrWhiteSpace(block)) _queue.Writer.TryWrite(block);
+            }
+            else foreach (var text in chunks) _queue.Writer.TryWrite(text);
             if (_buffer.HasConflictingRevision)
             {
                 Cancel();

@@ -20,9 +20,6 @@ public sealed partial class ModelRuntimeClient
         var exact = models.FirstOrDefault(model => model.Downloaded && model.SupportsVision
             && model.Id.Equals(selectedModel, StringComparison.OrdinalIgnoreCase));
         if (exact is null || exact.Loaded) return exact?.Id;
-        // A direct media button supplies the saved base ID, whereas a running
-        // parallel main agent uses its already resident ~main instance.
-        return models.FirstOrDefault(model => model.Downloaded && model.Loaded && model.SupportsVision
-            && model.Id.Equals(selectedModel + "~main", StringComparison.OrdinalIgnoreCase))?.Id ?? exact.Id;
+        return exact.Id;
     }
 }

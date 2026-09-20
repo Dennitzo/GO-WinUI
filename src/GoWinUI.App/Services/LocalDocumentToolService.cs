@@ -348,6 +348,7 @@ public sealed partial class LocalDocumentToolService(
             sha,
             bytes.LongLength,
             "document-tool",
+            null,
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["documentId"] = document.Id.ToString("D"),

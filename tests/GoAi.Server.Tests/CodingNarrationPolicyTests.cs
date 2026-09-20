@@ -6,6 +6,19 @@ namespace GoAi.Server.Tests;
 public sealed class CodingNarrationPolicyTests
 {
     [Fact]
+    public void CompleteNarrationIsReleasedTogetherBeforeToolDispatch()
+    {
+        var gate = new GoAi.Server.Core.Runs.IncrementalVisibleTextGate(true, bufferUntilComplete: true);
+        const string first = "Die neuen Tests bestehen. ";
+        const string second = "Ich prüfe jetzt zusätzlich die vorhandenen Modellrouting-Tests, um die Regression zu bestätigen.";
+        Assert.Null(gate.Push(first));
+        Assert.Null(gate.Push(second));
+        Assert.False(gate.HasStreamed);
+        Assert.Equal(first + second, gate.Flush());
+        Assert.Null(gate.Flush());
+    }
+
+    [Fact]
     public void NewCodingPolicyIncludesStagesAndSpeakableNarration()
     {
         var policy = CodingAgentPolicy.ForWorkingState(true);

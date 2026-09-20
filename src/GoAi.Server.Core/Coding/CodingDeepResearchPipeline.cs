@@ -18,6 +18,9 @@ internal static class CodingDeepResearchPipeline
     internal static readonly TimeSpan TimeBudget = TimeSpan.FromMinutes(7);
     private static readonly JsonSerializerOptions Json = GoAiProtocol.CreateJsonOptions();
     private static readonly Regex Whitespace = new(@"\s+", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+    private static readonly Regex ApiIdentifiers = new(@"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)+(?<name>[A-Za-z_][A-Za-z0-9_]*)\b|\b(?<name>[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+)\b|\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+    private const string UserProvidedSourceTitle = "Vom Nutzer angegebene Original-URL";
     private static readonly string[] RequiredFindingFields = ["claim", "evidenceId"];
     private static readonly string[] RequiredSynthesisFields = ["findings", "uncertainties"];
     private static readonly char[] SearchTokenPunctuation = ['\'', '"', '(', ')', '[', ']', '{', '}', ',', ';', '!', '?'];
@@ -94,6 +97,10 @@ internal static class CodingDeepResearchPipeline
             if (plan.Select(static question => question.Query).Distinct(StringComparer.OrdinalIgnoreCase).Count() != plan.Count)
                 throw new InvalidDataException("Der Rechercheplan wiederholt dieselbe Suchanfrage.");
 
+            var userSources = StagedWebResearchPipeline.ReadUserProvidedUrls(task)
+                .Where(IsPublicHttpUrl)
+                .Select(static url => new WebSearchResult(UserProvidedSourceTitle, url, null)).ToList();
+            var userUrls = userSources.Select(static source => NormalizeFetchUrl(source.Url)).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var candidates = new List<WebSearchResult>();
             for (var questionIndex = 0; questionIndex < plan.Count; questionIndex++)
             {
@@ -121,7 +128,8 @@ internal static class CodingDeepResearchPipeline
                     break;
                 }
             }
-            candidates = candidates.DistinctBy(static result => result.Url, StringComparer.OrdinalIgnoreCase).ToList();
+            candidates = candidates.Where(candidate => !userUrls.Contains(NormalizeFetchUrl(candidate.Url)))
+                .DistinctBy(static result => result.Url, StringComparer.OrdinalIgnoreCase).ToList();
             var attemptedUrls = new HashSet<string>(StringComparer.Ordinal);
             var attempts = 0;
             var fetchLimit = Math.Min(maximumSources, toolLimit - toolCalls);
@@ -134,8 +142,12 @@ internal static class CodingDeepResearchPipeline
                 await progress(new("deepResearchFetch", attempts, fetchLimit), token).ConfigureAwait(false);
                 var selectionMessages = StagedWebResearchPipeline.CreateFetchMessages(task, candidates,
                     sources.Select(static source => new FetchedResearchSource(source.Title, source.Url, "text/plain", source.Content, null)).ToArray(),
-                    language, allowOriginalUrls: true, attemptedUrls: attemptedUrls.ToArray()).ToArray();
-                selectionMessages[0] = selectionMessages[0] with { Content = UntrustedInstruction + selectionMessages[0].Content };
+                    language, allowOriginalUrls: true, attemptedUrls: attemptedUrls.ToArray(), userProvidedSources: userSources).ToArray();
+                selectionMessages[0] = selectionMessages[0] with
+                {
+                    Content = UntrustedInstruction + selectionMessages[0].Content
+                        + (userSources.Count > 0 ? " Prüfe die separat angegebenen Original-URLs des Nutzers zuerst; sie sind keine Suchtreffer und erst nach erfolgreichem Abruf Belege." : ""),
+                };
                 if (uncertainties.Count > 0)
                     selectionMessages[1] = selectionMessages[1] with
                     {
@@ -145,14 +157,16 @@ internal static class CodingDeepResearchPipeline
                     null, true, "web.fetch", false)).ConfigureAwait(false);
                 JsonElement arguments;
                 try { arguments = RequiredArguments(selection, "web.fetch"); }
-                catch (InvalidDataException) when (candidates.Any(candidate => !attemptedUrls.Contains(NormalizeFetchUrl(candidate.Url))))
+                catch (InvalidDataException) when (userSources.Concat(candidates).Any(candidate => !attemptedUrls.Contains(NormalizeFetchUrl(candidate.Url))))
                 {
-                    // Preserve usable search evidence if the local model ignores forced tool choice.
-                    // Fetch only an actual search result, never a guessed documentation URL.
-                    var next = candidates.First(candidate => !attemptedUrls.Contains(NormalizeFetchUrl(candidate.Url)));
+                    // If forced tool choice is ignored, prefer an explicit user URL, then a real search result.
+                    // Neither is evidence until the bounded, safety-checked fetch succeeds.
+                    var next = userSources.Concat(candidates).First(candidate => !attemptedUrls.Contains(NormalizeFetchUrl(candidate.Url)));
                     arguments = JsonSerializer.SerializeToElement(new { url = next.Url,
-                        queries = plan.Select(question => question.Query).Take(4).ToArray() }, Json);
-                    uncertainties.Add("Die Modellauswahl lieferte keinen eindeutigen Quellenaufruf; GO hat den nächsten vorhandenen Suchtreffer für den belegten Abruf ausgewählt.");
+                        queries = CreateFallbackFetchQueries(task, next.Url) }, Json);
+                    uncertainties.Add(next.Title == UserProvidedSourceTitle
+                        ? "Die Modellauswahl lieferte keinen eindeutigen Quellenaufruf; GO hat eine ausdrücklich vom Nutzer genannte Original-URL für den belegten Abruf ausgewählt."
+                        : "Die Modellauswahl lieferte keinen eindeutigen Quellenaufruf; GO hat den nächsten vorhandenen Suchtreffer für den belegten Abruf ausgewählt.");
                 }
                 var selectedUrl = RequiredText(arguments, "url", 2_048);
                 if (!IsPublicHttpUrl(selectedUrl)) throw new InvalidDataException("Die Quellenauswahl erfordert eine öffentliche HTTP(S)-URL ohne Zugangsdaten.");
@@ -162,7 +176,8 @@ internal static class CodingDeepResearchPipeline
                     uncertainties.Add("Ein wiederholter Quellenabruf wurde ohne weiteren Netzwerkaufruf übersprungen.");
                     continue;
                 }
-                var candidate = candidates.FirstOrDefault(candidate => string.Equals(candidate.Url, selectedUrl, StringComparison.OrdinalIgnoreCase));
+                var candidate = userSources.Concat(candidates).FirstOrDefault(candidate => string.Equals(NormalizeFetchUrl(candidate.Url), attemptUrl, StringComparison.OrdinalIgnoreCase));
+                userSources.RemoveAll(candidate => NormalizeFetchUrl(candidate.Url) == attemptUrl);
                 candidates.RemoveAll(candidate => NormalizeFetchUrl(candidate.Url) == attemptUrl);
                 // The selected phrase is retained; result volume is controlled by the host.
                 var phrase = arguments.TryGetProperty("query", out var query) && query.ValueKind == JsonValueKind.String ? query.GetString() : null;
@@ -180,6 +195,26 @@ internal static class CodingDeepResearchPipeline
                 }
                 var fetched = execution.Result.Deserialize<TargetedWebFetchResult>(Json) ?? throw new InvalidDataException("Leere Quellenantwort.");
                 if (!fetched.IsUntrusted || !IsPublicHttpUrl(fetched.Url)) throw new InvalidDataException("Ungültige Quellenherkunft.");
+                if ((!fetched.Found || fetched.Matches.Count == 0) && toolCalls < toolLimit)
+                {
+                    var retryPhrases = CreateFallbackFetchQueries(task, selectedUrl);
+                    var attemptedPhrases = phrases.Concat(string.IsNullOrWhiteSpace(phrase) ? [] : [phrase])
+                        .Select(Normalize).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    if (retryPhrases.Any(retryPhrase => !attemptedPhrases.Contains(Normalize(retryPhrase))))
+                    {
+                        // One retry of this same source, only with new phrases and within the existing tool budget.
+                        // ExecuteAsync counts and validates the call; the fetch service repeats its network safety checks.
+                        var retry = await ExecuteAsync(fetchTool, Call("web.fetch", new { url = selectedUrl, queries = retryPhrases,
+                            maximumResults = 4, contextCharacters = 700, maximumCharacters = 4_000 })).ConfigureAwait(false);
+                        if (!retry.Succeeded)
+                        {
+                            uncertainties.Add(Bound(retry.ErrorMessage ?? "Eine Quelle war beim gezielten Wiederholungsabruf nicht abrufbar.", 300));
+                            continue;
+                        }
+                        fetched = retry.Result.Deserialize<TargetedWebFetchResult>(Json) ?? throw new InvalidDataException("Leere Quellenantwort.");
+                        if (!fetched.IsUntrusted || !IsPublicHttpUrl(fetched.Url)) throw new InvalidDataException("Ungültige Quellenherkunft.");
+                    }
+                }
                 if (!fetched.Found || fetched.Matches.Count == 0)
                 {
                     uncertainties.Add($"Keine passende Fundstelle: {Bound(candidate?.Title ?? new Uri(selectedUrl).Host, 120)}.");
@@ -334,6 +369,19 @@ internal static class CodingDeepResearchPipeline
             ? text : throw new InvalidDataException($"Ungültiges Recherchefeld: {name}.");
     private static LmToolCall Call(string name, object arguments) => new("research-" + Guid.NewGuid().ToString("N"), name, JsonSerializer.SerializeToElement(arguments, Json));
     private static string Normalize(string value) => Whitespace.Replace(value, " ").Trim();
+    internal static IReadOnlyList<string> CreateFallbackFetchQueries(string task, string url)
+    {
+        // Fetch searches exact phrases: a whole research question rarely occurs on the source page.
+        // Retain API identifiers actually present in the task, excluding URL/domain text, plus its page name.
+        var queries = Whitespace.Split(task).Where(static part => !part.Contains("://", StringComparison.Ordinal))
+            .SelectMany(static part => ApiIdentifiers.Matches(part).Select(static match => match.Groups["name"].Value))
+            .Where(static name => name.Length <= 120).Distinct(StringComparer.OrdinalIgnoreCase).Take(3).ToList();
+        var uri = new Uri(url);
+        var page = Path.GetFileNameWithoutExtension(uri.AbsolutePath.TrimEnd('/'));
+        if (string.IsNullOrWhiteSpace(page)) page = uri.Host;
+        if (!queries.Contains(page, StringComparer.OrdinalIgnoreCase)) queries.Add(Bound(page, 120));
+        return queries;
+    }
     internal static IReadOnlyList<string> CreateEvidenceQuotes(string content)
     {
         var quotes = new List<string>();

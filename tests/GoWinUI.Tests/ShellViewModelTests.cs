@@ -5,6 +5,19 @@ namespace GoWinUI.Tests;
 
 public sealed class ShellViewModelTests
 {
+    [Theory]
+    [InlineData("projects", "assistant")]
+    [InlineData("assistant", "assistant")]
+    [InlineData("logs", "logs")]
+    [InlineData("settings", "settings")]
+    [InlineData("obsolete-route", "assistant")]
+    [InlineData("", "assistant")]
+    [InlineData(null, "assistant")]
+    public void StoredNavigationRoutesRestoreAnAvailablePage(string? storedRoute, string expected)
+    {
+        Assert.Equal(expected, ShellViewModel.ResolveNavigationRoute(storedRoute));
+    }
+
     [Fact]
     public void ConnectionStateTracksOfflineReachableAndUnavailableModesWithoutATitleBarLabel()
     {

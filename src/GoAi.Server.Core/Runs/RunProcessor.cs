@@ -16,6 +16,7 @@ namespace GoAi.Server.Core.Runs;
 
 public sealed partial class RunProcessor : BackgroundService
 {
+    internal const string InterruptedTurnEventType = "model.interruptedTurn";
     internal const int MaximumRequiredToolCallRetries = 1;
     internal const int MaximumEmptyResponseRetries = 2;
     internal const string EmptyResponseRepairPrompt = """
@@ -27,7 +28,6 @@ public sealed partial class RunProcessor : BackgroundService
         Arbeitsschritte mit den angebotenen Werkzeugen. Gib Denktext nicht als Abschlussantwort aus.
         """;
 
-    private readonly CodingSubagentService _subagents;
     private readonly RunWorkChannel _queue;
     private readonly RunRepository _repository;
     private readonly ModelRouter _router;
@@ -51,9 +51,8 @@ public sealed partial class RunProcessor : BackgroundService
         AgentToolCatalog toolCatalog,
         AgentToolExecutor toolExecutor,
         IOptions<GoAiServerOptions> options,
-        ServerRuntimeState runtime, CodingSubagentService subagents)
+        ServerRuntimeState runtime)
     {
-        _subagents = subagents;
         _queue = queue;
         _repository = repository;
         _router = router;
@@ -68,7 +67,6 @@ public sealed partial class RunProcessor : BackgroundService
 
     public bool Cancel(string runId)
     {
-        _subagents.Cancel(runId);
         lock (_activeGate)
         {
             return _activeRuns.TryGetValue(runId, out var cancellation) && TryCancel(cancellation);
@@ -77,7 +75,6 @@ public sealed partial class RunProcessor : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var stopAgents = stoppingToken.Register(_subagents.Stop);
         var recovered = await _repository.RecoverAsync(stoppingToken).ConfigureAwait(false);
         foreach (var runId in recovered)
         {
@@ -203,38 +200,8 @@ public sealed partial class RunProcessor : BackgroundService
         RunRequest request,
         CancellationToken cancellationToken)
     {
-        await _subagents.WaitForOtherRunsAsync(runId, cancellationToken).ConfigureAwait(false);
         var isCoding = request.Mode == RunMode.Coding;
         if (isCoding) request = request with { CodingOptions = (request.CodingOptions ?? new CodingRunOptions()) with { UseWorkingState = true, ReasoningPolicy = "maximum" } };
-        try
-        {
-            if (isCoding && request.CodingOptions?.ParallelModelId is { Length: > 0 } parallelModel)
-            {
-                var originalMain = request.PreferredCodingModelId ?? _options.CodingModelId;
-                var pair = await _modelRuntime.ConfigurePairAsync(originalMain, parallelModel, cancellationToken).ConfigureAwait(false);
-                request = request with { PreferredCodingModelId = pair.Main };
-                if (await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false) is null)
-                {
-                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelLoading, new ModelLoadingEvent(pair.Main, "loading", 0, 0), cancellationToken).ConfigureAwait(false);
-                    await _workers.PrepareLmModelWithStatusAsync(pair.Main, 0, null, cancellationToken).ConfigureAwait(false);
-                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelLoading, new ModelLoadingEvent(pair.Secondary, "loading", 0, 0), cancellationToken).ConfigureAwait(false);
-                    await _workers.PrepareLmModelWithStatusAsync(pair.Secondary, 0, null, cancellationToken).ConfigureAwait(false);
-                }
-                await _subagents.RestoreAsync(runId, request, cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                await _modelRuntime.DisablePairAsync(isCoding ? request.PreferredCodingModelId ?? _options.CodingModelId : request.PreferredGeneralModelId ?? _options.GeneralModelId, cancellationToken).ConfigureAwait(false);
-                await _subagents.RestoreAsync(runId, request, cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch (Exception exception) when (isCoding && ModelRuntimeClient.IsTransientInferenceFailure(exception))
-        {
-            // Pair configuration happens before the normal model-loading retry path.
-            // A missing native Windows runtime after a reboot must keep the durable
-            // coding checkpoint queued instead of permanently failing the run.
-            throw new ModelProviderRequestException("model_configuration", 1, exception);
-        }
         ModelSelection selection;
         try { selection = await _router.SelectAsync(request, cancellationToken).ConfigureAwait(false); }
         catch (HttpRequestException exception) when (isCoding)
@@ -281,6 +248,8 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 checkpoint = checkpoint with { Messages = continued, PreserveSessionPromptPrefix = true };
             }
+            if (isCoding && request.DeepResearch)
+                checkpoint = ScheduleExplicitDeepResearch(checkpoint, runId, ExtractOriginalTask(request));
             await _repository.AppendEventAsync(
                 runId,
                 RunEventTypes.QueueChanged,
@@ -307,7 +276,6 @@ public sealed partial class RunProcessor : BackgroundService
 
         var messages = checkpoint.Messages.ToList();
         if (isCoding) CodingAgentPolicy.EnsureCurrentInstructions(messages);
-        if (!string.IsNullOrWhiteSpace(request.CodingOptions?.ParallelModelId)) CodingAgentPolicy.EnsureDelegationInstructions(messages);
         var roundCount = checkpoint.RoundCount;
         var toolCallCount = checkpoint.ToolCallCount;
         var inputTokens = checkpoint.InputTokens;
@@ -334,6 +302,7 @@ public sealed partial class RunProcessor : BackgroundService
         var preserveSessionPromptPrefix = checkpoint.PreserveSessionPromptPrefix;
         var workingStatePromptIncluded = checkpoint.WorkingStatePromptIncluded;
         var appliedSteeringSequence = checkpoint.AppliedSteeringSequence;
+        var deepResearchCompleted = checkpoint.DeepResearchCompleted;
         if (appliedSteeringSequence > 0)
         {
             stagedWebResearchRequested = false;
@@ -350,7 +319,7 @@ public sealed partial class RunProcessor : BackgroundService
 
         _ = await ApplySteeringAsync().ConfigureAwait(false);
         if (stagedWebResearchRequested
-            && !StagedWebResearchPipeline.HasCompletedDossier(messages))
+            && (request.DeepResearch ? !deepResearchCompleted : !StagedWebResearchPipeline.HasCompletedDossier(messages)))
         {
             var researchStart = (await _repository.GetAsync(runId, cancellationToken).ConfigureAwait(false))!.LastEventId;
             try
@@ -419,6 +388,7 @@ public sealed partial class RunProcessor : BackgroundService
             toolCallCount += research.ToolCalls;
             inputTokens += research.InputTokens;
             outputTokens += research.OutputTokens;
+            deepResearchCompleted = true;
             await _repository.AppendEventAsync(
                 runId,
                 RunEventTypes.ContextChanged,
@@ -461,7 +431,6 @@ public sealed partial class RunProcessor : BackgroundService
                     AgentToolSpec tool;
                     try
                     {
-                        await _subagents.ValidateParentMutationAsync(runId, call, cancellationToken).ConfigureAwait(false);
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
                         if (isCoding && string.IsNullOrWhiteSpace(pendingProposalId))
@@ -535,9 +504,7 @@ public sealed partial class RunProcessor : BackgroundService
                             new { tool = tool.Name, toolCallId = operationId, callId = operationId, target = serverToolTarget, arguments = call.Arguments },
                             cancellationToken).ConfigureAwait(false)) continue;
                         AgentToolExecutionResult result;
-                        if (CodingSubagentTools.IsTool(tool.Name) || tool.Name == WorkspaceTools.DocumentAgent)
-                            result = await _subagents.ExecuteAsync(tool.Name, runId, operationId, call.Arguments, request, cancellationToken, parentMessages: messages).ConfigureAwait(false);
-                        else if (tool.Name == CodingWorkingStateTools.PlanTool)
+                        if (tool.Name == CodingWorkingStateTools.PlanTool)
                         {
                             try
                             {
@@ -571,7 +538,7 @@ public sealed partial class RunProcessor : BackgroundService
                             await _repository.AppendEventAsync(
                                 runId,
                                 RunEventTypes.ArtifactCreated,
-                                artifact,
+                                artifact with { StepId = operationId },
                                 cancellationToken).ConfigureAwait(false);
                         }
                         await _repository.AppendEventAsync(
@@ -664,17 +631,32 @@ public sealed partial class RunProcessor : BackgroundService
             var effort = _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
             var selectableTools = budgetSummary ? [] : availableTools.ToArray();
             var modelTools = CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding);
-            var liveTextGate = new IncrementalVisibleTextGate(enabled: true);
+            var liveTextGate = new IncrementalVisibleTextGate(enabled: true, bufferUntilComplete: true);
             CodingTextReconciler? codingText = null;
             var firstReasoningFragment = true;
             var reasoningPublished = false;
+            var interruptedContent = new StringBuilder();
+            var interruptedReasoning = new StringBuilder();
+            var exactNativeTailRecovered = false;
             Func<ModelRuntimeProgress, CancellationToken, ValueTask> nativeProgress =
                 async (progress, token) =>
                 {
+                    if (progress.State == "interruptedNativeTail")
+                    {
+                        if (TryParseInterruptedDeepSeekTail(progress.ContentDelta, progress.ReasoningDelta != "off",
+                            out var exactContent, out var exactReasoning))
+                        {
+                            interruptedContent.Clear().Append(exactContent);
+                            interruptedReasoning.Clear().Append(exactReasoning);
+                            exactNativeTailRecovered = true;
+                        }
+                        return;
+                    }
                     if (progress.State == "reasoningDelta")
                     {
                         if (!string.IsNullOrEmpty(progress.ReasoningDelta))
                         {
+                            interruptedReasoning.Append(progress.ReasoningDelta);
                             await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
                                 new ReasoningDeltaEvent(progress.ReasoningDelta, (int)Math.Min(roundCount + 1, int.MaxValue),
                                     ReplaceFrom: firstReasoningFragment ? 0 : null, State: "running"), token).ConfigureAwait(false);
@@ -686,6 +668,7 @@ public sealed partial class RunProcessor : BackgroundService
                     if (string.Equals(progress.State, "contentDelta", StringComparison.Ordinal)
                         && !string.IsNullOrEmpty(progress.ContentDelta))
                     {
+                        interruptedContent.Append(progress.ContentDelta);
                         var visibleDelta = liveTextGate.Push(progress.ContentDelta);
                         if (!string.IsNullOrEmpty(visibleDelta))
                         {
@@ -697,9 +680,12 @@ public sealed partial class RunProcessor : BackgroundService
 
                     if (progress.State == "generationRetry")
                     {
-                        liveTextGate = new IncrementalVisibleTextGate(enabled: true);
+                        liveTextGate = new IncrementalVisibleTextGate(enabled: true, bufferUntilComplete: true);
                         codingText?.RestartAttempt();
                         firstReasoningFragment = true;
+                        interruptedContent.Clear();
+                        interruptedReasoning.Clear();
+                        exactNativeTailRecovered = false;
                     }
 
                     await _repository.AppendEventAsync(
@@ -931,6 +917,12 @@ public sealed partial class RunProcessor : BackgroundService
                 try
                 {
                     lastNativePrompt = ModelRuntimeClient.PrepareLanguageBoundMessages(contextPlan.Messages);
+                    // Persist the exact evaluated prefix before inference. Stop may
+                    // otherwise leave only the pre-tokenization prompt behind.
+                    messages = lastNativePrompt.ToList();
+                    preserveSessionPromptPrefix = true;
+                    workingStatePromptIncluded = workingState is not null;
+                    await SaveCheckpointAsync().ConfigureAwait(false);
                     response = await _modelRuntime.CompleteChatAsync(
                         selection.ModelId,
                         lastNativePrompt ?? contextPlan.Messages,
@@ -990,6 +982,18 @@ public sealed partial class RunProcessor : BackgroundService
                 roundCount++;
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 continue;
+            }
+
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // Historical fragments preserve append-only provider context after
+                // disk restore. Partial tool calls are never reconstructed/executed.
+                if (lastNativePrompt is not null && streamingTurnStartEventId is { } turnStart
+                    && (exactNativeTailRecovered || interruptedContent.Length > 0 || interruptedReasoning.Length > 0))
+                    await _repository.AppendEventAsync(runId, InterruptedTurnEventType,
+                        new { turnStartEventId = turnStart, content = interruptedContent.ToString(),
+                            reasoningContent = interruptedReasoning.ToString(), exactNativeTailRecovered }, CancellationToken.None).ConfigureAwait(false);
+                throw;
             }
 
             var remainingLiveDelta = liveTextGate.Flush();
@@ -1171,13 +1175,6 @@ public sealed partial class RunProcessor : BackgroundService
                 throw new InvalidOperationException("Model returned neither text nor a structured tool call.");
             }
 
-            if (await _subagents.CollectUnseenAsync(runId, messages, cancellationToken).ConfigureAwait(false) is { } agentResults)
-            {
-                messages.Add(new LmChatMessage("assistant", response.Content, ReasoningContent: response.ReasoningContent));
-                messages.Add(new LmChatMessage("user", agentResults + "\nPrüfe die Ergebnisse und integriere sie in den Abschluss des Nutzerauftrags."));
-                await SaveCheckpointAsync().ConfigureAwait(false);
-                continue;
-            }
             if (await CompleteRunAsync(response.Content, liveTextGate.HasStreamed).ConfigureAwait(false)) return;
             // Acceptance won the atomic completion race. Continue this same run.
             cancellationToken.ThrowIfCancellationRequested();
@@ -1210,7 +1207,8 @@ public sealed partial class RunProcessor : BackgroundService
                 IncompleteResponseRetryCount: incompleteResponseRetryCount,
                 PreserveSessionPromptPrefix: preserveSessionPromptPrefix,
                 WorkingStatePromptIncluded: workingStatePromptIncluded,
-                AppliedSteeringSequence: appliedSteeringSequence),
+                AppliedSteeringSequence: appliedSteeringSequence,
+                DeepResearchCompleted: deepResearchCompleted),
             cancellationToken);
 
         async Task<bool> ApplySteeringAsync()
@@ -1228,15 +1226,9 @@ public sealed partial class RunProcessor : BackgroundService
                     await _repository.GetEventsAfterAsync(runId, streamingTurnStartEventId.Value, cancellationToken).ConfigureAwait(false), visibleTextLength);
                 if (!string.IsNullOrWhiteSpace(interruptedText)) messages.Add(new LmChatMessage("assistant", interruptedText));
             }
-            string? childResults = null;
-            {
-                await _subagents.WaitAsync(runId, cancellationToken).ConfigureAwait(false);
-                childResults = await _subagents.CollectUnseenAsync(runId, messages, cancellationToken).ConfigureAwait(false);
-            }
             if (activeCalls is not null)
                 foreach (var abandoned in activeCalls.Skip(nextToolIndex))
                     messages.Add(new LmChatMessage("tool", "{\"status\":\"not_executed\",\"errorCode\":\"run.steered\",\"message\":\"Neue Nutzereingabe: noch nicht gestarteten Aufruf verworfen.\"}", ToolCallId: abandoned.Id));
-            if (childResults is not null) messages.Add(new LmChatMessage("user", childResults));
             activeCalls = null;
             nextToolIndex = 0;
             activeCallRound = null;
@@ -1559,7 +1551,7 @@ public sealed partial class RunProcessor : BackgroundService
             await _repository.AppendEventAsync(
                 runId,
                 RunEventTypes.ArtifactCreated,
-                artifact,
+                artifact with { StepId = operationId },
                 cancellationToken).ConfigureAwait(false);
         }
         await _repository.AppendEventAsync(
@@ -1830,7 +1822,6 @@ public sealed partial class RunProcessor : BackgroundService
 
     private async Task MarkFailedAsync(string runId, Exception exception)
     {
-        _subagents.Cancel(runId);
         var failedMode = exception is TimeoutException
             ? (await _repository.GetRequestAsync(runId).ConfigureAwait(false))?.Mode ?? RunMode.Auto
             : RunMode.Auto;
@@ -2015,7 +2006,7 @@ public sealed partial class RunProcessor : BackgroundService
     }
 }
 
-internal sealed class IncrementalVisibleTextGate(bool enabled)
+internal sealed class IncrementalVisibleTextGate(bool enabled, bool bufferUntilComplete = false)
 {
     private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(160);
     private const int FlushCharacterThreshold = 96;
@@ -2052,7 +2043,9 @@ internal sealed class IncrementalVisibleTextGate(bool enabled)
             _decision = StreamDecision.Visible;
         }
 
-        return _pending.Length >= FlushCharacterThreshold || _clock.Elapsed >= FlushInterval
+        // Main-agent narration is committed as a complete model turn before
+        // dispatching its tools. Reasoning/token progress still streams live.
+        return !bufferUntilComplete && (_pending.Length >= FlushCharacterThreshold || _clock.Elapsed >= FlushInterval)
             ? Flush()
             : null;
     }

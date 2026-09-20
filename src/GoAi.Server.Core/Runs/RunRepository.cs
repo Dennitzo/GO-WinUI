@@ -758,7 +758,7 @@ public sealed partial class RunRepository
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT c.checkpoint_json FROM coding_session_contexts c JOIN runs r ON r.run_id = c.run_id
+            SELECT r.run_id, c.checkpoint_json, r.state FROM coding_session_contexts c JOIN runs r ON r.run_id = c.run_id
             WHERE r.run_id != $run AND r.mode = 'Coding' AND r.state IN ('Completed','Failed','Cancelled','Interrupted')
                 AND json_extract(r.request_json, '$.sessionId') = $session
                 AND json_extract(r.request_json, '$.codingOptions.workspacePath') = $workspace COLLATE NOCASE
@@ -768,8 +768,19 @@ public sealed partial class RunRepository
         command.Parameters.AddWithValue("$run", currentRunId);
         command.Parameters.AddWithValue("$session", request.SessionId);
         command.Parameters.AddWithValue("$workspace", request.CodingOptions.WorkspacePath);
-        var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
-        return json is null ? null : JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
+        string previousRun;
+        AgentRunCheckpoint? checkpoint;
+        bool interrupted;
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) return null;
+            previousRun = reader.GetString(0);
+            checkpoint = JsonSerializer.Deserialize<AgentRunCheckpoint>(reader.GetString(1), _checkpointJsonOptions);
+            interrupted = reader.GetString(2) != "Completed";
+        }
+        if (checkpoint is null || !interrupted) return checkpoint;
+        return RestoreInterruptedVisibleTail(checkpoint,
+            await GetEventsAfterAsync(previousRun, 0, cancellationToken).ConfigureAwait(false));
     }
 
     internal async Task<GeneralSessionContextSnapshot?> GetGeneralSessionContextAsync(
@@ -781,9 +792,9 @@ public sealed partial class RunRepository
         // The table predates General continuation. Its rows are run-scoped and
         // cascade with the run; retaining the name avoids rewriting user data.
         command.CommandText = """
-            SELECT r.run_id, c.checkpoint_json, r.request_json
+            SELECT r.run_id, c.checkpoint_json, r.request_json, r.state
             FROM coding_session_contexts c JOIN runs r ON r.run_id = c.run_id
-            WHERE r.run_id != $run AND r.mode IN ('Auto','General') AND r.state = 'Completed'
+            WHERE r.run_id != $run AND r.mode IN ('Auto','General') AND r.state IN ('Completed','Failed','Cancelled','Interrupted')
                 AND json_extract(r.request_json, '$.sessionId') = $session
                 AND r.created_at < (SELECT created_at FROM runs WHERE run_id = $run)
             ORDER BY r.created_at DESC LIMIT 1;
@@ -793,12 +804,14 @@ public sealed partial class RunRepository
         string previousRun;
         AgentRunCheckpoint? checkpoint;
         RunRequest? previousRequest;
+        bool interrupted;
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) return null;
             previousRun = reader.GetString(0);
             checkpoint = JsonSerializer.Deserialize<AgentRunCheckpoint>(reader.GetString(1), _checkpointJsonOptions);
             previousRequest = DeserializeRequest(reader.GetString(2), _database.JsonOptions);
+            interrupted = reader.GetString(3) != "Completed";
         }
         if (checkpoint is null || previousRequest is null) return null;
         var text = new System.Text.StringBuilder();
@@ -831,7 +844,52 @@ public sealed partial class RunRepository
         }
         // The persisted request remains the immutable Create idempotency binding.
         // For session continuation compare the client's logical, steered history.
-        return new(checkpoint, previousRequest with { Messages = history }, visible[segmentStart..]);
+        return new(interrupted ? RestoreInterruptedVisibleTail(checkpoint, journal) : checkpoint,
+            previousRequest with { Messages = history }, visible[segmentStart..], interrupted);
+    }
+
+    private static AgentRunCheckpoint RestoreInterruptedVisibleTail(AgentRunCheckpoint checkpoint, IReadOnlyList<RunEvent> journal)
+    {
+        // A response can become visible immediately before Stop wins the
+        // checkpoint race. Retain it as historical text, never as an executable
+        // partial tool call. The already committed prompt remains unchanged.
+        if (checkpoint.StreamingTurnStartEventId is not { } start || checkpoint.ActiveToolCalls is { Count: > 0 })
+            return checkpoint;
+        var nativeTail = journal.LastOrDefault(item => item.Id > start
+            && item.Type == RunProcessor.InterruptedTurnEventType
+            && item.Data.TryGetProperty("turnStartEventId", out var boundary)
+            && boundary.TryGetInt64(out var value) && value == start);
+        if (nativeTail is not null)
+        {
+            var content = nativeTail.Data.TryGetProperty("content", out var text) && text.ValueKind == JsonValueKind.String
+                ? text.GetString() : null;
+            var reasoning = nativeTail.Data.TryGetProperty("reasoningContent", out var thought) && thought.ValueKind == JsonValueKind.String
+                ? thought.GetString() : null;
+            var exactNativeTailRecovered = nativeTail.Data.TryGetProperty("exactNativeTailRecovered", out var exact)
+                && exact.ValueKind == JsonValueKind.True;
+            // These are already parsed provider text/reasoning channels. Keep
+            // their exact bytes without publishing a partial user-facing answer.
+            // Never infer tool calls from an interrupted stream fragment.
+            // Even an empty exact native tail closes the already evaluated
+            // assistant prefix. Omitting that historical turn would replace it
+            // with the next user turn and require a native cache rewind.
+            if (exactNativeTailRecovered || !string.IsNullOrEmpty(content) || !string.IsNullOrEmpty(reasoning))
+                return checkpoint with
+                {
+                    Messages = [.. checkpoint.Messages, new("assistant", content ?? string.Empty, ReasoningContent: reasoning),
+                        new("user", "GO_INTERRUPTED_MODEL_TURN\nVorherige Modellrunde wurde unterbrochen. "
+                            + "Der historische Text ist unvollständig; daraus keinen erfolgreichen Werkzeugaufruf ableiten. "
+                            + "Der neue Nutzerauftrag ist maßgeblich.")],
+                    StreamingTurnStartEventId = null,
+                };
+        }
+        var tail = GoAi.Server.Core.Coding.CodingTextReconciler.Project(
+            journal.Where(item => item.Id > start).ToArray(), checkpoint.VisibleTextLength ?? 0);
+        return string.IsNullOrWhiteSpace(tail) ? checkpoint : checkpoint with
+        {
+            Messages = [.. checkpoint.Messages, new("assistant", tail)],
+            StreamingTurnStartEventId = null,
+        };
     }
 
     public async Task DeleteCheckpointAsync(string runId, CancellationToken cancellationToken = default)
@@ -911,6 +969,17 @@ public sealed partial class RunRepository
             if (!changed) throw;
             return JsonSerializer.Deserialize<RunRequest>(root.ToJsonString(), options);
         }
+    }
+
+    internal async Task<bool> HasProposalEventAsync(string runId, string proposalId, CancellationToken token)
+    {
+        await using var connection = await _database.OpenConnectionAsync(token).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=$run AND event_type=$type AND json_extract(data_json, '$.proposalId')=$proposal)";
+        command.Parameters.AddWithValue("$run", runId);
+        command.Parameters.AddWithValue("$type", GoAi.Contracts.RunEventTypes.ClientToolProposed);
+        command.Parameters.AddWithValue("$proposal", proposalId);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(token).ConfigureAwait(false), System.Globalization.CultureInfo.InvariantCulture) != 0;
     }
 
 }

@@ -848,6 +848,13 @@ public sealed class AssistantCoordinator(
             prompt,
             explicitTool,
             cancellationToken).ConfigureAwait(false);
+        if (envelope.Payload.TryGetProperty("deepResearch", out var deepResearch) && deepResearch.ValueKind == JsonValueKind.True)
+        {
+            if (match is not null && match.Trigger.Action is not (PromptTriggerAction.Coding or PromptTriggerAction.WebSearch))
+                throw new ArgumentException("Deep Research ist mit General oder Coding nutzbar. Wähle andere einmalige Tools zuerst ab.");
+            match = (match ?? CreateToolMatch("webSearch", prompt)) with { DeepResearch = true };
+        }
+
         await settings.UpdateAsync(current => current with
         {
             ActiveSessionId = sessionId,
@@ -1352,6 +1359,7 @@ public sealed class AssistantCoordinator(
         url = $"https://{AssistantWebBridge.VirtualHost}/artifacts/{artifact.Id:D}",
         downloadUrl = $"https://{AssistantWebBridge.VirtualHost}/artifacts/{artifact.Id:D}?download=1",
         artifact.Metadata,
+        stepId = artifact.StepId,
     };
 
     private static object ToWorkflowDto(WorkflowDefinition workflow) => new

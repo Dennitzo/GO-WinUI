@@ -1,4 +1,5 @@
 import unittest
+import json
 import tempfile
 from unittest.mock import patch
 from pathlib import Path
@@ -6,6 +7,62 @@ from test_catalog import catalog, gguf
 
 
 class ReasoningLanguageTests(unittest.TestCase):
+    def test_installed_deepseek_jinja_replays_the_entire_generated_prefix(self):
+        # Optional local acceptance: no inference/model load. The mandatory
+        # fixture test below covers adaptation without a local model install.
+        try:
+            import jinja2
+        except ImportError:
+            self.skipTest("Jinja2 is unavailable for the optional real-template render")
+        root = Path.home() / ".cache" / "huggingface" / "hub"
+        if not root.is_dir():
+            self.skipTest("No local model catalog")
+        installed = next((model for model in catalog.discover_models(root)
+                          if model["id"].startswith("coding/DeepSeek")), None)
+        if installed is None:
+            self.skipTest("No local DeepSeek model")
+        original = catalog.model_metadata(installed["path"], allow_metadata_only=True)["tokenizer.chat_template"]
+        adapted = catalog.german_reasoning_template(original)
+        if adapted is None or "set keep_reasoning = true" not in adapted:
+            self.skipTest("Installed model uses another DeepSeek template")
+        environment = jinja2.Environment()
+        environment.filters["from_json"] = json.loads
+        history = [dict(role="system", content="Antworte auf Deutsch."), dict(role="user", content="Merke EICHE-42.")]
+        reasoning, answer = "Ich merke mir die Kennung.", "EICHE-42"
+        following = [*history, dict(role="assistant", content=answer, reasoning_content=reasoning),
+                     dict(role="user", content="Nenne die Kennung erneut.")]
+        def render(template, messages):
+            return environment.from_string(template).render(messages=messages, bos_token="<｜begin▁of▁sentence｜>",
+                thinking=True, add_generation_prompt=True, tools=[])
+        generated = render(original, history) + reasoning + "</think>" + answer + "<｜end▁of▁sentence｜>"
+        self.assertFalse(render(original, following).startswith(generated))
+        self.assertTrue(render(adapted, following).startswith(generated))
+        self.assertEqual(render(original, history), render(adapted, history))
+        # Stop may occur inside reasoning, including after whitespace. Rendering
+        # the historical partial turn must not trim or rewrite any decoded byte.
+        for partial in ("  Unfertiger Gedanke", "Unfertiger Gedanke \n\t", " \n"):
+            with self.subTest(partial=repr(partial)):
+                interrupted = [*history, dict(role="assistant", content="", reasoning_content=partial),
+                    dict(role="user", content="Vorherige Runde unterbrochen; neuer Auftrag folgt."),
+                    dict(role="user", content="Nenne die Kennung erneut.")]
+                self.assertTrue(render(adapted, interrupted).startswith(render(adapted, history) + partial))
+        partial_content = "Antwort beginnt \n\t"
+        interrupted = [*history, dict(role="assistant", content=partial_content, reasoning_content=reasoning),
+                       dict(role="user", content="Setze fort.")]
+        self.assertTrue(render(adapted, interrupted).startswith(
+            render(adapted, history) + reasoning + "</think>" + partial_content))
+
+    def test_deepseek_keeps_historical_reasoning_without_requiring_tools(self):
+        template = "{%- set dsml_token = 'DSML' -%}\n" \
+            "{%- set keep_reasoning = tp.has or (loop.index0 > last_user_idx.value) -%}\n" \
+            "{%- if keep_reasoning and thinking -%}{{- message['reasoning_content'] -}}{%- endif -%}"
+        adapted = catalog.german_reasoning_template(template)
+        self.assertIn("set keep_reasoning = true", adapted)
+        self.assertIn("if keep_reasoning and thinking", adapted)
+        self.assertIn("message['reasoning_content']", adapted)
+        self.assertIsNone(catalog.german_reasoning_template(adapted))
+        self.assertEqual(template.replace("tp.has or (loop.index0 > last_user_idx.value)", "true"), adapted)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

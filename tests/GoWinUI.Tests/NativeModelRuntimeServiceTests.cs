@@ -10,7 +10,8 @@ public sealed class NativeModelRuntimeServiceTests
         var stops = 0;
         var starts = 0;
         using var service = new NativeModelRuntimeService(_ => true, _ => Task.FromResult(true),
-            _ => { starts++; return Task.CompletedTask; }, stop: _ => { stops++; return Task.CompletedTask; });
+            _ => { starts++; return Task.CompletedTask; }, stop: _ => { stops++; return Task.CompletedTask; },
+            gatewayIdle: (_, _) => Task.FromResult<bool?>(true));
         var gateway = new Uri("http://localhost:8080");
         await service.EnsureStartedAsync(gateway, CancellationToken.None);
         service.BeginShutdown();
@@ -31,7 +32,8 @@ public sealed class NativeModelRuntimeServiceTests
             entered.SetResult();
             await release.Task;
             running = true;
-        }, stop: _ => { running = false; return Task.CompletedTask; });
+        }, stop: _ => { running = false; return Task.CompletedTask; },
+            gatewayIdle: (_, _) => Task.FromResult<bool?>(true));
         var gateway = new Uri("http://localhost:8080");
         var start = service.EnsureStartedAsync(gateway, CancellationToken.None);
         await entered.Task;

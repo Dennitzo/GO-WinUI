@@ -52,4 +52,4 @@ finally {
         ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $evidence 'summary.json') -Encoding UTF8
     Pop-Location
 }
-Write-Host 'Subagent-, Sitzungs-, Darstellungs- und Cache-Pflichttests bestanden.' -ForegroundColor Green
+Write-Host 'Sitzungs-, Darstellungs- und Cache-Pflichttests bestanden.' -ForegroundColor Green

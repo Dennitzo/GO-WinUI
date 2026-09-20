@@ -158,6 +158,7 @@ public sealed class AiClientPersistenceTests
                 bytes.Length,
                 "screen-capture",
                 null,
+                null,
                 media);
             var cacheRoot = Path.Combine(environment.Directory, "preview-cache");
             using var previews = new AssistantArtifactPreviewService(
@@ -285,6 +286,7 @@ public sealed class AiClientPersistenceTests
             Convert.ToHexString(SHA256.HashData(artifactBytes)).ToLowerInvariant(),
             4,
             "image-worker",
+            null,
             new Dictionary<string, string> { ["seed"] = "42" },
             new MemoryStream(artifactBytes));
         var runRepository = environment.Get<IGoAiRunRepository>();
@@ -529,8 +531,37 @@ public sealed class AiClientPersistenceTests
             bytes.Length,
             "image-worker",
             null,
+            null,
             new MemoryStream(bytes));
 
         Assert.Equal("application/octet-stream", artifact.ContentType);
+    }
+
+    [Fact]
+    public async Task ArtifactImportAndReadPreservesToolStepAnchor()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Bildposition");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Antwort", MessageStatus.Completed);
+        byte[] bytes = [1, 2, 3];
+        var sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        await using var source = new MemoryStream(bytes, writable: false);
+        var artifact = await environment.Get<IChatArtifactRepository>().ImportAsync(
+            message.Id,
+            "media-anchor",
+            "render.png",
+            "image/png",
+            sha256,
+            bytes.Length,
+            "go-ai",
+            "server-step-123",
+            null,
+            source);
+
+        Assert.Equal("server-step-123", artifact.StepId);
+        var loaded = await environment.Get<IChatArtifactRepository>().GetAsync(artifact.Id);
+        Assert.NotNull(loaded);
+        Assert.Equal("server-step-123", loaded.StepId);
     }
 }

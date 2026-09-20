@@ -55,15 +55,6 @@ internal static partial class AppLog
     [LoggerMessage(EventId = 1104, Level = LogLevel.Warning, Message = "Assistant draft could not be flushed")]
     public static partial void AssistantDraftFlushFailed(ILogger logger, Exception exception);
 
-    [LoggerMessage(EventId = 1200, Level = LogLevel.Error, Message = "Project UI action failed")]
-    public static partial void ProjectActionFailed(ILogger logger, Exception exception);
-
-    [LoggerMessage(EventId = 1201, Level = LogLevel.Warning, Message = "Thumbnail generation failed for project asset {AssetId}")]
-    public static partial void AssetThumbnailGenerationFailed(ILogger logger, Exception exception, Guid assetId);
-
-    [LoggerMessage(EventId = 1202, Level = LogLevel.Debug, Message = "Thumbnail loading failed for project asset {AssetId}")]
-    public static partial void AssetThumbnailLoadingFailed(ILogger logger, Exception exception, Guid assetId);
-
     [LoggerMessage(EventId = 1300, Level = LogLevel.Error, Message = "Log export failed")]
     public static partial void LogExportFailed(ILogger logger, Exception exception);
 

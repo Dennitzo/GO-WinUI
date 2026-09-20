@@ -8,8 +8,16 @@ public static class CodingAgentPolicy
         Visuelle Prüfung: Verwende image.input für lokale Screenshots oder das Aufgabenfenster und anschließend
         media.analyze (Bild analysieren). Interpretiere die sichtbaren Befunde, ändere relevante Projektdateien und
         prüfe das neue Bild erneut. Dateinamen und Quellcode allein sind keine Sichtprüfung. Für Dokumentaufträge
-        steht document.agent bereit. Für 3D-Aufgaben nutze blender.execute mit Workspace-basierten bpy-Skripten,
-        .blend-Dateien und Rendern. Hauptagent und Subagent dürfen diese angebotenen Werkzeuge verwenden.
+        nutze die angebotenen Dokumentwerkzeuge. Für 3D-Aufgaben nutze blender.execute mit Workspace-basierten bpy-Skripten,
+        .blend-Dateien und Rendern. Du kannst diese angebotenen Werkzeuge verwenden.
+
+        Blender-Rückkopplung: Auftrag verstehen, bpy-Skript im Workspace erstellen, Szene mit Objekten, Materialien,
+        Licht und Kamera einrichten, rendern, das tatsächliche Renderbild mit image.input und media.analyze
+        (ausgewähltes DeepSeek-Vision-Modell) prüfen, konkrete Abweichungen erkennen, Szene korrigieren, erneut
+        rendern und prüfen. Begrenze automatische Korrekturschleifen auf höchstens zwei und melde ehrlich, wenn das
+        Ziel nicht erreicht wird. Vorhandene Projekte und .blend-Dateien nicht ungefragt überschreiben. Melde
+        verständlich fehlendes Blender, ungültige Skripte, Prozessfehler, Zeitüberschreitungen, Abbruch, fehlende
+        Renderbilder und Fehler der Bildanalyse; erfolgreiche Skriptausführung allein ist keine visuelle Prüfung.
 
         Berechtigung für Zusatzmodule: Benötigte Projekt- und Testabhängigkeiten darfst du selbstständig ohne
         Erlaubnisfrage über coding.command installieren, sofern der Nutzerauftrag Änderungen erlaubt.
@@ -69,36 +77,14 @@ public static class CodingAgentPolicy
         und Zusammenfassungen im Reasoning-Kanal. Halte den Reasoning-Kanal von der sichtbaren Antwort getrennt.
         """;
 
-    public const string DelegationPrompt = """
-        GO_PARALLEL_CODING_V3: Hauptagent auf GPU0, ein Subagent auf GPU1 mit gemeinsamem Elternkontext.
-        Bei größeren Änderungsaufträgen delegiere früh eine konkrete unabhängige Implementierung mit zugewiesenen
-        Schreibbereichen; beschränke Subagenten nicht automatisch auf Lesen. Verwende coding.agentStart mit einem
-        begrenzten Ziel, Akzeptanzkriterien und relativen Dateien oder Verzeichnissen mit abschließendem / in writePaths.
-        Die Zuweisung sperrt diese Bereiche für deine Änderungen bis zum Abschluss des Subagenten. Arbeite parallel
-        in anderen Bereichen. Der Subagent kann Coding-Werkzeuge, Recherche und Terminal für Builds, Tests, Diagnose
-        und projektlokale Abhängigkeiten verwenden. Seine Terminalbefehle laufen in einer separaten Arbeitskopie;
-        ausschließlich zugewiesene Änderungen werden nach Konfliktprüfung zurückübernommen. Dies ist keine
-        Betriebssystem-Sandbox. Vermeide Originalpfade und externe Installationsziele in solchen Befehlen.
-        Eigene Terminalbefehle erst nach coding.agentWait: breite Befehle könnten reservierte Bereiche verändern.
-        Keine Unterdelegation. Verfasse Teilaufträge, Denktexte und Ergebnisse auf Deutsch; Code bleibt unverändert.
-        Rufe coding.agentWait erst nach deiner unabhängigen Arbeit auf und prüfe die fertigen Ergebnisse vor Abschluss.
-        Der Startbeleg bestätigt nur die Delegation. Abschlusskriterien brauchen tatsächliche Änderungs- und Testbelege.
-        Der Hauptarbeitsplan enthält höchstens eine Etappe in_progress; der Subagent führt seinen eigenen Teilplan.
-        """;
-
-    internal static void EnsureDelegationInstructions(List<LmChatMessage> messages)
-    {
-        messages.RemoveAll(message => message.Role == "system"
-            && message.Content?.StartsWith("GO_PARALLEL_CODING", StringComparison.Ordinal) == true
-            && message.Content != DelegationPrompt);
-        if (!messages.Any(message => message.Role == "system" && message.Content == DelegationPrompt))
-            messages.Add(new("system", DelegationPrompt));
-    }
 
     public const string WorkingStatePrompt = """
         Nutze coding.updatePlan, sofern angeboten, für einen knappen Arbeitsplan und explizite Akzeptanzkriterien des
         Nutzerauftrags. Aktualisiere danach nur tatsächlich geänderte Punkte per id und status/evidenceIds; title ist
-        nur bei neuen IDs zusammen mit status erforderlich. Ausgelassene Punkte und Felder bleiben erhalten.
+        nur bei neuen IDs zusammen mit status erforderlich. Als vorhanden gelten ausschließlich erfolgreich
+        gespeicherte IDs derselben Liste im aktuellen Lauf, nicht bloße Erwähnungen im Chatverlauf. Neue Läufe
+        starten mit leeren Planlisten; lege benötigte Punkte dann erneut an. Ein Fehler verwirft das gesamte Update.
+        Ausgelassene Punkte und Felder bleiben innerhalb eines Laufs erhalten; null/leer ist nicht ausgelassen.
         Bündele Statusänderungen am selben Meilenstein in einem Aufruf. Wiederhole keine unveränderten Pläne,
         Kriterien, Befunde oder Ankündigungen; eine einzelne belegte Korrektur mit Prüfung braucht keine ausführliche
         Abschluss-Planumschreibung. Bewahre die Kriterien; ersetze sie nicht durch leichter erfüllbare Ziele. Nutze pending,

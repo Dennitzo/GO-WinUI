@@ -25,7 +25,6 @@ public sealed partial class MainWindow : Window
     private readonly Dictionary<string, Type> _routes = new(StringComparer.Ordinal)
     {
         ["assistant"] = typeof(AssistantPage),
-        ["projects"] = typeof(ProjectsPage),
         ["logs"] = typeof(LogsPage),
         ["settings"] = typeof(SettingsPage),
     };
@@ -261,7 +260,7 @@ public sealed partial class MainWindow : Window
 
     private void NavigateTo(string requestedRoute)
     {
-        var route = _routes.ContainsKey(requestedRoute) ? requestedRoute : "assistant";
+        var route = ShellViewModel.ResolveNavigationRoute(requestedRoute);
         _suppressSelection = true;
         try
         {
@@ -294,7 +293,6 @@ public sealed partial class MainWindow : Window
         ViewModel.ActivePageTitle = e.SourcePageType.Name switch
         {
             nameof(AssistantPage) => "AI Assistent",
-            nameof(ProjectsPage) => "Projekte",
             nameof(LogsPage) => "Logs",
             nameof(SettingsPage) => "Einstellungen",
             _ => "GO",
@@ -538,8 +536,9 @@ public sealed partial class MainWindow : Window
             return "settings";
         }
 
-        return (RootNavigation.SelectedItem as NavigationViewItem)?.Tag as string
-            ?? _settings.Current.LastRoute;
+        return ShellViewModel.ResolveNavigationRoute(
+            (RootNavigation.SelectedItem as NavigationViewItem)?.Tag as string
+                ?? _settings.Current.LastRoute);
     }
 
     private double GetDpi()

@@ -91,7 +91,7 @@ def model_metadata(path, allow_metadata_only=False):
                 metadata[key] = read_string(stream)
             elif key.endswith((".context_length", ".pooling_type", ".block_count", ".embedding_length",
                                ".attention.head_count", ".attention.head_count_kv", ".attention.key_length",
-                               ".attention.value_length", ".ssm.state_size", ".ssm.inner_size",
+                               ".attention.value_length", ".attention.indexer.key_length", ".ssm.state_size", ".ssm.inner_size",
                                ".ssm.group_count", ".ssm.conv_kernel")) and kind == 4:
                 metadata[key] = struct.unpack("<I", read_exact(stream, 4))[0]
             else:
@@ -240,11 +240,20 @@ def discover(root):
 
 
 def german_reasoning_template(template):
-    """Localize known instructions and prime thinking with a language heading.
+    """Adapt known templates for German reasoning and durable prompt prefixes.
 
     The heading is native assistant prefill, not a fabricated reasoning sentence.
     llama returns the prefill in reasoning_content; history must retain it once.
     """
+    deepseek_history = "{%- set keep_reasoning = tp.has or (loop.index0 > last_user_idx.value) -%}"
+    if "dsml_token" in template and deepseek_history in template:
+        # The stock DeepSeek-V4 template drops old reasoning without tools.
+        # JSON history can therefore be identical while its rendered prompt
+        # changes. In-memory rollback checkpoints mask this until /slots/restore
+        # (which restores final KV+tokens, not those checkpoints). Keep the
+        # provider's saved reasoning so the next user turn appends to the exact
+        # generated prefix, including in General chat after a process restart.
+        return template.replace(deepseek_history, "{%- set keep_reasoning = true -%}")
     marker = "{%- if add_generation_prompt %}"
     position = template.rfind(marker)
     thinking = "{{- '<think>\\n' }}"
@@ -275,16 +284,14 @@ def german_reasoning_template(template):
     return localized if localized != template else None
 
 
-def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto", pair=None):
+def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto"):
     models = discover_models(root)
-    if pair:
-        by_id = {model["id"]: model for model in models}
-        for role, source in zip(("main", "secondary"), pair):
-            if source in by_id:
-                models.append(dict(by_id[source], id=source + "~" + role, instance=role, baseModel=source))
     session_directory = Path(target).resolve().parent / "session-cache"
     session_directory.mkdir(parents=True, exist_ok=True)
-    lines = ["version = 1", "", "[*]", "load-on-startup = false", "stop-timeout = 10", "sleep-idle-seconds = -1",
+    # Session persistence addresses slot 0. Omitting this internal limit lets
+    # llama default to four slots and send chat turns to an unsaved LRU slot.
+    # This is a single execution slot, not a user-facing parallel-agent option.
+    lines = ["version = 1", "", "[*]", "load-on-startup = false", "stop-timeout = 10", "sleep-idle-seconds = -1", "parallel = 1",
              f"slot-save-path = {session_directory.as_posix()}/",
              "fit = on", f"fit-target = {fit_target}", "fit-ctx = 4096", f"n-gpu-layers = {gpu_layers}", ""]
     for model in models:
@@ -416,19 +423,37 @@ def choose_single_gpu(model, devices, reserve_mib=2048):
 
 
 def estimate_q8_session_bytes(metadata, tokens):
-    """Conservative q8_0 KV estimate for standard/GQA Qwen and Llama models.
+    """Conservative q8_0 KV estimate for standard/GQA and DeepSeek-V4 caches.
 
     Count every layer as attention, including hybrid layers, so this remains an
     upper estimate without guessing an architecture's recurrent-layer mask.
     Unknown/variable dimensions use the cache manager's explicit fallback.
     """
     architecture = metadata.get("general.architecture", "")
-    if architecture != "llama" and not architecture.startswith("qwen"):
+    if architecture not in ("llama", "deepseek4") and not architecture.startswith("qwen"):
         return None
     def number(suffix):
         value = metadata.get(architecture + "." + suffix)
         return value if isinstance(value, int) and value > 0 else None
     layers = number("block_count")
+    if architecture == "deepseek4":
+        key = number("attention.key_length")
+        indexer_key = number("attention.indexer.key_length")
+        if not all((layers, key, indexer_key)):
+            return None
+        # llama-kv-cache-dsv4.cpp stores K-only MLA rows, not a dense K+V
+        # tensor for all query heads. Include raw K for every token/layer,
+        # CSA and lightning-indexer at 1/4, and HCA at 1/128. Counting every
+        # layer in both compressed groups deliberately overestimates their
+        # disjoint layer masks. Round rows upward and reserve compressor state,
+        # slot metadata and 25% margin; real per-session measurements supersede
+        # this initial estimate after the first successful snapshot.
+        key_row = ((key + 31) // 32) * 34
+        indexer_row = ((indexer_key + 31) // 32) * 34
+        quarter = (tokens + 3) // 4 + 1
+        compressed = (tokens + 127) // 128 + 1
+        rows = layers * (tokens * key_row + quarter * (key_row + indexer_row) + compressed * key_row)
+        return int((rows + tokens * 64) * 1.25) + 128 * 1024**2
     heads = number("attention.head_count")
     embedding = number("embedding_length")
     kv_heads = number("attention.head_count_kv") or heads
@@ -453,7 +478,6 @@ class GpuLoadManager:
         self.root, self.preset, self.state, self.port = root, preset, state, port
         self.fit_target, self.gpu_layers = fit_target, gpu_layers
         self.placements = {}
-        self.pair = None
         self.lock = threading.RLock()
         self.binary = Path(binary) if binary else None
         self.sessions = NativeSessionCache(Path(state) / "session-cache", self.router, self.session_fingerprint,
@@ -463,10 +487,6 @@ class GpuLoadManager:
         # This lookup is read-only: fingerprint checks do not rewrite/reload
         # active presets on each inference round.
         base_id = model_id
-        for role, source in zip(("main", "secondary"), self.pair or ()):
-            if model_id == source + "~" + role:
-                base_id = source
-                break
         model = next((item for item in discover_models(self.root) if item["id"] == base_id), None)
         if model is None:
             raise ValueError("Model is not in the local catalog")
@@ -485,7 +505,7 @@ class GpuLoadManager:
             paths += [self.binary] + sorted(self.binary.parent.glob("*.dll"))
         identity = [(str(item.resolve()), item.stat().st_size, item.stat().st_mtime_ns) for item in paths]
         metadata = model_metadata(path, allow_metadata_only=True) or {}
-        return dict(version=1, files=identity, context=model["context"], cache="q8_0",
+        return dict(version=1, files=identity, context=model["context"], cache="q8_0", slots=1,
                     template=german_reasoning_template(metadata.get("tokenizer.chat_template", "")),
                     placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers)
 
@@ -493,48 +513,14 @@ class GpuLoadManager:
         with self.lock:
             return self.sessions.prepare(model, key)
 
-    def session_save(self, model, key):
+    def session_save(self, model, key, prompt_tokens=None):
         with self.lock:
-            return self.sessions.save(model, key)
+            return self.sessions.save(model, key, prompt_tokens)
 
     def refresh(self):
         with self.lock:
             return write_presets(self.root, self.preset, self.placements, managed_gpu=True,
-                                 fit_target=self.fit_target, gpu_layers=self.gpu_layers, pair=self.pair)
-
-    def configure_pair(self, main_model, secondary_model=None):
-        with self.lock:
-            pair = (main_model, secondary_model) if secondary_model else None
-            response = {"mainAlias": main_model + "~main" if pair else main_model,
-                        "secondaryAlias": secondary_model + "~secondary" if pair else None}
-            if pair == self.pair:
-                return dict(response, success=True, reused=True)
-            models = {model["id"]: model for model in discover_models(self.root)}
-            if pair and any(key not in models or models[key]["role"] != "general" for key in pair):
-                raise ValueError("Both instances require a local text model")
-            active = [item for item in self.router("v1/models")["data"]
-                      if item.get("status", {}).get("value") in ("loaded", "loading", "sleeping")]
-            if active:
-                raise ValueError("Unload active models before changing the parallel model pair")
-            placements = {}
-            if pair:
-                devices = {gpu["index"]: gpu for gpu in gpu_inventory()}
-                if not all(index in devices for index in (0, 1)):
-                    raise ValueError("Parallel Coding requires physical GPU0 and GPU1")
-                for index, (role, source) in enumerate(zip(("main", "secondary"), pair)):
-                    if devices[index]["free"] < model_file_bytes(models[source]) + int(self.fit_target) * 1024 ** 2:
-                        raise ValueError(f"Insufficient free VRAM on GPU{index} for the selected model")
-                    placements[source + "~" + role] = devices[index]["device"]
-            previous_pair, previous_placements = self.pair, self.placements
-            self.pair, self.placements = pair, placements
-            try:
-                self.refresh()
-                self.router("v1/models?reload=1")
-            except Exception:
-                self.pair, self.placements = previous_pair, previous_placements
-                self.refresh()
-                raise
-            return dict(response, success=True, reused=False)
+                                 fit_target=self.fit_target, gpu_layers=self.gpu_layers)
 
     def router(self, path, body=None, timeout=15):
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/{path}",
@@ -556,15 +542,12 @@ class GpuLoadManager:
                 raise ValueError("Model is not in the local catalog")
             current = self.router("v1/models")["data"]
             active = [item for item in current if item.get("status", {}).get("value") in ("loaded", "loading", "sleeping")]
-            pair_aliases = {source + "~" + role for source, role in zip(self.pair or (), ("main", "secondary"))}
-            if pair_aliases and model_id not in pair_aliases:
-                raise ValueError("Disable the parallel model pair before loading another model")
-            if any(item["id"] != model_id and item["id"] not in pair_aliases for item in active):
+            if any(item["id"] != model_id for item in active):
                 raise ValueError("Unload the previous model before selecting GPU placement")
             if any(item["id"] == model_id for item in active):
                 return {"success": True, "reused": True}
             self.sessions.invalidate(model_id)
-            device = self.placements[model_id] if pair_aliases else choose_single_gpu(model, gpu_inventory(), self.fit_target)
+            device = choose_single_gpu(model, gpu_inventory(), self.fit_target)
             deadline = time.monotonic() + 280
             for attempt in range(2):
                 self.placements[model_id] = device
@@ -597,7 +580,7 @@ class GpuLoadManager:
                             failure += stream.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
                 memory_failure = re.search(r"out of memory|cudaMalloc.*failed|failed to allocate|unable to allocate|CUDA error.*memory", failure, re.I)
                 self.record(model_id, device, "failed", failure[-4000:])
-                if pair_aliases or not device or attempt or not memory_failure:
+                if not device or attempt or not memory_failure:
                     raise RuntimeError("Native model load failed; see gpu-placement.jsonl and llama.stderr.log")
                 # A failed router child has already exited, releasing its CUDA
                 # allocations. Reloading the changed preset joins that child.
@@ -610,15 +593,16 @@ def start_gpu_control(manager, host, port):
         def do_POST(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if self.path not in ("/models/load", "/models/configure-pair", "/sessions/prepare", "/sessions/save") or not 0 < length <= 8192:
+                if self.path not in ("/models/load", "/sessions/prepare", "/sessions/save") or not 0 < length <= 8192:
                     raise ValueError("Invalid GPU control request")
                 body = json.loads(self.rfile.read(length))
                 if self.path.startswith("/sessions/"):
-                    action = manager.session_prepare if self.path == "/sessions/prepare" else manager.session_save
-                    result = action(body["model"], body.get("sessionKey"))
+                    if self.path == "/sessions/prepare":
+                        result = manager.session_prepare(body["model"], body.get("sessionKey"))
+                    else:
+                        result = manager.session_save(body["model"], body.get("sessionKey"), body.get("promptTokens"))
                 else:
-                    result = (manager.configure_pair(body["mainModel"], body.get("secondaryModel"))
-                              if self.path == "/models/configure-pair" else manager.load(body["model"]))
+                    result = manager.load(body["model"])
                 status = 200
             except Exception as error:
                 result, status = {"error": str(error)}, 500
@@ -658,7 +642,7 @@ def runtime_command(binary, preset, host, port, fit_target, gpu_layers):
     # the manager still unloads the owned model on actual workload/model switches.
     return [str(binary), "--host", host, "--port", str(port),
             "--models-preset", str(preset), "--models-max", "2", "--no-models-autoload",
-            "--parallel", "1", "--jinja", "--no-webui", "--sleep-idle-seconds", "-1"]
+            "--jinja", "--no-webui", "--sleep-idle-seconds", "-1"]
 
 
 def main():

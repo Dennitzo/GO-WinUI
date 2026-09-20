@@ -14,7 +14,7 @@ internal sealed class SpeechStreamingTextBuffer(string initialContent = "")
 
     public bool HasConflictingRevision { get; private set; }
 
-    public IReadOnlyList<string> Take(string content, bool complete = false, bool flushSentence = false)
+    public IReadOnlyList<string> Take(string content, bool complete = false, bool flushSentence = false, bool flushBlock = false)
     {
         if (_completed || HasConflictingRevision) return [];
         if (_source.StartsWith(content, StringComparison.Ordinal) && content.Length < _source.Length) return [];
@@ -27,7 +27,7 @@ internal sealed class SpeechStreamingTextBuffer(string initialContent = "")
         var output = new List<string>();
         while (_consumed < _source.Length)
         {
-            var end = FindBoundary(_source, _consumed, complete, flushSentence, _initialFence);
+            var end = FindBoundary(_source, _consumed, complete || flushBlock, flushSentence, _initialFence);
             if (end <= _consumed) break;
             var text = NarrationOnly(_source[_consumed..end], _initialFence);
             _consumed = end;

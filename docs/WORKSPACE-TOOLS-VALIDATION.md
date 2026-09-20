@@ -8,25 +8,23 @@ voraus. BricsCAD setzt eine verbundene BricsCAD-Instanz voraus. Der kompakte
 Werkzeugselektor enthält Namen und Aufgabenbeschreibungen; die vollständigen
 Schemas werden anschließend gezielt bereitgestellt.
 
-- **Dokument erstellen** startet `document.agent`, einen eigenen persistenten
-  Dokumenten-Agenten mit gemeinsamem Ausgangskontext, eigenen Werkzeugbelegen und
-  einer deutschen Fachanweisung. Der aufrufende Agent wartet auf das Ergebnis.
+- **Dokument erstellen** verwendet `document.create` und `document.read` direkt
+  im normalen General- beziehungsweise Coding-Lauf. Es wird kein separater
+  Dokumenten-Agent gestartet; `document-agent` ist keine gültige Client-Capability.
   DOCX/PDF/Markdown/Text nutzen die vorhandenen versionierten Dokumentartefakte.
   Andere Formate benötigen passende Bibliotheken bzw. Programme im Workspace;
   daraus folgt keine Zusage für jedes proprietäre Dateiformat.
 - **Blender** nutzt die installierte Blender-Anwendung. `info` prüft die
   Installation; `run` führt ein zuvor geschriebenes und per SHA-256 bestätigtes
   Python-Skript aus; `open` öffnet die `.blend`-Datei sichtbar. Szenen und Render
-  gehören in den ausgewählten Workspace. Subagenten verwenden ihre bestehende
-  isolierte Arbeitskopie und veröffentlichen nur zugewiesene Dateien.
+  gehören in den ausgewählten Workspace.
 - **Bild analysieren** kombiniert `image.input` (lokales Bild oder Aufnahme eines
   ausdrücklich zur Aufgabe gehörenden Fensters) mit `media.analyze`. Das Hochladen
   allein gilt nicht als Bildanalyse. `workspace.open` startet erzeugte HTML/PDF-
   Vorschauen oder eine native EXE für eine anschließende Sichtprüfung.
 
-Die Werkzeuggrenzen prüfen Pfade, Schemas, Dateistände und Schreibbereiche. Wie
-bei den bestehenden Coding-Terminalwerkzeugen ist die Arbeitskopie keine
-Betriebssystem-Sandbox für beliebige Python-Skripte.
+Die Werkzeuggrenzen prüfen Pfade, Schemas und Dateistände. Die vorhandenen
+Workspace-Prüfungen sind keine Betriebssystem-Sandbox für beliebige Python-Skripte.
 
 ## Reproduzierbare Modelltests
 
@@ -55,7 +53,7 @@ Jeder Durchlauf bewahrt Prompt, Ereignisse, Werkzeugargumente/-ergebnisse und
 daneben. Der Dokumententest liest die tatsächlich exportierte DOCX-Datei erneut
 ein. Der Blender-Test verlangt Szene, Render, Bildanalyse und Öffnen der Szene.
 Der visuelle Test verlangt zwei Fensteraufnahmen, Bildanalyse und eine geänderte
-Anwendung; im Coding-Modus zusätzlich eigene Aufnahme und Analyse des Subagenten.
+Anwendung. Beide Modi verwenden dafür die Werkzeuge ihres eigenen Agentenlaufs.
 
 Beispiel für einen normalen visuellen Arbeitsauftrag:
 
@@ -63,9 +61,7 @@ Beispiel für einen normalen visuellen Arbeitsauftrag:
 > und untersuche den Screenshot mit Bild analysieren auf abgeschnittene Inhalte,
 > Abstände und Lesbarkeit. Behebe die tatsächlich sichtbaren Fehler im Projekt.
 > Starte die aktualisierte Fassung und prüfe einen neuen Screenshot. Belege die
-> Änderungen mit den beiden Bildanalysen. Ein paralleler Subagent darf einen
-> eigenen, nicht überschneidenden Bereich bearbeiten und dieselben Bildwerkzeuge
-> für seine Prüfung verwenden.
+> Änderungen mit den beiden Bildanalysen.
 
 ## Quellen und Grenzen der Recherche
 
@@ -90,7 +86,12 @@ angefragten Domain gehören. Es wird kein anderer Suchdienst außerhalb der
 lokalen SearXNG-Instanz als Fallback verwendet. Einzelne Anbieter können weiterhin
 extern gesperrt sein; diese werden ausgelassen statt fortlaufend erneut gefragt.
 
-## Prüfstand
+## Historischer Prüfstand vom 19.09.2026
+
+Die folgenden Ergebnisse und Testzahlen stammen aus dem damaligen Build mit
+Subagent-Unterstützung. Sie bleiben unveränderte Belege und weisen die aktuelle
+Implementation nach Entfernung der Subagenten nicht nach. Insbesondere die
+Dokumententests müssen den direkten Werkzeugablauf ohne separaten Agenten prüfen.
 
 Am 19.09.2026 bestanden: 668 Client-, 658 Server-, 163 Web- und 56 native
 Cache-Tests (`artifacts/validation/agent-context/summary.json`). Der Release-Build

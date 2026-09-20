@@ -39,7 +39,7 @@ function harness(storage = new Map()) {
   });
   for (const name of ["readUngroupedCollapsed", "persistUngroupedCollapsed", "createSessionItem", "createProjectRow",
     "createWorkspaceProject", "renderSessions", "renderSessionPin", "contextProfileForSnapshot", "persistMeasuredContext", "restoreSnapshotContext",
-    "belongsToActiveSession", "applySnapshot", "handleHostMessage", "isTerminalMessageStatus",
+    "belongsToActiveSession", "restoreDeepResearch", "applySnapshot", "handleHostMessage", "isTerminalMessageStatus",
     "pruneTerminalMessageRunStatuses", "conversationMessagesDiffer", "renderComposerAction", "renderStatus"]) {
     const start = source.indexOf(`  function ${name}(`);
     const ending = source.slice(start).match(/\r?\n {2}\}(?:\r?\n|$)/);
@@ -97,6 +97,19 @@ test("tab reload and session switching restore measured context and live per-mes
   freshPage.context.applySnapshot(active);
   assert.equal(freshPage.state.messageRunStatus.get("answer-a").detail, "16.384 Token");
   assert.equal(freshPage.elements.contextLabel.textContent, "50%");
+});
+
+test("full snapshots restore only the research preference of the selected session", () => {
+  const storage = new Map([["go.assistant.deep-research.v1:session-a", "1"]]);
+  const { context, state } = harness(storage);
+  context.applySnapshot(snapshot());
+  assert.equal(state.deepResearch, true);
+  context.applySnapshot(snapshot({ activeSessionId: "session-b", messages: [] }));
+  assert.equal(state.deepResearch, false);
+  context.applySnapshot(snapshot());
+  assert.equal(state.deepResearch, true);
+  context.applySnapshot(snapshot({ contextUsed: 500 }));
+  assert.equal(state.deepResearch, true, "ordinary status snapshots do not clear the active chip");
 });
 
 test("global project plus requests the native folder picker before creating anything", () => {
@@ -168,22 +181,6 @@ test("project heading and row actions share the same compact layout including th
   assert.ok(rule(".new-project-button svg, .session-group__add svg").includes("width: 16px; height: 16px"));
 });
 
-test("child tool progress updates its history without replacing the main model status or token counters", () => {
-  const h = harness();
-  vm.runInContext(fs.readFileSync(path.resolve(__dirname, "../../src/GoWinUI.App/Assets/Web/agent-tabs.js"), "utf8"), h.context);
-  h.context.applySnapshot(snapshot({ isRunning: true, runMessageId: "answer-a", runStatus: "Denkt nach",
-    runDetail: "Hauptmodell 100 Token", contextUsed: 700, contextLimit: 4096 }));
-  let recorded = null;
-  h.context.recordCodingActivity = payload => { recorded = payload; };
-  h.emit("status.changed", { sessionId: "session-a", messageId: "answer-a", toolStep: {
-    id: "child-progress", tool: "assistant.progress", agentId: "agent-a", detail: "Subagent denkt nach"
-  }, contextUsed: 9999, model: "child-model", runStatus: null, runDetail: null });
-  assert.equal(recorded.toolStep.agentId, "agent-a");
-  assert.equal(h.state.runStatus, "Denkt nach");
-  assert.equal(h.state.runDetail, "Hauptmodell 100 Token");
-  assert.equal(h.state.contextUsed, 700);
-  assert.equal(h.state.messageRunStatus.get("answer-a").detail, "Hauptmodell 100 Token");
-});
 
 test("context measurement survives app restart and model switch without reviving a finished run", () => {
   for (const role of ["general", "coding"]) {

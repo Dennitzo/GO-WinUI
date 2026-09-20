@@ -27,4 +27,5 @@ public sealed record AgentRunCheckpoint(
     int IncompleteResponseRetryCount = 0,
     bool PreserveSessionPromptPrefix = false,
     bool WorkingStatePromptIncluded = false,
-    long AppliedSteeringSequence = 0);
+    long AppliedSteeringSequence = 0,
+    bool DeepResearchCompleted = false);

@@ -1,6 +1,13 @@
-# Subagenten, Projektleiste und Kontextwiederverwendung
+# Historischer Prüfbericht: Projektleiste und Kontextwiederverwendung
 
-## Finaler Stand vom 19.09.2026
+**Einordnung vom 20.09.2026:** Die Subagent-Funktion wurde entfernt. Es gibt keine
+Agenten-Tabs, delegierten Arbeitskopien oder Parallelmodell-Auswahl mehr. Die hier
+dokumentierten Subagent- und Paralleltests sind ausschließlich historische Belege
+des damaligen Builds; sie beschreiben keine aktuelle Fähigkeit und gelten nicht als
+Abnahme des aktuellen Quellstands. Bestehende Sitzungen und historische Ergebnisse
+bleiben Daten. Das aktuelle Pflichtgate verwendet die heute vorhandenen Tests.
+
+## Historischer Stand vom 19.09.2026
 
 Das abschließende Pflichtgate bestand mit 658 Client-, 645 Server-, 162 Web- und
 56 Python-Prüfungen (1.521 insgesamt). Der Portable-Publish bestand einschließlich
@@ -29,7 +36,7 @@ Die unten dokumentierte fehlgeschlagene General-Probe mit stark prioritätsbeton
 Wortlaut bleibt eine Modellgrenze; sie wird durch diese erfolgreichen Prüfungen
 nicht zu einem bestandenen Test umgedeutet.
 
-## Wiederholbare Pflichtprüfung
+## Wiederholbare Pflichtprüfung und historische Prüfmatrix
 
 `windows/test-agent-context.ps1` ist das gemeinsame Pflichtgate für Client, Gateway,
 Webdarstellung und native Cache-Verwaltung. Es läuft auch vor dem Publish durch
@@ -41,7 +48,11 @@ bricht den Build ab. Logs, TRX und `summary.json` liegen unter
 powershell -NoProfile -ExecutionPolicy Bypass -File windows/test-agent-context.ps1
 ```
 
-| Fall | Nachweis |
+Die folgende Matrix beschreibt den Stand vom 19.09.2026. Insbesondere die Zeilen
+zu Subagenten, Agenten-Tabs und Arbeitskopien sind nach deren Entfernung nicht mehr
+ausführbare Produktfunktionen. Auch damalige Testzahlen sind kein aktuelles Gate-Ergebnis.
+
+| Historischer Fall | Damaliger Nachweis |
 |---|---|
 | Parallele Dateimutationen | Exklusive Datei-/Verzeichnisbereiche, Konfliktprüfung bei Rückübernahme, Tests gegen überlappende Pfade |
 | Subagent-Terminal | Echter Prozess in eigener Quellkopie, nur zugewiesene erfolgreiche Änderungen zurückübernommen, Hardlink-/Junction- und Fehlerfälle geprüft |
@@ -71,7 +82,7 @@ WebView, laufende Werkzeuge und Ereignisverarbeitung bleiben aktiv. Erst das
 tatsächliche Schließen des Fensters sichert den Entwurf und beendet die Seite,
 auch wenn gerade ein anderer Reiter geöffnet ist.
 
-## Live-Abnahme
+## Historische Live-Abnahme und Diagnosewerkzeuge
 
 Das deterministische Pflichtgate behauptet keine GPU-Messung. Die zusätzliche
 native Messung verlangt echte `usage.prompt_tokens_details.cached_tokens` und
@@ -95,13 +106,6 @@ Bestätigungen auch nach Laufende. Ein Fehler stoppt die Folgeprüfung; jeder Fa
 schreibt seinen vollständigen Ereignisbeleg als JSON. Bereits abgebrochene lokale
 Nachrichten werden beim App-Neustart nicht erneut aufgenommen oder verändert.
 
-`CodingParallelLiveTests.MainAndSecondaryModelsWriteTheirOwnFilesAndJoin` führt
-nach Setzen von `GO_AI_PARALLEL_LIVE=1` eine echte Zwei-Modell-Aufgabe mit getrennten
-Dateien, Client-Werkzeugen und einem vom Subagenten ausgeführten PowerShell-Test aus.
-Der Gateway muss dafür den aktuellen Stand und `SupportsIsolatedSubagents` liefern.
-Der Live-Test speichert die vollständigen Werkzeugbelege im konfigurierbaren
-Verzeichnis `GO_AI_PARALLEL_EVIDENCE`.
-
 Die reale Portable-Abnahme am 19.09.2026 ergänzte diese Prüfungen:
 
 - General wurde über den sichtbaren Umlenkungsbutton innerhalb derselben Run-ID
@@ -118,7 +122,7 @@ Die reale Portable-Abnahme am 19.09.2026 ergänzte diese Prüfungen:
   `SUBAGENT-TEST-PASSED`; Haupt- und Subagent wurden erfolgreich zusammengeführt.
   Beleg: `artifacts/validation/parallel-live-final/beee306b3b2a42b08ea0df3e8c4008d2.json`.
 
-## Technische Grenzen
+## Technische Grenzen des damaligen Builds
 
 Verschiedene Modelle können keine KV-Tensoren teilen. Beim ersten Wechsel werden
 Nachrichten erneut verarbeitet; bei der Rückkehr kann der kompatible gespeicherte
@@ -137,7 +141,7 @@ Auftrags zu unterscheiden: Coding kann den gespeicherten Lauf wieder aufnehmen;
 General beendet beim Neustart weiterhin den vorherigen aktiven Lauf. Ein Wechsel
 zwischen Seiten, Sitzungen oder Agent-Reitern beendet dagegen keinen aktiven Lauf.
 
-## Native Diagnose der Umlenkungspriorität
+## Historische native Diagnose der Umlenkungspriorität
 
 Am 19.09.2026 wurde eine echte General-Umlenkung dauerhaft akzeptiert und vor der
 nächsten Modellgenerierung angewendet, dennoch setzte Qwen den alten Auftrag fort.

@@ -36,11 +36,10 @@ public sealed class WorkspaceToolTests
     }
 
     [Fact]
-    public void LocalBrokerAcceptsScopedBlenderAndImageToolsWithCorrectRisk()
+    public void LocalBrokerAcceptsBlenderAndImageToolsWithCorrectRisk()
     {
-        var scope = new CodingExecutionScope("agent-test", ["scene.py", "scene.blend"]);
         var blender = new ToolProposal("proposal-test", "run-test", WorkspaceTools.Blender,
-            JsonSerializer.SerializeToElement(new { operation = "info" }), ToolRiskClass.Process, "Blender prüfen", DateTimeOffset.MaxValue, scope);
+            JsonSerializer.SerializeToElement(new { operation = "info" }), ToolRiskClass.Process, "Blender prüfen", DateTimeOffset.MaxValue);
         LocalToolBroker.ValidateProposal(blender);
         Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(blender with { RiskClass = ToolRiskClass.ReadOnly }));
         LocalToolBroker.ValidateProposal(blender with { Name = WorkspaceTools.ImageInput,

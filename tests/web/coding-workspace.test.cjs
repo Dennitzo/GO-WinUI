@@ -29,7 +29,7 @@ function harness({ speech = false, codingToolStepsExpanded = false } = {}) {
     model: "coding/Qwen3.5-27B-UD-Q4_K_XL.gguf~1234567890", isRunning: false,
     codingActivity: new Map(), codingActivityExpanded: new Map(), messageRunStatus: new Map(), messages: [], codingToolStepsExpanded };
   const elements = Object.fromEntries(["appShell", "prompt",
-    "codingWorkspace", "codingWorkspaceName", "messageScroll", "messageList"].map(name => [name, new Node("div")]));
+    "messageScroll", "messageList"].map(name => [name, new Node("div")]));
   elements.messageScroll.scrollTop = 50;
   elements.messageScroll.scrollTo = options => { elements.messageScroll.scrollTop = options.top; };
   const context = vm.createContext({ state, elements, URL,
@@ -40,10 +40,22 @@ function harness({ speech = false, codingToolStepsExpanded = false } = {}) {
     setTimeout: () => {}, timeLabel: () => "12:34", annotateReadableSpeechBlocks: () => {},
     applySpeechHighlight: () => {}, requestAnimationFrame: callback => callback(),
     createToolIcon: () => new Node("svg"), toolVisuals: { coding: ["", "coding-icon"] },
+    createArtifactList: items => {
+      const list = new Node("div");
+      list.className = "message-artifacts";
+      for (const item of items) {
+        const card = new Node("section");
+        card.className = "artifact-card";
+        card.dataset.artifactId = item.id;
+        card.textContent = item.fileName;
+        list.append(card);
+      }
+      return list;
+    },
     messageCopyIcon: "copy", messagePdfIcon: "pdf", messageDoneIcon: "done"
   });
   for (const name of ["visibleModelLabel", "codingToolLabel", "codingStepState", "normalizeCodingStep", "recordCodingActivity", "compareReasoningStepUpdates",
-    "createCodingActivity", "mergeCodingToolSteps", "codingPreviewHtml", "openCodingPreview", "closeCodingPreview", "enhanceCodingCodeBlocks", "renderCodingWorkspace", "renderCodingChanges", "applyCodingChanges", "pickCodingWorkspace", "cleanStatusMetadata",
+    "createCodingActivity", "mergeCodingToolSteps", "codingPreviewHtml", "openCodingPreview", "closeCodingPreview", "enhanceCodingCodeBlocks", "renderCodingWorkspace", "renderCodingChanges", "applyCodingChanges", "cleanStatusMetadata",
     "uniqueStatusParts", "isTerminalMessageStatus", "statusLabel", "runStatusText", "sanitizeVisibleMessageContent", "createMessage",
     "createMessageFooter", "createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "scrollMessageToTop", "renderMessages", "renderCodingMessages",
     "conversationMessagesDiffer", "sortCommittedMessages", "pruneTerminalMessageRunStatuses", "requestConversationRefresh", "acceptCommittedRevision",
@@ -88,6 +100,63 @@ test("General steering live receipts opt into the same ordered persisted timelin
   assert.equal(article.querySelectorAll(".steering-message").length, 1);
   assert.ok(article.querySelector(".steering-message").textContent.includes("Angewendet"));
   assert.equal(state.messages[0].id, "answer-1");
+});
+
+test("late thumbnails remain attached to their original tool before subsequent narration and survive restored sessions", () => {
+  for (const mode of ["coding", null]) {
+    const { context, state, elements } = harness();
+    state.selectedToolAction = mode;
+    const first = "Ich analysiere das erste Bild.\n\n";
+    const second = "Ich ändere jetzt die Szene.\n\n";
+    const third = "Das zweite Bild ist geprüft.";
+    const firstTool = { id: "image-1", tool: "media.analyze", status: "completed", contentOffset: first.length };
+    const firstArtifact = { id: "thumb-1", stepId: "image-1", fileName: "first.png" };
+    state.messages = [message({ content: first, status: "streaming", toolSteps: [firstTool], artifacts: [] })];
+    context.renderMessages(false);
+    const article = elements.messageList.querySelector("article");
+    state.messages[0].artifacts = [firstArtifact];
+    context.renderMessages(false);
+    assert.equal(elements.messageList.querySelector("article"), article);
+    const firstStep = article.querySelector('[data-step-id="image-1"]');
+    assert.ok(firstStep.querySelector('[data-artifact-id="thumb-1"]'), "a late artifact invalidates the cached tool rendering");
+    assert.equal(firstStep.querySelector("details").hasAttribute("open"), false);
+    assert.equal(firstStep.querySelector("details .artifact-card"), null, "the thumbnail remains visible outside the collapsed details");
+
+    const finished = { ...state.messages[0], status: "completed", content: first + second + third, toolSteps: [
+      firstTool,
+      { id: "edit", tool: "coding.edit", status: "completed", contentOffset: first.length + second.length },
+      { id: "render", tool: "blender.execute", status: "completed", contentOffset: first.length + second.length },
+      { id: "image-2", tool: "media.analyze", status: "completed", contentOffset: first.length + second.length }
+    ], artifacts: [firstArtifact, firstArtifact, { id: "thumb-2", stepId: "image-2", fileName: "second.png" }] };
+    state.messages = [finished];
+    context.renderMessages(false);
+    const assertOrder = list => {
+      const current = list.querySelector("article");
+      const timeline = current.querySelector(".coding-timeline");
+      assert.deepEqual(timeline.children.map(item => item.dataset.stepId || item.textContent.trim()),
+        [first.trim(), "image-1", second.trim(), "edit", "render", "image-2", third]);
+      assert.equal(current.querySelectorAll(".artifact-card").length, 2, "replayed artifacts are not duplicated");
+      assert.equal(timeline.querySelector('[data-step-id="image-1"] .artifact-card').dataset.artifactId, "thumb-1");
+      assert.equal(timeline.querySelector('[data-step-id="image-2"] .artifact-card').dataset.artifactId, "thumb-2");
+    };
+    assertOrder(elements.messageList);
+    state.messages = [];
+    context.renderMessages(false);
+    state.messages = [JSON.parse(JSON.stringify(finished))];
+    context.renderMessages(false);
+    assertOrder(elements.messageList);
+    const restored = harness();
+    restored.state.selectedToolAction = mode;
+    restored.context.applyConversationSnapshot({ activeSessionId: "session-a", conversationRevision: 1,
+      messages: [JSON.parse(JSON.stringify(finished))] });
+    assertOrder(restored.elements.messageList);
+  }
+});
+
+test("a legacy thumbnail with an unavailable step remains visible instead of being silently discarded", () => {
+  const { context } = harness();
+  const article = context.createMessage(message({ artifacts: [{ id: "legacy", stepId: "unknown-step", fileName: "old.png" }] }));
+  assert.equal(article.querySelectorAll(".artifact-card").length, 1);
 });
 
 test("identical failure fallback appears once after live completion and reload while tools and copy/export remain intact", async () => {
@@ -234,7 +303,7 @@ test("PDF export includes every lazy patch and legacy receipt once and preserves
   state.messages = [sourceMessage];
   const source = context.createMessage(sourceMessage);
   const originalEditBody = source.querySelector('[data-step-id="edit"] .coding-step__content');
-  assert.ok(originalEditBody, "file changes are expanded in the live chat by default");
+  assert.equal(originalEditBody, null, "file changes follow the collapsed preference");
   const openDisclosure = source.querySelector('[data-step-id="legacy"] details');
   openDisclosure.open = true;
   await openDisclosure.dispatch("toggle");
@@ -312,15 +381,17 @@ test("Coding and General share one header and no duplicate composer status", () 
   const css = fs.readFileSync(path.join(webRoot, "styles.css"), "utf8")
     + fs.readFileSync(path.join(webRoot, "coding-timeline.css"), "utf8");
   assert.match(html, /<h1 id="chat-heading">AI Assistent<\/h1>/);
+  assert.doesNotMatch(html, /agent-tabs|Hauptagent|Subagent/);
+  assert.doesNotMatch(app, /goAgentTabs|selectedAgentTab|subagent\.start/);
   assert.doesNotMatch(html, /id="coding-(?:project|model)"/);
   assert.doesNotMatch(css, /\.coding-mode\s+\.(?:chat-header|chat-title-row|chat-heading-group|header-actions)\b/);
   context.renderCodingWorkspace();
-  assert.ok(elements.codingWorkspace.title.includes("C:\\Projects\\My App"));
+  assert.ok(elements.appShell.classList.contains("coding-mode"));
   state.isRunning = true;
   state.runStatus = "Quellen recherchieren";
   state.runDetail = "3 Quellen gelesen";
   context.renderCodingWorkspace();
-  assert.equal(elements.codingWorkspace.disabled, true);
+  assert.equal(state.codingWorkspacePath, "C:\\Projects\\My App");
   assert.doesNotMatch(html, /coding-progress/);
   state.selectedToolAction = null;
   context.renderCodingWorkspace();
@@ -350,32 +421,20 @@ test("running Coding status remains in the assistant message only", () => {
   assert.doesNotMatch(app, /codingProgress/);
 });
 
-test("Workspace chip follows Workflows, reflects the current session and opens the bound picker in General", () => {
+test("the prompt has no workspace picker and Coding guidance points to sidebar projects", () => {
   const { context, state, elements, posts } = harness();
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
-  assert.match(html, /id="open-workflows"[^>]*>[\s\S]*?<\/button>\s*<button id="coding-workspace"/);
-  assert.equal((html.match(/id="coding-workspace"/g) || []).length, 1, "the header must not retain a duplicate picker");
+  assert.doesNotMatch(html, /id="coding-workspace"|workspace-button/);
+  assert.doesNotMatch(app, /coding\.pickWorkspace|pickCodingWorkspace|elements\.codingWorkspace/);
   state.selectedToolAction = null;
   context.renderCodingWorkspace();
-  assert.equal(elements.codingWorkspace.disabled, false);
-  assert.doesNotMatch(html, /id="coding-workspace-name"/);
-  assert.ok(elements.codingWorkspace.className.includes("active"));
-  assert.ok(elements.codingWorkspace.title.includes("C:\\Projects\\My App"));
-  context.pickCodingWorkspace();
-  assert.equal(posts[0].type, "coding.pickWorkspace");
-  assert.equal(posts[0].payload.sessionId, "session-a");
-  assert.equal(state.selectedToolAction, null, "mode changes only after the host confirms a successful folder selection");
-  state.activeSessionId = "session-b";
+  assert.equal(state.codingWorkspacePath, "C:\\Projects\\My App", "the project workspace remains unchanged");
+  state.selectedToolAction = "coding";
   state.codingWorkspacePath = null;
   context.renderCodingWorkspace();
-  assert.ok(!elements.codingWorkspace.className.includes("active"));
-  context.pickCodingWorkspace();
-  assert.equal(posts[1].payload.sessionId, "session-b");
-  state.isRunning = true;
-  context.renderCodingWorkspace();
-  context.pickCodingWorkspace();
-  assert.equal(elements.codingWorkspace.disabled, true);
-  assert.equal(posts.length, 2);
+  context.renderMessages(false);
+  assert.match(elements.messageList.textContent, /Projekte in der Sidebar/);
+  assert.equal(posts.length, 0);
 });
 
 test("inline tool steps preserve every supplied input, stdout, stderr and diff line at full height", () => {
@@ -454,7 +513,7 @@ test("completing a cached streaming timeline refreshes readable narration and co
   assert.equal(article.dataset.messageUpdatedAt, "2026-09-11T12:00:03Z");
 });
 
-test("real tool IDs update once and stale sessions or General events cannot populate Coding steps", () => {
+test("real tool IDs update once in both modes and stale sessions cannot populate their steps", () => {
   const { context, state } = harness();
   const event = { sessionId: "session-a", messageId: "answer-1", toolStep: { id: "call-1", tool: "web.deepResearch", status: "running", detail: "Suche" } };
   context.recordCodingActivity(event);
@@ -465,7 +524,10 @@ test("real tool IDs update once and stale sessions or General events cannot popu
   assert.equal(state.codingActivity.get("answer-1")[0].status, "completed");
   state.selectedToolAction = null;
   context.recordCodingActivity({ ...event, messageId: "general-answer" });
-  assert.equal(state.codingActivity.has("general-answer"), false);
+  assert.equal(state.codingActivity.get("general-answer").length, 1);
+  state.messages = [message({ id: "general-answer", content: "Recherche", status: "streaming" })];
+  context.renderMessages(false);
+  assert.ok(context.elements.messageList.querySelector(".coding-timeline"), "live General tools use the same chronological timeline");
 });
 
 test("token heartbeat updates the existing phase without manufacturing extra steps", () => {

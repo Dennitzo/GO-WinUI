@@ -42,12 +42,10 @@ public sealed partial class AgentToolCatalog
             names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => tool.Name is not ("coding.readOutput" or "coding.searchRunEvidence")
                 || HasCapability(capabilities, "coding.evidence")).Select(static tool => tool.Name));
             names.Add(CodingWorkingStateTools.PlanTool);
-            if (!string.IsNullOrWhiteSpace(request.CodingOptions?.ParallelModelId)) names.UnionWith(CodingSubagentTools.CreateTools().Select(t => t.Name));
         }
         if (HasCapability(capabilities, "documentIo"))
         {
             names.UnionWith([ClientToolNames.DocumentRead, ClientToolNames.DocumentCreate]);
-            if (HasCapability(capabilities, "document-agent")) names.Add(WorkspaceTools.DocumentAgent);
         }
         if (HasCapability(capabilities, "documents"))
         {
@@ -162,8 +160,7 @@ public sealed partial class AgentToolCatalog
 
     private static void ValidateToolSpecific(string name, JsonElement value)
     {
-        if (WorkspaceTools.IsLocal(name) || name == WorkspaceTools.DocumentAgent) { WorkspaceTools.Validate(name, value); return; }
-        if (CodingSubagentTools.IsTool(name)) { CodingSubagentTools.Validate(name, value); return; }
+        if (WorkspaceTools.IsLocal(name)) { WorkspaceTools.Validate(name, value); return; }
         if (name == CodingWorkingStateTools.PlanTool)
         {
             CodingWorkingStateTools.Validate(value);
@@ -315,7 +312,7 @@ public sealed partial class AgentToolCatalog
                 {"type":"object","properties":{"task":{"type":"string","minLength":1,"maxLength":4000},"maximumSearches":{"type":"integer","minimum":2,"maximum":3,"default":3,"description":"Anzahl geplanter Suchfragen; bei leeren Treffern höchstens eine kürzere Wiederholung je Frage innerhalb des gemeinsamen Webbudgets."},"maximumSources":{"type":"integer","minimum":2,"maximum":6,"default":4}},"required":["task"],"additionalProperties":false}
                 """)),
             Server("media.inspect", "Extrahiere sichere Metadaten, Audio und zeitcodierte Frames eines Uploads.", ToolRiskClass.ReadOnly, MediaSchema()),
-            Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem Vision-Modell.", ToolRiskClass.ReadOnly, MediaSchema()),
+            Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem ausgewählten DeepSeek-Modell mit integriertem Vision; bei Textmodellen ohne Vision bleibt der bestehende Fallback. Die Analyse erhält das tatsächliche Bild und protokolliert die verwendete Modell-ID. Bei Blender-Rendern prüfe Objekte, Farben, Licht und Sichtbarkeit und benenne konkrete Abweichungen, damit die Szene gezielt korrigiert werden kann.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("image.generate", "Erzeuge Bilder mit Z-Image-Turbo.", ToolRiskClass.ReadOnly, ImageSchema()),
             Server("math.evaluate", "Führe deterministische skalare, Vektor- oder Matrixoperationen ohne Skriptausführung aus.", ToolRiskClass.ReadOnly, MathSchema()),
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
@@ -330,7 +327,7 @@ public sealed partial class AgentToolCatalog
             Client(ClientToolNames.BricsCadMove, "Führe eine typisierte BricsCAD-Verschiebung automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
             Client(ClientToolNames.BricsCadAction, "Führe eine typisierte BricsCAD-Aktion automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
         };
-        return tools.Concat(WorkspaceToolSpecs()).Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).Concat(CodingSubagentTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
+        return tools.Concat(WorkspaceToolSpecs()).Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
     }
 
     private static AgentToolSpec Server(string name, string description, ToolRiskClass risk, JsonElement schema) =>

@@ -10,15 +10,15 @@ internal static class CodingWorkingStateTools
 
     internal static IReadOnlyList<AgentToolSpec> CreateTools() =>
     [
-        Tool(PlanTool, "Aktualisiere nur geänderte Planpunkte/Kriterien per id; nicht genannte Punkte und Felder bleiben erhalten. Bestehende IDs brauchen keinen title; neue IDs benötigen title und status. Bei neuem completed-Status sind evidenceIds erfolgreicher Werkzeugbelege erforderlich. Bündele echte Änderungen, wiederhole keinen vollständigen Plan, Befunde oder unveränderte Kriterien. Planung ersetzt keine Ausführung.",
+        Tool(PlanTool, "Speichere einen knappen Arbeitsstand für den aktuellen Lauf. steps und acceptanceCriteria sind getrennte Listen mit jeweils höchstens 16 Einträgen und höchstens einem in_progress. Anlegen: {id,title,status}; title hat 1–400 Zeichen. Ändern: Nur nach erfolgreichem Anlegen in derselben Liste genügt {id,status}; title darf fehlen oder unverändert mitgesendet werden. IDs im alten Chatverlauf sind nicht automatisch gespeichert: Ein neuer Lauf beginnt mit leeren Planlisten. Nicht genannte Punkte/Felder bleiben innerhalb des Laufs erhalten. Titel bestehender acceptanceCriteria dürfen nicht geändert werden. Neu completed erfordert 1–3 echte erfolgreiche evidenceIds; Planbestätigungen sind keine Arbeitsbelege. facts und rejectedHypotheses brauchen echte Belege (auch Fehlerbelege möglich); je Liste bleiben die letzten 12 Befunde aktiv, ältere im Journal. explanation wird nur im Aufrufjournal festgehalten. phase=final erklärt keine Arbeit für erledigt. Fehler lehnen das gesamte Update ab. Sende nur echte Änderungen; Planung ersetzt keine Ausführung.",
             """{"steps":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","additionalProperties":false,"properties":{"id":{"type":"string","minLength":1,"maxLength":80},"title":{"type":"string","minLength":1,"maxLength":400,"description":"Nur bei neuer ID erforderlich; sonst bestehenden Titel beibehalten."},"status":{"type":"string","enum":["pending","in_progress","completed"],"description":"Bei neuer ID erforderlich. Neu completed braucht echte erfolgreiche evidenceIds."},"evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100}}},"required":["id"]}},"acceptanceCriteria":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","additionalProperties":false,"properties":{"id":{"type":"string","minLength":1,"maxLength":80},"title":{"type":"string","minLength":1,"maxLength":400,"description":"Nur bei neuer ID erforderlich; sonst bestehenden Titel beibehalten."},"status":{"type":"string","enum":["pending","in_progress","completed"],"description":"Bei neuer ID erforderlich. Neu completed braucht echte erfolgreiche evidenceIds."},"evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100}}},"required":["id"]}},"facts":{"type":"array","maxItems":12,"items":{"type":"object","additionalProperties":false,"properties":{"text":{"type":"string","minLength":1,"maxLength":600},"evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100},"minItems":1}},"required":["text","evidenceIds"]}},"rejectedHypotheses":{"type":"array","maxItems":12,"items":{"type":"object","additionalProperties":false,"properties":{"text":{"type":"string","minLength":1,"maxLength":600},"evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100},"minItems":1}},"required":["text","evidenceIds"]}},"explanation":{"type":"string","minLength":1,"maxLength":2000},"nextStep":{"type":"string","minLength":1,"maxLength":1000},"phase":{"type":"string","enum":["planning","exploration","editing","review","final","error_recovery","unknown"]}}""", []),
     ];
 
     internal static void Validate(JsonElement args)
     {
-        if (!args.EnumerateObject().Any()) throw new ArgumentException("updatePlan requires at least one working-state field.");
-        if (args.TryGetProperty("steps", out var steps)) ValidatePlan(steps);
-        if (args.TryGetProperty("acceptanceCriteria", out var criteria)) ValidatePlan(criteria);
+        if (args.ValueKind != JsonValueKind.Object || !args.EnumerateObject().Any()) throw new ArgumentException("updatePlan benötigt mindestens ein Arbeitsstand-Feld als Objekt.");
+        if (args.TryGetProperty("steps", out var steps)) ValidatePlan(steps, "steps");
+        if (args.TryGetProperty("acceptanceCriteria", out var criteria)) ValidatePlan(criteria, "acceptanceCriteria");
         if (args.TryGetProperty("facts", out var facts)) ValidateFacts(facts);
         if (args.TryGetProperty("rejectedHypotheses", out var rejected)) ValidateFacts(rejected);
         if (args.TryGetProperty("explanation", out var explanation)) Text(explanation, 1, 2000);
@@ -28,7 +28,7 @@ internal static class CodingWorkingStateTools
             throw new ArgumentException("Unknown working phase.");
     }
 
-    private static void ValidatePlan(JsonElement steps)
+    private static void ValidatePlan(JsonElement steps, string section)
     {
         if (steps.ValueKind != JsonValueKind.Array || steps.GetArrayLength() is < 1 or > 16) throw new ArgumentException("Plans must contain one to sixteen items.");
         var ids = new HashSet<string>(StringComparer.Ordinal);
@@ -39,13 +39,16 @@ internal static class CodingWorkingStateTools
             foreach (var field in step.EnumerateObject())
                 if (field.Name is not ("id" or "title" or "status" or "evidenceIds")) throw new ArgumentException("Unknown plan step field.");
             var id = Required(step, "id"); Text(id, 1, 80);
-            if (step.TryGetProperty("title", out var title)) Text(title, 1, 400);
+            if (step.TryGetProperty("title", out var title)
+                && (title.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(title.GetString()) || title.GetString()!.Length > 400))
+                throw new ArgumentException($"{section}, ID {id.GetRawText()}: title wurde mitgesendet, ist aber ungültig. "
+                    + "Verwende 1–400 Zeichen. Bei einer bereits gespeicherten ID darf title ganz entfallen; null oder leer bedeutet nicht ausgelassen. Das gesamte Update wurde abgelehnt.");
             if (!ids.Add(id.GetString()!)) throw new ArgumentException("Plan IDs must be unique.");
             if (step.TryGetProperty("status", out var status))
             {
                 if (status.ValueKind != JsonValueKind.String || status.GetString() is not ("pending" or "in_progress" or "completed"))
                     throw new ArgumentException("Unknown plan status.");
-                if (status.GetString() == "in_progress" && ++active > 1) throw new ArgumentException("Only one plan step may be in progress.");
+                if (status.GetString() == "in_progress" && ++active > 1) throw new ArgumentException($"{section}: Höchstens ein Eintrag darf in_progress sein. Schließe den bisherigen Schritt im selben Update ab oder setze ihn auf pending.");
             }
             // The reducer checks new IDs, completed transitions and the merged plan.
             // An already completed item can retain its previously verified evidence.
@@ -56,6 +59,11 @@ internal static class CodingWorkingStateTools
     internal static JsonElement CreatePlanReceipt(CodingWorkingState state, JsonElement arguments)
     {
         var receipt = new Dictionary<string, object?> { ["success"] = true, ["phase"] = state.Phase };
+        if (arguments.TryGetProperty("steps", out _) || arguments.TryGetProperty("acceptanceCriteria", out _))
+        {
+            receipt["storedStepIds"] = state.Plan.Select(static item => item.Id).ToArray();
+            receipt["storedAcceptanceCriterionIds"] = state.AcceptanceCriteria.Select(static item => item.Id).ToArray();
+        }
         if (arguments.TryGetProperty("nextStep", out _)) receipt["nextStep"] = state.NextStep;
         AddChangedItems("steps", "updatedSteps", state.Plan);
         AddChangedItems("acceptanceCriteria", "updatedAcceptanceCriteria", state.AcceptanceCriteria);
@@ -93,7 +101,15 @@ internal static class CodingWorkingStateTools
         }
         if (ids.ValueKind != JsonValueKind.Array || ids.GetArrayLength() > 3 || required && ids.GetArrayLength() == 0)
             throw new ArgumentException("At most three evidence IDs are allowed; completed steps and facts need evidence.");
-        foreach (var id in ids.EnumerateArray()) Text(id, 1, 100);
+        foreach (var id in ids.EnumerateArray())
+        {
+            if (id.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(id.GetString()) || id.GetString()!.Length > 100)
+            {
+                var text = id.ValueKind == JsonValueKind.String ? id.GetString()! : id.GetRawText();
+                var shown = JsonSerializer.Serialize(text.Length <= 160 ? text : text[..160] + "… [gekürzt]");
+                throw new ArgumentException($"Beleg-ID {shown} ist ungültig: evidenceIds benötigt Text-IDs mit 1–100 Zeichen.");
+            }
+        }
         if (ids.EnumerateArray().Select(static id => id.GetString()).Distinct(StringComparer.Ordinal).Count() != ids.GetArrayLength())
             throw new ArgumentException("Evidence IDs must be unique.");
     }
@@ -103,7 +119,7 @@ internal static class CodingWorkingStateTools
 
     private static void Text(JsonElement value, int minimum, int maximum)
     {
-        if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } text || text.Length < minimum || text.Length > maximum)
+        if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } text || string.IsNullOrWhiteSpace(text) || text.Length < minimum || text.Length > maximum)
             throw new ArgumentException($"Expected text with {minimum} to {maximum} characters.");
     }
 

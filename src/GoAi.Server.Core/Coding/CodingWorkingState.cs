@@ -146,8 +146,9 @@ public static class CodingWorkingStateReducer
         if (arguments.ValueKind != JsonValueKind.Object) throw new ArgumentException("updatePlan benötigt ein Argumentobjekt.");
         var allowed = new HashSet<string>(StringComparer.Ordinal) { "steps", "acceptanceCriteria", "facts", "rejectedHypotheses", "nextStep", "phase", "explanation" };
         if (arguments.EnumerateObject().Any(property => !allowed.Contains(property.Name))) throw new ArgumentException("Unbekanntes updatePlan-Feld.");
-        var plan = arguments.TryGetProperty("steps", out var steps) ? ReadPlan(state, steps, state.Plan) : state.Plan;
-        var criteria = arguments.TryGetProperty("acceptanceCriteria", out var acceptance) ? ReadPlan(state, acceptance, state.AcceptanceCriteria) : state.AcceptanceCriteria;
+        CodingWorkingStateTools.Validate(arguments);
+        var plan = arguments.TryGetProperty("steps", out var steps) ? ReadPlan(state, steps, state.Plan, "steps") : state.Plan;
+        var criteria = arguments.TryGetProperty("acceptanceCriteria", out var acceptance) ? ReadPlan(state, acceptance, state.AcceptanceCriteria, "acceptanceCriteria") : state.AcceptanceCriteria;
         if (state.AcceptanceCriteria.Any(previous => !criteria.Any(item => item.Id == previous.Id && item.Title == previous.Title)))
             throw new ArgumentException("Vorhandene Akzeptanzkriterien dürfen nicht entfernt oder umgedeutet werden; nur Status und Belege dürfen sich ändern.");
         var facts = arguments.TryGetProperty("facts", out var suppliedFacts) ? ReadFacts(state, suppliedFacts, state.Facts) : state.Facts;
@@ -161,7 +162,7 @@ public static class CodingWorkingStateReducer
             NextStep = next, Phase = phase, Sequence = state.Sequence + 1 };
     }
 
-    private static List<CodingPlanItem> ReadPlan(CodingWorkingState state, JsonElement value, IReadOnlyList<CodingPlanItem> existing)
+    private static List<CodingPlanItem> ReadPlan(CodingWorkingState state, JsonElement value, IReadOnlyList<CodingPlanItem> existing, string section)
     {
         if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() is < 1 or > 16) throw new ArgumentException("Ein Plan benötigt 1 bis 16 Schritte.");
         var items = existing.ToList();
@@ -171,6 +172,12 @@ public static class CodingWorkingStateReducer
             var id = RequireText(item, "id", 80);
             var previousIndex = items.FindIndex(previous => previous.Id == id);
             var previous = previousIndex >= 0 ? items[previousIndex] : null;
+            if (previous is null && (!item.TryGetProperty("title", out _) || !item.TryGetProperty("status", out _)))
+                throw new ArgumentException($"{section}: Die ID {JsonSerializer.Serialize(id)} ist im aktuellen Arbeitsstand nicht gespeichert. "
+                    + "Lege sie mit id, title (1–400 Zeichen) und status (pending, in_progress oder completed) an. "
+                    + "IDs aus früheren Läufen oder der anderen Liste gelten hier nicht als vorhanden. "
+                    + $"Gespeicherte IDs in {section}: {JsonSerializer.Serialize(existing.Select(static entry => entry.Id))}. "
+                    + "Das gesamte Update wurde abgelehnt; kein Feld wurde geändert.");
             var title = item.TryGetProperty("title", out _) || previous is null ? RequireText(item, "title", 400) : previous.Title;
             var status = item.TryGetProperty("status", out _) || previous is null ? RequireText(item, "status", 20) : previous.Status;
             if (status is not ("pending" or "in_progress" or "completed") || !updatedIds.Add(id))
@@ -190,7 +197,7 @@ public static class CodingWorkingStateReducer
             else items.Add(updated);
         }
         if (items.Count > 16) throw new ArgumentException("Ein gespeicherter Plan darf insgesamt höchstens 16 Schritte enthalten.");
-        if (items.Count(static item => item.Status == "in_progress") > 1) throw new ArgumentException("Nur ein Planschritt darf gleichzeitig in_progress sein.");
+        if (items.Count(static item => item.Status == "in_progress") > 1) throw new ArgumentException($"{section}: Im zusammengeführten Arbeitsstand darf höchstens ein Eintrag in_progress sein. Schließe den bisherigen Schritt im selben Update ab oder setze ihn auf pending.");
         return items;
     }
 

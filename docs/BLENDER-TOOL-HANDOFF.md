@@ -27,7 +27,7 @@ kannst du examples/blender/scene_setup.py lesen und in den Test-Workspace kopier
 Die Vorlage wurde bereits erfolgreich ausgeführt und visuell geprüft.
 
 Behebe dabei konkret nachgewiesene Fehler. Behalte die Freigabe in General und
-Coding sowie die vorhandenen Subagent-Schreibbereiche und Konfliktprüfungen bei.
+Coding sowie die vorhandenen Konfliktprüfungen bei.
 Szenen, Skripte und Render gehören ausschließlich in den gewählten Workspace.
 Vor run den aktuellen Skript-SHA-256 lesen; keine Hashes erfinden. Nutze echte
 Werkzeugergebnisse als Belege. Ein gestarteter Prozess oder ein Bild-Upload ist
@@ -47,12 +47,10 @@ fehlgeschlagene und nicht ausgeführte Prüfungen getrennt. Antworte auf Deutsch
 | `src/GoWinUI.App/Services/WorkspaceToolService.cs` | Installationssuche, Skriptausführung, sichtbares Öffnen, Bildaufnahme/-Upload |
 | `src/GoWinUI.App/Services/LocalToolBroker.cs` | Lokale Ausführung und Risikoklasse |
 | `src/GoWinUI.Core/Coding/WorkspaceFilePath.cs` | Relative Workspace-Pfade und Reparse-Point-Prüfung |
-| `src/GoWinUI.Core/Coding/CodingDelegatedWorkspace.cs` | Isolierte Subagent-Arbeitskopie und selektive Übernahme |
-| `src/GoAi.Server.Core/Coding/CodingSubagentService.cs` | Subagent-Werkzeuge, Schreibbereiche, Sperren des Hauptagenten |
 | `src/GoWinUI.App/Services/GoAiAssistantService.cs` | Werkzeugfreigaben für General und Coding |
 | `src/GoWinUI.App/Assets/Web/index.html` / `app.js` | Sichtbarer Blender-Menüeintrag und Beschriftung |
 | `tests/GoWinUI.Tests/WorkspaceToolsLiveTests.cs` | Echte Modellabnahmen mit separater Testdatenbank |
-| `tests/GoAi.Server.Tests/WorkspaceToolAvailabilityTests.cs` | Auswahl/Validierung in beiden Modi und Subagent-Freigaben |
+| `tests/GoAi.Server.Tests/WorkspaceToolAvailabilityTests.cs` | Auswahl/Validierung in beiden Modi |
 
 Alle relativen Pfade beziehen sich auf den oben genannten Repository-Workspace.
 Das Blender-Laufzeitmodul befindet sich derzeit gemeinsam mit den Bild-/Startwerkzeugen
@@ -77,9 +75,8 @@ Die Hintergrundausführung verwendet `--background --factory-startup
 Fehler werden über den bestehenden Coding-Executor zurückgeliefert.
 Das sichtbare Öffnen ist vom Ausgabekanal des aufrufenden Prozesses entkoppelt.
 
-Subagenten führen Skripte in ihrer isolierten Kopie aus; nur zugewiesene Dateien
-werden nach Konfliktprüfung zurückübernommen. Das sichtbare Öffnen übernimmt der
-Hauptagent. Eine solche Arbeitskopie ist keine Betriebssystem-Sandbox für beliebige
+Das sichtbare Öffnen übernimmt der Hauptagent. Eine solche Arbeitskopie ist keine
+Betriebssystem-Sandbox für beliebige
 Python-Skripte. Bestehende Szenen deshalb nicht ungeprüft mit eingebetteten Skripten
 starten; automatische Skriptausführung bleibt deaktiviert.
 
@@ -91,10 +88,9 @@ starten; automatische Skriptausführung bleibt deaktiviert.
   `run-4f754291edbb4d15a2c2ed0a43b034ec`.
   Belege: `artifacts/validation/workspace-live/General-blender-GOd9da811c8f/acceptance.json`.
 - **Bestanden, automatisiert:** Werkzeugauswahl für General/Coding, Schemaprüfung,
-  Pfadgrenzen, Risikoklasse und Subagent-Freigabe. Der Code benutzt die bereits
-  separat getestete Subagent-Arbeitskopie.
-- **Noch offen:** echter Coding-Blender-Lauf; echte Blender-Ausführung durch einen
-  Subagenten; bestehende Szene gezielt bearbeiten und erneut rendern; deterministische
+  Pfadgrenzen und Risikoklasse.
+- **Noch offen:** echter Coding-Blender-Lauf; bestehende Szene gezielt bearbeiten
+  und erneut rendern; deterministische
   Tests für fehlende Installation, Prozessfehler, Abbruch und abweichenden Skripthash.
 - **Noch nicht erneut live geprüft:** die nach dem General-Lauf korrigierte
   Entkopplung sichtbarer GUI-Prozesse vom Test-Ausgabekanal. Das frühere Blender-Fenster

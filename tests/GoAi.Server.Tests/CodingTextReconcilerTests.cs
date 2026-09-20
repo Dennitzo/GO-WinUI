@@ -56,13 +56,8 @@ public sealed class CodingTextReconcilerTests
             && item.Data.GetProperty("state").GetString() == "generationRetry");
         var revisions = events.Where(item => item.Type == RunEventTypes.TextDelta
             && item.Data.TryGetProperty("replaceFrom", out var value) && value.ValueKind == JsonValueKind.Number).ToArray();
-        if (diverge)
-        {
-            var revision = Assert.Single(revisions);
-            Assert.Equal(0, revision.Data.GetProperty("replaceFrom").GetInt32());
-            Assert.StartsWith(Harness.Previous, revision.Data.GetProperty("delta").GetString());
-        }
-        else Assert.Empty(revisions);
+        // Failed attempts stay private; only the complete successful turn is published.
+        Assert.Empty(revisions);
         Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ClientToolProposed);
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
     }
@@ -133,7 +128,7 @@ public sealed class CodingTextReconcilerTests
         var checkpoint = (await harness.Repository.GetCheckpointAsync(runId))!;
         Assert.NotNull(checkpoint.StreamingTurnStartEventId);
         Assert.Equal(Harness.Previous.Length, checkpoint.VisibleTextLength);
-        Assert.Equal(Harness.Previous + NativeHandler.FirstText,
+        Assert.Equal(Harness.Previous,
             CodingTextReconciler.Project(await harness.Repository.GetEventsAfterAsync(runId, 0)));
         Assert.Equal("read-completed", Assert.Single(checkpoint.Messages, item => item.Role == "tool").ToolCallId);
 

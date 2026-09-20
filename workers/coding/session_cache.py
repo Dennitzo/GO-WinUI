@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import struct
 import time
 import urllib.parse
 import uuid
@@ -49,16 +50,28 @@ class NativeSessionCache:
     def _slots(self, model):
         return self.router("slots?model=" + urllib.parse.quote(model, safe=""))
 
+    def _idle_slot(self, model, timeout=2):
+        # Closing a streaming HTTP request is acknowledged before llama.cpp has
+        # necessarily finished cancelling its slot. Briefly drain that race;
+        # never erase the session identity or restore an older snapshot over it.
+        deadline = time.monotonic() + timeout
+        while True:
+            slot = next((item for item in self._slots(model) if item.get("id") == 0), None)
+            if slot is None:
+                raise RuntimeError("Native slot is not available")
+            if not slot.get("is_processing"):
+                return slot
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Native slot is not idle")
+            time.sleep(0.05)
+
     def prepare(self, model, key):
         try:
             identity = self._identity(model, key)
             current = self.resident.get(model)
             # A model can also disappear through an external router unload. A
             # fresh empty slot must restore even when its logical key is equal.
-            slots = self._slots(model)
-            slot = next((item for item in slots if item.get("id") == 0), None)
-            if slot is None or slot.get("is_processing"):
-                raise RuntimeError("Native slot is not idle")
+            slot = self._idle_slot(model)
             tokens = slot.get("n_prompt_tokens", slot.get("n_past", slot.get("n_tokens", 0)))
             if current and current["identity"] == identity and tokens > 0:
                 current["dirty"] = True
@@ -85,7 +98,9 @@ class NativeSessionCache:
                 self.resident[model] = dict(identity=identity, key=key, dirty=True)
             return self._record(model, "prepare", result)
         except Exception as error:
-            self.resident.pop(model, None)
+            # An unavailable/busy slot does not invalidate its logical owner.
+            # A later call must be allowed to reuse the interrupted prefix once
+            # cancellation has drained. Actual unloads call invalidate().
             return self._record(model, "prepare", dict(status="unavailable", detail=str(error)[:500]))
 
     def _prune(self, required=0, protected=None, replacing=None):
@@ -121,7 +136,48 @@ class NativeSessionCache:
         if total + final_growth > self.maximum_bytes or shutil.disk_usage(self.directory).free < self.free_reserve + required:
             raise OSError("Insufficient native session cache space; conversation remains saved")
 
-    def _save(self, model):
+    @staticmethod
+    def _snapshot_tail(path, prompt_tokens, saved_tokens):
+        # llama_state_seq_save_file v3 stores its token vector before the KV
+        # bytes. Recent servers wrap it in server_tokens::serialize v1. Read
+        # only that bounded vector tail, never the potentially huge KV state.
+        with path.open("rb") as stream:
+            header = stream.read(12)
+            if len(header) != 12:
+                raise ValueError("Incomplete native session header")
+            magic, version, packed_count = struct.unpack("<III", header)
+            if magic != 0x67677371 or version != 3:
+                raise ValueError("Unsupported native session format")
+            if packed_count < 1 or packed_count > (path.stat().st_size - 12) // 4:
+                raise ValueError("Invalid native session token bounds")
+            marker_bytes = stream.read(4)
+            marker, = struct.unpack("<i", marker_bytes)
+            if marker == -1:
+                if packed_count < 4:
+                    raise ValueError("Incomplete native server token header")
+                server_version, token_count = struct.unpack("<II", stream.read(8))
+                if server_version != 1 or token_count > packed_count - 4:
+                    raise ValueError("Unsupported native server token vector")
+                offset = 24
+            else:
+                if marker < 0:
+                    raise ValueError("Invalid native plain token vector")
+                token_count, offset = packed_count, 12  # Older plain token list.
+            if token_count != saved_tokens or not 0 < prompt_tokens <= token_count:
+                raise ValueError("Native snapshot and prompt token counts differ")
+            tail_count = token_count - prompt_tokens
+            if tail_count > 32768:
+                raise ValueError("Native generated tail exceeds the recovery limit")
+            stream.seek(offset + prompt_tokens * 4)
+            encoded = stream.read(tail_count * 4)
+            if len(encoded) != tail_count * 4:
+                raise ValueError("Incomplete native generated token tail")
+            tokens = list(struct.unpack("<" + "i" * tail_count, encoded))
+            if any(token < 0 for token in tokens):
+                raise ValueError("Native generated tail contains non-text tokens")
+            return tokens
+
+    def _save(self, model, prompt_tokens=None):
         current = self.resident.get(model)
         if not current or not current["dirty"]:
             return dict(status="unchanged")
@@ -129,10 +185,7 @@ class NativeSessionCache:
         target = self.directory / (identity + ".bin")
         temporary = self.directory / (identity + "." + uuid.uuid4().hex + ".pending")
         try:
-            slots = self._slots(model)
-            slot = next((item for item in slots if item.get("id") == 0), None)
-            if slot is None or slot.get("is_processing"):
-                raise RuntimeError("Native slot is not idle")
+            slot = self._idle_slot(model, timeout=10 if prompt_tokens is not None else 2)
             token_count = slot.get("n_prompt_tokens", slot.get("n_past", slot.get("n_tokens", 0)))
             if token_count <= 0:
                 raise RuntimeError("Native slot has no reusable tokens")
@@ -161,8 +214,22 @@ class NativeSessionCache:
             metadata.write_text(json.dumps(dict(bytes=target.stat().st_size, tokens=response["n_saved"])), encoding="utf-8")
             current["dirty"] = False
             self._prune(protected=[target.name])
-            return self._record(model, "save", dict(status="saved", savedTokens=response["n_saved"],
+            result = self._record(model, "save", dict(status="saved", savedTokens=response["n_saved"],
                                              bytes=response.get("n_written", target.stat().st_size)))
+            if prompt_tokens is not None:
+                try:
+                    tokens = self._snapshot_tail(target, prompt_tokens, response["n_saved"])
+                    decoded = self.router("detokenize", dict(model=model, tokens=tokens)) if tokens else {"content": ""}
+                    tail = decoded.get("content")
+                    if not isinstance(tail, str):
+                        raise ValueError("Native generated tail was not decoded as text")
+                    tail.encode("utf-8", errors="strict")
+                    result["generatedTail"] = tail
+                except Exception as error:
+                    # A valid KV snapshot remains saved even if exact text
+                    # recovery is unavailable. Never label the SSE tail exact.
+                    result["generatedTailDetail"] = str(error)[:500]
+            return result
         except Exception as error:
             return self._record(model, "save", dict(status="unavailable", detail=str(error)[:500]))
         finally:
@@ -171,12 +238,14 @@ class NativeSessionCache:
             except OSError:
                 pass  # A timed-out native write may still hold this unique file.
 
-    def save(self, model, key):
+    def save(self, model, key, prompt_tokens=None):
         try:
+            if prompt_tokens is not None and (type(prompt_tokens) is not int or prompt_tokens <= 0 or not key):
+                raise ValueError("promptTokens requires a positive integer and a session key")
             current = self.resident.get(model)
             if current is None or (key is not None and current["identity"] != self._identity(model, key)):
                 return dict(status="unchanged")
-            return self._save(model)
+            return self._save(model, prompt_tokens)
         except Exception as error:
             return self._record(model, "save", dict(status="unavailable", detail=str(error)[:500]))
 

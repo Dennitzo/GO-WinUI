@@ -27,6 +27,15 @@ def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=3276
 
 
 class CatalogTests(unittest.TestCase):
+    def test_native_presets_use_exactly_the_single_slot_saved_by_session_cache(self):
+        gguf(self.root / "model.gguf")
+        target = self.root / "models.ini"
+        catalog.write_presets(self.root, target)
+        text = target.read_text()
+        defaults = text.split("[*]", 1)[1].split("[", 1)[0]
+        self.assertIn("parallel = 1", defaults)
+        self.assertEqual(1, text.count("parallel ="))
+
     def test_deepseek_text_preset_loads_its_own_projector_and_advertises_vision(self):
         gguf(self.root / "deepseek" / "DeepSeek-Vision.gguf", architecture="deepseek4")
         gguf(self.root / "deepseek" / "mmproj-F16.gguf", architecture="clip")

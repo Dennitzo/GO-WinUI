@@ -95,37 +95,35 @@ test("new disclosures follow the global default while reader choices survive upd
   assert.equal(current.querySelector('[data-step-id="third"] details').hasAttribute("open"), true);
 });
 
-test("file changes default open before their live patch arrives and retain a reader's manual collapse", async () => {
+test("file changes follow the collapsed default while a manual expansion survives patch updates", async () => {
   const { context, render, document } = harness();
   const message = answer({ status: "streaming" });
   const tools = ["coding.edit", "coding.write", "coding.gitDiff"].map((tool, index) =>
     step({ id: `change-${index}`, tool, status: "running", inputJson: '{"path":"math.py"}' }));
   const current = render(message, tools);
   document.body.append(current);
-  assert.equal(current.querySelectorAll("details[open]").length, 3,
-    "the collapsed preference for ordinary tools must not hide code changes");
+  assert.equal(current.querySelectorAll("details[open]").length, 0,
+    "file changes must not bypass the collapsed preference");
   const disclosure = current.querySelector("details");
   const summary = disclosure.firstChild;
-  disclosure.removeAttribute("open");
-  await disclosure.dispatch("toggle");
   const patch = "--- a/math.py\n+++ b/math.py\n@@ -1 +1 @@\n-old\n+new\n";
   const completed = tools.map(tool => ({ ...tool, status: "completed",
     outputJson: JSON.stringify({ success: true, diff: patch }) }));
   context.goCodingTimeline.reconcile(current, render(answer(), completed, { previousTimeline: current }));
   assert.equal(current.querySelector("details"), disclosure);
   assert.equal(disclosure.firstChild, summary);
-  assert.equal(disclosure.hasAttribute("open"), false, "new patch data must not reopen a manually closed step");
+  assert.equal(disclosure.hasAttribute("open"), false, "patch data must not reopen a collapsed step");
   assert.equal(disclosure.querySelector(".coding-step__content"), null);
-  assert.equal(current.querySelectorAll(".coding-diff").length, 2, "other live patches appear without a click");
-  context.goCodingTimeline.reconcile(current, render(answer(), completed));
-  assert.equal(disclosure.hasAttribute("open"), false, "manual choice also survives cache-free reconciliation");
   disclosure.setAttribute("open", "");
   await disclosure.dispatch("toggle");
   assert.equal(disclosure.querySelector(".coding-diff__line--added code").textContent, "+new");
+  assert.equal(current.querySelectorAll(".coding-diff").length, 1, "only the expanded step builds its patch");
+  context.goCodingTimeline.reconcile(current, render(answer(), completed));
+  assert.equal(disclosure.hasAttribute("open"), true, "manual expansion survives cache-free reconciliation");
 });
 
-test("added, replaced and deleted file patches display colored diff rows by default", () => {
-  const { render } = harness();
+test("added, replaced and deleted file patches display colored diff rows when expanded", () => {
+  const { render } = harness({ codingToolStepsExpanded: true });
   const patches = [
     { tool: "coding.write", patch: "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+added\n", added: 1, removed: 0 },
     { tool: "coding.edit", patch: "--- a/edit.py\n+++ b/edit.py\n@@ -1 +1 @@\n-before\n+after\n", added: 1, removed: 1 },

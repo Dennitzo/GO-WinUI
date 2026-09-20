@@ -8,7 +8,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 37;
+    public const int CurrentSchemaVersion = 38;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -84,6 +84,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationThirtyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtySixAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtySevenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyEightAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -1334,6 +1335,27 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private static async Task ApplyMigrationThirtyEightAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=38;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_artifacts') WHERE name='step_id';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = "ALTER TABLE chat_artifacts ADD COLUMN step_id TEXT NULL;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(38,$now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task ApplyMigrationThirtySixAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
@@ -1691,6 +1713,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             length INTEGER NOT NULL CHECK(length>=0),
             provider TEXT NOT NULL,
             metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata_json)),
+            step_id TEXT NULL,
             created_at TEXT NOT NULL,
             UNIQUE(message_id, server_artifact_id)
         ) STRICT;

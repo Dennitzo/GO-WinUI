@@ -11,11 +11,10 @@ public static class RunRequestValidator
         "screenCapture",
         "documents",
         "documentIo",
-        "workspace", "visual-tools", "document-agent", "blender",
+        "workspace", "visual-tools", "blender",
         "pdf",
         "coding",
         "coding.evidence",
-        "coding-isolated-subagents",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
@@ -26,6 +25,13 @@ public static class RunRequestValidator
     public static void Validate(RunRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.DeepResearch && (request.AllowedServerTools is not { } researchTools
+            || !researchTools.Contains("web.search", StringComparer.Ordinal)
+            || !researchTools.Contains("web.fetch", StringComparer.Ordinal)
+            || request.Mode == RunMode.Coding && !researchTools.Contains("web.deepResearch", StringComparer.Ordinal)
+            || request.Workload is { Kind: not RunWorkloadKind.Conversation }
+            || request.ConversationProfile is ConversationProfile.Audiobook or ConversationProfile.ContextPreparation))
+            throw new ArgumentException("Deep Research benötigt einen General-/Coding-Dialog mit ausdrücklich erlaubter Websuche und Quellenabruf.");
         if (!string.Equals(request.ProtocolVersion, GoAiProtocol.Version, StringComparison.Ordinal))
         {
             throw new ArgumentException($"Unsupported protocolVersion. Expected {GoAiProtocol.Version}.");

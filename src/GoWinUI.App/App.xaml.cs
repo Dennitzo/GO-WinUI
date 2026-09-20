@@ -84,7 +84,6 @@ public partial class App : Application
                 services.AddSingleton<SystemAudioAnalysisCaptureService>();
                 services.AddSingleton<DesktopScreenshotService>();
                 services.AddSingleton<ScreenClipCaptureService>();
-                services.AddSingleton<ProjectAssetThumbnailService>();
                 services.AddSingleton<AssistantArtifactPreviewService>();
                 services.AddSingleton<ShellViewModel>();
                 services.AddSingleton<RecentActivityService>();
@@ -107,7 +106,6 @@ public partial class App : Application
                         provider.GetRequiredService<RecentActivityService>(),
                         microphone);
                 });
-                services.AddSingleton<ProjectsViewModel>();
                 services.AddSingleton<LogsViewModel>();
                 services.AddSingleton<SettingsViewModel>();
                 services.AddSingleton<MainWindow>();

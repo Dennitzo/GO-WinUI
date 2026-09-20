@@ -208,27 +208,12 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .chat-header h1 { margin: 0; font: 650 18px/1.25 "Segoe UI Variable Display", sans-serif; }
 .chat-header .icon-button { border-color: transparent; background: transparent; }
 .chat-title-row { flex-wrap: wrap; }
-.agent-tabs { display: flex; padding: 3px; gap: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
-.agent-tab { padding: 7px 13px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-family: inherit; font-size: 13px; font-weight: 600; line-height: 1.2; cursor: pointer; white-space: nowrap; }
-.agent-tab[aria-selected="true"] { color: var(--text); background: var(--surface-hover); box-shadow: 0 1px 3px #0001; }
-.agent-tab[data-running="true"]::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%; background: var(--accent); }
-.message-scroll, .subagent-scroll { grid-row: 2; }
+.message-scroll { grid-row: 2; }
 .composer-region { grid-row: 3; }
-.agent-notice__heading, .subagent-activity__status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.agent-notice__scope, .subagent-activity__round, .subagent-activity__metrics { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.agent-state { font-size: 12px; color: var(--muted); }
-.agent-state--completed { color: var(--success); }
-.agent-state--failed, .agent-state--denied { color: var(--danger); }
-.agent-state--running { color: var(--accent); }
-.agent-notice { padding: 14px 16px; margin: 12px 0; border-left: 3px solid var(--accent); border-radius: 8px; background: var(--surface-raised); }
-.agent-notice__open { margin-left: auto; background: transparent; border: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
-.agent-notice__body { margin-top: 10px; }
-.agent-notice__body > :last-child { margin-bottom: 0; }
-.subagent-activity { margin: 14px 0; }
-.subagent-activity__status { font-size: 13px; }
-.subagent-empty { max-width: 470px; margin: 12vh auto 0; text-align: center; color: var(--muted); }
-.subagent-empty h2 { font-size: 20px; color: var(--text); }
-.subagent-empty p { line-height: 1.6; }
+.agent-activity__status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.agent-activity__round, .agent-activity__metrics { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.agent-activity { margin: 14px 0; }
+.agent-activity__status { font-size: 13px; }
 .message-scroll { min-height: 0; padding: 20px 28px 30px; overflow: auto; }
 .message-list { width: 100%; }
 .chat-empty-state { width: min(720px, calc(100% - 48px)); margin: clamp(42px, 12vh, 120px) auto 0; color: var(--muted); text-align: center; font-size: 16px; }

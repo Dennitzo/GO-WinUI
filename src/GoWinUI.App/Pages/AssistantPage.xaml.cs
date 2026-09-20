@@ -458,24 +458,6 @@ public sealed partial class AssistantPage : Page, IDisposable
                                 (type, payload, requestId) => bridge.PostAsync(type, payload, requestId),
                                 args.Envelope.RequestId, token), _lifetime?.Token ?? CancellationToken.None);
                     break;
-                case "coding.pickWorkspace":
-                    if (_goAi.IsRunning)
-                    {
-                        throw new InvalidOperationException("Beende zuerst den laufenden Auftrag, bevor du den Projektordner wechselst.");
-                    }
-                    var codingSessionId = args.Envelope.Payload.GetProperty("sessionId").GetGuid();
-                    var folderPicker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
-                    folderPicker.FileTypeFilter.Add("*");
-                    InitializePicker(folderPicker);
-                    var codingFolder = await folderPicker.PickSingleFolderAsync();
-                    if (codingFolder is not null)
-                    {
-                        await CommitCodingWorkspaceAsync(_chatBridgeGate, () => _goAi.IsRunning,
-                            token => _coordinator.SetCodingWorkspacePathAsync(codingSessionId, codingFolder.Path, token),
-                            _lifetime?.Token ?? CancellationToken.None);
-                        await bridge.PostAsync("state.snapshot", await _coordinator.BuildSnapshotAsync(), args.Envelope.RequestId);
-                    }
-                    break;
                 case "document.pick":
                     await PickDocumentAsync(args.Envelope, bridge);
                     break;

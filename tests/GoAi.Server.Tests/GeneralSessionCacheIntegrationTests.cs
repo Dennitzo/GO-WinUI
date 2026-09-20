@@ -15,6 +15,61 @@ namespace GoAi.Server.Tests;
 public sealed class GeneralSessionCacheIntegrationTests
 {
     private static readonly int[] ContinuedRequestIndices = [2, 3, 4];
+
+    [Fact]
+    public async Task CompletedToolCallSavesNativeSessionBeforeTheClientToolCanStart()
+    {
+        using var context = new TestServerContext();
+        context.Options.ModelRuntimeUri = new("http://native.test:19090");
+        using var native = new NativeHandler { ReturnToolCall = true };
+        using var http = new HttpClient(native);
+        using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
+        var result = await runtime.CompleteChatAsync(NativeHandler.ModelA,
+            [new("user", "Lies die Datei.")], [new("coding.read", "Read", JsonSerializer.SerializeToElement(new
+            {
+                type = "object", properties = new { path = new { type = "string" } },
+            }))], modelRole: "coding", sessionCacheKey: "tool-session");
+        Assert.Single(result.ToolCalls);
+        var call = Assert.Single(native.Requests);
+        var saved = native.Operations[call.OperationIndex + 1];
+        Assert.Equal("/sessions/save", saved.Path);
+        Assert.Equal("tool-session", saved.SessionKey);
+    }
+
+    [Theory]
+    [InlineData(RunMode.General)]
+    [InlineData(RunMode.Coding)]
+    public async Task StopDuringFirstInferencePreservesNativePrefixAcrossNewRunsInSameSession(RunMode mode)
+    {
+        using var context = new TestServerContext();
+        context.Options.ModelRuntimeUri = new("http://native.test:19090");
+        context.Options.GeneralModelId = NativeHandler.ModelA;
+        context.Options.CodingModelId = NativeHandler.ModelA;
+        using var native = new NativeHandler { HoldFirstCompletion = true };
+        using var services = new Services(context, native);
+        var request = Request("stopped-session", [Message("user", "Merke dir EICHE-42 und erkläre ausführlich.")], NativeHandler.ModelA) with
+        {
+            Mode = mode, PreferredCodingModelId = NativeHandler.ModelA,
+            ClientCapabilities = mode == RunMode.Coding ? ["coding"] : [],
+            CodingOptions = mode == RunMode.Coding ? new(WorkspacePath: "C:/cache-test", ContinueSessionContext: true) : null,
+        };
+        var stopped = await services.StopDuringInferenceAsync(request, native.InferenceStarted.Task);
+        var checkpoint = await services.Repository.GetCheckpointAsync(stopped);
+        Assert.NotNull(checkpoint);
+        Assert.True(checkpoint.PreserveSessionPromptPrefix);
+        Assert.Equal(RunState.Cancelled, (await services.Repository.GetAsync(stopped))!.State);
+        Assert.Contains(native.Operations, operation => operation.Path == "/sessions/save"
+            && operation.SessionKey == native.Requests[0].SessionKey);
+
+        var next = request with { Messages = [.. request.Messages, Message("user", "Stop beendet. Nenne nur die Kennung.")] };
+        await services.CompleteAsync(next);
+        AssertNativePrefix(native.Requests[0].Body, native.Requests[1].Body);
+        var third = next with { Messages = [.. next.Messages, Message("assistant", native.Answers[^1]), Message("user", "Bestätige sie noch einmal.")] };
+        await services.CompleteAsync(third);
+        AssertNativePrefix(native.Requests[1].Body, native.Requests[2].Body);
+        Assert.All(native.Requests, item => Assert.Equal(native.Requests[0].SessionKey, item.SessionKey));
+        Assert.Equal(3, native.Requests.Count);
+    }
     [Fact]
     public async Task GeneralRunsReuseExactNativePrefixAndReasoningAcrossSessionsModelsAndServiceRecreation()
     {
@@ -156,6 +211,18 @@ public sealed class GeneralSessionCacheIntegrationTests
             return id;
         }
 
+        internal async Task<string> StopDuringInferenceAsync(RunRequest request, Task started)
+        {
+            var id = (await Repository.CreateAsync(request, null)).Snapshot.RunId;
+            using var stop = new CancellationTokenSource();
+            var processing = _provider.GetRequiredService<RunProcessor>().ProcessAsync(id, stop.Token);
+            await started.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.True(await Repository.CancelAsync(id));
+            await stop.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => processing);
+            return id;
+        }
+
         public void Dispose() { _provider.Dispose(); _runtime.Dispose(); _http.Dispose(); _database.Dispose(); }
     }
 
@@ -175,6 +242,9 @@ public sealed class GeneralSessionCacheIntegrationTests
         internal List<NativeRequest> Requests { get; } = [];
         internal List<Operation> Operations { get; } = [];
         internal List<string> Answers { get; } = [];
+        internal bool HoldFirstCompletion { get; init; }
+        internal bool ReturnToolCall { get; init; }
+        internal TaskCompletionSource InferenceStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal static string Reasoning(int ordinal) => $"Ich prüfe den erhaltenen Sitzungskontext im Testschritt {ordinal}.";
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -196,6 +266,19 @@ public sealed class GeneralSessionCacheIntegrationTests
             if (path != "/v1/chat/completions") throw new InvalidOperationException("Unexpected native endpoint: " + path);
             Assert.Equal(_loaded, model);
             Requests.Add(new(body.Clone(), _sessions.GetValueOrDefault(model), Operations.Count - 1));
+            if (HoldFirstCompletion && Requests.Count == 1)
+            {
+                InferenceStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            if (ReturnToolCall)
+                return Json(new
+                {
+                    choices = new[] { new { message = new { role = "assistant", content = (string?)null,
+                        tool_calls = new[] { new { id = "read-source", type = "function",
+                            function = new { name = ModelRuntimeClient.ToTransportToolName("coding.read"), arguments = "{\"path\":\"source.cs\"}" } } } }, finish_reason = "tool_calls" } },
+                    usage = new { prompt_tokens = 256, completion_tokens = 32 },
+                });
             var answer = $"Die geprüfte Antwort aus dem bereitgestellten Verlauf ist abgeschlossen (Testschritt {Requests.Count}).";
             Answers.Add(answer);
             return Json(new

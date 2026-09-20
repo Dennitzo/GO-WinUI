@@ -42,7 +42,7 @@ public sealed partial class GoAiAssistantService
                         // complete message used by the existing read-from-here highlighter.
                         new(text, "AI-Antwort (live)", null, null, update.Message.ContentProfile), token).ConfigureAwait(false);
                 }, microphone.WaitForSpeechResumeAsync, microphone.BeginSpeechSession(resetPause: true),
-                    _activeCancellation?.Token ?? CancellationToken.None);
+                    _activeCancellation?.Token ?? CancellationToken.None) { WaitForActionBoundary = true };
                 _automaticSpeechSession = session;
                 _ = ObserveAutomaticSpeechCompletionAsync(session, status);
             }

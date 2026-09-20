@@ -53,6 +53,7 @@
     artifactPreviewPending: new Set(),
     selectedToolAction: null,
     persistentToolAction: null,
+    deepResearch: false,
     pendingCaptureRequest: null,
     waitingForCapture: false,
     captureStopRequested: false,
@@ -147,7 +148,6 @@
     newSession: byId("new-session"),
     messageList: byId("message-list"),
     messageScroll: byId("message-scroll"),
-    codingWorkspace: byId("coding-workspace"),
     codingChanges: byId("coding-changes"),
     prompt: byId("prompt"),
     chatPane: document.querySelector(".chat-pane"),
@@ -336,7 +336,6 @@
   }
 
   function persistSessionScrollPosition(sessionId = state.activeSessionId) {
-    if (globalThis.goAgentTabs?.activeTab === "subagent") return;
     if (!sessionId || !elements.messageScroll) return;
     const scroller = elements.messageScroll;
     const maximumTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
@@ -589,9 +588,8 @@
 
   function renderMessages(scrollToEnd) {
     renderCodingChanges();
-    if (globalThis.goAgentTabs?.refresh(state) === "subagent") return;
     if (state.selectedToolAction === "coding" || state.messages.some(message => message.toolSteps?.length
-      || state.codingActivity.get(String(message.id))?.some(step => step.tool === "assistant.steering"))) {
+      || state.codingActivity.get(String(message.id))?.some(step => step.kind === "tool"))) {
       renderCodingMessages(scrollToEnd);
       return;
     }
@@ -610,7 +608,7 @@
         const description = document.createElement("p");
         description.textContent = state.codingWorkspacePath
           ? "Beschreibe eine Änderung, einen Fehler oder eine Frage zum Projekt."
-          : "Wähle über Workspace deinen Projektordner und beschreibe die gewünschte Codeänderung.";
+          : "Wähle über Projekte in der Sidebar deinen Projektordner und beschreibe die gewünschte Codeänderung.";
         empty.append(createToolIcon(toolVisuals.coding[1]), heading, description);
       } else {
         empty.textContent = "Wobei kann ich dich unterstützen?";
@@ -656,7 +654,7 @@
       const description = document.createElement("p");
       description.textContent = state.codingWorkspacePath
         ? "Beschreibe eine Änderung, einen Fehler oder eine Frage zum Projekt."
-        : "Wähle über Workspace deinen Projektordner und beschreibe die gewünschte Codeänderung.";
+        : "Wähle über Projekte in der Sidebar deinen Projektordner und beschreibe die gewünschte Codeänderung.";
       empty.append(createToolIcon(toolVisuals.coding[1]), heading, description);
       elements.messageList.append(empty);
     }
@@ -1103,7 +1101,7 @@
   function createMessage(message, previousArticle = null) {
     const role = String(message.role).toLowerCase();
     const hasTimeline = role === "assistant" && (state.selectedToolAction === "coding" || message.toolSteps?.length
-      || state.codingActivity.get(String(message.id))?.some(step => step.tool === "assistant.steering"));
+      || state.codingActivity.get(String(message.id))?.some(step => step.kind === "tool"));
     // Failed runs without generated text store their error as a content fallback.
     // Display it once; retain the original message for copy/export and persistence.
     const contentMessage = role === "assistant" && message.error
@@ -1168,8 +1166,12 @@
         .filter(Boolean).join(" · ");
       body.append(toolBox);
     }
+    // Media artifacts bound to a tool step render inside the coding timeline.
+    // Only unanchored captures/documents stay at the message end.
     const artifactItems = Array.isArray(message.artifacts) ? message.artifacts : [];
-    if (artifactItems.length) body.append(createArtifactList(artifactItems));
+    const anchoredStepIds = new Set(timeline ? mergeCodingToolSteps(contentMessage).map(step => String(step.id)) : []);
+    const trailingArtifacts = artifactItems.filter(item => !item?.stepId || !anchoredStepIds.has(String(item.stepId)));
+    if (trailingArtifacts.length) body.append(createArtifactList(trailingArtifacts));
     if (role === "assistant" && message.error) {
       const error = document.createElement("div");
       error.className = "message-error";
@@ -1315,7 +1317,7 @@
     const name = String(value || "");
     return ({
       "assistant.reasoning": "Denkprozess",
-      "document.agent": "Dokumenten-Agent",
+      "document.agent": "Historischer Dokumentauftrag",
       "document.create": "Dokument erstellen oder bearbeiten",
       "document.read": "Dokument lesen",
       "image.input": "Bild oder Screenshot laden",
@@ -1329,9 +1331,6 @@
       "coding.readOutput": "Ausgabe nachlesen",
       "coding.searchRunEvidence": "Laufbelege durchsuchen",
       "coding.updatePlan": "Arbeitsstand aktualisieren",
-      "coding.agentStart": "Subagent auf GPU1",
-      "coding.agentWait": "Subagentenergebnis",
-      "coding.agentCancel": "Subagent stoppen",
       "coding.search": "Code durchsuchen",
       "coding.write": "Datei schreiben",
       "coding.edit": "Datei bearbeiten",
@@ -1378,7 +1377,7 @@
   }
 
   function recordCodingActivity(payload) {
-    if ((state.selectedToolAction !== "coding" && payload?.toolStep?.tool !== "assistant.steering") || !payload?.messageId
+    if (!payload?.messageId
       || payload.sessionId && String(payload.sessionId) !== String(state.activeSessionId)) return;
     const messageId = String(payload.messageId);
     let steps = state.codingActivity.get(messageId);
@@ -1411,7 +1410,7 @@
 
   function createCodingActivity(message, previousTimeline = null) {
     const allSteps = mergeCodingToolSteps(message).filter(step => step.kind === "tool");
-    const steps = globalThis.goAgentTabs?.mainSteps(message, allSteps) || allSteps;
+    const steps = allSteps;
     const live = isTerminalMessageStatus(message.status) ? null : state.messageRunStatus.get(String(message.id));
     if (!steps.length && !live?.status) return null;
     const sessionId = state.activeSessionId;
@@ -1422,7 +1421,8 @@
       enhanceCodeBlocks: enhanceCodingCodeBlocks,
       sanitizeText: sanitizeVisibleMessageContent,
       liveStatus: live ? { status: live.status, detail: cleanStatusMetadata(live.detail) } : null,
-      onPreview: (messageId, stepId) => { if (state.activeSessionId === sessionId) openCodingPreview(messageId, stepId); }
+      onPreview: (messageId, stepId) => { if (state.activeSessionId === sessionId) openCodingPreview(messageId, stepId); },
+      createArtifacts: typeof createArtifactList === "function" ? createArtifactList : null
     });
   }
 
@@ -1534,12 +1534,6 @@
     const coding = state.selectedToolAction === "coding";
     elements.appShell.classList.toggle("coding-mode", coding);
     elements.prompt.placeholder = coding ? "Änderung beschreiben oder Frage zum Projekt stellen …" : "Nachricht eingeben …";
-    elements.codingWorkspace.classList.toggle("active", Boolean(state.codingWorkspacePath));
-    elements.codingWorkspace.title = state.codingWorkspacePath
-      ? `Workspace: ${state.codingWorkspacePath}\nOrdner wechseln` : "Workspace auswählen und Coding starten";
-    elements.codingWorkspace.setAttribute("aria-label", state.codingWorkspacePath
-      ? `Workspace ${state.codingWorkspacePath} wechseln` : "Workspace auswählen und Coding starten");
-    elements.codingWorkspace.disabled = state.isRunning || Boolean(state.pendingChatSend) || !state.activeSessionId;
     renderCodingChanges();
   }
 
@@ -1564,12 +1558,6 @@
       && summary.revision <= previous.revision) return;
     state.changesSummary = summary;
     renderCodingChanges();
-  }
-
-  function pickCodingWorkspace() {
-    if (state.activeSessionId && !state.isRunning) {
-      post("coding.pickWorkspace", { sessionId: state.activeSessionId });
-    }
   }
 
   function runStatusText(liveStatus) {
@@ -1695,6 +1683,7 @@
     renderCodingWorkspace();
     elements.activeTools.replaceChildren();
     elements.documents.replaceChildren();
+    renderDeepResearch();
 
     if (state.selectedToolAction && toolVisuals[state.selectedToolAction]) {
       const [label, iconPath] = toolVisuals[state.selectedToolAction];
@@ -1910,6 +1899,7 @@
     elements.contextStrip.hidden = state.documents.length === 0
       && state.attachments.length === 0
       && !state.selectedToolAction
+      && !state.deepResearch
       && !isAudioCaptureActive()
       && !isScreenClipActive()
       && !globalThis.goVoiceCapture?.isActive
@@ -2334,7 +2324,8 @@
       sessionId: state.activeSessionId,
       prompt,
       documentIds: state.documents.map(item => item.id),
-      toolAction: state.selectedToolAction
+      toolAction: state.selectedToolAction,
+      deepResearch: Boolean(state.deepResearch)
     });
     if (sent !== null && state.activeSessionId === sessionId && elements.prompt.value.trim() === prompt) setPromptValue("");
   }
@@ -2463,6 +2454,10 @@
       && persistentFallback
         ? persistentFallback
         : requested;
+    if (state.deepResearch && state.selectedToolAction && state.selectedToolAction !== "coding") {
+      state.deepResearch = false;
+      persistDeepResearch();
+    }
     for (const option of document.querySelectorAll(".service-option[data-tool-action]")) {
       option.classList.toggle("active", option.dataset.toolAction === state.selectedToolAction);
     }
@@ -2487,6 +2482,51 @@
     if (state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction)) {
       selectToolAction(state.persistentToolAction, false);
     }
+  }
+
+  function persistDeepResearch() {
+    if (!state.activeSessionId) return;
+    try { globalThis.localStorage.setItem(`go.assistant.deep-research.v1:${state.activeSessionId}`, state.deepResearch ? "1" : "0"); }
+    catch { /* Optional WebView storage must not prevent sending a prompt. */ }
+  }
+
+  function restoreDeepResearch() {
+    state.deepResearch = false;
+    if (!state.activeSessionId) return;
+    try { state.deepResearch = globalThis.localStorage.getItem(`go.assistant.deep-research.v1:${state.activeSessionId}`) === "1"; }
+    catch { /* Default to ordinary chat when storage is unavailable. */ }
+  }
+
+  function selectDeepResearch(enabled) {
+    if (!ensureEditableContext()) return;
+    if (enabled && state.selectedToolAction && state.selectedToolAction !== "coding") {
+      selectToolAction(state.persistentToolAction === "coding" ? "coding" : null, false);
+    }
+    state.deepResearch = Boolean(enabled);
+    persistDeepResearch();
+    renderContext();
+  }
+
+  function renderDeepResearch() {
+    for (const option of document.querySelectorAll('[data-tool-toggle="deepResearch"]')) {
+      option.classList.toggle("active", Boolean(state.deepResearch));
+      option.setAttribute("aria-checked", state.deepResearch ? "true" : "false");
+    }
+    if (!state.deepResearch) return;
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "active-tool-chip";
+    chip.dataset.toolToggle = "deepResearch";
+    chip.title = "Deep Research abwählen";
+    chip.setAttribute("aria-label", chip.title);
+    const text = document.createElement("span");
+    text.textContent = "Deep Research";
+    const remove = document.createElement("span");
+    remove.className = "active-tool-chip__remove";
+    remove.textContent = "×";
+    chip.append(createToolIcon(toolVisuals.webSearch[1]), text, remove);
+    chip.addEventListener("click", () => selectDeepResearch(false));
+    elements.activeTools.append(chip);
   }
 
   function resetTransientVoiceStateForSessionChange() {
@@ -2600,6 +2640,7 @@
     state.attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
     state.documentGroupStatus = payload.documentGroupStatus || { total: 0, ready: 0, processing: 0, failed: 0, status: "ready" };
     state.activeSessionId = nextSessionId;
+    if (sessionChanged) restoreDeepResearch();
     globalThis.goVoiceCapture?.setSessionId(state.activeSessionId);
     if (previousSessionId !== state.activeSessionId) {
       state.messageRunStatus.clear();
@@ -2964,11 +3005,6 @@
           }
           globalThis.goRunSteering?.observeRun(state);
           recordCodingActivity(payload);
-          if (globalThis.goAgentTabs?.isChild(payload.toolStep)
-            || /^Subagent GPU1(?:\b|\s|·)/i.test(String(payload.runDetail || ""))) {
-            renderMessages(false);
-            break;
-          }
           // Reasoning packets update only their card. They must not alternate
           // with model progress or replace token details with an internal name.
           if (["assistant.reasoning", "assistant.steering"].includes(payload.toolStep?.tool)) {
@@ -3205,19 +3241,6 @@
     }
   }
 
-  globalThis.goAgentTabs?.attach({
-    elements: { mainTab: byId("main-agent-tab"), subagentTab: byId("subagent-tab"),
-      mainPanel: elements.messageScroll, subagentPanel: byId("subagent-scroll"), subagentList: byId("subagent-list"),
-      composer: elements.composerRegion },
-    steps: mergeCodingToolSteps,
-    timeline: { get codingToolStepsExpanded() { return state.codingToolStepsExpanded; }, renderMarkdown: text => globalThis.goMarkdown.render(text),
-      enhanceCodeBlocks: enhanceCodingCodeBlocks, sanitizeText: sanitizeVisibleMessageContent,
-      onPreview: openCodingPreview, timeLabel },
-    saveMainScroll: persistSessionScrollPosition,
-    pauseMainScroll: () => chatScroll.restore(false),
-    restoreMainScroll: () => restoreSessionScrollPosition(state.activeSessionId),
-    renderMain: () => renderMessages(false)
-  });
   restoreSessionsCollapsed();
 
   elements.toggleSessions.addEventListener("click", () => {
@@ -3250,7 +3273,6 @@
     }
   });
   elements.send.addEventListener("click", handleComposerAction);
-  elements.codingWorkspace.addEventListener("click", pickCodingWorkspace);
   elements.composerSpeechPause.addEventListener("click", () => {
     if (!elements.composerSpeechPause.disabled) post("microphone.toggleSpeechPause", {});
   });
@@ -3311,6 +3333,14 @@
     setToolsMenuOpen(elements.toolsMenu.hidden);
   });
   elements.toolsMenu.addEventListener("click", event => event.stopPropagation());
+  for (const option of document.querySelectorAll('[data-tool-toggle="deepResearch"]')) {
+    option.prepend(createToolIcon(toolVisuals.webSearch[1]));
+    option.addEventListener("click", () => {
+      selectDeepResearch(!state.deepResearch);
+      setToolsMenuOpen(false);
+      elements.prompt.focus();
+    });
+  }
   for (const option of document.querySelectorAll(".service-option[data-tool-action]")) {
     const visual = toolVisuals[option.dataset.toolAction];
     if (visual) option.prepend(createToolIcon(visual[1]));

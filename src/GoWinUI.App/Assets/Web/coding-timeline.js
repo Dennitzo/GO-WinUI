@@ -397,16 +397,6 @@
     syncDisclosure(event.currentTarget || event.target);
   }
 
-  function expandsChangesByDefault(step) {
-    // Open mutations before the first receipt arrives so their live preview is
-    // immediately visible. Replacements, added files and deletions are all
-    // represented by these tools' unified patches, including /dev/null sides.
-    if (["coding.edit", "coding.write", "coding.gitDiff"].includes(step.tool)) return true;
-    const output = json(step.outputJson);
-    return Boolean(typeof output?.diff === "string" ? output.diff : output?.diff?.stdout)
-      || Boolean(output?.stagedDiff?.stdout);
-  }
-
   function displayStepStatus(step, message) {
     const status = String(step.status || "running").toLowerCase();
     const output = json(step.outputJson);
@@ -417,12 +407,15 @@
     return status;
   }
 
-  function renderStep(step, index, message, options, previous) {
+  function renderStep(step, index, message, options, previous, stepArtifacts) {
     const status = displayStepStatus(step, message);
     const section = node("section", `coding-step coding-step--${status}`);
     section.dataset.stepId = String(step.id);
     section.dataset.timelineKey = `tool-${step.id}`;
-    const signature = [step.tool, step.label, status, index, step.inputJson, step.outputJson, step.detail, step.explanation, step.previewHtml];
+    // Artifacts can arrive after the tool result. Include their metadata so an
+    // unchanged receipt cannot keep a stale (or missing) preview in the DOM.
+    const signature = [step.tool, step.label, status, index, step.inputJson, step.outputJson, step.detail, step.explanation,
+      step.previewHtml, JSON.stringify(stepArtifacts || [])];
     section._codingSignature = signature;
     if (previous?._codingSignature?.every((value, i) => value === signature[i])) {
       section._codingKeep = previous;
@@ -433,7 +426,7 @@
     const disclosure = node("details", "coding-step__disclosure");
     const previousDisclosure = previous?.querySelector(".coding-step__disclosure");
     if (previousDisclosure ? previousDisclosure.hasAttribute("open")
-      : expandsChangesByDefault(step) || options.codingToolStepsExpanded === true) {
+      : options.codingToolStepsExpanded === true) {
       disclosure.setAttribute("open", "");
     }
     const title = node("summary", "coding-step__title");
@@ -459,6 +452,13 @@
     disclosure.addEventListener("toggle", disclosureToggled);
     syncDisclosure(disclosure);
     section.append(disclosure);
+    // Keep images visible even when verbose tool arguments/results are closed.
+    // They remain part of this step, before all subsequent narration and tools.
+    if (Array.isArray(stepArtifacts) && stepArtifacts.length && options.createArtifacts) {
+      const artifacts = options.createArtifacts(stepArtifacts);
+      artifacts.classList.add("coding-step__artifacts");
+      section.append(artifacts);
+    }
     return section;
   }
 
@@ -529,6 +529,17 @@
     const content = String(message.content || "");
     const previousByKey = new Map(options.previousTimeline
       ? [...options.previousTimeline.children].map(item => [item.dataset.timelineKey, item]) : []);
+    // Media artifacts bound to a tool step render inside that step so later
+    // narration and actions stay below the preview instead of the message end.
+    const stepArtifacts = new Map();
+    const seenArtifacts = new Set();
+    for (const artifact of Array.isArray(message.artifacts) ? message.artifacts : []) {
+      if (!artifact?.stepId || seenArtifacts.has(String(artifact.id))) continue;
+      seenArtifacts.add(String(artifact.id));
+      const list = stepArtifacts.get(String(artifact.stepId)) || [];
+      list.push(artifact);
+      stepArtifacts.set(String(artifact.stepId), list);
+    }
     let offset = 0;
     function narration(text, key, streaming = false) {
       const visible = options.sanitizeText ? options.sanitizeText(text) : text;
@@ -554,15 +565,13 @@
         offset = end;
       }
       const previous = previousByKey.get(`tool-${step.id}`);
-      timeline.append(step.agentNotice && globalThis.goAgentTabs
-        ? globalThis.goAgentTabs.renderNotice(step, options)
-        : step.tool === "assistant.steering"
+      timeline.append(step.tool === "assistant.steering"
         ? renderSteering(step)
         : ["assistant.narration", "assistant.progress"].includes(step.tool)
         ? renderAgentActivity(step, message, options)
         : step.tool === "assistant.reasoning"
         ? renderReasoning(step, message, options, previous)
-        : renderStep(step, executionIndex++, message, options, previous));
+        : renderStep(step, executionIndex++, message, options, previous, stepArtifacts.get(String(step.id))));
     });
     const active = !terminalStates.has(String(message.status).toLowerCase());
     narration(content.slice(offset), "text-tail", active && !steps.some(step => !terminalStates.has(String(step.status).toLowerCase())));
@@ -579,12 +588,12 @@
   }
 
   function renderAgentActivity(step, message, options) {
-    const section = node("section", `subagent-activity subagent-activity--${step.tool.split(".")[1]}`);
+    const section = node("section", `agent-activity agent-activity--${step.tool.split(".")[1]}`);
     section.dataset.timelineKey = `tool-${step.id}`;
     section.dataset.stepId = String(step.id);
     const round = json(step.inputJson)?.round;
     if (step.tool === "assistant.narration") {
-      if (round) section.append(node("span", "subagent-activity__round", `Runde ${round}`));
+      if (round) section.append(node("span", "agent-activity__round", `Runde ${round}`));
       const body = node("div", "message-content");
       body.append(options.renderMarkdown(String(step.detail || "")));
       options.enhanceCodeBlocks?.(body);
@@ -592,7 +601,7 @@
     } else {
       const displayStatus = displayStepStatus(step, message);
       const running = !terminalStates.has(displayStatus);
-      const status = node("div", "subagent-activity__status");
+      const status = node("div", "agent-activity__status");
       status.setAttribute("role", "status");
       if (running) status.append(node("span", "message-status-spinner"));
       status.append(node("span", "", displayStatus === "steered" ? "Umgeleitet" : String(step.detail || (running ? "Arbeitet" : "Abgeschlossen"))));
@@ -607,7 +616,7 @@
         hasTokens ? `${totalTokens.toLocaleString("de-DE")} Token` : "",
         Number.isFinite(context.contextLimit) ? `Kontext: ${(context.estimatedInputTokens ?? inputTokens ?? 0).toLocaleString("de-DE")} / ${context.contextLimit.toLocaleString("de-DE")}` : ""
       ].filter(Boolean);
-      if (metrics.length) section.append(node("p", "subagent-activity__metrics", metrics.join(" · ")));
+      if (metrics.length) section.append(node("p", "agent-activity__metrics", metrics.join(" · ")));
     }
     return section;
   }

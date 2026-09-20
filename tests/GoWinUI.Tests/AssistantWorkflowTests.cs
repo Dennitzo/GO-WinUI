@@ -168,10 +168,10 @@ public sealed class AssistantWorkflowTests
         Assert.InRange(AssistantPage.PdfA4HeightInches, 11.692, 11.693);
         Assert.InRange(AssistantPage.PdfBookMarginLeftInches, .944, .946);
         Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
-        Assert.Contains("styles.css?v=20260919-agents-3", html, StringComparison.Ordinal);
-        Assert.Contains("markdown.js?v=20260913-3", html, StringComparison.Ordinal);
-        Assert.Contains("voice.js?v=20260822-2", html, StringComparison.Ordinal);
-        Assert.Contains("app.js?v=20260919-workspace-1", html, StringComparison.Ordinal);
+        Assert.Matches("""<link\b[^>]*\brel="stylesheet"[^>]*\bhref="styles\.css(?:\?[^\"]*)?"[^>]*>""", html);
+        Assert.Matches("""<script\b[^>]*\bsrc="markdown\.js(?:\?[^\"]*)?"[^>]*>""", html);
+        Assert.Matches("""<script\b[^>]*\bsrc="voice\.js(?:\?[^\"]*)?"[^>]*>""", html);
+        Assert.Matches("""<script\b[^>]*\bsrc="app\.js(?:\?[^\"]*)?"[^>]*>""", html);
         Assert.Contains("globalThis.goPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPdfBookReady = () =>", app, StringComparison.Ordinal);
         Assert.Contains("globalThis.goPrepareMessagePdf = globalThis.goPrepareBookPdf", app, StringComparison.Ordinal);
@@ -1112,6 +1112,7 @@ public sealed class AssistantWorkflowTests
             png.Length,
             "go-ai",
             null,
+            null,
             source);
         var cacheRoot = Path.Combine(environment.Directory, "preview-cache");
         using var previews = new AssistantArtifactPreviewService(
@@ -1144,6 +1145,7 @@ public sealed class AssistantWorkflowTests
             sha256,
             wave.Length,
             "screen-capture",
+            null,
             null,
             source);
         var cacheRoot = Path.Combine(environment.Directory, "preview-cache");

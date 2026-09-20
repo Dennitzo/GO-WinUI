@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https: data: blob:; media-src 'self' https://go-preview.local; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; frame-src https://go-coding-preview.local; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'">
   <title>GO AI Assistent</title>
   <link rel="stylesheet" href="vendor/katex/0.16.10/katex.min.css">
-  <link rel="stylesheet" href="styles.css?v=20260919-agents-3">
+  <link rel="stylesheet" href="styles.css?v=20260920-tools-1">
   <link rel="stylesheet" href="coding-timeline.css?v=20260913-3">
   <link rel="stylesheet" href="coding-changes.css?v=20260913-3">
 </head>
@@ -46,10 +46,6 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
           <h1 id="chat-heading">AI Assistent</h1>
-          <div class="agent-tabs" role="tablist" aria-label="Agent auswählen">
-            <button id="main-agent-tab" class="agent-tab" type="button" role="tab" aria-selected="true" aria-controls="message-scroll">Hauptagent</button>
-            <button id="subagent-tab" class="agent-tab" type="button" role="tab" aria-selected="false" aria-controls="subagent-scroll" tabindex="-1">Subagent</button>
-          </div>
         </div>
         <div class="header-actions">
           <button id="pin-session" class="pdf-chip" type="button" title="Sitzung anpinnen" aria-label="Sitzung anpinnen">Sitzung anpinnen</button>
@@ -57,11 +53,8 @@
         </div>
       </header>
 
-      <section id="message-scroll" class="message-scroll" role="tabpanel" aria-labelledby="main-agent-tab" aria-live="polite">
+      <section id="message-scroll" class="message-scroll" aria-live="polite">
         <div id="message-list" class="message-list"></div>
-      </section>
-      <section id="subagent-scroll" class="message-scroll subagent-scroll" role="tabpanel" aria-labelledby="subagent-tab" tabindex="0" hidden>
-        <div id="subagent-list" class="message-list subagent-list"></div>
       </section>
 
       <section class="composer-region" aria-label="Nachricht verfassen">
@@ -119,6 +112,7 @@
                   <button class="service-option" type="button" role="menuitem" data-tool-action="imageGeneration"><span>Bild erstellen</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="bricsCad"><span>BricsCAD</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="coding"><span>Coding</span></button>
+                  <button class="service-option" type="button" role="menuitemcheckbox" aria-checked="false" data-tool-toggle="deepResearch"><span>Deep Research</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="audiobook"><span>Hörbuch erstellen</span></button>
                   <button id="start-live-captions" class="service-option" type="button" role="menuitem" data-tool-immediate="liveCaption.start"><span>Live-Untertitel</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="translation"><span>Übersetzen</span></button>
@@ -145,11 +139,6 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
                 <span id="workflows-button-label">Workflows</span>
               </button>
-              <button id="coding-workspace" class="tool-button workspace-button" type="button" title="Workspace für den Coding-Agenten auswählen">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/></svg>
-                <span>Workspace</span>
-              </button>
-
               <div id="context-meter" class="context-meter" title="Kontext: 0 von 0 Tokens" role="img" aria-label="Kontext zu 0 Prozent belegt">
                 <span class="context-ring" aria-hidden="true"></span>
                 <span id="context-label">0%</span>
@@ -265,11 +254,10 @@
   <script src="vendor/highlightjs/11.11.1/powershell.min.js"></script>
   <script src="code-highlighting.js?v=20260913-3"></script>
   <script src="markdown.js?v=20260913-3"></script>
-  <script src="coding-timeline.js?v=20260919-workspace-1"></script>
-  <script src="agent-tabs.js?v=20260919-workspace-1"></script>
+  <script src="coding-timeline.js?v=20260920-artifacts-1"></script>
   <script src="run-steering.js?v=20260919-agents-1"></script>
   <script src="coding-changes.js?v=20260913-3"></script>
   <script src="chat-scroll.js?v=20260913-3"></script>
-  <script src="app.js?v=20260919-workspace-1"></script>
+  <script src="app.js?v=20260920-tools-1"></script>
 </body>
 </html>

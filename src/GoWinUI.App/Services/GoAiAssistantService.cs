@@ -906,6 +906,7 @@ public sealed partial class GoAiAssistantService(
                 attachment.Sha256,
                 attachment.Length,
                 "screen-capture",
+                null,
                 new Dictionary<string, string>(StringComparer.Ordinal)
                 {
                     ["source"] = isVideo
@@ -1054,7 +1055,7 @@ public sealed partial class GoAiAssistantService(
                 _activeCodingWorkspace ??= codingSession?.CodingWorkspacePath;
                 if (string.IsNullOrWhiteSpace(_activeCodingWorkspace) || !Path.IsPathFullyQualified(_activeCodingWorkspace)
                     || !Directory.Exists(_activeCodingWorkspace))
-                    throw new InvalidOperationException("Wähle über den Coding-Chip zuerst einen vorhandenen Projektordner.");
+                    throw new InvalidOperationException("Wähle in der Projekte-Sidebar eine Sitzung mit vorhandenem Workspace.");
                 _activeCodingWorkspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_activeCodingWorkspace));
                 await CodingWorkspaceGit.EnsureRepositoryAsync(_activeCodingWorkspace, cancellationToken).ConfigureAwait(false);
             }
@@ -1356,12 +1357,14 @@ public sealed partial class GoAiAssistantService(
         // Ordinary live tool offsets refer to the raw model stream instead.
         var steeringOffsets = (assistant.ToolSteps ?? []).Where(static step => step.Tool == "assistant.steering" && step.ContentOffset is not null)
             .ToDictionary(static step => step.Id, static step => step.ContentOffset!.Value, StringComparer.Ordinal);
+        // The server tool step that last started owns any following artifact. Media
+        // analysis thumbnails stay anchored to their action instead of the message end.
+        var activeServerStepId = (string?)null;
 
         async Task RecordToolStepAsync(string id, string tool, string status, string? detail, bool appendResult = false,
             string? previewHtml = null, string? inputJson = null, string? outputJson = null, string? explanation = null,
             DateTimeOffset? eventAt = null, string? agentId = null)
         {
-            if (localRun.Action != PromptTriggerAction.Coding && tool != "assistant.steering") return;
             var previous = assistant.ToolSteps?.FirstOrDefault(step => step.Id == id);
             // Replayed terminal events must not append the same result a second time.
             if (appendResult && previous?.Status == status && status != "running") return;
@@ -1439,10 +1442,10 @@ public sealed partial class GoAiAssistantService(
             }
 
             var parsed = GeneralAgentResponseParser.Parse(content, serverSessionTitle ?? string.Empty);
-            // Coding narration and the tool offsets form one chronological record.
+            // Narration and the tool offsets form one chronological record.
             // Keep that visible narration instead of replacing it with a parsed envelope.
             if (localRun.Action != PromptTriggerAction.Coding
-                && !(assistant.ToolSteps ?? []).Any(step => step.Tool == "assistant.steering"))
+                && (assistant.ToolSteps is null || assistant.ToolSteps.Count == 0))
                 content = RemoveDocumentEvidenceFooter(parsed.Message);
             await PersistContentAsync(MessageStatus.Completed, CancellationToken.None).ConfigureAwait(false);
             await chats.SetMessageContextSummaryAsync(
@@ -1541,18 +1544,7 @@ public sealed partial class GoAiAssistantService(
                 if (signal.Error is { } pumpError) throw pumpError;
                 if (signal.Apply is { } apply) { await apply().ConfigureAwait(false); continue; }
                 var item = signal.Event!;
-                var childStepId = SubagentDisplayStepId(item);
-                if (childStepId is not null)
-                {
-                    var previous = assistant.ToolSteps?.FirstOrDefault(step => step.Id == childStepId);
-                    var childStep = ApplySubagentDisplayEvent(previous, item, childStepId,
-                        assistant.Content.Length, NextToolStepUpdate(previous));
-                    if (childStep is not null)
-                        await RecordToolStepAsync(childStep.Id, childStep.Tool, childStep.Status, childStep.Detail,
-                            inputJson: childStep.InputJson, outputJson: childStep.OutputJson,
-                            eventAt: item.CreatedAt, agentId: childStep.AgentId).ConfigureAwait(false);
-                }
-                else switch (item.Type)
+                switch (item.Type)
                 {
                     case RunSteeringEventTypes.Accepted:
                     case RunSteeringEventTypes.Applied:
@@ -1649,8 +1641,11 @@ public sealed partial class GoAiAssistantService(
                         }
                         break;
                     case RunEventTypes.ServerToolStarted:
+                        var startedServerStepId = StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId")
+                            ?? "server-" + item.Id;
+                        activeServerStepId = startedServerStepId;
                         await RecordToolStepAsync(
-                            StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId") ?? "server-" + item.Id,
+                            startedServerStepId,
                             StringProperty(item.Data, "tool") ?? "web.search", "running", StringProperty(item.Data, "target"),
                             inputJson: item.Data.TryGetProperty("arguments", out var serverArguments) ? serverArguments.GetRawText() : JsonSerializer.Serialize(new { target = StringProperty(item.Data, "target") }, JsonOptions),
                             explanation: StringProperty(item.Data, "message") ?? DescribeServerTool(StringProperty(item.Data, "tool") ?? "web.search", StringProperty(item.Data, "target")),
@@ -1731,7 +1726,7 @@ public sealed partial class GoAiAssistantService(
                             throw new InvalidDataException(
                                 "Der Client-Toolvorschlag gehört nicht zum aktiven Serverlauf.");
                         }
-                        if (proposal.ExecutionScope is null) await update(new(
+                        await update(new(
                             GoAiAssistantUpdateKind.Status,
                             assistant,
                             Status: "Lokale Aktion",
@@ -1740,7 +1735,7 @@ public sealed partial class GoAiAssistantService(
                         await RecordToolStepAsync(proposal.ProposalId, proposal.Name, "running", FormatToolInputDetail(proposal),
                             previewHtml: GetToolPreviewHtml(proposal), inputJson: proposal.Arguments.GetRawText(),
                             explanation: proposal.Summary,
-                            eventAt: item.CreatedAt, agentId: proposal.ExecutionScope?.AgentId).ConfigureAwait(false);
+                            eventAt: item.CreatedAt).ConfigureAwait(false);
                         var claimed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                         if (pump.Start(proposal.ProposalId, async token =>
                         {
@@ -1807,6 +1802,7 @@ public sealed partial class GoAiAssistantService(
                             assistant.Id,
                             descriptor,
                             model ?? "GO AI Server",
+                            descriptor.StepId ?? activeServerStepId,
                             cancellationToken).ConfigureAwait(false);
                         if (collectedArtifacts.All(value => value.Id != imported.Id))
                         {
@@ -2449,7 +2445,7 @@ public sealed partial class GoAiAssistantService(
         var codingSession = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
         var action = trigger?.Trigger.Action;
-        if (action == PromptTriggerAction.DocumentCreate) originalPrompt = "Nutze document.agent für diesen Dokumentauftrag: " + originalPrompt;
+        if (action == PromptTriggerAction.DocumentCreate) originalPrompt = "Lies, bearbeite oder erstelle die angeforderten Dokumente direkt mit document.read/document.create und geeigneten Workspace-Werkzeugen. Prüfe das Ergebnis. Dokumentauftrag: " + originalPrompt;
         if (action == PromptTriggerAction.Blender) originalPrompt = "Nutze blender.execute und die Workspace-Werkzeuge für diesen Blender-Auftrag: " + originalPrompt;
         var audiobook = action == PromptTriggerAction.Audiobook;
         if (action == PromptTriggerAction.Coding)
@@ -2457,7 +2453,7 @@ public sealed partial class GoAiAssistantService(
             _activeCodingWorkspace ??= codingSession.CodingWorkspacePath;
             if (string.IsNullOrWhiteSpace(_activeCodingWorkspace) || !Directory.Exists(_activeCodingWorkspace))
             {
-                throw new InvalidOperationException("Wähle über den Coding-Chip zuerst einen vorhandenen Projektordner.");
+                throw new InvalidOperationException("Wähle in der Projekte-Sidebar eine Sitzung mit vorhandenem Workspace.");
             }
             var codingModel = settings.Current.SelectedCodingModel?.Trim();
             if (string.IsNullOrWhiteSpace(codingModel))
@@ -2474,7 +2470,7 @@ public sealed partial class GoAiAssistantService(
                 CalculateCodingHistoryBudget(availableCodingModel.ContextTokens, originalPrompt)).ToList();
             codingMessages.Add(new RunMessage("user", [new ContentPart("text", Text: originalPrompt)]));
             var serverCapabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
-            var codingConfiguration = NegotiateCodingOptions(serverCapabilities, settings.Current.SelectedParallelCodingModel);
+            var codingConfiguration = NegotiateCodingOptions(serverCapabilities);
             return new RunRequest(
                 GoAiProtocol.Version,
                 RunMode.Coding,
@@ -2490,7 +2486,8 @@ public sealed partial class GoAiAssistantService(
                     WorkspacePath = Path.GetFullPath(_activeCodingWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
                     ContinueSessionContext = historyBeforePrompt.Count > 0,
                 } : codingConfiguration.Options,
-                ReasoningEffort: await ResolveRequestedReasoningAsync(client, codingModel, "coding", cancellationToken).ConfigureAwait(false));
+                ReasoningEffort: await ResolveRequestedReasoningAsync(client, codingModel, "coding", cancellationToken).ConfigureAwait(false),
+                DeepResearch: trigger?.DeepResearch == true);
         }
         var contextProfile = audiobook
             ? SessionContextProfile.Audiobook
@@ -2575,7 +2572,7 @@ public sealed partial class GoAiAssistantService(
         }
         var capabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "documentIo", "documents", "document-agent", "visual-tools", "coding-isolated-subagents",
+            "documentIo", "documents", "visual-tools",
         };
         if (!string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath) && Directory.Exists(codingSession.CodingWorkspacePath))
             capabilities.UnionWith(["coding", "coding.evidence", "workspace", "blender"]);
@@ -2610,7 +2607,8 @@ public sealed partial class GoAiAssistantService(
             DocumentContext: documentContext?.Descriptor,
             SessionContext: sessionContext.Descriptor,
             ConversationProfile: audiobook ? ConversationProfile.Audiobook : ConversationProfile.General,
-            ReasoningEffort: await ResolveRequestedReasoningAsync(client, selectedModel, "general", cancellationToken).ConfigureAwait(false));
+            ReasoningEffort: await ResolveRequestedReasoningAsync(client, selectedModel, "general", cancellationToken).ConfigureAwait(false),
+            DeepResearch: trigger?.DeepResearch == true);
     }
 
     internal static string? ResolvePreferredModel(AppSettings current) =>
@@ -2691,7 +2689,7 @@ public sealed partial class GoAiAssistantService(
         return messages;
     }
 
-    private static readonly string[] WorkspaceClientCapabilities = ["documentIo", "documents", "document-agent", "visual-tools", "blender", "workspace"];
+    internal static readonly string[] WorkspaceClientCapabilities = ["documentIo", "documents", "visual-tools", "blender", "workspace"];
     private static readonly string[] BricsCadClientCapabilities = ["bricscad"];
 
     internal static IReadOnlyList<string> GetAllowedServerTools(
@@ -2791,6 +2789,7 @@ public sealed partial class GoAiAssistantService(
         Guid messageId,
         ArtifactDescriptor descriptor,
         string provider,
+        string? stepId,
         CancellationToken cancellationToken)
     {
         var temporaryDirectory = Path.Combine(Path.GetTempPath(), "GO", "AI-Artifacts");
@@ -2808,6 +2807,7 @@ public sealed partial class GoAiAssistantService(
                 descriptor.Sha256,
                 descriptor.Length,
                 provider,
+                stepId,
                 descriptor.Metadata,
                 input,
                 cancellationToken).ConfigureAwait(false);

@@ -179,11 +179,6 @@
             <FontIcon Glyph="&#xE99A;" />
           </NavigationViewItem.Icon>
         </NavigationViewItem>
-        <NavigationViewItem Content="Projekte" Tag="projects">
-          <NavigationViewItem.Icon>
-            <FontIcon Glyph="&#xE838;" />
-          </NavigationViewItem.Icon>
-        </NavigationViewItem>
         <NavigationViewItem Content="Ausführungslog" Tag="logs">
           <NavigationViewItem.Icon>
             <FontIcon Glyph="&#xE9D9;" />

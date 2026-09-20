@@ -38,4 +38,5 @@ public sealed record ArtifactDescriptor(
     string Sha256,
     DateTimeOffset CreatedAt,
     DateTimeOffset ExpiresAt,
-    IReadOnlyDictionary<string, string>? Metadata = null);
+    IReadOnlyDictionary<string, string>? Metadata = null,
+    string? StepId = null);

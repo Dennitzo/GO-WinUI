@@ -48,7 +48,8 @@ public sealed record PromptTrigger(
 public sealed record PromptTriggerMatch(
     PromptTrigger Trigger,
     string OriginalPrompt,
-    string RemainingPrompt);
+    string RemainingPrompt,
+    bool DeepResearch = false);
 
 public sealed record AssistantAttachment(
     Guid Id,
@@ -71,7 +72,8 @@ public sealed record ChatArtifact(
     long Length,
     string Provider,
     DateTimeOffset CreatedAt,
-    IReadOnlyDictionary<string, string>? Metadata = null);
+    IReadOnlyDictionary<string, string>? Metadata = null,
+    string? StepId = null);
 
 public sealed record GeneratedDocument(
     Guid Id,

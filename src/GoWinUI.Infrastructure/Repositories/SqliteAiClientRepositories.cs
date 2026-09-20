@@ -411,6 +411,7 @@ public sealed class SqliteChatArtifactRepository(
         string sha256,
         long length,
         string provider,
+        string? stepId,
         IReadOnlyDictionary<string, string>? metadata,
         Stream content,
         CancellationToken cancellationToken = default)
@@ -437,7 +438,7 @@ public sealed class SqliteChatArtifactRepository(
         }
         var artifact = new ChatArtifact(
             Guid.NewGuid(), messageId, blob.Id, serverArtifactId, safeFileName, safeContentType,
-            blob.Sha256, blob.Length, provider, DateTimeOffset.UtcNow, metadata);
+            blob.Sha256, blob.Length, provider, DateTimeOffset.UtcNow, metadata, stepId);
         try
         {
             await database.WriteAsync(async (connection, transaction, token) =>
@@ -446,8 +447,8 @@ public sealed class SqliteChatArtifactRepository(
                 command.Transaction = transaction;
                 command.CommandText = """
                     INSERT INTO chat_artifacts
-                        (id, message_id, blob_id, server_artifact_id, file_name, content_type, sha256, length, provider, metadata_json, created_at)
-                    VALUES($id, $message, $blob, $server, $name, $type, $sha, $length, $provider, $metadata, $created);
+                        (id, message_id, blob_id, server_artifact_id, file_name, content_type, sha256, length, provider, metadata_json, step_id, created_at)
+                    VALUES($id, $message, $blob, $server, $name, $type, $sha, $length, $provider, $metadata, $step, $created);
                     UPDATE chat_messages
                     SET revision=revision+1,updated_at=$created
                     WHERE id=$message;
@@ -465,6 +466,7 @@ public sealed class SqliteChatArtifactRepository(
                 command.Parameters.AddWithValue("$length", artifact.Length);
                 command.Parameters.AddWithValue("$provider", artifact.Provider);
                 command.Parameters.AddWithValue("$metadata", JsonSerializer.Serialize(artifact.Metadata ?? new Dictionary<string, string>()));
+                command.Parameters.AddWithValue("$step", artifact.StepId is null ? DBNull.Value : artifact.StepId);
                 command.Parameters.AddWithValue("$created", SqlitePromptTriggerRepository.Format(artifact.CreatedAt));
                 await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
             }, cancellationToken).ConfigureAwait(false);
@@ -495,17 +497,18 @@ public sealed class SqliteChatArtifactRepository(
         {
             var metadata = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(10))
                 ?? new Dictionary<string, string>();
+            var stepId = reader.IsDBNull(11) ? null : reader.GetString(11);
             items.Add(new ChatArtifact(
                 Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)),
                 reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetInt64(7),
-                reader.GetString(8), SqlitePromptTriggerRepository.ParseDate(reader.GetString(9)), metadata));
+                reader.GetString(8), SqlitePromptTriggerRepository.ParseDate(reader.GetString(9)), metadata, stepId));
         }
         return items;
     }
 
     internal const string SelectSql = """
         SELECT a.id, a.message_id, a.blob_id, a.server_artifact_id, a.file_name, a.content_type,
-               a.sha256, a.length, a.provider, a.created_at, a.metadata_json
+               a.sha256, a.length, a.provider, a.created_at, a.metadata_json, a.step_id
         FROM chat_artifacts a
         """;
 }

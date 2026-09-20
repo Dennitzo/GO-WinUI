@@ -71,10 +71,37 @@ class SessionCacheTests(unittest.TestCase):
     def test_busy_slot_is_not_saved_or_restored(self):
         self.cache.prepare("model", "session")
         self.busy = True
-        self.assertEqual("unavailable", self.cache.save("model", "session")["status"])
-        self.assertEqual("unavailable", self.cache.prepare("model", "another")["status"])
+        with patch("session_cache.time.monotonic", side_effect=[0, 3, 4, 7]):
+            self.assertEqual("unavailable", self.cache.save("model", "session")["status"])
+            self.assertEqual("unavailable", self.cache.prepare("model", "another")["status"])
         self.assertFalse(self.actions("save"))
         self.assertFalse(self.actions("restore"))
+
+    def test_stop_race_keeps_latest_resident_prefix_instead_of_old_snapshot(self):
+        self.cache.prepare("model", "session")
+        self.cache.save("model", "session")
+        self.cache.prepare("model", "session")
+        self.tokens = 500  # Interrupted follow-up evaluated beyond disk snapshot.
+        self.busy = True
+        with patch("session_cache.time.monotonic", side_effect=[0, 3]):
+            self.assertEqual("unavailable", self.cache.prepare("model", "session")["status"])
+        self.busy = False
+        self.assertEqual("resident", self.cache.prepare("model", "session")["status"])
+        self.assertEqual(500, self.tokens)
+        self.assertFalse(self.actions("restore"))
+
+    def test_stop_drain_saves_new_tokens_before_follow_up_or_restart(self):
+        self.cache.prepare("model", "session")
+        self.tokens = 500
+        self.busy = True
+        def finish_cancellation(_):
+            self.busy = False
+        with patch("session_cache.time.sleep", side_effect=finish_cancellation):
+            saved = self.cache.save("model", "session")
+        self.assertEqual("saved", saved["status"])
+        self.assertEqual(500, saved["savedTokens"])
+        metadata = json.loads(next(self.root.glob("*.json")).read_text())
+        self.assertEqual(500, metadata["tokens"])
 
     def test_failed_save_does_not_replace_valid_snapshot(self):
         self.cache.prepare("model", "session")

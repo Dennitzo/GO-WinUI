@@ -19,8 +19,6 @@ public sealed record CapabilitySnapshot(
     int UploadChunkSize,
     LiveCaptionCapability? LiveCaptions = null,
     bool SupportsCodingSessionContext = false,
-    bool SupportsParallelCoding = false,
-    bool SupportsIsolatedSubagents = false,
     bool SupportsRunSteering = false);
 
 public sealed record LiveCaptionCapability(

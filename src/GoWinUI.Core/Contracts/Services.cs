@@ -108,6 +108,7 @@ public interface IChatArtifactRepository
         string sha256,
         long length,
         string provider,
+        string? stepId,
         IReadOnlyDictionary<string, string>? metadata,
         Stream content,
         CancellationToken cancellationToken = default);

@@ -17,13 +17,17 @@ internal sealed class StagedWebResearchPipeline
     private const int MaximumCompactionBlockCharacters = 180_000;
     private const int MaximumCompactionPasses = 8;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
+    private const string UserProvidedSourceTitle = "Vom Nutzer angegebene Original-URL";
+    private static readonly Regex TaskUrls = new(@"https?://[^\s<>""'\[\]]+",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+    private static readonly char[] UrlTrailingPunctuation = ['.', ',', ';', ':', '!', '?', ')', ']', '}'];
 
     public static bool IsRequested(
         RunRequest request,
         IReadOnlyList<AgentToolSpec> tools) =>
         request.Mode != RunMode.Coding
-        && request.Messages.SelectMany(static message => message.Content)
-            .Any(static part => part.Text?.StartsWith("[GO_WEB_RESEARCH_REQUEST]", StringComparison.Ordinal) == true)
+        && (request.DeepResearch || request.Messages.SelectMany(static message => message.Content)
+            .Any(static part => part.Text?.StartsWith("[GO_WEB_RESEARCH_REQUEST]", StringComparison.Ordinal) == true))
         && request.AllowedServerTools is { } requested
         && requested.Contains("web.search", StringComparer.Ordinal)
         && requested.Contains("web.fetch", StringComparer.Ordinal)
@@ -133,7 +137,12 @@ internal sealed class StagedWebResearchPipeline
                 0,
                 UsedLocalSynthesisFallback: true);
         }
-        var remaining = search.Results
+        // Only direct user-task URLs add candidates. Never promote a URL from a
+        // search snippet, model proposal or fetched page into this allowlist.
+        // Keep the actual search response untouched, including its result count.
+        var userUrls = ReadUserProvidedUrls(normalizedTask);
+        var remaining = userUrls.Select(static url => new WebSearchResult(UserProvidedSourceTitle, url, null))
+            .Concat(search.Results)
             .Where(static result => TryNormalizePublicUrl(result.Url, out _))
             .GroupBy(static result => NormalizeUrl(result.Url), StringComparer.OrdinalIgnoreCase)
             .Select(static group => group.First())
@@ -154,7 +163,10 @@ internal sealed class StagedWebResearchPipeline
                     new StagedWebResearchModelRequest(
                         modelId,
                         modelRole,
-                        CreateFetchMessages(normalizedTask, remaining, fetched, preferredLanguage),
+                        CreateFetchMessages(normalizedTask,
+                            remaining.Where(candidate => !userUrls.Contains(NormalizeUrl(candidate.Url))).ToArray(),
+                            fetched, preferredLanguage,
+                            userProvidedSources: remaining.Where(candidate => userUrls.Contains(NormalizeUrl(candidate.Url))).ToArray()),
                         [fetchTool.ToLmDefinition()],
                         null,
                         RequireToolCall: true,
@@ -175,7 +187,7 @@ internal sealed class StagedWebResearchPipeline
             var selected = remaining.FirstOrDefault(candidate => UrlsEqual(candidate.Url, selectedUrl));
             if (selected is null)
             {
-                diagnostics.Add("Eine nicht in den SearXNG-Treffern enthaltene URL wurde verworfen.");
+                diagnostics.Add("Eine weder in den SearXNG-Treffern noch im direkten Nutzerauftrag enthaltene URL wurde verworfen.");
                 selected = remaining[0];
                 fetchCall = CreateFetchFallbackCall(
                     selected.Url,
@@ -304,7 +316,7 @@ internal sealed class StagedWebResearchPipeline
         }
         else
         {
-            diagnostics.Add("Kein SearXNG-Treffer konnte als Seite oder Dokument abgerufen werden.");
+            diagnostics.Add("Keine ausgewählte Such- oder Nutzerquelle konnte als Seite oder Dokument abgerufen werden.");
             usedLocalFallback = true;
         }
 
@@ -411,7 +423,8 @@ internal sealed class StagedWebResearchPipeline
         IReadOnlyList<FetchedResearchSource> fetched,
         string preferredLanguage,
         bool allowOriginalUrls = false,
-        IReadOnlyList<string>? attemptedUrls = null)
+        IReadOnlyList<string>? attemptedUrls = null,
+        IReadOnlyList<WebSearchResult>? userProvidedSources = null)
     {
         var builder = new StringBuilder()
             .AppendLine("Nutzerauftrag:")
@@ -425,6 +438,11 @@ internal sealed class StagedWebResearchPipeline
             {
                 builder.Append("  Hinweis: ").AppendLine(candidate.Snippet);
             }
+        }
+        if (userProvidedSources is { Count: > 0 })
+        {
+            builder.AppendLine().AppendLine("Direkt im Nutzerauftrag genannte Original-URLs (keine SearXNG-Treffer; noch nicht geprüft):");
+            foreach (var source in userProvidedSources) builder.Append("- ").AppendLine(source.Url);
         }
         if (fetched.Count > 0)
         {
@@ -451,7 +469,8 @@ internal sealed class StagedWebResearchPipeline
                         + "Prüfe pro URL alle relevanten Aspekte gemeinsam: bei mehreren API-Namen auf derselben Dokumentationsseite verwende queries "
                         + "mit bis zu vier getrennten kurzen Begriffen (z. B. [\"wait_for\",\"asyncio.timeout\",\"TaskGroup\"]). "
                         + "URL-Fragmente sind keine unterschiedlichen Quellen; wähle danach eine andere Originalquelle für die Gegenprüfung. "
-                    : "Waehle aus der angegebenen SearXNG-Liste genau eine fachlich relevante, noch nicht abgerufene Quelle. ")
+                    : "Waehle aus der angegebenen SearXNG-Liste oder der getrennten Liste direkter Nutzer-URLs genau eine fachlich relevante, noch nicht abgerufene Quelle. "
+                        + "Prüfe vom Nutzer ausdrücklich genannte Original-URLs bevorzugt. Auch diese sind erst nach erfolgreichem Abruf ein Beleg. ")
                 + "Rufe das einzige angebotene Werkzeug web.fetch genau einmal mit dieser URL und einer konkreten, relevanten Suchphrase in query auf. "
                 + "Der Agent erhaelt nur begrenzte Trefferfenster, niemals den vollstaendigen Seiteninhalt. "
                 + $"Bewerte die Relevanz fuer den {LanguageDisplayName(preferredLanguage)} Nutzerauftrag. "
@@ -975,6 +994,8 @@ internal sealed class StagedWebResearchPipeline
     private static string CreateTargetedFetchQuery(WebSearchResult selected, string task)
     {
         var candidate = selected.Title?.Trim();
+        if (candidate == UserProvidedSourceTitle && TryNormalizePublicUrl(selected.Url, out var userUri))
+            candidate = Path.GetFileNameWithoutExtension(userUri.AbsolutePath.TrimEnd('/'));
         if (string.IsNullOrWhiteSpace(candidate))
         {
             candidate = task.Trim();
@@ -1018,6 +1039,15 @@ internal sealed class StagedWebResearchPipeline
         TryNormalizePublicUrl(value, out var uri)
             ? uri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.SafeUnescaped).TrimEnd('/')
             : value.Trim();
+
+    internal static IReadOnlyList<string> ReadUserProvidedUrls(string task) => TaskUrls.Matches(task)
+        .Select(static match => match.Value.TrimEnd(UrlTrailingPunctuation))
+        .Where(static value => value.Length <= 2_048 && TryNormalizePublicUrl(value, out var uri)
+            && string.IsNullOrEmpty(uri.UserInfo) && !uri.IsLoopback)
+        .Select(NormalizeUrl)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Take(MaximumFetchedSources)
+        .ToArray();
 
     private static bool TryNormalizePublicUrl(string value, out Uri uri)
     {

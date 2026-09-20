@@ -752,7 +752,10 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
         if (profile != SessionContextProfile.Audiobook)
         {
             return candidates
-                .Where(static message => message.Status == MessageStatus.Completed)
+                .Where(static message => message.Status == MessageStatus.Completed
+                    || (message.Role == ChatRole.Assistant
+                        && message.Status is (MessageStatus.Cancelled or MessageStatus.Interrupted or MessageStatus.Failed)
+                        && !IsFailurePlaceholder(message)))
                 .ToArray();
         }
 
@@ -779,6 +782,18 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
                 : message.ContentProfile == MessageContentProfile.Audiobook
                     && message.Status is MessageStatus.Completed or MessageStatus.Cancelled or MessageStatus.Interrupted)
             .ToArray();
+    }
+
+    private static bool IsFailurePlaceholder(ChatMessage message)
+    {
+        // CompleteRun/Resume store the exception text (or this generic fallback)
+        // only when no model text was received. Keep genuine partial answers,
+        // but never present a transport/UI error as provider conversation history.
+        if (message.Status is not (MessageStatus.Failed or MessageStatus.Interrupted)) return false;
+        var content = message.Content.Trim();
+        return content == "Der GO-AI-Auftrag konnte nicht abgeschlossen werden."
+            || (!string.IsNullOrWhiteSpace(message.Error)
+                && string.Equals(content, message.Error.Trim(), StringComparison.Ordinal));
     }
 
     internal static int CalculateBlockSummaryTarget(int totalTargetCharacters, int blockCount)

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Text.Json;
 
 namespace GoWinUI.App.Services;
 
@@ -13,6 +14,8 @@ public sealed class NativeModelRuntimeService : IDisposable
     private readonly Func<CancellationToken, Task> _start;
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<CancellationToken, Task> _stop;
+    private readonly Func<Uri, CancellationToken, Task<bool?>> _gatewayIdle;
+    private readonly TimeSpan _shutdownDrainTimeout;
     private int _stopping;
     private bool _stopped;
     private DateTimeOffset _nextProbe;
@@ -23,12 +26,16 @@ public sealed class NativeModelRuntimeService : IDisposable
 
     internal NativeModelRuntimeService(Func<Uri, bool> isLocalGateway,
         Func<CancellationToken, Task<bool>> probe, Func<CancellationToken, Task> start,
-        Func<DateTimeOffset>? now = null, Func<CancellationToken, Task>? stop = null)
+        Func<DateTimeOffset>? now = null, Func<CancellationToken, Task>? stop = null,
+        Func<Uri, CancellationToken, Task<bool?>>? gatewayIdle = null, TimeSpan? shutdownDrainTimeout = null)
     {
         _isLocalGateway = isLocalGateway;
         _probe = probe;
         _start = start;
         _stop = stop ?? (token => RunInstalledRuntimeAsync("Stop", token));
+        _gatewayIdle = gatewayIdle ?? ProbeGatewayIdleAsync;
+        _shutdownDrainTimeout = shutdownDrainTimeout ?? TimeSpan.FromSeconds(15);
+        if (_shutdownDrainTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(shutdownDrainTimeout));
         _now = now ?? (() => DateTimeOffset.UtcNow);
     }
 
@@ -79,10 +86,65 @@ public sealed class NativeModelRuntimeService : IDisposable
         try
         {
             if (_stopped) return;
+            // The HTTP cancel acknowledgement precedes native cancellation and
+            // its durable KV snapshot. Keep the shared runtime alive until the
+            // gateway confirms all leases, workloads and queued work drained.
+            // Unknown status must not kill another portable instance's run.
+            if (!await WaitForGatewayIdleAsync(gateway, cancellationToken).ConfigureAwait(false)) return;
             await _stop(cancellationToken).ConfigureAwait(false);
             _stopped = true;
         }
         finally { _gate.Release(); }
+    }
+
+    private async Task<bool> WaitForGatewayIdleAsync(Uri gateway, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_shutdownDrainTimeout);
+        try
+        {
+            while (true)
+            {
+                var idle = await _gatewayIdle(gateway, timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
+                if (idle is null) return false;
+                if (idle.Value) return true;
+                await Task.Delay(TimeSpan.FromMilliseconds(250), timeout.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception) when (exception is not OutOfMemoryException) { return false; }
+    }
+
+    private static async Task<bool?> ProbeGatewayIdleAsync(Uri gateway, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        using var http = new HttpClient(new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false });
+        try
+        {
+            using var response = await http.GetAsync(new Uri(gateway, "v1/gpu/status"), timeout.Token).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return null;
+            using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false),
+                cancellationToken: timeout.Token).ConfigureAwait(false);
+            return ReadGatewayIdle(json.RootElement);
+        }
+        catch (HttpRequestException) { return null; }
+        catch (JsonException) { return null; }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return null; }
+    }
+
+    internal static bool? ReadGatewayIdle(JsonElement status)
+    {
+        if (status.ValueKind != JsonValueKind.Object
+            || !status.TryGetProperty("queueLength", out var queue) || queue.ValueKind != JsonValueKind.Number
+            || !queue.TryGetInt32(out var queued) || queued < 0
+            || !status.TryGetProperty("activeWorkloads", out var workloads) || workloads.ValueKind != JsonValueKind.Array)
+            return null;
+        if (queued > 0 || workloads.GetArrayLength() > 0) return false;
+        // GoAiProtocol omits null-valued fields. An absent activeLease is the
+        // normal null representation only after both explicit counters are idle.
+        if (!status.TryGetProperty("activeLease", out var lease) || lease.ValueKind == JsonValueKind.Null) return true;
+        return lease.ValueKind == JsonValueKind.String ? false : null;
     }
 
     internal static bool IsLocalGateway(Uri gateway)

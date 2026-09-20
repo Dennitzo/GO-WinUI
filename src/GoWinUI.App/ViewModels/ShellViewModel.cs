@@ -32,6 +32,11 @@ public sealed partial class ShellViewModel : ObservableObject
     [ObservableProperty]
     public partial string ActivePageTitle { get; set; } = "AI Assistent";
 
+    // Retired or unknown routes must restore a usable page without touching
+    // the projects and workspace associations stored for the assistant.
+    internal static string ResolveNavigationRoute(string? requestedRoute) =>
+        requestedRoute is "logs" or "settings" ? requestedRoute : "assistant";
+
     [ObservableProperty]
     public partial bool IsAiRunning { get; set; }
 

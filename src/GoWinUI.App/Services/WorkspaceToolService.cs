@@ -18,8 +18,6 @@ public sealed class WorkspaceToolService(GoAiConnectionService connection)
         {
             var openRelative = args.GetProperty("path").GetString()!;
             var full = WorkspaceFilePath.Resolve(workspace ?? "", openRelative);
-            if (proposal.ExecutionScope is { } openScope && !CodingDelegatedWorkspace.IsOwned(openRelative, openScope.WritePaths))
-                throw new UnauthorizedAccessException("Die Anwendung liegt außerhalb des Subagent-Bereichs.");
             if (!File.Exists(full)) throw new FileNotFoundException("Die Projektanwendung fehlt.", full);
             var extension = Path.GetExtension(full).ToLowerInvariant();
             ProcessStartInfo start;
@@ -31,9 +29,9 @@ public sealed class WorkspaceToolService(GoAiConnectionService connection)
                 start.ArgumentList.Add("--user-data-dir=" + Path.Combine(Path.GetTempPath(), "GO", "AppPreviews", proposal.RunId));
                 start.ArgumentList.Add("--no-first-run");
             }
-            else if (extension == ".exe" && proposal.ExecutionScope is null)
+            else if (extension == ".exe")
                 start = new(full) { UseShellExecute = true, WorkingDirectory = workspace! };
-            else throw new InvalidDataException("workspace.open unterstützt HTML/PDF oder native EXE beim Hauptagenten.");
+            else throw new InvalidDataException("workspace.open unterstützt HTML/PDF oder native EXE im ausgewählten Workspace.");
             using var opened = Process.Start(start) ?? throw new IOException("Projektanwendung konnte nicht geöffnet werden.");
             return new { opened = true, path = openRelative, processId = opened.Id,
                 instruction = "Anwendungsfenster ist gestartet. Für belegte Sichtprüfung image.input windows/capture und anschließend media.analyze verwenden." };
@@ -82,14 +80,13 @@ public sealed class WorkspaceToolService(GoAiConnectionService connection)
 
         var executable = FindBlender();
         if (operation == "info") return new { available = executable is not null, executable,
-            instruction = "Blender Python/bpy. Skript mit coding.write/edit im Workspace erstellen, mit coding.read den SHA-256 ermitteln, dann run. .blend und Renderbilder ebenfalls im Workspace speichern; Render mit image.input + media.analyze prüfen. open startet die fertige .blend in Blender." };
+            instruction = "Blender Python/bpy. Skript mit coding.write/edit im Workspace erstellen, mit coding.read den SHA-256 ermitteln, dann run. .blend und Renderbilder ebenfalls im Workspace speichern. Vollständiger Rückkopplungsablauf: Auftrag verstehen, Szene mit Objekten, Materialien, Licht und Kamera erstellen, rendern, das tatsächliche Renderbild mit image.input + media.analyze (ausgewähltes DeepSeek-Vision-Modell) prüfen, Abweichungen erkennen, korrigieren, erneut rendern und prüfen. Begrenze Korrekturschleifen auf höchstens zwei. Vorhandene Projekte nicht ungefragt überschreiben. Erfolgreiche Skriptausführung allein ist keine visuelle Prüfung. open startet die fertige .blend in Blender." };
         if (executable is null) throw new FileNotFoundException("Blender wurde nicht gefunden. Installiere Blender oder setze GO_BLENDER_EXECUTABLE.");
         var relative = args.GetProperty("path").GetString()!;
         var fullPath = WorkspaceFilePath.Resolve(workspace ?? "", relative);
         if (!File.Exists(fullPath)) throw new FileNotFoundException("Blender-Eingabedatei fehlt.", fullPath);
         if (operation == "open")
         {
-            if (proposal.ExecutionScope is not null) throw new InvalidOperationException("Das fertige Blender-Projekt öffnet der Hauptagent nach Abschluss des Subagenten.");
             if (!Path.GetExtension(fullPath).Equals(".blend", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("open benötigt eine .blend-Datei.");
             // A visible long-lived app must not inherit the broker/test host's
@@ -106,10 +103,7 @@ public sealed class WorkspaceToolService(GoAiConnectionService connection)
         var command = JsonSerializer.SerializeToElement(new { executable,
             arguments = new[] { "--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "1", "--python", relative },
             timeoutSeconds = args.TryGetProperty("timeoutSeconds", out var duration) ? duration.GetInt32() : 300 });
-        return proposal.ExecutionScope is { } scope
-            ? await new CodingDelegatedWorkspace(workspace!, proposal.RunId, scope.AgentId, scope.WritePaths)
-                .ExecuteCommandAsync(command, progress, cancellationToken: token).ConfigureAwait(false)
-            : await new LocalCodingToolExecutor(workspace!, progress).ExecuteAsync("coding.command", command, token).ConfigureAwait(false);
+        return await new LocalCodingToolExecutor(workspace!, progress).ExecuteAsync("coding.command", command, token).ConfigureAwait(false);
     }
 
     public static string? FindBlender()

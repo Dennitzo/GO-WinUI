@@ -40,10 +40,9 @@ public sealed class WorkspaceToolsLiveTests(ITestOutputHelper output)
         Directory.CreateDirectory(workspace);
         var prompt = scenario switch
         {
-            "document" => $"Erstelle mit einem eigenen Dokumenten-Agenten Bericht.docx. Erstelle zunächst den Abschnitt Ziel mit dem Text {marker}. Lies das erstellte Dokument dann mit einem Dokumentwerkzeug und ergänze anschließend einen zweiten Abschnitt Ergebnis mit dem Text PRUEFUNG-OK. Prüfe durch erneutes Lesen, dass beide Texte enthalten sind. Liefere das fertige DOCX als Dokumentartefakt. Keine Websuche.",
+            "document" => $"Erstelle mit document.create Bericht.docx. Erstelle zunächst den Abschnitt Ziel mit dem Text {marker}. Lies das erstellte Dokument dann mit document.read und ergänze anschließend einen zweiten Abschnitt Ergebnis mit dem Text PRUEFUNG-OK. Prüfe durch erneutes Lesen, dass beide Texte enthalten sind. Liefere das fertige DOCX als Dokumentartefakt. Keine Websuche und keine Delegation.",
             "blender" => "Erstelle in Blender eine einfache 3D-Szene mit einem blauen Würfel auf einer hellgrauen Fläche, Kamera und Licht. Speichere scene.blend und rendere render.png im Workspace. Erstelle das nötige Python-Skript selbst im Workspace und führe es mit dem Blender-Werkzeug aus. Analysiere das Renderbild mit Bild analysieren und prüfe die Farbe und Sichtbarkeit. Öffne die fertige scene.blend in der Blender-Oberfläche. Keine Websuche und keine Paketinstallation.",
             _ => $"Erstelle index.html als kleine lokale Webanwendung mit dem Fenstertitel {marker}, weißem Hintergrund und einer auffälligen roten Statuskarte mit Text FEHLER. Starte die Anwendung in einem eigenen Fenster, erfasse einen Screenshot genau dieses Fensters und analysiere ihn mit Bild analysieren. Ändere erst danach anhand des sichtbaren Befunds die rote Karte in eine grüne mit Text BEREIT. Öffne die aktualisierte Anwendung erneut, erfasse sie erneut und prüfe das neue Bild. "
-                + (mode == RunMode.Coding ? "Lass zusätzlich einen parallelen Subagenten mit Schreibbereich visual-check.txt das aktualisierte Anwendungsfenster selbst erfassen und mit Bild analysieren prüfen; er soll den sichtbaren Befund in visual-check.txt schreiben. Warte auf sein Ergebnis. " : "")
                 + "Verwende dafür die angebotenen Workspace-, Fenster- und Bildwerkzeuge. Keine Websuche, kein manuelles Raten anhand des Quellcodes und keine Browserautomation per Terminal.",
         };
         var server = Environment.GetEnvironmentVariable("GO_AI_SERVER_URL") ?? "http://127.0.0.1:8080";
@@ -73,10 +72,12 @@ public sealed class WorkspaceToolsLiveTests(ITestOutputHelper output)
         try
         {
             var accepted = await client.CreateRunAsync(new RunRequest(GoAiProtocol.Version, mode,
-                [new("user", [new("text", prompt)])], ClientCapabilities: ["coding", "coding.evidence", "workspace", "documentIo", "documents", "document-agent", "visual-tools", "blender", "coding-isolated-subagents"],
+                [new("user", [new("text", prompt)])], ClientCapabilities: ["coding", "coding.evidence", "workspace", "documentIo", "documents", "visual-tools", "blender"],
                 SessionId: session.Id.ToString("D"), PreferredGeneralModelId: model, PreferredCodingModelId: mode == RunMode.Coding ? model : null,
-                CodingOptions: mode == RunMode.Coding ? new(WorkspacePath: workspace, ParallelModelId: scenario == "visual" ? model : null) : null,
-                AllowedServerTools: ["media.analyze", "media.inspect", "web.search", "web.fetch", "image.generate", "math.evaluate"], ReasoningEffort: "low"),
+                CodingOptions: mode == RunMode.Coding ? new(WorkspacePath: workspace) : null,
+                // The selected model's advertised default also supports DeepSeek
+                // (on/none); Qwen-specific effort names must not leak into this gate.
+                AllowedServerTools: ["media.analyze", "media.inspect", "web.search", "web.fetch", "image.generate", "math.evaluate"]),
                 "workspace-" + marker, token);
             runId = accepted.RunId;
             await File.WriteAllTextAsync(Path.Combine(workspace, "run.json"), JsonSerializer.Serialize(new { mode, scenario, prompt, runId }, Json), token);
@@ -112,9 +113,7 @@ public sealed class WorkspaceToolsLiveTests(ITestOutputHelper output)
             var tools = results.Values.ToArray();
             if (scenario == "document")
             {
-                Assert.Contains(events, e => e.Type == RunEventTypes.ServerToolStarted && e.Data.TryGetProperty("tool", out var name) && name.GetString() == WorkspaceTools.DocumentAgent);
                 Assert.True(tools.Count(t => t.Proposal.Name == ClientToolNames.DocumentCreate && t.Result.Status == "completed") >= 2);
-                Assert.Contains(tools, t => t.Proposal.Name == ClientToolNames.DocumentCreate && t.Proposal.ExecutionScope is not null);
                 Assert.True(tools.Count(t => t.Proposal.Name == ClientToolNames.DocumentRead && t.Result.Status == "completed") >= 2);
                 var artifacts = await environment.Get<IChatArtifactRepository>().ListForMessageAsync(turn.AssistantMessage.Id);
                 var docx = artifacts.Where(a => a.FileName.EndsWith(".docx", StringComparison.OrdinalIgnoreCase))
@@ -150,13 +149,6 @@ public sealed class WorkspaceToolsLiveTests(ITestOutputHelper output)
                     Assert.Contains(events.Skip(firstAnalysis + 1), e => e.Type == RunEventTypes.ClientToolProposed
                         && e.Data.TryGetProperty("name", out var name) && name.GetString() is "coding.write" or "coding.edit"
                         && e.Data.GetProperty("arguments").GetProperty("path").GetString() == "index.html");
-                    if (mode == RunMode.Coding)
-                    {
-                        Assert.Contains(tools, t => t.Proposal.Name == WorkspaceTools.ImageInput && t.Proposal.ExecutionScope is not null);
-                        Assert.True(File.Exists(Path.Combine(workspace, "visual-check.txt")));
-                        Assert.Contains(events, e => e.Type == RunEventTypes.ServerToolCompleted && e.Data.TryGetProperty("agentId", out _)
-                            && e.Data.TryGetProperty("tool", out var name) && name.GetString() == "media.analyze");
-                    }
                 }
             }
             passed = true;

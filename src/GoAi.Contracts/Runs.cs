@@ -57,14 +57,14 @@ public sealed record RunRequest(
     ConversationProfile? ConversationProfile = null,
     string? ReasoningEffort = null,
     string? PreferredCodingModelId = null,
-    CodingRunOptions? CodingOptions = null);
+    CodingRunOptions? CodingOptions = null,
+    bool DeepResearch = false);
 
 public sealed record CodingRunOptions(
     bool UseWorkingState = true,
     string ReasoningPolicy = "maximum",
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? WorkspacePath = null,
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool ContinueSessionContext = false,
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? ParallelModelId = null);
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool ContinueSessionContext = false);
 
 public sealed record DocumentContextDescriptor(
     DocumentContextMode Mode,

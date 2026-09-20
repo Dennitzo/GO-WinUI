@@ -54,7 +54,7 @@ public sealed class CapabilityService
         [
             "web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze",
             "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve",
-            "coding.updatePlan", WorkspaceTools.DocumentAgent,
+            "coding.updatePlan",
         ],
         [
             ClientToolNames.CodingList,
@@ -103,8 +103,6 @@ public sealed class CapabilityService
             10_000,
             true),
         SupportsCodingSessionContext: true,
-        SupportsParallelCoding: true,
-        SupportsIsolatedSubagents: true,
         SupportsRunSteering: true);
 
     private static ModelCapability CreateModelCapability(
