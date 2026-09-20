@@ -131,7 +131,7 @@ public sealed partial class BlenderToolService
             objects = report["objects"]?.AsArray().Take(64).ToArray(), truncatedObjects = totalObjects > 64,
             images = report["images"], render = report["render"], execution,
             error = !processSucceeded || !allViewsRendered ? "Prüfung unvollständig oder strukturelle Fehler erkannt; konkrete Befunde in issues und reportPath beachten." : null,
-            instruction = "Geometrieprüfung ist keine visuelle Freigabe. reportPath enthält alle Objekte/Befunde. Renderbilder mit image.input und media.analyze auf Anforderungen, Proportionen, Verbindungen und Sichtbarkeit prüfen; konkrete Fehler gezielt in einer neuen Szenenrevision beheben." };
+            instruction = "Geometrieprüfung ist keine visuelle Freigabe. reportPath enthält alle Objekte/Befunde. Jedes Renderbild mit image.input laden und mit media.analyze prüfen: Render als uploadId, die Referenzbilder derselben Ansicht als referenceUploadIds und eine konkrete Prüffrage. Vision liefert Unterschiede und Änderungsanweisungen; solange sie Unterschiede nennt, ist das Kriterium nicht erfüllt. Konkrete Fehler gezielt in einer neuen Szenenrevision beheben und erneut vergleichen." };
     }
 
     private static async Task<object> ScaffoldAsync(JsonElement args, string workspace, CancellationToken token)
@@ -144,6 +144,8 @@ public sealed partial class BlenderToolService
         await WriteResourceAsync("scene.py", scene, token).ConfigureAwait(false);
         var steps = Path.Combine(directory, "steps");
         Directory.CreateDirectory(steps);
+        // Reference downloads belong here; a fixed folder avoids nested-path mistakes.
+        Directory.CreateDirectory(Path.Combine(directory, "references"));
         var firstStep = Path.Combine(steps, "01_blockout.py");
         await WriteResourceAsync("step.py", firstStep, token).ConfigureAwait(false);
         var modelingGuide = Path.Combine(directory, "MODELING_GUIDE.md");
@@ -161,7 +163,8 @@ public sealed partial class BlenderToolService
             helperPath = Relative(workspace, helper), scriptPath = Relative(workspace, firstStep), legacyScriptPath = Relative(workspace, scene),
             designPath = Relative(workspace, designPath), readmePath = Relative(workspace, readme),
             modelingGuidePath = Relative(workspace, modelingGuide),
-            instruction = "Zuerst MODELING_GUIDE.md vollständig lesen und die dortige Modellierungsmethode anwenden; danach README.md, steps/01_blockout.py und design.json. Die öffentliche Helper-API steht in Guide und README; bei unklaren Parametern die betreffende Funktion in go_blender.py gezielt lesen. Referenzanhänge wirklich auswerten. Mit kleinen Etappenskripten und stage arbeiten: zuerst Hauptformen, danach geprüfte Baugruppen, Details und gezielte Korrekturen. stage übernimmt Laden/Speichern/Strukturprüfung und automatische Blender-Vorschau. Das Skript enthält nur Änderungen, höchstens 12000 Zeichen. Vor jeder nächsten Etappe Render und echte Vision prüfen; Nutzer-Umlenkungen berücksichtigen. currentScene und stageHistory im Designbrief aktualisieren. scene.py ist nur ein Legacy-Beispiel für run, kein Einstieg für komplexe neue Modelle." };
+            referencesPath = Relative(workspace, Path.Combine(directory, "references")),
+            instruction = "Zuerst MODELING_GUIDE.md vollständig lesen und die dortige Modellierungsmethode anwenden; danach README.md, steps/01_blockout.py und design.json. Die öffentliche Helper-API steht in Guide und README; bei unklaren Parametern die betreffende Funktion in go_blender.py gezielt lesen. Referenzbilder nach referencesPath laden (Pfad relativ zum Workspace, kein zusätzliches workingDirectory), mit image.input hochladen und analysieren; Upload-IDs in design.json festhalten. Mit kleinen Etappenskripten und stage arbeiten: zuerst Hauptformen, danach geprüfte Baugruppen, Details und gezielte Korrekturen. stage übernimmt Laden/Speichern/Strukturprüfung und automatische Blender-Vorschau; mit views rendert stage die neue Revision sofort. Das Skript enthält nur Änderungen, höchstens 12000 Zeichen. Jede Etappe mit media.analyze prüfen: Render als uploadId, Referenzen als referenceUploadIds; aus den gelieferten Änderungsanweisungen die nächste Korrektur ableiten. Nutzer-Umlenkungen berücksichtigen. currentScene und stageHistory im Designbrief aktualisieren. scene.py ist nur ein Legacy-Beispiel für run, kein Einstieg für komplexe neue Modelle." };
     }
 
     private static async Task<JsonElement> ExecuteProcessAsync(string executable, string workspace, string script,
@@ -242,8 +245,19 @@ public sealed partial class BlenderToolService
         - beam(name, start, end, width=0.1, depth=None, material=None, collection=None)
         - tube_curve(name, points, radius=0.05, closed=False, material=None, collection=None)
         - mesh(name, vertices, faces, material=None, collection=None)
+        - lathe(name, profile=[(radius, z), ...], segments=48, location=(0,0,0), smooth=True, material=None, collection=None): one continuous body/head silhouette
+        - cone_between(name, start, end, start_radius, end_radius=0.0, vertices=32, material=None, collection=None); split_point(start, end, fraction)
+        - point_on_sphere(center, radius, azimuth_deg, elevation_deg) -> (point, normal); surface_patch(name, point, normal, radius, thickness=0.01, scale=(1,1), sink=0.35, material=None, collection=None)
+        - flat_polygon(name, outline=[(u,v), ...], thickness=0.02, plane='xz', offset=0.0, location=(0,0,0), rotation=(0,0,0), material=None, collection=None)
+        - mirror_x(obj, name=None)
         - ground(size=20, z=0, material=None); setup_review_scene(view='perspective', resolution=768)
         - save_revision(path): legacy standalone scripts only; stage saves automatically.
+
+        Characters and organic figures: build the body and head as ONE lathe profile, limbs with
+        cone_between/sphere, ears and tails with cone_between segments on one line, cheeks, eyes and
+        stripes as surface_patch, flat zigzag tails or fins with flat_polygon. Compare every stage
+        against the reference images: media.analyze with the render as uploadId and the references
+        as referenceUploadIds returns per-part differences and concrete change instructions.
 
         Keep design.json current: requirements include measurable constraints, decisions record
         creative choices, references record actual image/document findings, acceptedFeatures

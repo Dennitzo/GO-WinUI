@@ -1267,7 +1267,18 @@ public sealed partial class GoAiAssistantService(
         public int? CachedPromptTokens { get; set; }
         public int GeneratedTokens { get; set; }
         public bool HasStarted { get; set; }
+        /// <summary>Last reported prompt-processing fraction; kept while the model generates.</summary>
+        public double? PromptProgress { get; set; }
     }
+
+    // The visible detail keeps the context state ("Kontext bereit · 98 % · 28.687 Token")
+    // while the model generates. Round counters and elapsed seconds are not shown.
+    private static string FormatContextReady(ModelTokenProgressState counter) =>
+        counter.PromptProgress is { } fraction
+            ? $"Kontext bereit · {fraction:P0} · {FormatCurrentModelTokens(counter)}"
+            : counter.ProcessedPromptTokens > 0
+                ? $"Kontext bereit · {FormatCurrentModelTokens(counter)}"
+                : FormatCurrentModelTokens(counter);
 
     internal static string? FormatModelTokenProgress(ModelGenerationEvent progress, ModelTokenProgressState counter)
     {
@@ -1283,12 +1294,13 @@ public sealed partial class GoAiAssistantService(
             counter.ProcessedPromptTokens = 0;
             counter.CachedPromptTokens = null;
             counter.GeneratedTokens = 0;
+            counter.PromptProgress = null;
             counter.HasStarted = true;
             return "0 Token";
         }
         if (progress.State is "codingWaiting" or "codingLoading")
         {
-            return $"Runde {progress.Attempt ?? 1} · {progress.ElapsedSeconds ?? 0} s · {FormatCurrentModelTokens(counter)}";
+            return FormatContextReady(counter);
         }
         if (progress.State == "promptProcessing")
         {
@@ -1297,10 +1309,8 @@ public sealed partial class GoAiAssistantService(
                 counter.CachedPromptTokens = progress.CachedPromptTokens;
             counter.ActiveTokens = counter.ProcessedPromptTokens + counter.GeneratedTokens;
             counter.HasStarted = true;
-            var ready = progress.PromptProgress is { } fraction
-                ? $"Kontext bereit · {fraction:P0}"
-                : "Kontext bereit";
-            return $"{ready} · {counter.ActiveTokens:N0} Token";
+            if (progress.PromptProgress is { } fraction) counter.PromptProgress = fraction;
+            return FormatContextReady(counter);
         }
         if (progress.ToolName?.StartsWith("coding.", StringComparison.Ordinal) == true)
         {

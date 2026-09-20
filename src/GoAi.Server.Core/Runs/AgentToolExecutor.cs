@@ -337,14 +337,29 @@ public sealed class AgentToolExecutor
         }
 
         var imagePaths = new List<string>();
+        var referenceCount = 0;
         if (upload.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
         {
+            // Reference images (artwork, photos, dimension sheets) precede the
+            // inspected image so Vision compares them within one request.
+            foreach (var referenceId in ReadReferenceUploadIds(arguments))
+            {
+                var reference = await _uploads.GetCompletedAsync(referenceId, cancellationToken).ConfigureAwait(false)
+                    ?? throw new KeyNotFoundException($"Completed reference upload {referenceId} not found.");
+                if (!reference.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("referenceUploadIds must reference image uploads.");
+                imagePaths.Add(await _uploads.ResolveCompletedPathAsync(referenceId, cancellationToken).ConfigureAwait(false)
+                    ?? throw new FileNotFoundException("Completed reference image payload is missing."));
+                referenceCount++;
+            }
             var uploadPath = await _uploads.ResolveCompletedPathAsync(uploadId, cancellationToken).ConfigureAwait(false)
                 ?? throw new FileNotFoundException("Completed image upload payload is missing.");
             imagePaths.Add(uploadPath);
         }
         else
         {
+            if (ReadReferenceUploadIds(arguments).Count > 0)
+                throw new InvalidDataException("referenceUploadIds are only supported for image uploads.");
             foreach (var descriptor in processed.Artifacts
                 .Where(static item => item.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
                 .Take(48))
@@ -391,6 +406,8 @@ public sealed class AgentToolExecutor
         }
 
         var prompt = GetString(arguments, "prompt") ?? GeneralAgentPolicies.DefaultMediaAnalysis;
+        if (referenceCount > 0)
+            prompt = GeneralAgentPolicies.VisualComparisonInstruction(referenceCount) + "\n\n" + prompt;
         if (transcription is not null && !string.IsNullOrWhiteSpace(transcription.Text))
         {
             var transcript = transcription.Text.Length <= 64_000
@@ -433,6 +450,7 @@ public sealed class AgentToolExecutor
             transcriptionWarning,
             visionAnalysis = hasVideoTranscript ? visionAnalysis : null,
             analysis,
+            referenceImages = referenceCount,
             visionModelId = visionModel,
             visionReasoningEffort = _modelRuntime.ResolveMediaReasoningEffort(visionModel, "vision", reasoningEffort),
             modelId = hasVideoTranscript ? fusionModel : visionModel,
@@ -440,6 +458,19 @@ public sealed class AgentToolExecutor
                 hasVideoTranscript ? "general" : "vision", reasoningEffort),
             artifacts = processed.Artifacts,
         }, processed.Artifacts, hasVideoTranscript ? fusionModel : visionModel);
+    }
+
+    internal static IReadOnlyList<string> ReadReferenceUploadIds(JsonElement arguments)
+    {
+        if (!arguments.TryGetProperty("referenceUploadIds", out var references) || references.ValueKind != JsonValueKind.Array)
+            return [];
+        return references.EnumerateArray()
+            .Where(static item => item.ValueKind == JsonValueKind.String)
+            .Select(static item => item.GetString()!)
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .Take(6)
+            .ToArray();
     }
 
     private async Task<string> AnalyzeWithVisionAsync(

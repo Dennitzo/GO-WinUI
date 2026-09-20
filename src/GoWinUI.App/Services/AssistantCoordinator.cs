@@ -40,7 +40,7 @@ public sealed class AssistantCoordinator(
             or GoAiAssistantUpdateKind.Completed or GoAiAssistantUpdateKind.Cancelled or GoAiAssistantUpdateKind.Failed)) return;
         var isCoding = _displayStates.TryGetValue(update.Message.SessionId, out var previous)
             && previous.MessageId == update.Message.Id ? previous.IsCoding
-                : (await chats.GetSessionAsync(update.Message.SessionId, CancellationToken.None).ConfigureAwait(false))?.PersistentToolAction == PersistentToolAction.Coding;
+                : IsCodingAgentSession((await chats.GetSessionAsync(update.Message.SessionId, CancellationToken.None).ConfigureAwait(false))?.PersistentToolAction);
         var selection = isCoding ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
         _displayStates.AddOrUpdate(update.Message.SessionId,
             _ => Merge(new(update.Message.Id, selection, isCoding, true)),
@@ -224,7 +224,7 @@ public sealed class AssistantCoordinator(
         var documentGroupStatus = BuildDocumentGroupStatus(documentItems, attachmentItems.Count);
         // A snapshot is local UI state. Never make sidebar/session interaction wait for
         // the native model runtime, which may be offline or loading a model.
-        var isCodingSession = session.PersistentToolAction == PersistentToolAction.Coding;
+        var isCodingSession = IsCodingAgentSession(session.PersistentToolAction);
         var selectedModel = isCodingSession ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
         var contextLimit = ModelContextProfiles.ResolveMaximum(selectedModel, isCodingSession ? "coding" : "general");
         ContextBuildResult context;
@@ -658,6 +658,7 @@ public sealed class AssistantCoordinator(
             "bricsCad" => PersistentToolAction.BricsCad,
             "audiobook" => PersistentToolAction.Audiobook,
             "coding" => PersistentToolAction.Coding,
+            "blender" => PersistentToolAction.Blender,
             _ => throw new InvalidOperationException("Die angeforderte persistente Tool-Aktion ist unbekannt."),
         };
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
@@ -1016,6 +1017,8 @@ public sealed class AssistantCoordinator(
             PersistentToolAction.BricsCad => CreateToolMatch("bricsCad", prompt),
             PersistentToolAction.Audiobook => CreateToolMatch("audiobook", prompt),
             PersistentToolAction.Coding => CreateToolMatch("coding", prompt),
+            // The Blender chip stays active for every follow-up prompt of the session.
+            PersistentToolAction.Blender => CreateToolMatch("blender", prompt),
             _ => null,
         };
     }
@@ -1044,7 +1047,8 @@ public sealed class AssistantCoordinator(
     {
         PromptTriggerAction.BricsCad => PersistentToolAction.BricsCad,
         PromptTriggerAction.Audiobook => PersistentToolAction.Audiobook,
-        PromptTriggerAction.Coding or PromptTriggerAction.Blender => PersistentToolAction.Coding,
+        PromptTriggerAction.Coding => PersistentToolAction.Coding,
+        PromptTriggerAction.Blender => PersistentToolAction.Blender,
         _ => null,
     };
 
@@ -1053,8 +1057,13 @@ public sealed class AssistantCoordinator(
         PersistentToolAction.BricsCad => "bricsCad",
         PersistentToolAction.Audiobook => "audiobook",
         PersistentToolAction.Coding => "coding",
+        PersistentToolAction.Blender => "blender",
         _ => null,
     };
+
+    /// <summary>Blender sessions run the Coding agent (model, workspace, timeline) with modelling instructions.</summary>
+    internal static bool IsCodingAgentSession(PersistentToolAction? action) =>
+        action is PersistentToolAction.Coding or PersistentToolAction.Blender;
 
     internal async Task EmitGoAiUpdateAsync(
         GoAiAssistantUpdate update,

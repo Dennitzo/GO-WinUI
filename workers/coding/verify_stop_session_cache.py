@@ -65,6 +65,9 @@ def main():
     parser.add_argument("--require-native-restart", action="store_true")
     parser.add_argument("--restart-after-stop", action="store_true",
                         help="Seed only the interrupted first turn, then verify its cache after external restart")
+    parser.add_argument("--switch-reasoning", action="store_true",
+                        help="Interrupt turn 0 with the lowest reasoning level and continue with the model default "
+                             "(the Blender Stop scenario); cache reuse must survive the template switch")
     args = parser.parse_args()
     if args.stage != "full" and args.state is None:
         parser.error("Restart stages require --state")
@@ -106,6 +109,14 @@ def main():
                        "wie ein fiktiver CSV-Importer Daten validiert.\n" + facts)
             history = [message("user", initial)]
             effort = select_reasoning(report["initialModels"]["models"], args.model, mode)
+            interrupted_effort = effort
+            if args.switch_reasoning:
+                supported = next((item.get("reasoningEfforts") or [] for item in report["initialModels"]["models"]
+                                  if item["id"] == args.model), [])
+                lowest = next((level for level in ("none", "minimal", "low") if level in supported), None)
+                if lowest is None or lowest == effort:
+                    raise ValueError("--switch-reasoning needs a lower selectable level than the default for " + args.model)
+                interrupted_effort = lowest
             saved_case = None
             if args.stage == "verify-restart":
                 saved_case = persisted["cases"].get(mode)
@@ -124,7 +135,8 @@ def main():
                 request = {"protocolVersion": "1.0", "mode": mode, "sessionId": session,
                            "messages": history, "clientCapabilities": ["coding"] if mode == "coding" else [],
                            "allowedServerTools": [], "preferredGeneralModelId": args.model,
-                           "preferredCodingModelId": args.model, "reasoningEffort": effort,
+                           "preferredCodingModelId": args.model,
+                           "reasoningEffort": interrupted_effort if turn == 0 else effort,
                            "limits": {"maximumOutputTokens": 4096, "timeoutSeconds": args.timeout}}
                 if workspace:
                     request["codingOptions"] = {"workspacePath": workspace, "continueSessionContext": True,
@@ -134,7 +146,8 @@ def main():
                                        {"Idempotency-Key": "probe-" + uuid.uuid4().hex})
                 active = receipt["runId"]
                 path = "/v1/runs/" + active
-                row = {"runId": active, "turn": turn, "events": [], "cancelSent": False}
+                row = {"runId": active, "turn": turn, "events": [], "cancelSent": False,
+                       "reasoningEffort": request["reasoningEffort"]}
                 case["turns"].append(row)
                 print(json.dumps({"mode": mode, "turn": turn, "runId": active, "stage": "started"}), flush=True)
                 for event in gateway.events(path + "/events"):

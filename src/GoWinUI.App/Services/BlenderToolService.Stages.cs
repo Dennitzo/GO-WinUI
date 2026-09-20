@@ -38,10 +38,20 @@ public sealed partial class BlenderToolService
         var temporaryScene = Path.Combine(outputParent, ".go-stage-" + stageId + ".blend");
         var reportPath = Path.Combine(stageDirectory, "report.json");
         var requestPath = Path.Combine(stageDirectory, "request.json");
+        // Optional review renders of the new revision, stored next to it as
+        // <revision>_renders/<view>.png so every stage produces auditable images.
+        var views = args.TryGetProperty("views", out var requestedViews) ? requestedViews.Deserialize<string[]>() : null;
+        var renderDirectory = views is null ? null
+            : Path.Combine(outputParent, Path.GetFileNameWithoutExtension(outputPath) + "_renders");
+        if (renderDirectory is not null && (Directory.Exists(renderDirectory) || File.Exists(renderDirectory)))
+            throw new IOException("Der Renderordner der neuen Revision existiert bereits; wähle einen neuen outputPath.");
         await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(new
         {
             scriptPath, baseScene = basePath, outputPath = temporaryScene, reportPath, label,
             projectDirectory = Path.GetDirectoryName(scriptPath),
+            views, renderDirectory,
+            resolution = args.TryGetProperty("resolution", out var resolution) ? resolution.GetInt32() : 768,
+            samples = args.TryGetProperty("samples", out var samples) ? samples.GetInt32() : 32,
         }, JsonOptions), token).ConfigureAwait(false);
         var execution = await ExecuteProcessAsync(executable, workspace,
             Path.Combine(stageDirectory, "go_blender_stage.py"), requestPath, args, progress, token).ConfigureAwait(false);
@@ -69,6 +79,23 @@ public sealed partial class BlenderToolService
         report["baseSceneSha256"] = basePath is null ? null : args.GetProperty("baseSceneSha256").GetString();
         report["stageId"] = stageId;
         report["createdAt"] = DateTimeOffset.UtcNow.ToString("O");
+        var renderCompleted = report["renderCompleted"]?.GetValue<bool>() ?? false;
+        if (report["images"] is JsonArray images && renderDirectory is not null)
+        {
+            foreach (var image in images.OfType<JsonObject>())
+            {
+                var imagePath = Path.GetFullPath(image["path"]!.GetValue<string>());
+                if (!imagePath.StartsWith(renderDirectory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                    || !File.Exists(imagePath) || new FileInfo(imagePath).Length < 100)
+                    throw new InvalidDataException("Blender lieferte kein gültiges Renderbild im Renderordner der Revision.");
+                var relative = Relative(workspace, imagePath);
+                _ = WorkspaceFilePath.Resolve(workspace, relative);
+                image["path"] = relative;
+                await using var imageStream = File.OpenRead(imagePath);
+                image["sha256"] = Convert.ToHexStringLower(await SHA256.HashDataAsync(imageStream, token).ConfigureAwait(false));
+                image["bytes"] = imageStream.Length;
+            }
+        }
         await File.WriteAllTextAsync(reportPath, report.ToJsonString(JsonOptions), token).ConfigureAwait(false);
         var preview = await EnsurePreviewAsync(executable, workspace, outputPath, sceneHash, label, token).ConfigureAwait(false);
         return new
@@ -78,8 +105,16 @@ public sealed partial class BlenderToolService
             sceneSha256 = sceneHash, reportPath = Relative(workspace, reportPath), valid = report["valid"]?.GetValue<bool>() ?? false,
             inspectionCompleted = report["inspectionCompleted"]?.GetValue<bool>() ?? false,
             counts = report["counts"], bounds = report["bounds"], issues = report["issues"]?.AsArray().Take(32).ToArray(),
-            issueCount = report["issues"]?.AsArray().Count ?? 0, preview, execution,
-            instruction = "Zwischenstand gespeichert und zur Blender-Vorschau übergeben. preview.state beachten. Jetzt strukturelle Befunde auswerten, render und tatsächliche Vision-Prüfung dieser Etappe durchführen. Neue Umlenkung berücksichtigen. Erst danach mit einem neuen kleinen Skript auf dieser baseScene weiterarbeiten; akzeptierte Bauteile erhalten und design.json aktualisieren.",
+            issueCount = report["issues"]?.AsArray().Count ?? 0,
+            images = views is null ? null : report["images"],
+            renderCompleted = views is null ? null : (bool?)renderCompleted,
+            renderDirectory = renderDirectory is null ? null : Relative(workspace, renderDirectory),
+            preview, execution,
+            instruction = views is null
+                ? "Zwischenstand gespeichert und zur Blender-Vorschau übergeben. preview.state beachten. Jetzt strukturelle Befunde auswerten, render und tatsächliche Vision-Prüfung dieser Etappe durchführen (stage mit views rendert beim nächsten Mal direkt). Neue Umlenkung berücksichtigen. Erst danach mit einem neuen kleinen Skript auf dieser baseScene weiterarbeiten; akzeptierte Bauteile erhalten und design.json aktualisieren."
+                : renderCompleted
+                    ? "Zwischenstand gespeichert, Vorschau aktualisiert und Prüfansichten in images gerendert. Jetzt jedes Bild mit image.input file laden und mit media.analyze prüfen: Renderbild als uploadId, die passenden Referenzbilder als referenceUploadIds, konkrete Prüffrage je Ansicht. Die Vision-Antwort liefert Unterschiede und Änderungsanweisungen; leite daraus die nächste kleine Korrekturetappe auf dieser baseScene ab. Kein Kriterium ist erfüllt, solange Vision Unterschiede nennt. design.json (visualChecks, stageHistory, currentScene) aktualisieren."
+                    : "Zwischenstand gespeichert, aber die Prüfansichten wurden nicht vollständig gerendert; issues beachten und render mit frischem outputDirectory wiederholen. Erst nach tatsächlicher Vision-Prüfung weiterbauen.",
         };
     }
 

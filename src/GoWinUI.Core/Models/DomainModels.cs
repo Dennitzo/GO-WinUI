@@ -2,7 +2,7 @@ namespace GoWinUI.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
-public enum PersistentToolAction { BricsCad, Audiobook, Coding }
+public enum PersistentToolAction { BricsCad, Audiobook, Coding, Blender }
 public enum MessageContentProfile { General, Audiobook }
 public enum SessionContextProfile { General, Audiobook }
 public enum ProjectStatus { Active, Archived }

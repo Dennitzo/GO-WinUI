@@ -438,26 +438,40 @@ public sealed class CodingIntegrationTests
     }
 
     [Fact]
-    public void CodingWaitingShowsElapsedTimeBeforeTheFirstTokenWithoutInventingProgress()
+    public void CodingWaitingKeepsTheContextReadyDisplayInsteadOfRoundsAndElapsedTime()
     {
         var counter = new GoAiAssistantService.ModelTokenProgressState();
         var waiting = GoAiAssistantService.FormatModelTokenProgress(
             new ModelGenerationEvent("codingWaiting", Attempt: 2, ElapsedSeconds: 37),
             counter);
 
-        Assert.Equal("Runde 2 · 37 s · 0 Token", waiting);
+        Assert.Equal("0 Token", waiting);
+        Assert.DoesNotContain("Runde", waiting, StringComparison.Ordinal);
         Assert.False(counter.HasStarted);
         Assert.Equal(0, counter.ActiveTokens);
 
         _ = GoAiAssistantService.FormatModelTokenProgress(
-            new ModelGenerationEvent("tokenProgress", ProcessedPromptTokens: 150, GeneratedTokens: 12),
+            new ModelGenerationEvent("promptProcessing", PromptProgress: 0.98, PromptTokens: 28_687, ProcessedPromptTokens: 28_113),
+            counter);
+        _ = GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("tokenProgress", GeneratedTokens: 574, CurrentTokens: 574),
             counter);
         var continuedWaiting = GoAiAssistantService.FormatModelTokenProgress(
-            new ModelGenerationEvent("codingWaiting", Attempt: 2, ElapsedSeconds: 42),
+            new ModelGenerationEvent("codingWaiting", Attempt: 5, ElapsedSeconds: 145),
             counter);
-        Assert.Equal("Runde 2 · 42 s · 162 Token", continuedWaiting);
+        Assert.Equal($"Kontext bereit · 98 % · {28_687:N0} Token", continuedWaiting);
+        Assert.DoesNotContain("Runde", continuedWaiting, StringComparison.Ordinal);
+        Assert.DoesNotContain(" s ·", continuedWaiting, StringComparison.Ordinal);
         Assert.True(counter.HasStarted);
-        Assert.Equal(162, counter.ActiveTokens);
+        Assert.Equal(28_687, counter.ActiveTokens);
+
+        // The loading heartbeat of a later round keeps the same context state.
+        Assert.Equal(continuedWaiting, GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("codingLoading", Attempt: 6, ElapsedSeconds: 3), counter));
+        // A new model attempt starts from zero again, without a stale percentage.
+        Assert.Equal("0 Token", GoAiAssistantService.FormatModelTokenProgress(new ModelGenerationEvent("generationStarted"), counter));
+        Assert.Equal("0 Token", GoAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("codingWaiting", Attempt: 6, ElapsedSeconds: 4), counter));
     }
 
     private static ToolProposal CreateProposal(string name, ToolRiskClass risk) => new(

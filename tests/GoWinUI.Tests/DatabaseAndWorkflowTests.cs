@@ -264,6 +264,18 @@ public sealed class DatabaseAndWorkflowTests
 
         await repository.SetPersistentToolActionAsync(session.Id, null);
         Assert.Null((await repository.GetSessionAsync(session.Id))?.PersistentToolAction);
+
+        // Blender shares the legacy 'code' storage value with Coding; the variant column
+        // keeps the exact chip so a session switch or page reload restores Blender.
+        await repository.SetPersistentToolActionAsync(session.Id, PersistentToolAction.Blender);
+        Assert.Equal(PersistentToolAction.Blender, (await repository.GetSessionAsync(session.Id))?.PersistentToolAction);
+        Assert.Equal(PersistentToolAction.Blender, Assert.Single(await repository.ListSessionsAsync()).PersistentToolAction);
+        Assert.Equal("code", await command.ExecuteScalarAsync());
+        command.CommandText = "SELECT persistent_tool_variant FROM chat_sessions WHERE id=$id;";
+        Assert.Equal("blender", await command.ExecuteScalarAsync());
+        await repository.SetPersistentToolActionAsync(session.Id, PersistentToolAction.Coding);
+        Assert.Equal(PersistentToolAction.Coding, (await repository.GetSessionAsync(session.Id))?.PersistentToolAction);
+        Assert.Equal(DBNull.Value, await command.ExecuteScalarAsync());
     }
 
     [Fact]

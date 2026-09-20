@@ -261,6 +261,7 @@ public sealed partial class AgentToolCatalog
                 RequireString(value, "uploadId", 39, 39);
                 OptionalString(value, "prompt", 1, 10_000);
                 OptionalDetailWindows(value);
+                OptionalReferenceUploads(value, name);
                 break;
             case "image.generate":
                 RequireString(value, "prompt", 1, 10_000);
@@ -312,7 +313,7 @@ public sealed partial class AgentToolCatalog
                 {"type":"object","properties":{"task":{"type":"string","minLength":1,"maxLength":4000},"maximumSearches":{"type":"integer","minimum":2,"maximum":3,"default":3,"description":"Anzahl geplanter Suchfragen; bei leeren Treffern höchstens eine kürzere Wiederholung je Frage innerhalb des gemeinsamen Webbudgets."},"maximumSources":{"type":"integer","minimum":2,"maximum":6,"default":4}},"required":["task"],"additionalProperties":false}
                 """)),
             Server("media.inspect", "Extrahiere sichere Metadaten, Audio und zeitcodierte Frames eines Uploads.", ToolRiskClass.ReadOnly, MediaSchema()),
-            Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem ausgewählten DeepSeek-Modell mit integriertem Vision; bei Textmodellen ohne Vision bleibt der bestehende Fallback. Die Analyse erhält das tatsächliche Bild und protokolliert die verwendete Modell-ID. Für Blender-Referenzen erfasse Silhouette, Proportionen, Baugruppen und Materialien; trenne sichtbare Merkmale von Annahmen. Für Blender-Render nenne im prompt die Ansicht, konkreten Designanforderungen und belegten Referenzmerkmale. Prüfe jedes Kriterium als erfüllt, verletzt oder nicht beurteilbar mit sichtbarem Befund, betroffener Baugruppe und gezieltem Korrekturvorschlag. Verdeckte Details gelten nicht als bestanden. Prüfe Anzahl, Anordnung, Symmetrie, Anschlussstellen, Durchdringungen, Bodenabstand, Farben, Licht und Sichtbarkeit nur soweit im Bild erkennbar.", ToolRiskClass.ReadOnly, MediaSchema()),
+            Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem ausgewählten DeepSeek-Modell mit integriertem Vision; bei Textmodellen ohne Vision bleibt der bestehende Fallback. Die Analyse erhält das tatsächliche Bild und protokolliert die verwendete Modell-ID. Für Blender-Referenzen erfasse Silhouette, Proportionen, Baugruppen und Materialien; trenne sichtbare Merkmale von Annahmen. Für Blender-Render nenne im prompt die Ansicht, konkreten Designanforderungen und belegten Referenzmerkmale und übergib die Referenzbilder als referenceUploadIds: Vision vergleicht dann Referenz und Render Bauteil für Bauteil und liefert je Abweichung eine konkrete Änderungsanweisung mit Richtung, Achse und geschätztem Betrag relativ zu einem sichtbaren Bezugsmaß. Vision antwortet ausführlich mit genauen Geometriebeschreibungen und nennt immer weitere Verbesserungen; ein Kriterium gilt erst als erfüllt, wenn die Antwort keinen Unterschied mehr benennt. Prüfe jedes Kriterium als erfüllt, verletzt oder nicht beurteilbar mit sichtbarem Befund, betroffener Baugruppe und gezieltem Korrekturvorschlag. Verdeckte Details gelten nicht als bestanden. Prüfe Anzahl, Anordnung, Symmetrie, Anschlussstellen, Durchdringungen, Bodenabstand, Farben, Licht und Sichtbarkeit nur soweit im Bild erkennbar.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("image.generate", "Erzeuge Bilder mit Z-Image-Turbo.", ToolRiskClass.ReadOnly, ImageSchema()),
             Server("math.evaluate", "Führe deterministische skalare, Vektor- oder Matrixoperationen ohne Skriptausführung aus.", ToolRiskClass.ReadOnly, MathSchema()),
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
@@ -368,7 +369,7 @@ public sealed partial class AgentToolCatalog
         """);
 
     private static JsonElement MediaSchema() => Parse("""
-        {"type":"object","properties":{"uploadId":{"type":"string"},"prompt":{"type":"string"},"detailWindows":{"type":"array","maxItems":3,"items":{"type":"object","properties":{"start":{"type":"number","minimum":0},"end":{"type":"number","exclusiveMinimum":0,"maximum":3600}},"required":["start","end"],"additionalProperties":false}}},"required":["uploadId"],"additionalProperties":false}
+        {"type":"object","properties":{"uploadId":{"type":"string","description":"Zu prüfendes Bild oder Video, etwa das aktuelle Renderbild."},"prompt":{"type":"string","description":"Konkrete Prüffrage: Ansicht, Anforderungen, Referenzmerkmale und zu vergleichende Bauteile."},"referenceUploadIds":{"type":"array","maxItems":6,"uniqueItems":true,"items":{"type":"string"},"description":"Nur Bilder: bis zu sechs Referenz-Uploads (Vorlagen, Fotos, Maßblätter), die Vision im selben Aufruf mit uploadId vergleicht. Die Antwort beschreibt jede Abweichung als konkrete Änderungsanweisung."},"detailWindows":{"type":"array","maxItems":3,"items":{"type":"object","properties":{"start":{"type":"number","minimum":0},"end":{"type":"number","exclusiveMinimum":0,"maximum":3600}},"required":["start","end"],"additionalProperties":false}}},"required":["uploadId"],"additionalProperties":false}
         """);
 
     private static JsonElement MathSchema() => Parse("""
@@ -457,6 +458,35 @@ public sealed partial class AgentToolCatalog
         if (value.TryGetProperty(name, out var property) && property.GetInt32() % 64 != 0)
         {
             throw new ArgumentException($"Property '{name}' must be a multiple of 64.");
+        }
+    }
+
+    private static void OptionalReferenceUploads(JsonElement value, string toolName)
+    {
+        if (!value.TryGetProperty("referenceUploadIds", out var references))
+        {
+            return;
+        }
+        if (toolName != "media.analyze")
+        {
+            throw new ArgumentException("Property 'referenceUploadIds' is only supported by media.analyze.");
+        }
+        if (references.ValueKind != JsonValueKind.Array || references.GetArrayLength() is < 1 or > 6)
+        {
+            throw new ArgumentException("Property 'referenceUploadIds' must list one to six upload ids.");
+        }
+        var primary = value.GetProperty("uploadId").GetString();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var reference in references.EnumerateArray())
+        {
+            if (reference.ValueKind != JsonValueKind.String || reference.GetString() is not { Length: 39 } id)
+            {
+                throw new ArgumentException("Each reference upload id must be a 39-character upload id.");
+            }
+            if (id == primary || !seen.Add(id))
+            {
+                throw new ArgumentException("Reference upload ids must be distinct and differ from uploadId.");
+            }
         }
     }
 

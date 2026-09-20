@@ -58,10 +58,54 @@ class ReasoningLanguageTests(unittest.TestCase):
             "{%- if keep_reasoning and thinking -%}{{- message['reasoning_content'] -}}{%- endif -%}"
         adapted = catalog.german_reasoning_template(template)
         self.assertIn("set keep_reasoning = true", adapted)
-        self.assertIn("if keep_reasoning and thinking", adapted)
-        self.assertIn("message['reasoning_content']", adapted)
+        # History replays by the stored reasoning of each turn, never by the
+        # current thinking flag: a reasoning switch must keep the KV prefix.
+        self.assertNotIn("if keep_reasoning and thinking", adapted)
+        self.assertIn(catalog.DEEPSEEK_HISTORY_BY_CONTENT, adapted)
         self.assertIsNone(catalog.german_reasoning_template(adapted))
-        self.assertEqual(template.replace("tp.has or (loop.index0 > last_user_idx.value)", "true"), adapted)
+        self.assertEqual(template.replace("tp.has or (loop.index0 > last_user_idx.value)", "true")
+                         .replace(catalog.DEEPSEEK_HISTORY_BY_FLAG, catalog.DEEPSEEK_HISTORY_BY_CONTENT), adapted)
+
+    def test_installed_deepseek_history_prefix_is_identical_across_reasoning_switches(self):
+        try:
+            import jinja2
+        except ImportError:
+            self.skipTest("Jinja2 is unavailable for the optional real-template render")
+        root = Path.home() / ".cache" / "huggingface" / "hub"
+        if not root.is_dir():
+            self.skipTest("No local model catalog")
+        installed = next((model for model in catalog.discover_models(root)
+                          if model["id"].startswith("coding/DeepSeek")), None)
+        if installed is None:
+            self.skipTest("No local DeepSeek model")
+        original = catalog.model_metadata(installed["path"], allow_metadata_only=True)["tokenizer.chat_template"]
+        adapted = catalog.german_reasoning_template(original)
+        if adapted is None or catalog.DEEPSEEK_HISTORY_BY_CONTENT not in adapted:
+            self.skipTest("Installed model uses another DeepSeek template")
+        environment = jinja2.Environment()
+        environment.filters["from_json"] = json.loads
+        tools = [{"type": "function", "function": {"name": "coding_read", "description": "Lies", "parameters": {"type": "object"}}}]
+        def render(template, messages, thinking):
+            return environment.from_string(template).render(messages=messages, bos_token="<BOS>",
+                thinking=thinking, add_generation_prompt=True, tools=tools)
+        history = [dict(role="system", content="Antworte auf Deutsch."), dict(role="user", content="Merke EICHE-42.")]
+        end = "<｜end▁of▁sentence｜>"
+        # Turn generated with thinking off: exact prefix "</think>" + content.
+        no_reasoning = [*history, dict(role="assistant", content="EICHE-42", reasoning_content=""),
+                        dict(role="user", content="Nenne die Kennung erneut.")]
+        generated_off = render(adapted, history, False) + "EICHE-42" + end
+        self.assertTrue(render(adapted, no_reasoning, False).startswith(generated_off))
+        self.assertTrue(render(adapted, no_reasoning, True).startswith(generated_off),
+                        "switching reasoning on must not rewrite a turn generated without reasoning")
+        self.assertFalse(render(original, no_reasoning, True).startswith(generated_off),
+                         "the stock template rewrites history by the current flag")
+        # Turn generated with thinking on: exact prefix "<think>" + reasoning + "</think>" + content.
+        with_reasoning = [*history, dict(role="assistant", content="EICHE-42", reasoning_content="Ich merke sie mir."),
+                          dict(role="user", content="Nenne die Kennung erneut.")]
+        generated_on = render(adapted, history, True) + "Ich merke sie mir." + "</think>" + "EICHE-42" + end
+        self.assertTrue(render(adapted, with_reasoning, True).startswith(generated_on))
+        self.assertTrue(render(adapted, with_reasoning, False).startswith(generated_on),
+                        "switching reasoning off must not drop the generated reasoning prefix")
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

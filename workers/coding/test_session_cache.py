@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import session_cache
 from session_cache import NativeSessionCache
 
 
@@ -102,6 +103,29 @@ class SessionCacheTests(unittest.TestCase):
         self.assertEqual(500, saved["savedTokens"])
         metadata = json.loads(next(self.root.glob("*.json")).read_text())
         self.assertEqual(500, metadata["tokens"])
+
+    def test_interrupted_save_waits_for_a_long_native_batch_to_drain(self):
+        # Observed: a cancelled 164k-token prompt released its slot 55 s after the
+        # Stop. The interrupted save must outlast such a batch instead of giving
+        # up after ten seconds and leaving only the pre-stop snapshot on disk.
+        self.cache.prepare("model", "session")
+        self.tokens = 500
+        self.busy = True
+        polls = []
+        def poll(_):
+            polls.append(1)
+            if len(polls) == 3:
+                self.busy = False
+        with patch("session_cache.time.sleep", side_effect=poll),                 patch("session_cache.time.monotonic", side_effect=[0, 20, 45, 70, 89]):
+            saved = self.cache.save("model", "session", 100)
+        self.assertEqual("saved", saved["status"])
+        self.assertEqual(500, saved["savedTokens"])
+        self.assertGreaterEqual(session_cache.INTERRUPTED_SAVE_IDLE_SECONDS, 60)
+        self.busy = False
+        self.cache.prepare("model", "session")  # A new turn marks the session dirty again.
+        self.busy = True
+        with patch("session_cache.time.sleep"),                 patch("session_cache.time.monotonic", side_effect=[0, 30, 91]):
+            self.assertEqual("unavailable", self.cache.save("model", "session", 100)["status"])
 
     def test_failed_save_does_not_replace_valid_snapshot(self):
         self.cache.prepare("model", "session")

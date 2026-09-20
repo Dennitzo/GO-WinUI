@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import urllib.request
 
 from catalog import start_gpu_control
+import session_cache
 from session_cache import NativeSessionCache
 
 
@@ -109,7 +110,7 @@ class SessionCacheTailTests(unittest.TestCase):
     def test_interrupted_save_allows_longer_cancellation_drain(self):
         with patch.object(self.cache, "_idle_slot", return_value=dict(n_prompt_tokens=4)) as idle:
             self.cache.save("model", "session", 2)
-        idle.assert_called_once_with("model", timeout=10)
+        idle.assert_called_once_with("model", timeout=session_cache.INTERRUPTED_SAVE_IDLE_SECONDS)
         self.cache.prepare("model", "session")
         with patch.object(self.cache, "_idle_slot", return_value=dict(n_prompt_tokens=4)) as idle:
             self.cache.save("model", "session")

@@ -14,6 +14,14 @@ import urllib.parse
 import uuid
 
 
+# A Stop arrives while llama is inside a prompt batch. Large models process a
+# 2048-token batch in tens of seconds, so the slot reports is_processing long
+# after the client disconnected. The gateway keeps its turn gate until this save
+# returns; waiting here costs nothing the follow-up prompt would not wait for
+# anyway (the single slot cannot start it earlier) and keeps the snapshot exact.
+INTERRUPTED_SAVE_IDLE_SECONDS = 90.0
+
+
 class NativeSessionCache:
     def __init__(self, directory, router, fingerprint, maximum_bytes=64 * 1024**3,
                  free_reserve=4 * 1024**3, estimate_bytes=None):
@@ -185,7 +193,7 @@ class NativeSessionCache:
         target = self.directory / (identity + ".bin")
         temporary = self.directory / (identity + "." + uuid.uuid4().hex + ".pending")
         try:
-            slot = self._idle_slot(model, timeout=10 if prompt_tokens is not None else 2)
+            slot = self._idle_slot(model, timeout=INTERRUPTED_SAVE_IDLE_SECONDS if prompt_tokens is not None else 2)
             token_count = slot.get("n_prompt_tokens", slot.get("n_past", slot.get("n_tokens", 0)))
             if token_count <= 0:
                 raise RuntimeError("Native slot has no reusable tokens")

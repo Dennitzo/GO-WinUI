@@ -8,7 +8,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 38;
+    public const int CurrentSchemaVersion = 39;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -85,6 +85,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationThirtySixAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtySevenAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtyEightAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyNineAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -1329,6 +1330,34 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
                 WHERE NOT EXISTS (SELECT 1 FROM chat_sessions WHERE session_group_id=chat_session_groups.id);
                 INSERT INTO schema_migrations(version,applied_at) VALUES(37,$now);
                 """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyNineAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        // The Blender chip is the persistent Coding agent with modelling instructions.
+        // persistent_tool_action keeps its legacy CHECK constraint ('code'); the
+        // variant column distinguishes Blender from plain Coding across sessions.
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=39;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='persistent_tool_variant';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = """
+                    ALTER TABLE chat_sessions
+                        ADD COLUMN persistent_tool_variant TEXT NULL
+                        CHECK(persistent_tool_variant IS NULL OR persistent_tool_variant IN ('blender'));
+                    """;
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(39,$now);";
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }

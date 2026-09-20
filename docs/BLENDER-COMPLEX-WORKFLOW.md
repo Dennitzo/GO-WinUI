@@ -54,7 +54,7 @@ Standard 300, Bereich 1–3600. Es ist kein Gesamtzeitbudget für das Modellproj
 |---|---|---|
 | `info` | nichts | Installation prüfen; mit optionalem `path` aktuellen SHA-256 und Größe einer `.py`-/`.blend`-Datei lesen. Mit Workspace die dedizierte Vorschau automatisch öffnen. |
 | `scaffold` | `path` | Neuen Projektordner mit `go_blender.py`, `steps/01_blockout.py`, `design.json`, `README.md`, `MODELING_GUIDE.md` anlegen und Vorschau öffnen; optional `brief` mit 1–8000 Zeichen. `scriptPath` ist die erste Etappe; `legacyScriptPath` verweist auf das ältere eigenständige `scene.py`. |
-| `stage` | `path`, `expectedSha256`, `outputPath`, `label` | Kleines `.py`-Skript ausführen, neue `.blend` automatisch speichern, strukturell prüfen und automatisch sichtbar anzeigen. |
+| `stage` | `path`, `expectedSha256`, `outputPath`, `label` | Kleines `.py`-Skript ausführen, neue `.blend` automatisch speichern, strukturell prüfen und automatisch sichtbar anzeigen. Optional `views`, `resolution`, `samples`: die neue Revision wird sofort nach `<Revision>_renders/` gerendert; `images` und `renderCompleted` stehen im Ergebnis. |
 | `preview` | `path`, `expectedSha256` | Vorhandene `.blend` im dedizierten Blender-Vorschaufenster erneut anzeigen; optional `label`. |
 | `run` | `path`, `expectedSha256` | Vorhandene Python-Skripte ausführen. Neue komplexe Modelle entstehen über `stage`. |
 | `inspect` | `path`, `expectedSha256`, `outputDirectory` | Gespeicherte `.blend` strukturell prüfen und JSON-Bericht erzeugen. |
@@ -156,6 +156,36 @@ standardmäßig bis zu 96 Werkzeugaufrufe und 192 Modellrunden, einschließlich 
 gesonderten Werkzeugauswahl. Größere konfigurierte Grenzen bleiben erhalten.
 General ohne diese Werkzeug-/Workspace-Kombination behält seine bisherigen
 Budgets; Coding behält seine eigene Konfiguration.
+
+## Referenzvergleich, Figuren und persistenter Blender-Chip (20.09.2026, Nachmittag)
+
+Die Analyse der Pikachu-Sitzung steht in
+[BLENDER-PIKACHU-ANALYSIS.md](BLENDER-PIKACHU-ANALYSIS.md). Daraus folgen:
+
+- `media.analyze` nimmt `referenceUploadIds` (bis zu sechs Bild-Uploads) entgegen.
+  Referenzen und das zu prüfende Bild gehen in einem Vision-Aufruf an das Modell;
+  die Vision-Systemregel verlangt ausführliche, geometrisch genaue Beschreibungen,
+  einen Vergleich Bauteil für Bauteil und eine nummerierte Verbesserungsliste mit
+  Richtung, Achse und Betrag. Ein Kriterium gilt erst als erfüllt, wenn die Antwort
+  keinen Unterschied mehr benennt.
+- `stage` rendert mit `views` sofort; `scaffold` legt `references/` an und liefert
+  `referencesPath`. Die Anleitung erklärt die Pfadregel für Downloads mit
+  `coding.command` (workspace-relativ, kein zusätzliches `workingDirectory`).
+- Der Baukasten enthält `lathe`, `cone_between`, `split_point`, `point_on_sphere`,
+  `surface_patch`, `flat_polygon` und `mirror_x` für Figuren und organische Formen.
+  `MODELING_GUIDE.md`, README und Systemprompt beschreiben die Methode.
+- Der Blender-Menüeintrag ist eine persistente Sitzungsaktion
+  (`PersistentToolAction.Blender`, Clientschema 39 mit `persistent_tool_variant`).
+  Sitzungswechsel, Seitenwechsel und Folgeprompts behalten den Blender-Chip; jeder
+  Folgeprompt trägt die Blender-Anweisung. Abwählen über das Tools-Menü beendet den
+  Modus wie bei Coding.
+- Die Statuszeile zeigt während der Generierung „Kontext bereit · 98 % · 28.687 Token"
+  statt Runde und Sekunden.
+- Tokenwiederverwendung nach Stopp: Das DeepSeek-Template rendert historische
+  Assistant-Züge nach ihrem gespeicherten Reasoning statt nach dem aktuellen
+  Thinking-Schalter; die unterbrochene Snapshot-Sicherung wartet bis zu 90 s auf das
+  Ende des nativen Batches. Prüfung: `python workers/coding/verify_stop_session_cache.py
+  --model <ID> --mode coding --switch-reasoning --output artifacts/validation/…`.
 
 ## Kontext gezielt klein halten
 

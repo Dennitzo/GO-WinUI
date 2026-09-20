@@ -239,6 +239,11 @@ def discover(root):
     return [(model["id"], model["path"]) for model in discover_models(root) if model["role"] == "general"]
 
 
+DEEPSEEK_HISTORY_BY_FLAG = "{%- if keep_reasoning and thinking -%}"
+DEEPSEEK_HISTORY_BY_CONTENT = ("{%- if keep_reasoning and message['reasoning_content'] is defined "
+                               "and message['reasoning_content'] -%}")
+
+
 def german_reasoning_template(template):
     """Adapt known templates for German reasoning and durable prompt prefixes.
 
@@ -253,7 +258,15 @@ def german_reasoning_template(template):
         # (which restores final KV+tokens, not those checkpoints). Keep the
         # provider's saved reasoning so the next user turn appends to the exact
         # generated prefix, including in General chat after a process restart.
-        return template.replace(deepseek_history, "{%- set keep_reasoning = true -%}")
+        adapted = template.replace(deepseek_history, "{%- set keep_reasoning = true -%}")
+        # Historical assistant turns must replay exactly what was generated. The
+        # stock template renders them by the CURRENT thinking flag, so switching
+        # reasoning between runs of one session ("none" -> "on") rewrites every
+        # earlier turn and discards the whole native KV prefix (observed: 0 of
+        # 158k cached tokens after Stop + new prompt). Render by the stored
+        # reasoning of each turn instead; only the generation prompt follows the
+        # current flag.
+        return adapted.replace(DEEPSEEK_HISTORY_BY_FLAG, DEEPSEEK_HISTORY_BY_CONTENT)
     marker = "{%- if add_generation_prompt %}"
     position = template.rfind(marker)
     thinking = "{{- '<think>\\n' }}"
@@ -282,6 +295,12 @@ def german_reasoning_template(template):
         # would duplicate it and invalidate the KV prefix; empty reasoning
         # (thinking disabled) likewise keeps the original empty think block.
     return localized if localized != template else None
+
+
+def multi_gpu_split_mode():
+    """llama split mode for models that need both GPUs; GO_NATIVE_MULTI_GPU_SPLIT overrides."""
+    value = os.environ.get("GO_NATIVE_MULTI_GPU_SPLIT", "layer").strip().lower()
+    return value if value in ("layer", "row", "tensor") else "layer"
 
 
 def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto"):
@@ -337,6 +356,11 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             # Explicit ctx-size=0 disables that reduction in llama/common/arg.cpp.
             lines += ["cache-type-k = q8_0", "cache-type-v = q8_0", "flash-attn = on", "predict = -1",
                       "reasoning-budget = -1", "reasoning = on" if model["reasoning"]["enabled"] else "reasoning = auto"]
+            if not placement and multi_gpu_split_mode() != "layer":
+                # A model that does not fit one GPU is split across both. "layer"
+                # (llama default) pipelines the GPUs; "tensor"/"row" run every
+                # layer on both GPUs at once. Chosen by measurement, see README.
+                lines += [f"split-mode = {multi_gpu_split_mode()}"]
             if model["reasoning"]["effort"]:
                 lines += [f"reasoning-effort = {model['reasoning']['effort']}"]
             if model.get("projector"):
@@ -507,7 +531,8 @@ class GpuLoadManager:
         metadata = model_metadata(path, allow_metadata_only=True) or {}
         return dict(version=1, files=identity, context=model["context"], cache="q8_0", slots=1,
                     template=german_reasoning_template(metadata.get("tokenizer.chat_template", "")),
-                    placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers)
+                    placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers,
+                    split=multi_gpu_split_mode())
 
     def session_prepare(self, model, key):
         with self.lock:

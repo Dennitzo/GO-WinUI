@@ -29,7 +29,7 @@ function harness(storage = new Map()) {
     ungroupedSessionStorageKey: "ungrouped", sidebarStorageKey: "sidebar",
     post: (type, payload) => posts.push({ type, payload }), flushDraft: noOp,
     sessionShortLabel: value => value[0],
-    persistentToolActions: new Set(["coding"]), normalizeToolAction: value => value,
+    persistentToolActions: new Set(["coding", "blender"]), normalizeToolAction: value => value,
     closeCodingPreview: noOp, persistSessionScrollPosition: noOp, resetTransientVoiceStateForSessionChange: noOp,
     applyCodingChanges: noOp, selectToolAction: value => { toolSelections.push(value); state.selectedToolAction = value; },
     setSessionsCollapsed: noOp, setPromptValue: value => { elements.prompt.value = value; },
@@ -113,32 +113,45 @@ test("full snapshots restore only the research preference of the selected sessio
   assert.equal(state.deepResearch, true, "ordinary status snapshots do not clear the active chip");
 });
 
-test("Blender selection survives idle snapshots but a running backend Coding snapshot consumes it", () => {
+test("Blender is a persistent session mode: session switches and page reloads restore it", () => {
   const { context, state } = harness();
-  context.applySnapshot(snapshot({ selectedToolAction: "coding" }));
-  state.selectedToolAction = "blender";
-  context.applySnapshot(snapshot({ selectedToolAction: "coding", isRunning: false }));
-  assert.equal(state.selectedToolAction, "blender", "idle refresh must retain the unsent request capability");
-  context.applySnapshot(snapshot({ selectedToolAction: "coding", isRunning: true }));
-  assert.equal(state.selectedToolAction, "coding");
-  assert.equal(state.persistentToolAction, "coding");
-  context.applySnapshot(snapshot({ selectedToolAction: "coding", isRunning: false }));
-  assert.equal(state.selectedToolAction, "coding", "later idle snapshots retain the accepted persistent mode");
+  context.applySnapshot(snapshot({ selectedToolAction: "blender" }));
+  assert.equal(state.selectedToolAction, "blender");
+  assert.equal(state.persistentToolAction, "blender");
+  context.applySnapshot(snapshot({ selectedToolAction: "blender", isRunning: true }));
+  assert.equal(state.selectedToolAction, "blender", "a running Blender session never falls back to the Coding chip");
+  context.applySnapshot(snapshot({ activeSessionId: "session-b", messages: [], selectedToolAction: "coding" }));
+  assert.equal(state.selectedToolAction, "coding", "another session shows its own persistent mode");
+  context.applySnapshot(snapshot({ selectedToolAction: "blender" }));
+  assert.equal(state.selectedToolAction, "blender", "switching back restores the stored Blender mode");
+  const reloaded = harness();
+  reloaded.context.applySnapshot(snapshot({ selectedToolAction: "blender", isRunning: false }));
+  assert.equal(reloaded.state.selectedToolAction, "blender", "a fresh page (native page switch) restores Blender from the backend");
 });
 
-test("all terminal Blender events apply backend Coding before clearing their one-shot capability", () => {
+test("a one-shot chip still survives idle refreshes while composing", () => {
+  const { context, state } = harness();
+  context.applySnapshot(snapshot({ selectedToolAction: "coding" }));
+  state.selectedToolAction = "webSearch";
+  context.applySnapshot(snapshot({ selectedToolAction: "coding", isRunning: false }));
+  assert.equal(state.selectedToolAction, "webSearch", "idle refresh must retain the unsent request capability");
+  context.applySnapshot(snapshot({ activeSessionId: "session-b", messages: [], selectedToolAction: "coding" }));
+  assert.equal(state.selectedToolAction, "coding");
+});
+
+test("all terminal Blender events keep the persistent Blender chip for the next prompt", () => {
   for (const type of ["chat.completed", "chat.cancelled", "chat.failed"]) {
-    for (const priorMode of [null, "bricsCad"]) {
+    for (const priorMode of [null, "bricsCad", "coding"]) {
       const { context, state, emit, toolSelections } = harness();
       context.applySnapshot(snapshot({ isRunning: true }));
       state.selectedToolAction = "blender";
       state.persistentToolAction = priorMode;
       toolSelections.length = 0;
       emit(type, { message: { id: "answer-a", sessionId: "session-a" },
-        session: { id: "session-a", title: "Blender-Projekt", persistentToolAction: "coding" } });
-      assert.equal(state.persistentToolAction, "coding");
-      assert.equal(state.selectedToolAction, "coding");
-      assert.deepEqual(toolSelections, ["coding"], "never render the stale General/BricsCAD fallback");
+        session: { id: "session-a", title: "Blender-Projekt", persistentToolAction: "blender" } });
+      assert.equal(state.persistentToolAction, "blender");
+      assert.equal(state.selectedToolAction, "blender");
+      assert.deepEqual(toolSelections, ["blender"], "never replace Blender with Coding or a stale fallback");
     }
   }
 });

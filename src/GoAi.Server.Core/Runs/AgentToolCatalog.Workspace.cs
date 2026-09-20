@@ -35,9 +35,9 @@ public sealed partial class AgentToolCatalog
                 "baseScene":{"type":"string","minLength":1,"maxLength":1024,"description":"Nur stage, bei Folgeschritten: bestätigte vorhandene .blend. Nur zusammen mit baseSceneSha256. Der Wrapper lädt sie vor dem kleinen Änderungsskript."},
                 "baseSceneSha256":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-fA-F]{64}$","description":"Nur stage: tatsächlicher aktueller Hash der baseScene, zwingend zusammen mit baseScene. Niemals erfinden."},
                 "outputDirectory":{"type":"string","minLength":1,"maxLength":1024,"description":"Pflicht für inspect/render: neuer relativer Ausgabeordner; vorhandene Ordner werden nicht überschrieben."},
-                "views":{"type":"array","minItems":1,"maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["perspective","front","right","top","back","left"]},"description":"Nur render: gewünschte Ansichten; bei komplexen Objekten perspektivisch plus geeignete orthogonale Ansichten."},
-                "resolution":{"type":"integer","minimum":128,"maximum":2048,"default":768,"description":"Nur render: Kantenlänge der quadratischen Ansichten in Pixeln."},
-                "samples":{"type":"integer","minimum":1,"maximum":128,"default":32,"description":"Nur render: Abtastungen je Ansicht."},
+                "views":{"type":"array","minItems":1,"maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["perspective","front","right","top","back","left"]},"description":"render und stage: gewünschte Ansichten; stage rendert die neue Revision sofort nach <Revision>_renders/. Bei komplexen Objekten perspektivisch plus geeignete orthogonale Ansichten."},
+                "resolution":{"type":"integer","minimum":128,"maximum":2048,"default":768,"description":"render und stage: Kantenlänge der quadratischen Ansichten in Pixeln."},
+                "samples":{"type":"integer","minimum":1,"maximum":128,"default":32,"description":"render und stage: Abtastungen je Ansicht."},
                 "timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600}
               },
               "required":["operation"],

@@ -23,7 +23,7 @@ function harness(storage = new Map()) {
     document: { body, createElement: tag => new TestNode(tag),
       querySelectorAll: selector => body.querySelectorAll(selector), querySelector: selector => body.querySelector(selector) },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
-    persistentToolActions: new Set(["coding", "bricsCad", "audiobook"]),
+    persistentToolActions: new Set(["coding", "bricsCad", "audiobook", "blender"]),
     toolVisuals: { coding: ["Coding", "code"], blender: ["Blender", "cube"], webSearch: ["Websuche", "search"], imageAnalysis: ["Bild analysieren", "image"] },
     createToolIcon: () => new TestNode("svg"),
     isAudioCaptureActive: () => false, isScreenClipActive: () => false,
@@ -91,7 +91,7 @@ test("research selection is scoped to its session and survives tab recreation wi
   assert.equal(reopened.state.deepResearch, false);
 });
 
-test("Blender and research coexist in either selection order and the next request uses confirmed Coding", async () => {
+test("Blender and research coexist in either selection order and Blender stays the persistent mode", async () => {
   for (const researchFirst of [true, false]) {
     const { context, state, elements, posts } = harness();
     if (researchFirst) context.selectDeepResearch(true);
@@ -99,21 +99,28 @@ test("Blender and research coexist in either selection order and the next reques
     if (!researchFirst) context.selectDeepResearch(true);
     assert.equal(state.selectedToolAction, "blender");
     assert.equal(state.deepResearch, true);
-    assert.equal(state.persistentToolAction, null, "only the backend accepts the Coding transition");
-    assert.equal(posts.some(item => item.type === "session.tool"), false);
+    assert.equal(state.persistentToolAction, "blender", "Blender is stored as the session's persistent mode");
+    const stored = posts.filter(item => item.type === "session.tool").at(-1).payload;
+    assert.equal(stored.sessionId, "session-a");
+    assert.equal(stored.action, "blender");
     elements.prompt.value = "Recherchiere und modelliere das Gebäude in Blender.";
     await context.submitPrompt();
     assert.equal(posts.at(-1).payload.toolAction, "blender");
     assert.equal(posts.at(-1).payload.deepResearch, true);
     state.pendingChatSend = null;
-    state.persistentToolAction = "coding";
     context.clearCompletedOneShotToolAction();
-    assert.equal(state.selectedToolAction, "coding");
+    assert.equal(state.selectedToolAction, "blender", "a persistent Blender chip is never consumed by a completed run");
     assert.equal(state.deepResearch, true);
     elements.prompt.value = "Verbreitere jetzt nur den Eingang.";
     await context.submitPrompt();
-    assert.equal(posts.at(-1).payload.toolAction, "coding");
+    assert.equal(posts.at(-1).payload.toolAction, "blender", "follow-up prompts keep sending the Blender capability");
     assert.equal(posts.at(-1).payload.deepResearch, true);
+    state.pendingChatSend = null;
+    context.selectToolAction(null);
+    assert.equal(state.selectedToolAction, null, "explicit deselection ends the persistent mode");
+    const cleared = posts.filter(item => item.type === "session.tool").at(-1).payload;
+    assert.equal(cleared.sessionId, "session-a");
+    assert.equal(cleared.action, null);
   }
 });
 

@@ -103,7 +103,9 @@
   };
 
   const byId = id => document.getElementById(id);
-  const persistentToolActions = new Set(["bricsCad", "audiobook", "coding"]);
+  // Blender is a persistent Coding-agent mode: it survives session switches, page
+  // reloads and follow-up prompts until the user deselects it.
+  const persistentToolActions = new Set(["bricsCad", "audiobook", "coding", "blender"]);
   const toolVisuals = Object.freeze({
     coding: ["Coding", "M8 6l-6 6 6 6M16 6l6 6-6 6M14 3l-4 18"],
     audioAnalysis: ["Audio analysieren", "M4 12h2m2-5 4 10 3-7 2 4h3"],
@@ -2509,7 +2511,7 @@
   function selectDeepResearch(enabled) {
     if (!ensureEditableContext()) return;
     if (enabled && state.selectedToolAction && !["coding", "blender"].includes(state.selectedToolAction)) {
-      selectToolAction(state.persistentToolAction === "coding" ? "coding" : null, false);
+      selectToolAction(["coding", "blender"].includes(state.persistentToolAction) ? state.persistentToolAction : null, false);
     }
     state.deepResearch = Boolean(enabled);
     persistDeepResearch();
@@ -2668,10 +2670,9 @@
     const serverToolAction = normalizeToolAction(payload.selectedToolAction);
     state.persistentToolAction = persistentToolActions.has(serverToolAction) ? serverToolAction : null;
     const activeOneShotTool = state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction);
-    // Blender launches Coding; consume its chip only after the backend confirms
-    // the running mode, not on an idle refresh while the user is still composing.
-    const blenderStartedCoding = state.selectedToolAction === "blender" && serverToolAction === "coding" && state.isRunning;
-    if (previousSessionId !== state.activeSessionId || !activeOneShotTool || blenderStartedCoding) {
+    // Persistent modes (Coding, Blender, BricsCAD, Hörbuch) follow the backend
+    // session state; a one-shot chip survives idle refreshes while composing.
+    if (previousSessionId !== state.activeSessionId || !activeOneShotTool) {
       selectToolAction(serverToolAction, false);
     } else {
       selectToolAction(state.selectedToolAction, false);

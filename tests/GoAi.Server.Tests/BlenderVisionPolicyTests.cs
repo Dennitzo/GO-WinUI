@@ -313,6 +313,76 @@ public sealed class BlenderVisionPolicyTests
     };
 
     [Fact]
+    public void StageAcceptsReviewViewsAndQualityForImmediateRenders()
+    {
+        var arguments = StageArguments();
+        arguments["views"] = new[] { "perspective", "front", "right" };
+        arguments["resolution"] = 512;
+        arguments["samples"] = 16;
+        WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(arguments));
+        arguments["views"] = new[] { "front", "front" };
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(arguments)));
+        var preview = new Dictionary<string, object>
+        {
+            ["operation"] = "preview", ["path"] = "rover/scene_v002.blend", ["expectedSha256"] = new string('a', 64),
+            ["views"] = new[] { "front" },
+        };
+        Assert.Throws<ArgumentException>(() => WorkspaceTools.Validate(WorkspaceTools.Blender, JsonSerializer.SerializeToElement(preview)));
+    }
+
+    [Fact]
+    public void MediaAnalysisAcceptsDistinctReferenceUploadsOnly()
+    {
+        var catalog = new AgentToolCatalog();
+        var media = catalog.Resolve("media.analyze", catalog.GetAvailableTools(CreateRequest(null)));
+        var primary = "upload-" + new string('1', 32);
+        var reference = "upload-" + new string('2', 32);
+        Assert.Equal(39, primary.Length);
+        catalog.Validate(media, JsonSerializer.SerializeToElement(new
+        {
+            uploadId = primary, prompt = "Vergleiche Render und Referenz.", referenceUploadIds = new[] { reference },
+        }));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(media, JsonSerializer.SerializeToElement(new
+        {
+            uploadId = primary, referenceUploadIds = new[] { primary },
+        })));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(media, JsonSerializer.SerializeToElement(new
+        {
+            uploadId = primary, referenceUploadIds = new[] { reference, reference },
+        })));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(media, JsonSerializer.SerializeToElement(new
+        {
+            uploadId = primary, referenceUploadIds = Array.Empty<string>(),
+        })));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(media, JsonSerializer.SerializeToElement(new
+        {
+            uploadId = primary, referenceUploadIds = Enumerable.Range(0, 7).Select(index => "upload-" + new string((char)('3' + index), 32)).ToArray(),
+        })));
+        var inspect = catalog.Resolve("media.inspect", catalog.GetAvailableTools(CreateRequest(null)));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(inspect, JsonSerializer.SerializeToElement(new
+        {
+            uploadId = primary, referenceUploadIds = new[] { reference },
+        })));
+        Assert.Contains("referenceUploadIds", media.Description, StringComparison.Ordinal);
+        Assert.Contains("Änderungsanweisung", media.Description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void VisionPoliciesDemandDetailedGeometryAndImprovements()
+    {
+        Assert.Contains("Verbesserungen", GeneralAgentPolicies.VisionAnalysisSystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("nicht voreilig", GeneralAgentPolicies.VisionAnalysisSystemPrompt, StringComparison.Ordinal);
+        Assert.Contains("Größenverhältnisse", GeneralAgentPolicies.VisionAnalysisSystemPrompt, StringComparison.Ordinal);
+        var comparison = GeneralAgentPolicies.VisualComparisonInstruction(2);
+        Assert.Contains("ersten 2 Bilder", comparison, StringComparison.Ordinal);
+        Assert.Contains("Änderungsanweisung", comparison, StringComparison.Ordinal);
+        Assert.Contains("nicht beurteilbar", comparison, StringComparison.Ordinal);
+        Assert.Contains("referenceUploadIds", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("g.lathe", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+        Assert.Contains("stage mit views", BlenderAuthoringGuide.WorkflowPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ImageInputRejectsMissingPathForFileOperation()
     {
         var missingPath = JsonSerializer.SerializeToElement(new { operation = "file" });

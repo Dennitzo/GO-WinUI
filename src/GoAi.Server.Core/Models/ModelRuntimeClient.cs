@@ -466,7 +466,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             ["stream_options"] = new { include_usage = true },
             ["messages"] = new object[]
             {
-                new { role = "system", content = CodingAgentPolicy.ReasoningLanguagePrompt + "\n\nAnalysiere ausschließlich die bereitgestellten Medien fachlich. Erfinde keine sichtbaren Details." },
+                new { role = "system", content = CodingAgentPolicy.ReasoningLanguagePrompt + "\n\n" + Policies.GeneralAgentPolicies.VisionAnalysisSystemPrompt },
                 new { role = "user", content = content.ToArray() },
             },
         };

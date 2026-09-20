@@ -71,11 +71,12 @@ public static class WorkspaceTools
                 throw new ArgumentException("outputDirectory ist nur für inspect/render erlaubt.");
             if (args.TryGetProperty("views", out var views))
             {
+                // stage renders the saved revision immediately when views are given.
                 string[] allowedViews = ["perspective", "front", "right", "top", "back", "left"];
-                if (operation != "render" || views.ValueKind != JsonValueKind.Array || views.GetArrayLength() is < 1 or > 6
+                if (operation is not ("render" or "stage") || views.ValueKind != JsonValueKind.Array || views.GetArrayLength() is < 1 or > 6
                     || views.EnumerateArray().Any(v => v.ValueKind != JsonValueKind.String || !allowedViews.Contains(v.GetString(), StringComparer.Ordinal))
                     || views.EnumerateArray().Select(v => v.GetString()).Distinct(StringComparer.Ordinal).Count() != views.GetArrayLength())
-                    throw new ArgumentException("render benötigt eine bis sechs unterschiedliche gültige Ansichten.");
+                    throw new ArgumentException("render/stage benötigen eine bis sechs unterschiedliche gültige Ansichten.");
             }
             RenderInteger(args, operation, "resolution", 128, 2048);
             RenderInteger(args, operation, "samples", 1, 128);
@@ -87,9 +88,9 @@ public static class WorkspaceTools
 
     private static void RenderInteger(JsonElement args, string operation, string name, int minimum, int maximum)
     {
-        if (args.TryGetProperty(name, out var value) && (operation != "render" || value.ValueKind != JsonValueKind.Number
+        if (args.TryGetProperty(name, out var value) && (operation is not ("render" or "stage") || value.ValueKind != JsonValueKind.Number
             || !value.TryGetInt32(out var number) || number < minimum || number > maximum))
-            throw new ArgumentException($"{name} ist nur für render im Bereich {minimum}–{maximum} erlaubt.");
+            throw new ArgumentException($"{name} ist nur für render/stage im Bereich {minimum}–{maximum} erlaubt.");
     }
 
     private static void Hash(JsonElement args, string name)

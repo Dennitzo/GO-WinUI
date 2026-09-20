@@ -246,6 +246,200 @@ def mesh(name, vertices, faces, material=None, collection=None):
     return _finish(obj, name, material, collection)
 
 
+def _consistent_normals(obj):
+    """Recalculate outward normals of a freshly built mesh object."""
+    for other in bpy.context.selected_objects:
+        other.select_set(False)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.normals_make_consistent(inside=False)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    return obj
+
+
+def cone_between(name, start, end, start_radius, end_radius=0.0, vertices=32,
+                 material=None, collection=None):
+    """A cone/frustum whose axis runs exactly from start to end (world points).
+
+    Use it for ears, horns, spikes, tapered limbs and tails: two consecutive
+    segments on the same start->end line (see split_point) stay aligned without
+    guessing rotations. end_radius=0 gives a sharp tip.
+    """
+    _budget()
+    a, b = Vector(_vector(start, "start")), Vector(_vector(end, "end"))
+    direction = b - a
+    length = _positive(direction.length, "cone length")
+    bottom = _positive(start_radius, "start_radius")
+    top = float(end_radius)
+    if not math.isfinite(top) or top < 0:
+        raise ValueError("end_radius must be zero or positive")
+    bpy.ops.mesh.primitive_cone_add(vertices=_integer(vertices, "vertices", 3, 512), radius1=bottom,
+                                    radius2=top, depth=length, location=(a + b) * 0.5)
+    obj = bpy.context.object
+    obj.rotation_euler = direction.to_track_quat("Z", "Y").to_euler()
+    for polygon in obj.data.polygons:
+        polygon.use_smooth = True
+    return _finish(obj, name, material, collection)
+
+
+def split_point(start, end, fraction):
+    """Point at `fraction` (0..1) along the segment start->end, as a tuple."""
+    a, b = Vector(_vector(start, "start")), Vector(_vector(end, "end"))
+    t = float(fraction)
+    if not math.isfinite(t) or not 0 <= t <= 1:
+        raise ValueError("fraction must lie between 0 and 1")
+    return tuple(a.lerp(b, t))
+
+
+def point_on_sphere(center, radius, azimuth_degrees, elevation_degrees):
+    """Surface point and outward normal on a sphere.
+
+    azimuth 0 looks to the front (-Y); positive azimuth turns towards +X.
+    elevation 0 is the equator, +90 the top. Returns (point, normal) tuples
+    for surface_patch or manual placement of eyes, cheeks and stripes.
+    """
+    c = Vector(_vector(center, "center"))
+    r = _positive(radius, "radius")
+    azimuth, elevation = math.radians(float(azimuth_degrees)), math.radians(float(elevation_degrees))
+    normal = Vector((math.sin(azimuth) * math.cos(elevation), -math.cos(azimuth) * math.cos(elevation),
+                     math.sin(elevation))).normalized()
+    return tuple(c + normal * r), tuple(normal)
+
+
+def surface_patch(name, point, normal, radius, thickness=0.01, scale=(1.0, 1.0),
+                  sink=0.35, material=None, collection=None):
+    """A flat patch (cheek, eye, stripe, badge) lying ON a surface, always visible.
+
+    The patch is a flattened sphere whose local Z follows `normal`. Only `sink`
+    (0..1) of its thickness lies inside the surface; the rest stands proud, so
+    it can never vanish inside the body. scale=(su, sv) elongates the patch
+    along the surface, e.g. (2.2, 0.5) for a back stripe.
+    """
+    _budget()
+    p, n = Vector(_vector(point, "point")), Vector(_vector(normal, "normal"))
+    if n.length == 0:
+        raise ValueError("normal must not be zero")
+    n.normalize()
+    r = _positive(radius, "radius")
+    t = _positive(thickness, "thickness")
+    su, sv = (float(v) for v in scale)
+    if not all(math.isfinite(v) and v > 0 for v in (su, sv)):
+        raise ValueError("scale must contain two positive numbers")
+    s = float(sink)
+    if not math.isfinite(s) or not 0 <= s <= 1:
+        raise ValueError("sink must lie between 0 and 1")
+    centre = p + n * (t * (0.5 - s))
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=48, ring_count=24, radius=1.0, location=centre)
+    obj = bpy.context.object
+    for vertex in obj.data.vertices:
+        vertex.co = (vertex.co.x * r * su, vertex.co.y * r * sv, vertex.co.z * t * 0.5)
+    for polygon in obj.data.polygons:
+        polygon.use_smooth = True
+    obj.rotation_euler = n.to_track_quat("Z", "Y").to_euler()
+    return _finish(obj, name, material, collection)
+
+
+def flat_polygon(name, outline, thickness=0.02, plane="xz", offset=0.0, location=(0, 0, 0),
+                 rotation=(0, 0, 0), material=None, collection=None):
+    """Extrude a closed 2D outline into a flat plate (lightning tail, fin, leaf, badge).
+
+    `outline` lists (u, v) points in order around the shape (no self-crossing).
+    plane "xz" maps u->X, v->Z (a plate seen from the front or side), "xy" maps
+    u->X, v->Y (seen from above), "yz" maps u->Y, v->Z. `offset` shifts the plate
+    along its normal; location/rotation place the finished object.
+    """
+    _budget()
+    points = [tuple(float(c) for c in p) for p in outline]
+    if not 3 <= len(points) <= 4096 or any(len(p) != 2 or not all(math.isfinite(c) for c in p) for p in points):
+        raise ValueError("outline needs 3 to 4096 finite (u, v) points")
+    t = _positive(thickness, "thickness")
+    axes = {"xz": (0, 2, 1), "xy": (0, 1, 2), "yz": (1, 2, 0)}
+    if plane not in axes:
+        raise ValueError("plane must be xz, xy or yz")
+    au, av, an = axes[plane]
+    half, shift = t * 0.5, float(offset)
+    vertices = []
+    for depth in (-half + shift, half + shift):
+        for u, v in points:
+            coordinate = [0.0, 0.0, 0.0]
+            coordinate[au], coordinate[av], coordinate[an] = u, v, depth
+            vertices.append(tuple(coordinate))
+    count = len(points)
+    faces = [tuple(range(count))[::-1], tuple(range(count, 2 * count))]
+    faces += [(i, (i + 1) % count, count + (i + 1) % count, count + i) for i in range(count)]
+    obj = mesh(name, vertices, faces, material=material, collection=collection)
+    obj.location = _vector(location)
+    obj.rotation_euler = _vector(rotation)
+    return _consistent_normals(obj)
+
+
+def lathe(name, profile, segments=48, location=(0, 0, 0), smooth=True, material=None, collection=None):
+    """Surface of revolution around local Z from a (radius, z) profile.
+
+    One lathe replaces stacked spheres for pear-shaped bodies, heads, vases or
+    wheels: the silhouette follows the profile exactly and the skin is one
+    continuous surface. Profile points run from bottom to top; a radius of 0 at
+    an end closes it with a pole, otherwise that end is capped flat.
+    """
+    _budget()
+    rings = [(float(r), float(z)) for r, z in profile]
+    if not 2 <= len(rings) <= 512 or any(not math.isfinite(r) or not math.isfinite(z) or r < 0 for r, z in rings):
+        raise ValueError("profile needs 2 to 512 (radius, z) pairs with radius >= 0")
+    if any(rings[i][1] > rings[i + 1][1] for i in range(len(rings) - 1)):
+        raise ValueError("profile z values must increase from bottom to top")
+    n = _integer(segments, "segments", 3, 256)
+    vertices, ring_index = [], []
+    for r, z in rings:
+        if r <= 1e-9:
+            ring_index.append((len(vertices), 1))
+            vertices.append((0.0, 0.0, z))
+        else:
+            ring_index.append((len(vertices), n))
+            for k in range(n):
+                angle = 2 * math.pi * k / n
+                vertices.append((r * math.cos(angle), r * math.sin(angle), z))
+    faces = []
+    for (a, na), (b, nb) in zip(ring_index, ring_index[1:]):
+        if na == 1 and nb == 1:
+            continue
+        if na == 1:
+            faces += [(a, b + (k + 1) % nb, b + k) for k in range(nb)]
+        elif nb == 1:
+            faces += [(a + k, a + (k + 1) % na, b) for k in range(na)]
+        else:
+            faces += [(a + k, a + (k + 1) % na, b + (k + 1) % nb, b + k) for k in range(na)]
+    first, last = ring_index[0], ring_index[-1]
+    if first[1] > 1:
+        faces.append(tuple(first[0] + k for k in range(first[1]))[::-1])
+    if last[1] > 1:
+        faces.append(tuple(last[0] + k for k in range(last[1])))
+    obj = mesh(name, vertices, faces, material=material, collection=collection)
+    obj.location = _vector(location)
+    if smooth:
+        for polygon in obj.data.polygons:
+            polygon.use_smooth = True
+    return _consistent_normals(obj)
+
+
+def mirror_x(obj, name=None):
+    """Independent mirrored copy across the X=0 plane for left/right symmetry."""
+    _blender()
+    _budget()
+    copy = obj.copy()
+    copy.data = obj.data.copy()
+    copy.name = str(name) if name else obj.name + "_Mirror"
+    for previous in list(obj.users_collection):
+        previous.objects.link(copy)
+    if not copy.users_collection:
+        bpy.context.scene.collection.objects.link(copy)
+    copy.location = (-obj.location.x, obj.location.y, obj.location.z)
+    copy.rotation_euler = (obj.rotation_euler.x, -obj.rotation_euler.y, -obj.rotation_euler.z)
+    copy.scale = (-obj.scale.x, obj.scale.y, obj.scale.z)
+    return copy
+
+
 def ground(size=20, z=0, material=None):
     """Optional presentation ground, excluded from model framing/diagnostics."""
     obj = box("Review ground", (_positive(size, "size"), size, 0.04),

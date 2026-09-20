@@ -31,7 +31,7 @@ public sealed class BlenderCodingRequestTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task BlenderChipSendsCodingRequestWithAttachmentsAndKeepsCodingForTheNextPrompt(bool deepResearch)
+    public async Task BlenderChipSendsCodingRequestWithAttachmentsAndStaysActiveForTheNextPrompt(bool deepResearch)
     {
         await using var fixture = await Fixture.CreateAsync();
         var attachments = fixture.Environment.Get<IAssistantAttachmentRepository>();
@@ -49,7 +49,8 @@ public sealed class BlenderCodingRequestTests
         AssertAttachments(fixture, first, attachment, document);
 
         var changed = Assert.Single(fixture.Events, item => item.Name == "session.changed").Payload;
-        Assert.Equal("coding", changed.GetProperty("selectedToolAction").GetString());
+        // Blender is its own persistent session mode; the chip must not be replaced by Coding.
+        Assert.Equal("blender", changed.GetProperty("selectedToolAction").GetString());
         Assert.Equal(CodingModel, changed.GetProperty("model").GetString());
         Assert.Equal(CodingModel, changed.GetProperty("reasoningModelId").GetString());
         Assert.Equal("coding", changed.GetProperty("reasoningRole").GetString());
@@ -66,12 +67,13 @@ public sealed class BlenderCodingRequestTests
         var next = fixture.Requests[1];
         AssertCodingRequest(fixture, next, deepResearch: false, continueSession: true);
         Assert.Contains(nextPrompt, next.Messages[^1].Content[0].Text, StringComparison.Ordinal);
+        Assert.Contains("blender.execute", next.Messages[^1].Content[0].Text, StringComparison.Ordinal);
         Assert.Contains(next.Messages.Take(next.Messages.Count - 1), message =>
             message.Role == "user" && message.Content.Any(part => part.Text == FirstPrompt));
         AssertAttachments(fixture, next, attachment, document);
         Assert.NotEqual(Assert.Single(first.UploadIds!), Assert.Single(next.UploadIds!));
         var session = await fixture.Environment.Get<IChatRepository>().GetSessionAsync(fixture.SessionId, deadline.Token);
-        Assert.Equal(PersistentToolAction.Coding, session!.PersistentToolAction);
+        Assert.Equal(PersistentToolAction.Blender, session!.PersistentToolAction);
         Assert.Equal(fixture.Workspace, session.CodingWorkspacePath);
         Assert.Equal(attachment.Id, Assert.Single(await attachments.ListAsync(fixture.SessionId, deadline.Token)).Id);
         Assert.Equal(document.Id, Assert.Single(await fixture.Environment.Get<IDocumentIngestor>().ListAsync(fixture.SessionId, deadline.Token)).Id);

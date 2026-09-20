@@ -55,6 +55,36 @@ public static class GeneralAgentPolicies
 
     public const string DefaultTranscriptAnalysis = "Analysiere das Transkript anhand seines Inhalts. Fasse die wichtigsten Aussagen zusammen, erkläre relevante Zusammenhänge und benenne Unklarheiten.";
     public const string DefaultMediaAnalysis = "Analysiere den tatsächlichen Inhalt dieses Mediums. Beschreibe relevante Beobachtungen, trenne sie von Schlussfolgerungen und benenne Unsicherheiten.";
+
+    /// <summary>System rules for every Vision request: long, precise, geometry-oriented findings with improvements.</summary>
+    public const string VisionAnalysisSystemPrompt = """
+        Analysiere ausschließlich die bereitgestellten Medien fachlich. Erfinde keine sichtbaren Details.
+
+        Antwortform: Verfasse eine ausführliche, strukturierte Analyse auf Deutsch. Kurze Pauschalurteile sind unzulässig.
+        Beschreibe Geometrie genau: Für jedes sichtbare Bauteil Form (Kugel, Ellipsoid, Kegel, Quader, flache Platte,
+        Zickzack, Rohr), Lage im Bild (links/rechts/oben/unten, Drittel), Ausrichtung und Neigung (Achse, ungefährer
+        Winkel), Größenverhältnisse als Verhältnis zu einem sichtbaren Bezugsmaß (etwa Kopfbreite, Gesamthöhe),
+        Kontur (rund, kantig, gerade, gezackt), Verbindungen und Übergänge (verschmolzen, überlappend, Lücke, schwebend,
+        Durchdringung, versetzt), Farbe und Kontrast, Oberfläche und Schatten. Nenne konkrete Bildbefunde als Beleg.
+        Unterscheide klar zwischen Beobachtung (sichtbar), Schlussfolgerung (abgeleitet) und Unsicherheit (verdeckt,
+        unscharf, nicht beurteilbar). Behaupte keine exakten Maße aus perspektivischen Bildern; Verhältnisse sind erlaubt.
+
+        Bewertung: Erkläre ein Kriterium nicht voreilig als erfüllt. Jede Prüfung endet mit einer nummerierten Liste
+        „Verbesserungen“, die auch bei gutem Stand mindestens drei konkrete, priorisierte Vorschläge enthält. Jeder
+        Vorschlag benennt Bauteil, Befund, Ursache (so weit erkennbar) und die Änderung als Anleitung mit Richtung,
+        Achse und geschätztem Betrag relativ zum Bezugsmaß (zum Beispiel „Ohrspitze links um etwa ein Fünftel der
+        Kopfbreite nach hinten verschieben, Neigung um etwa 15 Grad nach außen“). Erst wenn kein Unterschied und kein
+        Vorschlag mehr benennbar ist, darf ein Kriterium als erfüllt gelten; begründe das ausdrücklich mit Bildbefunden.
+        """;
+
+    /// <summary>Prepended to media.analyze prompts when reference images precede the inspected image.</summary>
+    public static string VisualComparisonInstruction(int referenceCount) =>
+        $"Vergleich: Die ersten {referenceCount} Bilder sind Referenzen (Vorlage, Foto, Maßblatt oder frühere Ansicht); das letzte Bild ist das zu prüfende Bild, etwa das aktuelle Renderbild. "
+        + "Gehe Bauteil für Bauteil vor: Beschreibe zuerst das Merkmal in der Referenz, dann dasselbe Merkmal im geprüften Bild, dann den Unterschied. "
+        + "Erfasse dabei Silhouette, Proportionen (Verhältnis Kopf zu Körper, Gliedmaßen, Anbauteile), Position, Ausrichtung, Neigung, Form der Konturen, Anzahl und Anordnung wiederkehrender Elemente, Farben und Kontraste sowie Übergänge zwischen Bauteilen. "
+        + "Beachte Blickwinkel und Perspektive der Bilder; vergleiche nur, was in beiden Bildern beurteilbar ist, und markiere nicht vergleichbare Merkmale als „nicht beurteilbar“. "
+        + "Formuliere für jeden Unterschied eine konkrete Änderungsanweisung mit Richtung, Achse und geschätztem Betrag relativ zu einem sichtbaren Bezugsmaß und nenne die betroffene Baugruppe. "
+        + "Schließe mit einer priorisierten Liste der Änderungen (größte Abweichung zuerst) und einer kurzen Einschätzung, welche Merkmale bereits übereinstimmen.";
     public const string DefaultVideoAnalysis = "Analysiere die sichtbaren Vorgänge und vorhandenen Audioinhalte dieses Videos. Fasse die relevanten Beobachtungen zusammen und benenne Unsicherheiten.";
 
     public const string AudiobookAuthor = """

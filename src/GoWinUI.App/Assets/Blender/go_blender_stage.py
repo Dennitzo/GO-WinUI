@@ -53,8 +53,29 @@ def validate_request(raw):
     label = raw.get("label", "Blender stage")
     if not isinstance(label, str) or not label.strip() or len(label) > 512:
         raise ValueError("label must contain between 1 and 512 characters")
+    render = None
+    if raw.get("views") is not None:
+        views = raw["views"]
+        if (not isinstance(views, list) or not 1 <= len(views) <= 6 or len(set(views)) != len(views)
+                or any(view not in helpers.VIEWS for view in views)):
+            raise ValueError("views must list one to six distinct review views")
+        directory = raw.get("renderDirectory")
+        if not isinstance(directory, str) or not Path(directory).is_absolute():
+            raise ValueError("renderDirectory must be an absolute workspace directory")
+        render_directory = Path(directory).resolve()
+        if not render_directory.is_relative_to(Path.cwd().resolve()) or render_directory.exists():
+            raise ValueError("renderDirectory must be a fresh directory inside the workspace")
+        resolution = raw.get("resolution", 768)
+        samples = raw.get("samples", 32)
+        if isinstance(resolution, bool) or not isinstance(resolution, int) or not 128 <= resolution <= 2048:
+            raise ValueError("resolution must be an integer between 128 and 2048")
+        if isinstance(samples, bool) or not isinstance(samples, int) or not 1 <= samples <= 128:
+            raise ValueError("samples must be an integer between 1 and 128")
+        render = {"views": list(views), "outputDirectory": render_directory,
+                  "resolution": resolution, "samples": samples}
     return {"scriptPath": script, "baseScene": base, "outputPath": output,
-            "reportPath": report, "projectDirectory": project, "label": label.strip()}
+            "reportPath": report, "projectDirectory": project, "label": label.strip(),
+            "render": render}
 
 
 def run_request(request_path):
@@ -119,6 +140,17 @@ def run_request(request_path):
         except Exception as error:
             inspection._issue(report["issues"], "error", "stage_inspection_failed", f"{type(error).__name__}: {error}")
             report["valid"] = False
+        if request["render"] is not None and report["inspectionCompleted"]:
+            # Review images of the SAVED revision, rendered in memory with the
+            # neutral review rig. The saved .blend stays untouched.
+            try:
+                print("GO Blender stage: rendering review views", flush=True)
+                inspection.render_views(request["render"], report)
+                report["renderDirectory"] = str(request["render"]["outputDirectory"])
+                report["renderCompleted"] = len(report["images"]) == len(request["render"]["views"])
+            except Exception as error:
+                report["renderCompleted"] = False
+                inspection._issue(report["issues"], "warning", "stage_render_failed", f"{type(error).__name__}: {error}")
     except BaseException as error:
         report["success"] = False
         report["valid"] = False

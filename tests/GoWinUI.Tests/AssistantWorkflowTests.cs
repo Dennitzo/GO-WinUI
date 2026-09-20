@@ -1270,7 +1270,7 @@ public sealed class AssistantWorkflowTests
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("new Set([\"bricsCad\", \"audiobook\", \"coding\"])", app, StringComparison.Ordinal);
+        Assert.Contains("new Set([\"bricsCad\", \"audiobook\", \"coding\", \"blender\"])", app, StringComparison.Ordinal);
         Assert.Contains("!persistentToolActions.has(state.selectedToolAction)", app, StringComparison.Ordinal);
         Assert.Contains("clearCompletedOneShotToolAction();", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.completed\":", app, StringComparison.Ordinal);

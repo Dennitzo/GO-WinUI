@@ -138,6 +138,10 @@ General verwendet einen kompakten Toolkatalog mit nachgeliefertem Einzelschema. 
 Berechnungswerkzeuge werden mit den freigegebenen Servertools kombiniert. Der Client kann Sitzungsdokumente lesen und
 erstellen sowie optional BricsCAD-Aktionen anbieten. Dokumentwerkzeuge verwenden begrenzte Abschnittsfenster.
 
+Der Blender-Menüeintrag ist wie Coding eine persistente Sitzungsaktion: Er bleibt über Sitzungswechsel,
+native Seitenwechsel und Folgeprompts aktiv, bis er im Tools-Menü abgewählt wird; jeder Folgeprompt läuft als
+Coding-Lauf mit Blender-Anweisung.
+
 Coding wird als `RunRequest.mode="coding"` mit `clientCapabilities=["coding"]` und `preferredCodingModelId`
 gestartet. Die ID stammt unverändert aus `/v1/models/coding`; der Projektpfad bleibt im Client. Die Werkzeuge
 `coding.list`, `coding.search`, `coding.read`, `coding.write`, `coding.edit`, `coding.gitDiff` und `coding.command`

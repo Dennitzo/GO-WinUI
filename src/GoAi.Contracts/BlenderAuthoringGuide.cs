@@ -13,14 +13,17 @@ public static class BlenderAuthoringGuide
         stage führt ein kleines .py-Änderungsskript mit höchstens 12000 Zeichen aus: path, expectedSha256, label
         und neuer outputPath (.blend) sind Pflicht. Bei Folgeschritten baseScene und baseSceneSha256 gemeinsam
         angeben. Der Wrapper lädt die Basis, speichert automatisch eine neue Revision, prüft sie strukturell und
-        zeigt sie automatisch in Blender; preview.state auswerten. Das Skript ändert nur die betreffende Etappe,
+        zeigt sie automatisch in Blender; preview.state auswerten. Mit views (optional resolution, samples) rendert
+        stage die neue Revision sofort und liefert die Bildpfade in images; ein getrennter render-Aufruf entfällt. Das Skript ändert nur die betreffende Etappe,
         es lädt/speichert keine Szene und leert bei Folgeschritten nicht das ganze Projekt. preview zeigt eine
         vorhandene .blend erneut; benötigt path und expectedSha256, label optional. open bleibt verfügbar.
         Rückkopplungsablauf: Referenzen/Designbrief → 01 Hauptformen → Struktur/Render/Vision prüfen →
         02 Baugruppen → wieder prüfen → Details und gezielte Korrekturen als weitere kleine Skripte.
         Jede Etappe prüfen, bevor die nächste darauf aufbaut. Bildreferenzen mit media.analyze, Dokumente mit
         Dokumentwerkzeugen lesen. Renderbilder tatsächlich über image.input und media.analyze (ausgewähltes
-        DeepSeek-Vision-Modell) gegen konkrete Kriterien prüfen. inspect/render benötigen path, expectedSha256
+        DeepSeek-Vision-Modell) gegen konkrete Kriterien prüfen: Render als uploadId, Referenzbilder als
+        referenceUploadIds; die Antwort nennt je Bauteil Unterschied und Änderungsanweisung. Ein Kriterium ist erst
+        erfüllt, wenn kein Unterschied mehr benannt wird. inspect/render benötigen path, expectedSha256
         und frischen outputDirectory. Hashes aus coding.read (Skripte), info path oder unverändertem sourceSha256
         übernehmen, niemals erfinden. run bleibt für vorhandene Skripte; komplexe Modelle mit stage entwickeln.
         Pflege design.json mit stageHistory, currentScene, Anforderungen, Entscheidungen und acceptedFeatures.
@@ -85,9 +88,18 @@ public static class BlenderAuthoringGuide
         7. Vor jeder Etappe genau festhalten: Ziel, Basisszene, betroffene Bauteile, unveränderte Merkmale,
            erwartetes sichtbares Ergebnis und passende Prüfansichten. Erst ein kleines Skript ausführen,
            dann tatsächliche Geometrie- und Vision-Befunde auswerten und die nächste Änderung daraus ableiten.
-        8. Repariere die kleinste belegte Ursache: benanntes Objekt, Transformation, Geometrie, Sichtbarkeit,
+           Nutze stage mit views, damit jede Revision sofort gerenderte Prüfbilder hat.
+        8. Vergleiche jede Prüfansicht mit der passenden Referenz in einem media.analyze-Aufruf (Render als
+           uploadId, Referenzen als referenceUploadIds) und übernimm die gelieferte priorisierte Liste der
+           Änderungsanweisungen als Plan der nächsten kleinen Etappe. Solange Vision Unterschiede oder
+           Vorschläge nennt, ist das Merkmal nicht erfüllt; „grob vorhanden“ zählt als verletzt.
+        9. Repariere die kleinste belegte Ursache: benanntes Objekt, Transformation, Geometrie, Sichtbarkeit,
            Material oder Ansicht. Nach der Reparatur denselben Befund und benachbarte akzeptierte Merkmale
            erneut prüfen. Erfolg benötigt einen neuen Prüfbeleg. Nicht alles neu zeichnen oder bloß erklären.
+        10. Figuren und organische Formen: Körper und Kopf als eine Lathe-Silhouette (g.lathe mit
+            Profilpunkten), Ohren/Hörner/Schwanzansätze als cone_between-Segmente auf einer Linie, Wangen,
+            Augen und Streifen als surface_patch auf der Oberfläche, flache Zickzackformen wie einen
+            Blitzschwanz als flat_polygon. Zwei gestapelte Kugeln oder ein Rohr sind dafür falsche Formen.
 
         Dauerhafter Designbrief: Pflege design.json mit requirements, decisions, references, acceptedFeatures,
         stagePlan, revisions, visualChecks, stageHistory, currentStage und currentScene. Bewahre Quellenpfade, Upload-/Dokument-IDs und

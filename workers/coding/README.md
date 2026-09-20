@@ -21,6 +21,14 @@ errors are not disguised as VRAM failures. No running model's placement is
 changed by catalog refresh. Decisions and failures are recorded in
 `%USERPROFILE%/.go-winui/native-runtime/gpu-placement.jsonl`.
 
+Multi-GPU split (measured 20.09.2026, DeepSeek-V4-Flash-Vision IQ1_S, 2x Quadro RTX 8000):
+the default llama `layer` split uses both GPUs for weights, KV and compute (prefill
+216-267 tokens/s fresh and on 12k-30k cached prefixes, SM peaks 98-99 % on both GPUs;
+decode 12-26 tokens/s alternating between the GPUs). The experimental `tensor` split
+loaded but drove only one GPU during inference, so it is not used. The environment
+variable `GO_NATIVE_MULTI_GPU_SPLIT` (`layer`, `row`, `tensor`) still allows a
+measured re-test for other models; it becomes part of the snapshot fingerprint.
+
 GO starts the shared native runtime when connecting to its local gateway or
 refreshing the local model catalog. The portable package includes the launcher
 and scanner in `Assets/NativeRuntime`, so this does not require a repository
@@ -135,7 +143,15 @@ actual prompt prefix before reusing tokens. The database conversation remains
 authoritative when a snapshot is missing or incompatible.
 
 Snapshots use hashed model/session keys and model-file, native-binary, template,
-and GPU-configuration fingerprints. Cache storage is bounded to 64 GiB with a
+and GPU-configuration fingerprints.
+
+Stop and follow-up prompts: the DeepSeek chat template is rewritten so historical
+assistant turns replay by their stored `reasoning_content`, not by the current
+thinking flag. Switching the reasoning level between two runs of one session
+(`none` -> `on`) therefore keeps the whole native KV prefix; only the generation
+prompt changes. An interrupted save waits up to 90 s for llama to leave its
+current prompt batch (`INTERRUPTED_SAVE_IDLE_SECONDS`), because large models take
+tens of seconds per 2048-token batch and the slot cannot serve the follow-up earlier. Cache storage is bounded to 64 GiB with a
 4 GiB free-space reserve; the oldest inactive snapshots may be evicted. Cache
 failures are recorded in `session-cache/events.jsonl` and fall back to normal
 prompt processing without failing the user request. Snapshotting does not load

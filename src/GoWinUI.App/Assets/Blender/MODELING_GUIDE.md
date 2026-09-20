@@ -31,6 +31,12 @@ Quellseite als `url` und die Bildadresse als `thumbnailUrl`. Prüfe die Quellsei
 mit `web.fetch`. Lade geeignete tatsächlich gefundene Bildadressen über
 `coding.command` in freie Referenzdateien im Workspace; anschließend
 `image.input file` und `media.analyze` mit der zurückgegebenen Upload-ID verwenden.
+Pfadregel für Downloads: `coding.command` läuft standardmäßig im Workspace-Root;
+gib Zielpfade relativ zum Workspace an (etwa `projekt/references/front.png`, der
+Scaffold legt `references/` an) und ein `workingDirectory` nur, wenn der Befehl
+es zwingend braucht. Ein Befehl mit `workingDirectory=projekt` **und** dem Pfad
+`projekt/references/…` erzeugt verschachtelte Ordner, die `image.input` nicht findet.
+Prüfe nach dem Download mit `coding.list`, dass die Datei am erwarteten Pfad liegt.
 Ein Suchtreffer oder Seitentext ersetzt keine Sichtprüfung. Dokumentiere Quelle,
 Bildadresse, lokalen Pfad, Blickwinkel und sichtbare Merkmale. Scheitert ein
 Bildabruf, verwende eine andere gefundene Quelle und halte verbleibende Lücken fest.
@@ -141,6 +147,39 @@ bewusst geplanten Punkten. Überlappende Kugeln sind keine durchgehende Haut:
 Verbindungen/Remesh/Retopologie als eigene Etappe bauen; Silhouette und dünne
 Übergänge anschließend prüfen.
 
+Figuren und Charaktere (Tiere, Maskottchen, Spielfiguren) brauchen eine
+**durchgehende Silhouette** und **aufgesetzte, sichtbare Details**. Dafür gibt es
+eigene Bausteine; zwei gestapelte Kugeln ergeben einen Schneemann, keinen Körper:
+
+- `g.lathe(name, profile, segments=48, location=(0,0,0), smooth=True, material=None, collection=None)`
+  erzeugt aus einem Profil `[(radius, z), ...]` von unten nach oben eine
+  Rotationsfläche: Birnenkörper mit Kopf in einem Stück, Hals, Bauch und Scheitel
+  aus einer Kurve. Beispiel: `[(0.0, 0.0), (0.16, 0.03), (0.19, 0.16), (0.15, 0.30), (0.17, 0.36), (0.16, 0.46), (0.0, 0.52)]`.
+- `g.cone_between(name, start, end, start_radius, end_radius=0.0, ...)` baut Kegel
+  und Kegelstümpfe **zwischen zwei Weltpunkten**. Ohren, Hörner, Stacheln und
+  Schwanzansätze mit farbiger Spitze: einen Ansatz- und einen Spitzenpunkt wählen,
+  mit `g.split_point(start, end, 0.7)` teilen und beide Segmente auf derselben
+  Linie bauen. So bleiben Spitzen in jeder Ansicht fluchtend; keine geratenen
+  Rotationen für getrennte Teilobjekte.
+- `g.point_on_sphere(center, radius, azimuth_grad, elevation_grad)` liefert Punkt
+  und Normale auf einem Kopf oder Rumpf; `g.surface_patch(name, point, normal, radius, thickness=0.01, scale=(1,1), sink=0.35, ...)`
+  setzt darauf flache Wangen, Augenweiß, Flecken oder Rückenstreifen
+  (`scale=(2.2, 0.5)` für längliche Streifen). Der Patch steht bewusst aus der
+  Oberfläche heraus und kann nicht im Körper verschwinden.
+- `g.flat_polygon(name, outline, thickness, plane="xz", ...)` extrudiert einen
+  geschlossenen 2D-Umriss zu einer flachen Platte: Blitzschwanz als Zickzack
+  `[(0,0),(0.06,0.05),(0.03,0.09),(0.10,0.15),(0.06,0.17),(0.14,0.28),(0.16,0.27),(0.11,0.16),(0.15,0.13),(0.07,0.06)]`
+  in der XZ-Ebene, Flossen, Blätter, Kämme. Ein Rohr (`tube_curve`) ist für
+  einen flachen Blitzschwanz die falsche Form.
+- `g.mirror_x(obj, name)` spiegelt ein fertiges Bauteil an X=0 für Links/Rechts.
+
+Arbeitsfolge für eine Figur: Referenzbilder analysieren und Proportionen als
+Verhältnisse notieren (Kopfhöhe zu Gesamthöhe, Ohrlänge zu Kopfbreite,
+Schwanzspannweite zu Körperhöhe). Zuerst Rumpf und Kopf als eine Lathe-Silhouette,
+dann Gliedmaßen mit `cone_between`/`sphere`, danach Ohren, Schwanz und
+Gesichtsdetails als Patches. Nach jeder Etappe Front, Seite und Perspektive gegen
+die Referenz vergleichen (Abschnitt 8) und nur die benannten Abweichungen ändern.
+
 ## 6. Topologie, Modifier und Verbindungen kontrollieren
 
 Keine gleichen Flächeneckpunkte, Nullflächen oder nicht endlichen Koordinaten.
@@ -197,13 +236,28 @@ massiven Innenblock bleibt optisch geschlossen.
    Beginne etwa mit 512–768 px. Mehr Samples ersetzen keine andere Blickrichtung.
 3. Lade die tatsächlich erzeugten Bilder über `image.input` und untersuche sie mit
    `media.analyze`. Dateiexistenz, erfolgreicher Render oder Vorschau sind keine
-   durchgeführte Vision-Prüfung.
-4. Stelle konkrete Fragen: „Sind alle vier Stützen sichtbar angebunden?“, „Liegt
-   die Tür frei?“, „Verläuft das Kabel bis zum Anschluss?“, „Bleiben Dach und
-   Gewächshaus getrennt lesbar?“ Vergleiche dabei die relevante Referenz.
+   durchgeführte Vision-Prüfung. `stage` mit `views` rendert die neue Revision
+   sofort in `<Revision>_renders/` und gibt die Bildpfade in `images` zurück; ein
+   getrennter `render`-Aufruf ist dann nicht nötig.
+4. Vergleiche **Referenz und Render im selben Aufruf**: Übergib das Renderbild als
+   `uploadId` und die passenden Referenzbilder (gleiche oder ähnliche Ansicht) als
+   `referenceUploadIds`. Vision beschreibt dann Bauteil für Bauteil Referenz,
+   Render und Unterschied und formuliert jede Abweichung als Änderungsanweisung
+   mit Richtung, Achse und Betrag relativ zu einem Bezugsmaß. Stelle zusätzlich
+   konkrete Fragen: „Sind die Ohrspitzen in der Seitenansicht auf einer Linie mit
+   dem Ohransatz?“, „Sind beide Wangen vollständig sichtbar?“, „Ist der Schwanz
+   eine flache Zickzackplatte oder ein rundes Rohr?“, „Liegt die Tür frei?“
+   Halte die Upload-IDs der Referenzen in `design.json` fest und lade sie bei Bedarf
+   erneut über `image.input file`.
 5. Erfasse pro Kriterium `erfüllt`, `verletzt` oder `nicht beurteilbar`, zusammen
-   mit Revision, Bildpfad und beobachtetem Befund. Begründe Sichtbares, erfinde keine
-   exakten Maße aus perspektivischen Bildern. Maße kommen aus Szenendaten.
+   mit Revision, Bildpfad und beobachtetem Befund. Ein Kriterium ist erst erfüllt,
+   wenn die Vision-Antwort für dieses Merkmal **keinen Unterschied und keinen
+   Vorschlag** mehr nennt; „grob vorhanden“ ist verletzt. Begründe Sichtbares,
+   erfinde keine exakten Maße aus perspektivischen Bildern. Maße kommen aus Szenendaten.
+6. Leite aus der priorisierten Änderungsliste der Vision-Antwort die nächste kleine
+   Etappe ab: Bauteil, Ursache im Skript (Position, Achse, Radius, Profilpunkt),
+   konkrete Zahlenänderung, erwartetes Bild. Rendere erneut mit denselben Ansichten
+   und vergleiche mit derselben Referenz, bis kein Unterschied mehr benannt wird.
 
 Verdecktes ist nicht bestätigt: weitere Ansicht oder Detailprüfung wählen.
 Geänderte Kriterien brauchen Bilder der **neuen** Revision. Vision kann irren;
