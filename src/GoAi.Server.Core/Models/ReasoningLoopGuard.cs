@@ -118,8 +118,8 @@ internal sealed class ReasoningLoopGuard
 
     internal ReasoningLoopDetectedException WatchdogFailure() => new("reasoning_watchdog",
         ReasoningCharacters, ReasoningWords,
-        $"Die Modellrunde wurde nach {_maximumDuration.TotalMinutes:0.##} Minuten ausschließlich Denktext kontrolliert beendet. "
-        + "Es entstand kein neuer Antwort- oder Werkzeugfortschritt. Der gespeicherte Arbeitsstand und die bisherigen Belege bleiben erhalten; keine automatische Wiederholung.")
+        $"Die Denkphase hat nach {_maximumDuration.TotalMinutes:0.##} Minuten das Zeitlimit überschritten, ohne neuen Antwort- oder Werkzeugfortschritt. "
+        + "Der Lauf wird nicht beendet, sondern fortgesetzt und umgelenkt: Triff jetzt eine klare Entscheidung und führe den nächsten konkreten Schritt aus. Der gespeicherte Arbeitsstand und die bisherigen Belege bleiben erhalten.")
         { ReasoningTail = _reasoningTail.ToString() };
 
     private void CompleteWord()
@@ -154,8 +154,7 @@ internal sealed class ReasoningLoopGuard
         _windowWords = _newSequences = 0;
         if (_repeatedWindows >= RequiredRepeatedWindows)
             throw new ReasoningLoopDetectedException("reasoning_repetition", ReasoningCharacters, ReasoningWords,
-                "Die Modellrunde wurde gestoppt, weil längere Denkpassagen mehrfach nahezu unverändert wiederholt wurden. "
-                + "Der gespeicherte Arbeitsstand und die bisherigen Belege bleiben erhalten; die identische Generierung wird nicht automatisch neu gestartet.")
+                "Der Denkprozess hat sich mehrfach nahezu unverändert wiederholt. Der Lauf wird nicht beendet, sondern fortgesetzt und umgelenkt: Triff jetzt eine klare Entscheidung und führe den nächsten konkreten Schritt aus. Der gespeicherte Arbeitsstand und die bisherigen Belege bleiben erhalten.")
                 { ReasoningTail = _reasoningTail.ToString() };
     }
 }

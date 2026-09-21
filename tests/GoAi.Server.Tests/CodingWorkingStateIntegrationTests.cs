@@ -827,45 +827,44 @@ public sealed class CodingWorkingStateIntegrationTests
     }
 
     [Fact]
-    public async Task ReasoningLoopFailureIsNotRetriedAndPreservesInterruptedContext()
+    public async Task ReasoningLoopSteersTheRunInsteadOfFailingAndPreservesInterruptedContext()
     {
         using var harness = new Harness();
         var run = await harness.CreateAsync();
         var reasoning = string.Concat(Enumerable.Repeat(ReasoningLoopGuardTests.NightPassage, 100));
-        harness.Handler.CompletionOverride = (_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent("data: " + JsonSerializer.Serialize(new
+        harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 1
+            ? new HttpResponseMessage(HttpStatusCode.OK)
             {
-                choices = new[] { new { delta = new { reasoning_content = reasoning } } },
-            }) + "\n\n", Encoding.UTF8, "text/event-stream"),
-        });
+                Content = new StringContent("data: " + JsonSerializer.Serialize(new
+                {
+                    choices = new[] { new { delta = new { reasoning_content = reasoning } } },
+                }) + "\n\n", Encoding.UTF8, "text/event-stream"),
+            }
+            : harness.Handler.CompleteResponse());
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var subscription = harness.Notifier.Subscribe(run);
         await harness.Processor.StartAsync(deadline.Token);
         try
         {
             while (!(await harness.Repository.GetEventsAfterAsync(run, 0, deadline.Token))
-                .Any(item => item.Type == RunEventTypes.RunFailed))
+                .Any(item => item.Type == RunEventTypes.RunCompleted))
                 await subscription.Reader.ReadAsync(deadline.Token);
         }
         finally { await harness.Processor.StopAsync(CancellationToken.None); }
 
-        Assert.Single(harness.Handler.Requests);
+        Assert.Equal(2, harness.Handler.Requests.Count);
         var snapshot = (await harness.Repository.GetAsync(run))!;
-        Assert.Equal(RunState.Failed, snapshot.State);
-        Assert.Equal("provider.reasoning_loop", snapshot.ErrorCode);
+        Assert.Equal(RunState.Completed, snapshot.State);
         var events = await harness.Repository.GetEventsAfterAsync(run, 0);
-        var failure = Assert.Single(events, item => item.Type == RunEventTypes.RunFailed);
-        Assert.False(failure.Data.GetProperty("retryable").GetBoolean());
         var interruption = Assert.Single(events, item => item.Type == RunProcessor.InterruptedTurnEventType);
         Assert.Contains("Bericht erstellen", interruption.Data.GetProperty("reasoningContent").GetString());
-        var diagnostics = Assert.Single(events, item => item.Type == "reasoning.guard_stopped");
-        Assert.Equal("reasoning_repetition", diagnostics.Data.GetProperty("failureKind").GetString());
-        Assert.InRange(diagnostics.Data.GetProperty("reasoningTail").GetString()!.Length, 1, 16_384);
         Assert.Contains(events, item => item.Type == RunEventTypes.ReasoningDelta
-            && item.Data.TryGetProperty("state", out var state) && state.GetString() == "failed");
-        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunCompleted || item.Type == RunEventTypes.ClientToolProposed);
-        Assert.NotNull((await harness.Repository.GetCheckpointAsync(run))!.StreamingTurnStartEventId);
+            && item.Data.TryGetProperty("state", out var state) && state.GetString() == "steered");
+        Assert.Contains(events, item => item.Type == RunEventTypes.TextDelta
+            && item.Data.TryGetProperty("delta", out var delta)
+            && delta.GetString()!.Contains("klare Entscheidung"));
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunFailed);
+        Assert.DoesNotContain(events, item => item.Type == "reasoning.guard_stopped");
     }
 
     [Fact]

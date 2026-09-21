@@ -7,7 +7,7 @@ namespace GoAi.Server.Core.Coding;
 
 public static class CodingLoopGuard
 {
-    public const int MaximumToolResultCharacters = 12_000;
+    public const int MaximumToolResultCharacters = 32_000;
     private static readonly string[] ReceiptMetadataFields =
     [
         "status", "success", "errorCode", "exitCode", "timedOut", "outcomeUnknown", "applied",

@@ -1025,9 +1025,30 @@ public sealed partial class RunProcessor : BackgroundService
                             failureKind = exception.FailureKind }, CancellationToken.None).ConfigureAwait(false);
                 if (reasoningPublished)
                     await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
-                        new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue), State: "failed"),
+                        new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue), State: "steered"),
                         CancellationToken.None).ConfigureAwait(false);
-                throw;
+                // Der Wiederholungsschutz beendet den Lauf nicht. Die abgebrochene Runde
+                // wird wie eine Nutzer-Umlenkung wiederhergestellt und mit einer klaren
+                // Entscheidungsanweisung fortgesetzt.
+                if (lastNativePrompt is not null)
+                {
+                    messages = lastNativePrompt.ToList();
+                    preserveSessionPromptPrefix = true;
+                    workingStatePromptIncluded = workingState is not null;
+                }
+                var visible = CodingTextReconciler.Project(await _repository.GetEventsAfterAsync(runId, 0, cancellationToken).ConfigureAwait(false));
+                if (visible.Length > generationVisibleStart)
+                    messages.Add(new LmChatMessage("assistant", visible[generationVisibleStart..]));
+                var steerInstruction = $"Der Denkprozess hat sich wiederholt ({exception.FailureKind}). Der Lauf wird fortgesetzt und umgelenkt. Triff jetzt eine klare Entscheidung: Benenne den nächsten konkreten Schritt und führe ihn aus, statt weiter zu grübeln. Der gespeicherte Arbeitsstand bleibt erhalten.";
+                messages.Add(new LmChatMessage("user", steerInstruction));
+                await PublishVisibleDeltaAsync(codingText is null ? new TextDeltaEvent(steerInstruction)
+                    : codingText.Push(steerInstruction), cancellationToken).ConfigureAwait(false);
+                visibleTextLength = visible.Length;
+                streamingTurnStartEventId = null;
+                lastNativePrompt = null;
+                roundCount++;
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                continue;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

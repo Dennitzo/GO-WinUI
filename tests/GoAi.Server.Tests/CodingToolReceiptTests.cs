@@ -33,8 +33,8 @@ public sealed class CodingToolReceiptTests
         var raw = JsonSerializer.Serialize(new
         {
             status = "failed", errorCode = "client.coding_tool_failed",
-            result = new { success = false, exitCode = 7, stdout = new string('x', 11950), stderr = "actual failure",
-                evidence = new { evidenceId, tool = "coding.command", storedBytes = 12050, truncated = false } },
+            result = new { success = false, exitCode = 7, stdout = new string('x', 32000), stderr = "actual failure",
+                evidence = new { evidenceId, tool = "coding.command", storedBytes = 32150, truncated = false } },
         });
         Assert.True(raw.Length > CodingLoopGuard.MaximumToolResultCharacters);
         var bounded = CodingLoopGuard.BoundToolResult(raw);
@@ -49,7 +49,7 @@ public sealed class CodingToolReceiptTests
         LmChatMessage[] messages = [new("assistant", ToolCalls: [first]), new("tool", bounded, ToolCallId: first.Id),
             new("assistant", ToolCalls: [second]), new("tool", bounded, ToolCallId: second.Id)];
         Assert.Throws<AgentRunLimitException>(() => CodingLoopGuard.ThrowIfRepeatedFailure(messages, first with { Id = "third" }));
-        Assert.Equal(11950, JsonSerializer.Deserialize<JsonElement>(raw).GetProperty("result").GetProperty("stdout").GetString()!.Length);
+        Assert.Equal(32000, JsonSerializer.Deserialize<JsonElement>(raw).GetProperty("result").GetProperty("stdout").GetString()!.Length);
     }
 
     [Fact]
@@ -298,9 +298,9 @@ internal static class BlenderReceiptFixture
         return JsonSerializer.SerializeToElement(new
         {
             success = true, operation = "render", sourceSha256 = SourceHash, reportPath = "renders_blockout_v01/report.json",
-            valid = false, counts = new { objects = 27, sceneObjects = 27, meshObjects = 23, vertices = 1506, edges = 2856,
-                faces = 1396, triangles = 2920, materials = 8, hiddenMeshes = 0, curves = 0, estimatedEvaluatedVertices = 8608,
-                evaluatedVertices = 3634, evaluatedEdges = 7176, evaluatedFaces = 3586, evaluatedMeshInstances = 22, evaluatedObjectInstances = 27 },
+            valid = false, counts = new { objects = 64, sceneObjects = 64, meshObjects = 60, vertices = 3500, edges = 6500,
+                faces = 3200, triangles = 6800, materials = 8, hiddenMeshes = 0, curves = 0, estimatedEvaluatedVertices = 20000,
+                evaluatedVertices = 8500, evaluatedEdges = 16000, evaluatedFaces = 8000, evaluatedMeshInstances = 52, evaluatedObjectInstances = 64 },
             bounds, units = new { system = "METRIC", scaleLength = 1.0, lengthUnit = "METERS" },
             issues = Enumerable.Range(0, 14).Select(index => new
                 { severity = "warning", code = "nonuniform_scale", @object = "Panel" + index, message = "Non-uniform object scale; check modifiers/export dimensions" })
@@ -309,12 +309,12 @@ internal static class BlenderReceiptFixture
                     new { severity = "error", code = "nonfinite_vertices", @object = "Solar_Array", message = "Mesh contains non-finite coordinates" },
                 ]).ToArray(),
             issueCount = 16,
-            objects = Enumerable.Range(0, 27).Select(index => new
+            objects = Enumerable.Range(0, 64).Select(index => new
             {
                 name = "Habitat_Part" + index, type = "MESH", collections = Collections, materials = Materials,
                 hiddenRender = false, hiddenViewport = false, instancedPrototype = false, environment = false,
                 scale = UnitScale, component = "Habitat", bounds, mesh, diagnosticScope = "source_mesh",
-                estimatedEvaluatedVertices = 152, visibleInstanceCount = 1, evaluatedMesh = mesh,
+                estimatedEvaluatedVertices = 300, visibleInstanceCount = 1, evaluatedMesh = mesh,
             }).ToArray(),
             truncatedObjects = false,
             preview = new { success = true, state = "ready", revision = 1, path = "station_blockout_v01.blend", sha256 = SourceHash },
