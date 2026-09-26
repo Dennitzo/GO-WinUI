@@ -130,13 +130,28 @@ if ([string]::IsNullOrWhiteSpace($PythonPath)) {
 }
 if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) { throw "Python interpreter not found: $PythonPath" }
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) { throw "Port $Port is already occupied; its existing process will not be changed." }
-$help = (& $BinaryPath --help 2>&1 | Out-String)
-if ($LASTEXITCODE -ne 0 -or $help -notmatch '--models-preset' -or $help -notmatch '--fit-target' -or $help -notmatch '--fit-ctx' -or
+# llama-server writes its banner and help text to stderr. Windows PowerShell
+# turns native stderr into ErrorRecords when ErrorActionPreference is Stop,
+# which used to abort startup before the exit code and capability checks ran.
+$savedErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    $help = (& $BinaryPath --help 2>&1 | Out-String)
+    $helpExitCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $savedErrorActionPreference
+}
+if ($helpExitCode -ne 0 -or $help -notmatch '--models-preset' -or $help -notmatch '--fit-target' -or $help -notmatch '--fit-ctx' -or
     $help -notmatch '--embedding' -or $help -notmatch '--mmproj' -or $help -notmatch '--tags' -or
     $help -notmatch '--reasoning-effort' -or $help -notmatch '--reasoning-budget' -or $help -notmatch '--sleep-idle-seconds') {
     throw 'The existing native llama binary does not support the required model router, memory fitting and model reasoning options.'
 }
 New-Item -ItemType Directory -Path $StateDirectory -Force | Out-Null
+# A graceful stop is communicated through this durable marker. A later start
+# must clear it before launching the new supervisor; otherwise catalog.py sees
+# the marker immediately and exits after the start command reported success.
+if (Test-Path -LiteralPath $stopFile -PathType Leaf) { Remove-Item -LiteralPath $stopFile -Force }
 $arguments = @($catalogScript, '--model-root', [IO.Path]::GetFullPath($ModelRoot), '--binary', [IO.Path]::GetFullPath($BinaryPath),
     '--state-directory', $StateDirectory, '--port', [string]$Port, '--fit-target', [string]$FitTargetMiB, '--gpu-layers', $GpuLayers)
 $quotedArguments = ($arguments | ForEach-Object {

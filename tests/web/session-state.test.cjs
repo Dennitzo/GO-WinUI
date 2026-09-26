@@ -29,7 +29,7 @@ function harness(storage = new Map()) {
     ungroupedSessionStorageKey: "ungrouped", sidebarStorageKey: "sidebar",
     post: (type, payload) => posts.push({ type, payload }), flushDraft: noOp,
     sessionShortLabel: value => value[0],
-    persistentToolActions: new Set(["coding", "blender"]), normalizeToolAction: value => value,
+    persistentToolActions: new Set(["coding"]), normalizeToolAction: value => value,
     closeCodingPreview: noOp, persistSessionScrollPosition: noOp, resetTransientVoiceStateForSessionChange: noOp,
     applyCodingChanges: noOp, selectToolAction: value => { toolSelections.push(value); state.selectedToolAction = value; },
     setSessionsCollapsed: noOp, setPromptValue: value => { elements.prompt.value = value; },
@@ -113,22 +113,6 @@ test("full snapshots restore only the research preference of the selected sessio
   assert.equal(state.deepResearch, true, "ordinary status snapshots do not clear the active chip");
 });
 
-test("Blender is a persistent session mode: session switches and page reloads restore it", () => {
-  const { context, state } = harness();
-  context.applySnapshot(snapshot({ selectedToolAction: "blender" }));
-  assert.equal(state.selectedToolAction, "blender");
-  assert.equal(state.persistentToolAction, "blender");
-  context.applySnapshot(snapshot({ selectedToolAction: "blender", isRunning: true }));
-  assert.equal(state.selectedToolAction, "blender", "a running Blender session never falls back to the Coding chip");
-  context.applySnapshot(snapshot({ activeSessionId: "session-b", messages: [], selectedToolAction: "coding" }));
-  assert.equal(state.selectedToolAction, "coding", "another session shows its own persistent mode");
-  context.applySnapshot(snapshot({ selectedToolAction: "blender" }));
-  assert.equal(state.selectedToolAction, "blender", "switching back restores the stored Blender mode");
-  const reloaded = harness();
-  reloaded.context.applySnapshot(snapshot({ selectedToolAction: "blender", isRunning: false }));
-  assert.equal(reloaded.state.selectedToolAction, "blender", "a fresh page (native page switch) restores Blender from the backend");
-});
-
 test("a one-shot chip still survives idle refreshes while composing", () => {
   const { context, state } = harness();
   context.applySnapshot(snapshot({ selectedToolAction: "coding" }));
@@ -137,23 +121,6 @@ test("a one-shot chip still survives idle refreshes while composing", () => {
   assert.equal(state.selectedToolAction, "webSearch", "idle refresh must retain the unsent request capability");
   context.applySnapshot(snapshot({ activeSessionId: "session-b", messages: [], selectedToolAction: "coding" }));
   assert.equal(state.selectedToolAction, "coding");
-});
-
-test("all terminal Blender events keep the persistent Blender chip for the next prompt", () => {
-  for (const type of ["chat.completed", "chat.cancelled", "chat.failed"]) {
-    for (const priorMode of [null, "bricsCad", "coding"]) {
-      const { context, state, emit, toolSelections } = harness();
-      context.applySnapshot(snapshot({ isRunning: true }));
-      state.selectedToolAction = "blender";
-      state.persistentToolAction = priorMode;
-      toolSelections.length = 0;
-      emit(type, { message: { id: "answer-a", sessionId: "session-a" },
-        session: { id: "session-a", title: "Blender-Projekt", persistentToolAction: "blender" } });
-      assert.equal(state.persistentToolAction, "blender");
-      assert.equal(state.selectedToolAction, "blender");
-      assert.deepEqual(toolSelections, ["blender"], "never replace Blender with Coding or a stale fallback");
-    }
-  }
 });
 
 test("global project plus requests the native folder picker before creating anything", () => {
@@ -205,6 +172,32 @@ test("project-local compose preserves each workspace and pins stay first inside 
     assert.equal(posts.at(-1).type, "session.projectCreate");
     assert.equal(posts.at(-1).payload.workspacePath, index === 0 ? "C:\\Projects\\A" : "D:\\Projects\\B");
   }
+});
+
+test("projects are ordered by their most recently changed session", () => {
+  const { context, elements } = harness();
+  context.applySnapshot(snapshot({ sessions: [
+    { id: "old", title: "Alt", sessionGroupId: "old-project", updatedAt: "2026-09-20T10:00:00Z" },
+    { id: "new", title: "Neu", sessionGroupId: "new-project", updatedAt: "2026-09-24T10:00:00Z" }
+  ], sessionGroups: [
+    { id: "old-project", name: "Altes Projekt", createdAt: "2026-09-20T09:00:00Z", workspacePath: "C:\\Old" },
+    { id: "new-project", name: "Neues Projekt", createdAt: "2026-09-19T09:00:00Z", workspacePath: "C:\\New" }
+  ] }));
+  const groups = elements.sessionList.querySelectorAll(".session-group");
+  assert.equal(groups[0].querySelector(".session-group__name").textContent, "Neues Projekt");
+  assert.equal(groups[1].querySelector(".session-group__name").textContent, "Altes Projekt");
+});
+
+test("live captions use the normal assistant message stream without the old panel", () => {
+  const start = source.indexOf("  function renderLiveCaption(");
+  const ending = source.slice(start).match(/\r?\n {2}\}(?:\r?\n|$)/);
+  assert.ok(start >= 0 && ending);
+  const implementation = source.slice(start, start + ending.index + ending[0].length);
+  assert.match(implementation, /state\.messages\.push\(/);
+  assert.match(implementation, /status: "streaming"/);
+  assert.match(implementation, /replace\(\/\\r\?\\n\/g, "\\n\\n"\)/);
+  assert.match(implementation, /renderMessages\(Boolean\(caption\.isActive\)\)/);
+  assert.doesNotMatch(source, /Live-Untertitel beenden/);
 });
 
 test("project heading and row actions share the same compact layout including the scrollbar gutter", () => {

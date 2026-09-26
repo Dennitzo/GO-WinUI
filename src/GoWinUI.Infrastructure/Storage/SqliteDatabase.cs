@@ -8,7 +8,7 @@ namespace GoWinUI.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 39;
+    public const int CurrentSchemaVersion = 41;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -86,6 +86,8 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             await ApplyMigrationThirtySevenAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtyEightAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationThirtyNineAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyOneAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -701,7 +703,7 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             command.CommandText = """
                 ALTER TABLE chat_sessions
                     ADD COLUMN persistent_tool_action TEXT NULL
-                    CHECK(persistent_tool_action IS NULL OR persistent_tool_action IN ('code','bricscad','audiobook'));
+                    CHECK(persistent_tool_action IS NULL OR persistent_tool_action IN ('code','audiobook'));
                 UPDATE chat_sessions
                 SET persistent_tool_action='code'
                 WHERE assistant_mode='code';
@@ -1338,9 +1340,6 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
 
     private static async Task ApplyMigrationThirtyNineAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
-        // The Blender chip is the persistent Coding agent with modelling instructions.
-        // persistent_tool_action keeps its legacy CHECK constraint ('code'); the
-        // variant column distinguishes Blender from plain Coding across sessions.
         await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
@@ -1351,13 +1350,64 @@ public sealed class SqliteDatabase : IGoDatabase, IAsyncDisposable
             if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
             {
                 command.CommandText = """
-                    ALTER TABLE chat_sessions
-                        ADD COLUMN persistent_tool_variant TEXT NULL
-                        CHECK(persistent_tool_variant IS NULL OR persistent_tool_variant IN ('blender'));
+                    ALTER TABLE chat_sessions ADD COLUMN persistent_tool_variant TEXT NULL;
                     """;
                 await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
             command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(39,$now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=40;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='persistent_tool_variant_v2';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = "ALTER TABLE chat_sessions ADD COLUMN persistent_tool_variant_v2 TEXT NULL;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            command.CommandText = "UPDATE chat_sessions SET persistent_tool_variant_v2=persistent_tool_variant WHERE persistent_tool_variant_v2 IS NULL;";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(40,$now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyOneAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=41;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                UPDATE chat_sessions
+                SET persistent_tool_action=CASE
+                        WHEN persistent_tool_action IN ('code','audiobook') THEN persistent_tool_action
+                        ELSE NULL
+                    END,
+                    persistent_tool_variant=NULL,
+                    persistent_tool_variant_v2=NULL;
+                DELETE FROM prompt_triggers
+                WHERE id IN ('a1000000-0000-4000-8000-000000000011','a1000000-0000-4000-8000-000000000012');
+                UPDATE go_ai_runs SET action=NULL
+                WHERE action IS NOT NULL AND action NOT IN
+                    ('imageGeneration','translation','textToSpeech','transcription','audioAnalysis','videoAnalysis',
+                     'imageAnalysis','webSearch','voiceInput','liveCaptions','liveTranslation','audiobook','coding','documentCreate');
+                INSERT INTO schema_migrations(version,applied_at) VALUES(41,$now);
+                """;
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -1788,8 +1838,6 @@ internal static class PromptTriggerSeeds
         new(Guid.Parse("a1000000-0000-4000-8000-000000000008"), "imageAnalysis", "Bild analysieren", "Analysiert ein angehängtes Bild mit dem Vision-Modell.", 180),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000009"), "webSearch", "Führe Websuche durch", "Durchsucht das Web über den GO AI Server.", 180),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000010"), "webSearch", "Suche im Web", "Durchsucht das Web über den GO AI Server.", 170),
-        new(Guid.Parse("a1000000-0000-4000-8000-000000000011"), "youTubeSearch", "Suche auf YouTube", "Durchsucht YouTube über den GO AI Server.", 170),
-        new(Guid.Parse("a1000000-0000-4000-8000-000000000012"), "bricsCad", "In BricsCAD", "Aktiviert die typisierten BricsCAD-Werkzeuge für diesen Lauf.", 180),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000014"), "liveCaptions", "Untertitel", "Startet Live-Untertitel für das Windows-Systemaudio.", 180),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000015"), "liveTranslation", "Live übersetzen", "Startet die Echtzeitübersetzung des Windows-Systemaudios.", 180),
         new(Guid.Parse("a1000000-0000-4000-8000-000000000019"), "audiobook", "Hörbuch erstellen", "Erstellt oder lenkt ein fortlaufendes, direkt vorlesbares Hörbuchkapitel.", 190),

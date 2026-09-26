@@ -20,7 +20,6 @@ var options = new GoAiServerOptions
     SpeechWorkerUri = ResolveUri("GO_AI_SPEECH_WORKER_URL", "http://speech:8080"),
     MediaWorkerUri = ResolveUri("GO_AI_MEDIA_WORKER_URL", "http://media:8080"),
     ImageWorkerUri = ResolveUri("GO_AI_IMAGE_WORKER_URL", "http://image:8080"),
-    YouTubeApiKey = Environment.GetEnvironmentVariable("GO_AI_YOUTUBE_API_KEY"),
     WorkerDataDirectory = Environment.GetEnvironmentVariable("GO_AI_WORKER_DATA_DIRECTORY"),
 };
 
@@ -50,7 +49,6 @@ var builder = Host.CreateDefaultBuilder(args)
         destination.SpeechWorkerUri = options.SpeechWorkerUri;
         destination.MediaWorkerUri = options.MediaWorkerUri;
         destination.ImageWorkerUri = options.ImageWorkerUri;
-        destination.YouTubeApiKey = options.YouTubeApiKey;
         destination.WorkerDataDirectory = options.WorkerDataDirectory;
     });
 

@@ -224,7 +224,12 @@ svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; s
 .avatar { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--border); border-radius: 50%; background: color-mix(in srgb, var(--accent) 9%, var(--surface-raised)); color: var(--text); font-size: 11px; font-weight: 750; }
 .message-body { display: flex; flex-direction: column; align-items: flex-start; width: fit-content; min-width: 0; max-width: min(900px, 86%); }
 .message.assistant .message-body { width: fit-content; max-width: 100%; }
-.message-meta { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.message-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; color: var(--muted); font-size: 11px; letter-spacing: .015em; }
+.message-meta__identity, .message-meta__activity { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.message-meta__activity::before { flex: none; margin-right: 2px; color: var(--muted); content: "·"; }
+.message-meta__detail { display: inline-flex; align-items: center; color: var(--muted); font-size: 11px; }
+.message-meta__detail::before { margin-right: 6px; content: "·"; }
+.message-meta .message-status-spinner { flex: none; margin: 0 1px 0 0; }
 .message-content { min-width: 0; max-width: 100%; overflow-wrap: anywhere; line-height: inherit; }
 .message.assistant .message-content { width: fit-content; max-width: 100%; padding: 0; border-radius: 0; background: transparent; }
 .message-content p { margin: 0 0 12px; }
@@ -302,8 +307,9 @@ html[data-theme="high-contrast"] tr.speech-source-active--block > td {
 .message-footer-link { padding: 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 13px; line-height: 1.4; text-decoration: underline; text-underline-offset: 3px; }
 .message-footer-link:hover { color: var(--text); }
 .message-status { color: var(--muted); }
-.message-status.streaming { color: var(--accent); font-weight: 650; }
-.message-status-spinner { display: inline-block; width: 12px; height: 12px; margin: 0 5px 0 2px; vertical-align: -2px; border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: message-status-spin .9s linear infinite; }
+.message-status.streaming { color: var(--muted); font-weight: 400; font-size: 11px; }
+.message-status.streaming .message-status-tokens { display: inline-block; margin-left: 4px; color: var(--muted); font-weight: 400; }
+.message-status-spinner { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 2px; vertical-align: -2px; border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: message-status-spin .9s linear infinite; }
 @keyframes message-status-spin { to { transform: rotate(360deg); } }
 .message-status.failed { color: var(--danger); }
 .stream-cursor::after { display: inline-block; width: 7px; height: 16px; margin-left: 3px; vertical-align: -2px; background: var(--accent); content: ""; animation: blink .8s steps(2) infinite; }
@@ -330,13 +336,12 @@ html[data-theme="high-contrast"] tr.speech-source-active--block > td {
 /* Coding uses the same message actions and Markdown renderer as the general chat. */
 @media screen {
   .coding-mode .message-scroll { padding-top: 28px; padding-bottom: 32px; }
-  .coding-mode .message-list { max-width: 1000px; margin-inline: auto; }
+  .coding-mode .message-list { width: 100%; }
   .coding-mode .message { font-size: 15px; line-height: 1.65; margin-bottom: 28px; }
   .coding-mode .message.assistant { grid-template-columns: minmax(0, 1fr); }
   .coding-mode .message.assistant > .avatar { display: none; }
   .coding-mode .message.assistant .message-body { width: 100%; }
   .coding-mode .message.assistant .message-content { width: 100%; }
-  .coding-mode .message-meta { margin-bottom: 10px; font-size: 11px; letter-spacing: .015em; }
   .coding-mode .message.user .message-body { max-width: min(780px, 92%); }
   .coding-mode .message.user .message-content { padding: 12px 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-raised); }
   .coding-mode .message-content:empty { display: none; }
@@ -412,15 +417,6 @@ tr:last-child td { border-bottom: 0; }
 .message-error { margin: 16px 0 8px; padding: 11px 14px; border-left: 2px solid var(--danger); border-radius: 4px; background: color-mix(in srgb, var(--danger) 6%, transparent); color: var(--text); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .message-error strong { color: var(--danger); font-weight: 600; }
 .message-error p { margin: 3px 0 0; white-space: pre-wrap; }
-.live-caption { width: min(820px, 100%); margin: 0 auto 8px; padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border)); border-radius: 13px; background: color-mix(in srgb, var(--accent) 8%, var(--surface-raised)); box-shadow: 0 6px 20px color-mix(in srgb, var(--background-accent) 8%, transparent); }
-.live-caption__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.live-caption__header > div { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
-.live-caption__header strong { color: var(--text); font-size: 13px; }
-.live-caption__header span { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.live-caption__stop { min-height: 28px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 99px; background: transparent; color: var(--text); font-size: 12px; }
-.live-caption__stop:hover { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); color: var(--danger); }
-.live-caption__transcript { max-height: 112px; margin: 9px 0 0; overflow-y: auto; color: var(--text); font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
-.live-caption__error { margin: 7px 0 0; color: var(--danger); font-size: 12px; }
 .context-strip { display: flex; flex-wrap: wrap; gap: 7px; width: min(820px, 100%); margin: 0 auto 7px; }
 .document-chips, .active-tool-chips { display: contents; }
 .active-tool-chip, .composer-speech-status { display: inline-flex; align-items: center; gap: 7px; height: 36px; min-height: 36px; padding: 0 10px; border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border)); border-radius: 999px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text); font-size: 13px; font-weight: 400; line-height: normal; }

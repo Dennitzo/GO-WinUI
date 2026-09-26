@@ -25,6 +25,36 @@ public sealed class AssistantCoordinator(
 {
     private const string DefaultSessionTitle = "Neue Sitzung";
     private const string DefaultSystemPrompt = "GO ist ein allgemeiner lokaler AI-Assistent. Unterstütze die konkrete Aufgabe des Nutzers, etwa beim Programmieren, Schreiben, Lernen, Analysieren oder Planen. Passe Sprache, Detailtiefe und Vorgehen an die Frage an. Unterscheide belegte Informationen von Annahmen, benenne relevante Unsicherheiten und erfinde keine Fakten, Quellen oder Ergebnisse.";
+    private static readonly HashSet<string> GenericSessionTitles = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Neue Sitzung", "Neuer Chat", "Hallo", "Antwort", "Frage", "Allgemeiner Chat",
+        "Willkommen", "Workflow", "GO Assistent", "GO-Assistent", "Gespräch mit GO",
+    };
+
+    private static string? DerivePromptSessionTitle(string prompt)
+    {
+        var value = (prompt ?? string.Empty)
+            .Replace("**", string.Empty, StringComparison.Ordinal)
+            .Replace("__", string.Empty, StringComparison.Ordinal)
+            .ReplaceLineEndings(" ")
+            .Trim(' ', '\t', '`', '"', '\'', '.', '!', '?', ';', ':', ',', '-', '–', '—')
+            .TrimStart('#');
+        foreach (var prefix in new[] { "Kannst du bitte ", "Kannst du ", "Könntest du bitte ", "Könntest du ", "Bitte " })
+        {
+            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = value[prefix.Length..];
+                break;
+            }
+        }
+        value = string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        var words = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length > 6) value = string.Join(' ', words.Take(6));
+        if (value.Length > 64) value = value[..64].TrimEnd();
+        value = value.Trim();
+        if (value.Length == 0 || GenericSessionTitles.Contains(value)) return null;
+        return value;
+    }
     private int _startupRunsHandled;
     private Task? _resumeTask;
     private readonly object _resumeLock = new();
@@ -78,7 +108,10 @@ public sealed class AssistantCoordinator(
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die ausgewählte Coding-Sitzung wurde nicht gefunden.");
         await CodingWorkspaceGit.EnsureRepositoryAsync(fullPath, cancellationToken).ConfigureAwait(false);
-        await chats.SetCodingWorkspacePathAsync(session.Id, fullPath, activateCoding: true, cancellationToken).ConfigureAwait(false);
+        // A workspace is context, not a tool selection. Fresh project sessions
+        // and General conversations must remain General until the user chooses a
+        // persistent authoring/Coding chip explicitly.
+        await chats.SetCodingWorkspacePathAsync(session.Id, fullPath, activateCoding: false, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool> HasAudiobookVoiceContextAsync(CancellationToken cancellationToken = default)
@@ -270,6 +303,7 @@ public sealed class AssistantCoordinator(
                 group.Id,
                 group.Name,
                 group.IsCollapsed,
+                group.CreatedAt,
                 group.WorkspacePath,
                 sessionIds = sessions.Where(item => item.SessionGroupId == group.Id).Select(item => item.Id),
             }),
@@ -636,7 +670,9 @@ public sealed class AssistantCoordinator(
         if (!Directory.Exists(fullPath)) throw new DirectoryNotFoundException("Der Projektordner existiert nicht.");
         var group = await chats.GetOrCreateSessionGroupForWorkspaceAsync(fullPath, cancellationToken).ConfigureAwait(false);
         var session = await chats.CreateSessionAsync(DefaultSessionTitle, cancellationToken).ConfigureAwait(false);
-        await chats.SetCodingWorkspacePathAsync(session.Id, fullPath, activateCoding: true, cancellationToken).ConfigureAwait(false);
+        // A workspace supplies optional file context; it must not implicitly
+        // switch a fresh conversation into the persistent Coding tool mode.
+        await chats.SetCodingWorkspacePathAsync(session.Id, fullPath, activateCoding: false, cancellationToken).ConfigureAwait(false);
         await chats.SetSessionGroupCollapsedAsync(group.Id, false, cancellationToken).ConfigureAwait(false);
         await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id }, cancellationToken).ConfigureAwait(false);
         await recentActivity.RecordAsync(
@@ -655,10 +691,8 @@ public sealed class AssistantCoordinator(
         var action = requestedAction?.Trim() switch
         {
             null or "" => (PersistentToolAction?)null,
-            "bricsCad" => PersistentToolAction.BricsCad,
             "audiobook" => PersistentToolAction.Audiobook,
             "coding" => PersistentToolAction.Coding,
-            "blender" => PersistentToolAction.Blender,
             _ => throw new InvalidOperationException("Die angeforderte persistente Tool-Aktion ist unbekannt."),
         };
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
@@ -842,6 +876,13 @@ public sealed class AssistantCoordinator(
             ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
+        var promptTitle = DerivePromptSessionTitle(prompt);
+        if (promptTitle is { } derivedTitle
+            && !string.Equals(session.Title, derivedTitle, StringComparison.Ordinal))
+        {
+            await chats.RenameSessionAsync(sessionId, derivedTitle, cancellationToken).ConfigureAwait(false);
+            session = session with { Title = derivedTitle };
+        }
         await chats.SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
         var explicitTool = GetOptionalString(envelope.Payload, "toolAction", 40);
         var match = await ResolvePromptMatchAsync(
@@ -851,7 +892,7 @@ public sealed class AssistantCoordinator(
             cancellationToken).ConfigureAwait(false);
         if (envelope.Payload.TryGetProperty("deepResearch", out var deepResearch) && deepResearch.ValueKind == JsonValueKind.True)
         {
-            if (match is not null && match.Trigger.Action is not (PromptTriggerAction.Coding or PromptTriggerAction.Blender or PromptTriggerAction.WebSearch))
+            if (match is not null && match.Trigger.Action is not (PromptTriggerAction.Coding or PromptTriggerAction.WebSearch))
                 throw new ArgumentException("Deep Research ist mit General oder Coding nutzbar. Wähle andere einmalige Tools zuerst ab.");
             match = (match ?? CreateToolMatch("webSearch", prompt)) with { DeepResearch = true };
         }
@@ -952,6 +993,7 @@ public sealed class AssistantCoordinator(
                 group.Id,
                 group.Name,
                 group.IsCollapsed,
+                group.CreatedAt,
                 group.WorkspacePath,
                 sessionIds = sessions.Where(session => session.SessionGroupId == group.Id).Select(session => session.Id),
             }),
@@ -965,16 +1007,13 @@ public sealed class AssistantCoordinator(
             "audioAnalysis" => PromptTriggerAction.AudioAnalysis,
             "imageAnalysis" => PromptTriggerAction.ImageAnalysis,
             "imageGeneration" => PromptTriggerAction.ImageGeneration,
-            "bricsCad" => PromptTriggerAction.BricsCad,
             "audiobook" => PromptTriggerAction.Audiobook,
             "coding" => PromptTriggerAction.Coding,
             "documentCreate" => PromptTriggerAction.DocumentCreate,
-            "blender" => PromptTriggerAction.Blender,
             "textToSpeech" => PromptTriggerAction.TextToSpeech,
             "translation" => PromptTriggerAction.Translation,
             "videoAnalysis" => PromptTriggerAction.VideoAnalysis,
             "webSearch" => PromptTriggerAction.WebSearch,
-            "youTubeSearch" => PromptTriggerAction.YouTubeSearch,
             _ => throw new ArgumentException("Die ausgewählte Tool-Aktion ist nicht bekannt."),
         };
         var now = DateTimeOffset.UtcNow;
@@ -1014,11 +1053,8 @@ public sealed class AssistantCoordinator(
         }
         return session.PersistentToolAction switch
         {
-            PersistentToolAction.BricsCad => CreateToolMatch("bricsCad", prompt),
             PersistentToolAction.Audiobook => CreateToolMatch("audiobook", prompt),
             PersistentToolAction.Coding => CreateToolMatch("coding", prompt),
-            // The Blender chip stays active for every follow-up prompt of the session.
-            PersistentToolAction.Blender => CreateToolMatch("blender", prompt),
             _ => null,
         };
     }
@@ -1045,25 +1081,20 @@ public sealed class AssistantCoordinator(
 
     private static PersistentToolAction? PersistentToolActionFor(PromptTriggerAction? action) => action switch
     {
-        PromptTriggerAction.BricsCad => PersistentToolAction.BricsCad,
         PromptTriggerAction.Audiobook => PersistentToolAction.Audiobook,
         PromptTriggerAction.Coding => PersistentToolAction.Coding,
-        PromptTriggerAction.Blender => PersistentToolAction.Blender,
         _ => null,
     };
 
     private static string? PersistentToolActionName(PersistentToolAction? action) => action switch
     {
-        PersistentToolAction.BricsCad => "bricsCad",
         PersistentToolAction.Audiobook => "audiobook",
         PersistentToolAction.Coding => "coding",
-        PersistentToolAction.Blender => "blender",
         _ => null,
     };
 
-    /// <summary>Blender sessions run the Coding agent (model, workspace, timeline) with modelling instructions.</summary>
     internal static bool IsCodingAgentSession(PersistentToolAction? action) =>
-        action is PersistentToolAction.Coding or PersistentToolAction.Blender;
+        action is PersistentToolAction.Coding;
 
     internal async Task EmitGoAiUpdateAsync(
         GoAiAssistantUpdate update,

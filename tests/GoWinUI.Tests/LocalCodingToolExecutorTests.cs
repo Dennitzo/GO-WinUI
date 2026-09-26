@@ -730,7 +730,9 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         Assert.Contains("RELATIVE_EXECUTABLE_OK", result.GetProperty("stdout").GetString()!, StringComparison.Ordinal);
         var file = Path.Combine(expected, "relative-only.txt");
         await File.WriteAllTextAsync(file, "file tools keep their relative-path contract");
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => Execute("coding.read", new { path = file }));
+        // Read-only tools may now read absolute paths anywhere on the host.
+        var read = await Execute("coding.read", new { path = file });
+        Assert.Contains("file tools keep their relative-path contract", read.GetProperty("content").GetString());
     }
 
     [Theory]

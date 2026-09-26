@@ -43,6 +43,7 @@ public static class ClientToolNames
     public const string CodingEdit = "coding.edit";
     public const string CodingCommand = "coding.command";
     public const string CodingGitDiff = "coding.gitDiff";
+    public const string CodingUndo = "coding.undo";
     public const string CodingSearchHistory = "coding.searchHistory";
     public const string CodingSearchKnowledge = "coding.searchKnowledge";
     public const string CodingRenderHtml = "coding.renderHtml";
@@ -53,8 +54,4 @@ public static class ClientToolNames
     public const string DocumentsList = "documents.list";
     public const string DocumentsSearch = "documents.search";
     public const string DocumentsReadPages = "documents.readPages";
-    public const string BricsCadGeometryQuery = "bricscad.geometryQuery";
-    public const string BricsCadMeasure = "bricscad.measure";
-    public const string BricsCadMove = "bricscad.move";
-    public const string BricsCadAction = "bricscad.action";
 }

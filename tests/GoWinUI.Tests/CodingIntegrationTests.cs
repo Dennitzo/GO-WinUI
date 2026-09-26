@@ -273,7 +273,7 @@ public sealed class CodingIntegrationTests
         await coordinator.SetCodingWorkspacePathAsync(capturedSessionId, firstRoot);
 
         Assert.Equal(firstRoot, (await chats.GetSessionAsync(first.Id))?.CodingWorkspacePath);
-        Assert.Equal(PersistentToolAction.Coding, (await chats.GetSessionAsync(first.Id))?.PersistentToolAction);
+        Assert.Null((await chats.GetSessionAsync(first.Id))?.PersistentToolAction);
         Assert.Equal(secondRoot, (await chats.GetSessionAsync(second.Id))?.CodingWorkspacePath);
         Assert.Equal(PersistentToolAction.Audiobook, (await chats.GetSessionAsync(second.Id))?.PersistentToolAction);
         Assert.Equal(second.Id, settings.Current.ActiveSessionId);
@@ -306,7 +306,7 @@ public sealed class CodingIntegrationTests
     }
 
     [Fact]
-    public async Task WorkspaceAndCodingModeRollbackTogetherWhenActivationFails()
+    public async Task WorkspaceSelectionDoesNotImplicitlyActivateCoding()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -317,26 +317,14 @@ public sealed class CodingIntegrationTests
         Directory.CreateDirectory(replacement);
         await chats.SetCodingWorkspacePathAsync(session.Id, original);
         await chats.SetPersistentToolActionAsync(session.Id, PersistentToolAction.Audiobook);
-        await using (var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
-        {
-            await connection.OpenAsync();
-            await using var trigger = connection.CreateCommand();
-            trigger.CommandText = """
-                CREATE TRIGGER reject_coding_activation
-                BEFORE UPDATE OF persistent_tool_action ON chat_sessions
-                WHEN NEW.persistent_tool_action='code'
-                BEGIN SELECT RAISE(ABORT, 'injected activation failure'); END;
-                """;
-            await trigger.ExecuteNonQueryAsync();
-        }
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
         var coordinator = CreateCoordinator(environment, settings);
 
-        await Assert.ThrowsAsync<SqliteException>(() => coordinator.SetCodingWorkspacePathAsync(session.Id, replacement));
+        await coordinator.SetCodingWorkspacePathAsync(session.Id, replacement);
 
         var restored = await chats.GetSessionAsync(session.Id);
-        Assert.Equal(original, restored?.CodingWorkspacePath);
+        Assert.Equal(replacement, restored?.CodingWorkspacePath);
         Assert.Equal(PersistentToolAction.Audiobook, restored?.PersistentToolAction);
     }
 
@@ -416,6 +404,7 @@ public sealed class CodingIntegrationTests
     [InlineData("coding.gitDiff", ToolRiskClass.ReadOnly)]
     [InlineData("coding.write", ToolRiskClass.LocalMutation)]
     [InlineData("coding.edit", ToolRiskClass.LocalMutation)]
+    [InlineData("coding.undo", ToolRiskClass.LocalMutation)]
     [InlineData("coding.command", ToolRiskClass.Process)]
     public void CodingToolRiskMustMatchTheLocalContract(string tool, ToolRiskClass expectedRisk)
     {

@@ -98,12 +98,22 @@ def inspect(request: InspectRequest) -> dict:
 def _inspect_image(source: Path) -> dict:
     job_dir = _new_job_directory()
     thumbnail = job_dir / "thumbnail.jpg"
+    vision_input = job_dir / "vision-input.jpg"
     try:
         with Image.open(source) as image:
             image.verify()
         with Image.open(source) as image:
             width, height = image.size
             image_format = image.format or "unknown"
+            # llama.cpp's multimodal loader is deliberately fed a decoded JPEG
+            # instead of the upload container. In particular, otherwise valid
+            # WebP files are not supported consistently by every Windows vision
+            # build and fail before prompt evaluation starts.
+            vision = image.copy()
+            vision.thumbnail((4096, 4096), Image.Resampling.LANCZOS)
+            if vision.mode not in {"RGB", "L"}:
+                vision = vision.convert("RGB")
+            vision.save(vision_input, "JPEG", quality=95, optimize=True)
             image.thumbnail((512, 512), Image.Resampling.LANCZOS)
             if image.mode not in {"RGB", "L"}:
                 image = image.convert("RGB")
@@ -113,7 +123,10 @@ def _inspect_image(source: Path) -> dict:
     return {
         "kind": "image",
         "metadata": {"width": width, "height": height, "format": image_format},
-        "artifacts": [_artifact(thumbnail, "image/jpeg", "thumbnail")],
+        "artifacts": [
+            _artifact(vision_input, "image/jpeg", "vision_input"),
+            _artifact(thumbnail, "image/jpeg", "thumbnail"),
+        ],
         "frames": [],
     }
 

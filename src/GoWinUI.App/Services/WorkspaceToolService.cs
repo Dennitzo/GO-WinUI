@@ -46,7 +46,10 @@ public sealed class WorkspaceToolService(GoAiConnectionService connection)
             var temporary = false;
             if (operation == "file")
             {
-                path = WorkspaceFilePath.Resolve(workspace ?? "", args.GetProperty("path").GetString()!);
+                var requested = args.GetProperty("path").GetString()!;
+                path = Path.IsPathFullyQualified(requested)
+                    ? Path.GetFullPath(requested)
+                    : WorkspaceFilePath.Resolve(workspace ?? "", requested);
                 mediaType = Path.GetExtension(path).ToLowerInvariant() switch
                 {
                     ".png" => "image/png", ".jpg" or ".jpeg" => "image/jpeg", ".webp" => "image/webp",
@@ -76,10 +79,8 @@ public sealed class WorkspaceToolService(GoAiConnectionService connection)
             finally { if (temporary) File.Delete(path); }
         }
 
-        return await new BlenderToolService().ExecuteAsync(args, workspace, progress, token).ConfigureAwait(false);
+        throw new InvalidOperationException($"Unbekanntes Workspace-Werkzeug: {proposal.Name}");
     }
-
-    public static string? FindBlender() => BlenderToolService.FindBlender();
     private static string? FindBrowser()
     {
         foreach (var directory in new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),

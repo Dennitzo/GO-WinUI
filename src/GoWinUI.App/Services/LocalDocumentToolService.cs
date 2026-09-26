@@ -383,6 +383,12 @@ public sealed partial class LocalDocumentToolService(
                     ?? throw new InvalidOperationException("Die PDF-Ausgabe konnte nicht erzeugt werden.");
                 contentType = "application/pdf";
             }
+            else if (format == "xlsx")
+            {
+                outputPath = Path.Combine(temporaryDirectory, Path.GetFileNameWithoutExtension(fileName) + ".xlsx");
+                await codec.WriteXlsxAsync(source, outputPath, cancellationToken).ConfigureAwait(false);
+                contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+            }
             else
             {
                 outputPath = Path.Combine(temporaryDirectory, Path.GetFileNameWithoutExtension(fileName) + ".docx");

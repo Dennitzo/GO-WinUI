@@ -13,9 +13,9 @@ internal static class CodingDeepResearchPipeline
     internal const string ToolName = "web.deepResearch";
     internal const string PlanToolName = "research.plan";
     internal const string SynthesisToolName = "research.synthesize";
-    internal const int MaximumModelCalls = 8;
-    internal const int MaximumToolCalls = 9;
-    internal static readonly TimeSpan TimeBudget = TimeSpan.FromMinutes(7);
+    internal const int MaximumModelCalls = 24;
+    internal const int MaximumToolCalls = 27;
+    internal static readonly TimeSpan TimeBudget = TimeSpan.FromMinutes(21);
     private static readonly JsonSerializerOptions Json = GoAiProtocol.CreateJsonOptions();
     private static readonly Regex Whitespace = new(@"\s+", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
     private static readonly Regex ApiIdentifiers = new(@"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)+(?<name>[A-Za-z_][A-Za-z0-9_]*)\b|\b(?<name>[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+)\b|\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
@@ -72,6 +72,12 @@ internal static class CodingDeepResearchPipeline
         var token = timeout.Token;
         try
         {
+            var researchIterations = 0;
+            while (true)
+            {
+                researchIterations++;
+                if (researchIterations > 3)
+                    throw new ResearchBudgetException("Deep Research hat nach mehreren Runden noch keine sinnvolle Lösung erreicht.");
             // Reserve plan, at least two source selections, synthesis and all associated network calls.
             if (modelLimit < 4 || toolLimit < 4)
                 throw new ResearchBudgetException("Für Deep Research sind nicht mehr genug Modell- oder Werkzeugrunden verfügbar.");
@@ -272,7 +278,20 @@ internal static class CodingDeepResearchPipeline
             if (synthesized.TryGetProperty("uncertainties", out var unknowns) && unknowns.ValueKind == JsonValueKind.Array)
                 uncertainties.AddRange(unknowns.EnumerateArray().Take(6).Where(static item => item.ValueKind == JsonValueKind.String)
                     .Select(static item => Bound(item.GetString()!, 300)));
-            if (findings.Count == 0) throw new InvalidDataException("Die Synthese enthielt keine mit Originaltext belegten Befunde.");
+            if (findings.Count == 0)
+            {
+                if (modelCalls < modelLimit && toolCalls < toolLimit)
+                {
+                    plan.Clear();
+                    sources.Clear();
+                    searchResults.Clear();
+                    uncertainties.Add("Die erste Recherche lieferte keine belegten Befunde; eine weitere Runde mit neuen Teilfragen wird ausgeführt.");
+                    continue;
+                }
+                throw new InvalidDataException("Die Synthese enthielt keine mit Originaltext belegten Befunde.");
+            }
+            break;
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (OperationCanceledException)

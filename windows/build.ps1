@@ -6,12 +6,7 @@ param(
 
     [switch] $SkipTests,
 
-    [switch] $SkipPublish,
-
-    [Alias('WithBricsCadPlugin')]
-    [switch] $IncludeBricsCadPlugin,
-
-    [string] $BricsCadInstallDir
+    [switch] $SkipPublish
 )
 
 Set-StrictMode -Version 2.0
@@ -19,7 +14,6 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 $appProject = Resolve-GoRepositoryPath -RelativePath 'src\GoWinUI.App\GoWinUI.App.csproj'
-$protocolProject = Resolve-GoRepositoryPath -RelativePath 'src\GoWinUI.BricsCad.Protocol\GoWinUI.BricsCad.Protocol.csproj'
 
 Invoke-GoDotNet -CommandArguments @(
     'restore', $appProject,
@@ -36,13 +30,6 @@ Invoke-GoDotNet -CommandArguments @(
     '-p:RuntimeIdentifier=win-x64',
     '--nologo'
 )
-Invoke-GoDotNet -CommandArguments @(
-    'build', $protocolProject,
-    '--configuration', $Configuration,
-    '--framework', 'net10.0',
-    '--nologo'
-)
-
 if (-not $SkipTests) {
     & (Join-Path $PSScriptRoot 'test.ps1') -Configuration $Configuration
     # Includes DeepSeek integrated-vision routing and native projector/preset tests.
@@ -56,10 +43,4 @@ if (-not $SkipPublish) {
         -RuntimeIdentifier win-x64 `
         -OutputDirectory (Resolve-GoRepositoryPath -RelativePath 'artifacts\portable\win-x64')
 }
-if ($IncludeBricsCadPlugin) {
-    & (Join-Path $PSScriptRoot 'build-bricscad-plugin.ps1') `
-        -Configuration $Configuration `
-        -BricsCadInstallDir $BricsCadInstallDir
-}
-
 Write-Host 'GO build completed.' -ForegroundColor Green

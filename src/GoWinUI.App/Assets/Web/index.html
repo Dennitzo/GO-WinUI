@@ -61,17 +61,6 @@
         <button id="scroll-to-latest" class="scroll-to-latest" type="button" title="Zur aktuellen Nachricht" aria-label="Zur aktuellen Nachricht und automatisch folgen" aria-controls="message-scroll" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16m-6-6 6 6 6-6"/></svg>
         </button>
-        <section id="live-caption" class="live-caption" aria-live="polite" hidden>
-          <header class="live-caption__header">
-            <div>
-              <strong id="live-caption-title">Live-Untertitel</strong>
-              <span id="live-caption-status"></span>
-            </div>
-            <button id="stop-live-caption" class="live-caption__stop" type="button">Beenden</button>
-          </header>
-          <p id="live-caption-transcript" class="live-caption__transcript">Warte auf Windows-Systemaudio …</p>
-          <p id="live-caption-error" class="live-caption__error" hidden></p>
-        </section>
         <div id="context-strip" class="context-strip" hidden>
           <div id="active-tool-chips" class="active-tool-chips"></div>
           <div id="coding-changes" class="coding-changes" hidden></div>
@@ -107,10 +96,8 @@
                   <div class="tools-menu__actions">
                   <button class="service-option" type="button" role="menuitem" data-tool-action="audioAnalysis"><span>Audio analysieren</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="documentCreate"><span>Dokument erstellen</span></button>
-                  <button class="service-option" type="button" role="menuitem" data-tool-action="blender"><span>Blender</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="imageAnalysis"><span>Bild analysieren</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="imageGeneration"><span>Bild erstellen</span></button>
-                  <button class="service-option" type="button" role="menuitem" data-tool-action="bricsCad"><span>BricsCAD</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="coding"><span>Coding</span></button>
                   <button class="service-option" type="button" role="menuitemcheckbox" aria-checked="false" data-tool-toggle="deepResearch"><span>Deep Research</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="audiobook"><span>Hörbuch erstellen</span></button>
@@ -119,7 +106,6 @@
                   <button class="service-option" type="button" role="menuitem" data-tool-action="videoAnalysis"><span>Video analysieren</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="textToSpeech"><span>Vorlesen</span></button>
                   <button class="service-option" type="button" role="menuitem" data-tool-action="webSearch"><span>Websuche</span></button>
-                  <button class="service-option" type="button" role="menuitem" data-tool-action="youTubeSearch"><span>YouTube</span></button>
                   </div>
                 </div>
               </div>

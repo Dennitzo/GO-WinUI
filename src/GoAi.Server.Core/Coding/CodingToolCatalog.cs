@@ -24,6 +24,8 @@ public static class CodingToolCatalog
             """{"executable":{"type":"string","minLength":1,"maxLength":1024},"arguments":{"type":"array","items":{"type":"string","maxLength":4000},"maxItems":64},"workingDirectory":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":0,"default":0,"maximum":2147483647}}""", ["executable", "arguments"]),
         Create(ClientToolNames.CodingGitDiff, "Lies git status und den aktuellen Git-Diff einschließlich staged Änderungen; beendet sich nach 30 Sekunden.", ToolRiskClass.ReadOnly,
             """{"path":{"type":"string"}}""", []),
+        Create(ClientToolNames.CodingUndo, "Setze getätigte Code-Änderungen zurück (git restore für unstaged und staged Änderungen). Optional mit path für genau eine Datei; ohne path werden alle getätigten Änderungen im Projektordner zurückgesetzt. Nur der ausgewählte Projektordner ist betroffen.", ToolRiskClass.LocalMutation,
+            """{"path":{"type":"string"}}""", []),
         Create(ClientToolNames.CodingSearchHistory, "Suche gezielt frühere Nachrichten ausschließlich in der aktuellen GO-Sitzung. Nutze dies bei relevanten früheren Entscheidungen oder Nutzerangaben; keine globale Gesprächssuche.", ToolRiskClass.ReadOnly,
             """{"query":{"type":"string","minLength":1,"maxLength":512},"maximumResults":{"type":"integer","minimum":1,"maximum":8,"default":5}}""", ["query"]),
         Create(ClientToolNames.CodingSearchKnowledge, "Suche Originalbelege ausschließlich in den Dokumenten der aktuellen GO-Sitzung. Nutze dies für relevante bereitgestellte Spezifikationen oder Wissen; keine globale Dokument- oder Dateisuche.", ToolRiskClass.ReadOnly,

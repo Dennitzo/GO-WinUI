@@ -85,7 +85,7 @@ public sealed class GpuStatusService
 
     internal static (string DisplayName, string Runtime) DescribeWorkload(string workload) => workload switch
     {
-        "llm-general" => ("gpt-oss-120b", "native llama"),
+        "llm-general" => ("Ausgewähltes AI-Modell", "native llama"),
         "speech-to-text" => ("Audio wird transkribiert", "Docker · Whisper STT"),
         "live-caption" => ("Sprache wird live transkribiert", "Docker · Whisper STT"),
         "live-caption-warmup" => ("Sprachmodell wird vorbereitet", "Docker · Whisper STT"),
@@ -98,7 +98,6 @@ public sealed class GpuStatusService
         "video-audio-fusion" => ("Video und Audio werden zusammengeführt", "native llama · gpt-oss-120b"),
         "embedding" => ("Kontext wird indiziert", "native llama · Embeddings"),
         "web-search" => ("Websuche wird ausgeführt", "Docker · SearXNG"),
-        "youtube-search" => ("YouTube wird durchsucht", "YouTube API / SearXNG"),
         "web-fetch" => ("Webquelle wird geladen", "Docker · Gateway"),
         _ => (workload, "Docker · Gateway"),
     };

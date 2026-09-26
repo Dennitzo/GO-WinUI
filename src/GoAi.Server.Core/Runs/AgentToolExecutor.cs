@@ -6,6 +6,7 @@ using GoAi.Server.Core.Research;
 using GoAi.Server.Core.Storage;
 using GoAi.Server.Core.Workers;
 using Microsoft.Extensions.Options;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -69,23 +70,32 @@ public sealed class AgentToolExecutor
         CancellationToken cancellationToken = default) =>
         ExecuteAsync(name, arguments, runId, selectedModelId, null, cancellationToken);
 
+    public Task<AgentToolExecutionResult> ExecuteAsync(
+        string name,
+        JsonElement arguments,
+        string runId,
+        string? selectedModelId,
+        string? reasoningEffort,
+        CancellationToken cancellationToken = default) =>
+        ExecuteAsync(name, arguments, runId, selectedModelId, reasoningEffort, null, cancellationToken);
+
     public async Task<AgentToolExecutionResult> ExecuteAsync(
         string name,
         JsonElement arguments,
         string runId,
         string? selectedModelId,
         string? reasoningEffort,
+        IReadOnlyList<string>? currentUploadIds,
         CancellationToken cancellationToken = default)
     {
         try
         {
             return name switch
             {
-                "web.search" => await SearchAsync(arguments, runId, youtube: false, cancellationToken).ConfigureAwait(false),
-                "youtube.search" => await SearchAsync(arguments, runId, youtube: true, cancellationToken).ConfigureAwait(false),
+                "web.search" => await SearchAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "web.fetch" => await FetchAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
-                "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, selectedModelId, reasoningEffort, cancellationToken).ConfigureAwait(false),
-                "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, selectedModelId, reasoningEffort, cancellationToken).ConfigureAwait(false),
+                "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, selectedModelId, reasoningEffort, currentUploadIds, cancellationToken).ConfigureAwait(false),
+                "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, selectedModelId, reasoningEffort, currentUploadIds, cancellationToken).ConfigureAwait(false),
                 "image.generate" => await GenerateImagesAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "speech.synthesize" => await SynthesizeSpeechAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "math.evaluate" => EvaluateMath(arguments),
@@ -114,16 +124,61 @@ public sealed class AgentToolExecutor
                 errorCode: failure.ErrorCode,
                 errorMessage: failure.Message);
         }
+        catch (Exception exception) when (IsRecoverableMediaFailure(name, exception))
+        {
+            var failure = DescribeMediaFailure(exception);
+            return Result(
+                new
+                {
+                    success = false,
+                    errorCode = failure.ErrorCode,
+                    message = failure.Message,
+                    retryable = failure.Retryable,
+                    currentUploadIds = currentUploadIds ?? [],
+                },
+                succeeded: false,
+                errorCode: failure.ErrorCode,
+                errorMessage: failure.Message);
+        }
     }
 
     internal static bool IsRecoverableResearchFailure(string toolName, Exception exception) =>
-        toolName is "web.search" or "web.fetch" or "youtube.search"
+        toolName is "web.search" or "web.fetch"
         && exception is HttpRequestException
             or TimeoutException
             or TaskCanceledException
             or IOException
             or InvalidDataException
                 or JsonException;
+
+    internal static bool IsRecoverableMediaFailure(string toolName, Exception exception) =>
+        toolName is "media.inspect" or "media.analyze"
+        && exception is KeyNotFoundException
+            or FileNotFoundException
+            or HttpRequestException
+            or TimeoutException
+            or TaskCanceledException
+            or IOException
+            or InvalidDataException
+            or InvalidOperationException
+            or JsonException
+            or ReasoningLoopDetectedException;
+
+    internal static ResearchToolFailure DescribeMediaFailure(Exception exception) => exception switch
+    {
+        KeyNotFoundException => new(
+            "media.upload_unavailable",
+            "Der angeforderte temporäre Medien-Upload ist nicht mehr verfügbar. Verwende ausschließlich eine aktuelle uploadId aus der neuesten Nutzernachricht; liegt bereits eine erfolgreiche Bildanalyse vor, arbeite mit deren Befunden weiter.",
+            false),
+        ReasoningLoopDetectedException => new(
+            "media.reasoning_loop",
+            "Das Vision-Modell wiederholte seinen Denkprozess auch beim direkten Wiederholungsversuch. Arbeite mit vorhandenen Bildbefunden weiter und analysiere erst nach einer neuen Render-Etappe erneut.",
+            true),
+        _ => new(
+            "media.analysis_unavailable",
+            "Die Medienanalyse konnte in diesem Schritt nicht abgeschlossen werden. Der übrige Projektlauf kann mit vorhandenen Befunden fortgesetzt werden.",
+            true),
+    };
 
     private async Task<AgentToolExecutionResult> SynthesizeSpeechAsync(JsonElement args, string runId, CancellationToken token)
     {
@@ -164,7 +219,7 @@ public sealed class AgentToolExecutor
             return new ResearchToolFailure("web.fetch.unavailable", message, retryable);
         }
 
-        var serviceName = toolName == "youtube.search" ? "YouTube-Suche" : "SearXNG-Websuche";
+        var serviceName = "SearXNG-Websuche";
         var serviceMessage = statusCode is { } serviceStatus
             ? $"Die {serviceName} ist momentan nicht verfügbar (HTTP {(int)serviceStatus}). Prüfe den lokalen Suchdienst und seine Verbindung; behaupte keine neuen Recherchebelege."
             : $"Die {serviceName} ist momentan nicht erreichbar oder hat ihr Zeitlimit überschritten. Prüfe den lokalen Suchdienst und seine Verbindung; behaupte keine neuen Recherchebelege.";
@@ -206,19 +261,17 @@ public sealed class AgentToolExecutor
     private async Task<AgentToolExecutionResult> SearchAsync(
         JsonElement arguments,
         string runId,
-        bool youtube,
         CancellationToken cancellationToken)
     {
-        using var activity = _serviceActivities.Begin(youtube ? "youtube-search" : "web-search", runId);
+        using var activity = _serviceActivities.Begin("web-search", runId);
         var response = await _research.SearchAsync(
             new WebSearchRequest(
                 arguments.GetProperty("query").GetString()!,
                 GetInt(arguments, "maximumResults", 10),
                 GetString(arguments, "language") ?? "de-DE",
                 GetString(arguments, "profile")),
-            youtubeFallback: youtube,
             cancellationToken).ConfigureAwait(false);
-        if (!youtube && (response.Provider != "searxng" || response.IsFallback))
+        if (response.Provider != "searxng" || response.IsFallback)
             throw new InvalidDataException("Die Websuche akzeptiert ausschließlich SearXNG ohne Provider-Fallback.");
         return Result(response);
     }
@@ -261,11 +314,26 @@ public sealed class AgentToolExecutor
         bool analyze,
         string? selectedModelId,
         string? reasoningEffort,
+        IReadOnlyList<string>? currentUploadIds,
         CancellationToken cancellationToken)
     {
-        var uploadId = arguments.GetProperty("uploadId").GetString()!;
-        var upload = await _uploads.GetCompletedAsync(uploadId, cancellationToken).ConfigureAwait(false)
-            ?? throw new KeyNotFoundException("Completed media upload not found.");
+        var requestedUploadId = arguments.GetProperty("uploadId").GetString()!;
+        var uploadId = requestedUploadId;
+        var upload = await _uploads.GetCompletedAsync(uploadId, cancellationToken).ConfigureAwait(false);
+        if (upload is null)
+        {
+            var currentUploads = new List<UploadCompleted>();
+            foreach (var candidateId in (currentUploadIds ?? []).Distinct(StringComparer.Ordinal))
+            {
+                var candidate = await _uploads.GetCompletedAsync(candidateId, cancellationToken).ConfigureAwait(false);
+                if (candidate is not null && IsSupportedMedia(candidate.MediaType)) currentUploads.Add(candidate);
+            }
+            var fallbackId = SelectCurrentUploadFallback(requestedUploadId, currentUploads);
+            if (fallbackId is null)
+                throw new KeyNotFoundException("Completed media upload not found and no unambiguous current upload is available.");
+            uploadId = fallbackId;
+            upload = currentUploads.Single(item => string.Equals(item.UploadId, fallbackId, StringComparison.Ordinal));
+        }
         if (analyze && upload.MediaType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
         {
             // Reine Audiodateien benötigen weder FFmpeg-Frameextraktion noch ein
@@ -304,14 +372,15 @@ public sealed class AgentToolExecutor
             new WorkerMediaRequest(uploadId, upload.MediaType, detailWindows),
             runId,
             cancellationToken).ConfigureAwait(false);
+        var visibleArtifacts = VisibleMediaArtifacts(processed.Artifacts);
         if (!analyze)
         {
             return Result(new
             {
                 processed.Kind,
                 metadata = processed.Metadata,
-                artifacts = processed.Artifacts,
-            }, processed.Artifacts);
+                artifacts = visibleArtifacts,
+            }, visibleArtifacts);
         }
 
         TranscriptionResponse? transcription = null;
@@ -341,21 +410,24 @@ public sealed class AgentToolExecutor
         if (upload.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
         {
             // Reference images (artwork, photos, dimension sheets) precede the
-            // inspected image so Vision compares them within one request.
+            // inspected image so Vision compares them within one request. Always
+            // use the media worker's decoded JPEG. Passing the original WebP to
+            // native llama.cpp is backend-dependent and can fail during token
+            // counting before the model sees the prompt.
             foreach (var referenceId in ReadReferenceUploadIds(arguments))
             {
                 var reference = await _uploads.GetCompletedAsync(referenceId, cancellationToken).ConfigureAwait(false)
                     ?? throw new KeyNotFoundException($"Completed reference upload {referenceId} not found.");
                 if (!reference.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("referenceUploadIds must reference image uploads.");
-                imagePaths.Add(await _uploads.ResolveCompletedPathAsync(referenceId, cancellationToken).ConfigureAwait(false)
-                    ?? throw new FileNotFoundException("Completed reference image payload is missing."));
+                var normalizedReference = await _workers.InspectMediaAsync(
+                    new WorkerMediaRequest(referenceId, reference.MediaType), runId, cancellationToken).ConfigureAwait(false);
+                imagePaths.Add(await ResolveVisionInputAsync(normalizedReference, cancellationToken).ConfigureAwait(false));
                 referenceCount++;
             }
-            var uploadPath = await _uploads.ResolveCompletedPathAsync(uploadId, cancellationToken).ConfigureAwait(false)
-                ?? throw new FileNotFoundException("Completed image upload payload is missing.");
-            imagePaths.Add(uploadPath);
+            imagePaths.Add(await ResolveVisionInputAsync(processed, cancellationToken).ConfigureAwait(false));
         }
+
         else
         {
             if (ReadReferenceUploadIds(arguments).Count > 0)
@@ -370,6 +442,20 @@ public sealed class AgentToolExecutor
                     imagePaths.Add(artifact.Path);
                 }
             }
+        }
+
+        async Task<string> ResolveVisionInputAsync(ProcessedMediaResult media, CancellationToken token)
+        {
+            var descriptor = media.Artifacts.FirstOrDefault(static item =>
+                    item.Metadata is not null
+                    && item.Metadata.TryGetValue("role", out var role)
+                    && string.Equals(role, "vision_input", StringComparison.Ordinal))
+                ?? media.Artifacts.FirstOrDefault(static item =>
+                    item.MediaType is "image/jpeg" or "image/png")
+                ?? throw new InvalidDataException("The media worker did not produce a decoded vision image.");
+            var artifact = await _artifacts.ResolveAsync(descriptor.ArtifactId, token).ConfigureAwait(false)
+                ?? throw new FileNotFoundException("Decoded vision image payload is missing.");
+            return artifact.Path;
         }
 
         if (imagePaths.Count == 0)
@@ -392,8 +478,8 @@ public sealed class AgentToolExecutor
                     analysis = transcriptAnalysis,
                     modelId = _options.GeneralModelId,
                     reasoningEffort = _modelRuntime.ResolveMediaReasoningEffort(_options.GeneralModelId, "general", reasoningEffort),
-                    artifacts = processed.Artifacts,
-                }, processed.Artifacts, _options.GeneralModelId);
+                    artifacts = visibleArtifacts,
+                }, visibleArtifacts, _options.GeneralModelId);
             }
 
             return Result(new
@@ -401,8 +487,8 @@ public sealed class AgentToolExecutor
                 processed.Kind,
                 metadata = processed.Metadata,
                 analysis = "Für diesen Medientyp wurden keine Vision-Frames erzeugt.",
-                artifacts = processed.Artifacts,
-            }, processed.Artifacts);
+                artifacts = visibleArtifacts,
+            }, visibleArtifacts);
         }
 
         var prompt = GetString(arguments, "prompt") ?? GeneralAgentPolicies.DefaultMediaAnalysis;
@@ -456,9 +542,36 @@ public sealed class AgentToolExecutor
             modelId = hasVideoTranscript ? fusionModel : visionModel,
             reasoningEffort = _modelRuntime.ResolveMediaReasoningEffort(hasVideoTranscript ? fusionModel : visionModel,
                 hasVideoTranscript ? "general" : "vision", reasoningEffort),
-            artifacts = processed.Artifacts,
-        }, processed.Artifacts, hasVideoTranscript ? fusionModel : visionModel);
+            artifacts = visibleArtifacts,
+            requestedUploadId = string.Equals(requestedUploadId, uploadId, StringComparison.Ordinal) ? null : requestedUploadId,
+            resolvedUploadId = string.Equals(requestedUploadId, uploadId, StringComparison.Ordinal) ? null : uploadId,
+        }, visibleArtifacts, hasVideoTranscript ? fusionModel : visionModel);
     }
+
+    internal static string? SelectCurrentUploadFallback(
+        string requestedUploadId,
+        IReadOnlyList<UploadCompleted> currentUploads)
+    {
+        var candidates = currentUploads
+            .Where(item => !string.Equals(item.UploadId, requestedUploadId, StringComparison.Ordinal))
+            .Select(static item => item.UploadId)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+        return candidates.Length == 1 ? candidates[0] : null;
+    }
+
+    private static bool IsSupportedMedia(string mediaType) =>
+        mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+        || mediaType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
+        || mediaType.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
+
+    internal static IReadOnlyList<ArtifactDescriptor> VisibleMediaArtifacts(
+        IReadOnlyList<ArtifactDescriptor> artifacts)
+        => artifacts.Where(static item => item.Metadata is null
+                || !item.Metadata.TryGetValue("role", out var role)
+                || !string.Equals(role, "vision_input", StringComparison.Ordinal))
+            .ToArray();
 
     internal static IReadOnlyList<string> ReadReferenceUploadIds(JsonElement arguments)
     {
@@ -490,13 +603,34 @@ public sealed class AgentToolExecutor
             modelId,
             modelId == _options.VisionModelId ? _options.VisionContextLength : 0,
             cancellationToken).ConfigureAwait(false);
-        return await _modelRuntime.AnalyzeImagesAsync(
-            modelId,
-            prompt,
-            imagePaths,
-            _modelRuntime.ResolveMediaReasoningEffort(modelId, "vision", reasoningEffort),
-            cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await _modelRuntime.AnalyzeImagesAsync(
+                modelId,
+                prompt,
+                imagePaths,
+                _modelRuntime.ResolveMediaReasoningEffort(modelId, "vision", reasoningEffort),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is ReasoningLoopDetectedException
+            || exception is ModelGenerationTerminatedException { ProviderCode: "vision_output_limit" })
+        {
+            // A media tool is an evidence-producing substep. If the local vision
+            // model circles in hidden reasoning, retry once with reasoning disabled
+            // and a direct-result contract instead of turning the tool card and the
+            // whole authoring run into a terminal failure.
+            return await _modelRuntime.AnalyzeImagesAsync(
+                modelId,
+                BuildVisionLoopRecoveryPrompt(prompt),
+                imagePaths,
+                reasoningEffort: _modelRuntime.ResolveMediaReasoningEffort(modelId, "vision", "none"),
+                cancellationToken).ConfigureAwait(false);
+        }
     }
+
+    internal static string BuildVisionLoopRecoveryPrompt(string prompt)
+        => prompt + "\n\nAntworte jetzt direkt mit den belastbaren sichtbaren Befunden. Wiederhole keine Planung und stelle keine Rückfrage. "
+            + "Markiere abgeschnittene oder verdeckte Bereiche als nicht beurteilbar und liefere mit den vorhandenen Bilddaten ein unmittelbar nutzbares Ergebnis.";
 
     private async Task<string> AnalyzeTranscriptAsync(
         string prompt,

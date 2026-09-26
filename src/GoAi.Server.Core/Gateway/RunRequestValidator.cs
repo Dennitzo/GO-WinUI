@@ -7,18 +7,17 @@ public static class RunRequestValidator
 {
     private static readonly HashSet<string> ClientCapabilities = new(StringComparer.OrdinalIgnoreCase)
     {
-        "bricscad",
         "screenCapture",
         "documents",
         "documentIo",
-        "workspace", "visual-tools", "blender",
+        "workspace", "visual-tools",
         "pdf",
         "coding",
         "coding.evidence",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
-        "web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze",
+        "web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze",
         "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve",
     };
 
@@ -242,15 +241,12 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("maximumContextTokens must be at least 2048; the model catalog bounds the effective limit.");
         }
-        var supportsUnlimitedDuration = request.Mode == RunMode.Coding
-            || request.Mode == RunMode.General
-                && request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
-                && request.ClientCapabilities?.Contains("blender", StringComparer.OrdinalIgnoreCase) == true;
+        var supportsUnlimitedDuration = request.Mode == RunMode.Coding;
         if (request.Limits?.TimeoutSeconds is { } timeoutSeconds
             && (timeoutSeconds == 0 ? !supportsUnlimitedDuration
                 : timeoutSeconds < 30 || request.Mode != RunMode.Coding && timeoutSeconds > 14_400))
         {
-            throw new ArgumentException("timeoutSeconds must be 0 for Coding or General with Blender/workspace capabilities, or at least 30; finite non-Coding limits support up to 14400 seconds.");
+            throw new ArgumentException("timeoutSeconds must be 0 for Coding or at least 30; finite non-Coding limits support up to 14400 seconds.");
         }
     }
 

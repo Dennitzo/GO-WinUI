@@ -58,6 +58,7 @@ public sealed record RunRequest(
     string? ReasoningEffort = null,
     string? PreferredCodingModelId = null,
     CodingRunOptions? CodingOptions = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? WorkspacePath = null,
     bool DeepResearch = false);
 
 public sealed record CodingRunOptions(

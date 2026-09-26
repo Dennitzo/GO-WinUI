@@ -43,7 +43,8 @@ public sealed record LmChatResult(
     bool HadReasoning = false,
     int ReasoningTokens = 0,
     ModelTurnMetrics? Metrics = null,
-    string? ReasoningContent = null);
+    string? ReasoningContent = null,
+    string? FinishReason = null);
 
 public sealed class ModelEmptyResponseException(bool hadReasoning, int attempts)
     : InvalidOperationException(hadReasoning

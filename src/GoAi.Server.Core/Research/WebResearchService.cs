@@ -52,11 +52,10 @@ public sealed partial class WebResearchService : IDisposable
 
     public async Task<WebSearchResponse> SearchAsync(
         WebSearchRequest request,
-        bool youtubeFallback,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var key = JsonSerializer.Serialize(new { request, youtubeFallback });
+        var key = JsonSerializer.Serialize(request);
         await _searchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -64,7 +63,7 @@ public sealed partial class WebResearchService : IDisposable
             foreach (var expired in _searchCache.Where(pair => pair.Value.Until <= now).Select(pair => pair.Key).ToArray())
                 _searchCache.Remove(expired);
             if (_searchCache.TryGetValue(key, out var cached)) return cached.Response;
-            var result = await SearchCoreAsync(request, youtubeFallback, allowLanguageRetry: true, cancellationToken).ConfigureAwait(false);
+            var result = await SearchCoreAsync(request, allowLanguageRetry: true, cancellationToken).ConfigureAwait(false);
             if (result.Results.Count > 0)
             {
                 if (_searchCache.Count >= 64) _searchCache.Remove(_searchCache.MinBy(pair => pair.Value.Until).Key);
@@ -75,7 +74,7 @@ public sealed partial class WebResearchService : IDisposable
         finally { _searchGate.Release(); }
     }
 
-    private async Task<WebSearchResponse> SearchCoreAsync(WebSearchRequest request, bool youtubeFallback,
+    private async Task<WebSearchResponse> SearchCoreAsync(WebSearchRequest request,
         bool allowLanguageRetry, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -91,18 +90,11 @@ public sealed partial class WebResearchService : IDisposable
             throw new ArgumentException("Search profile must be auto, general, python, web, dotnet or images.", nameof(request));
 
         var maximum = Math.Clamp(request.MaximumResults, 1, 20);
-        var youtubeApiKey = _options.YouTubeApiKey;
-        if (youtubeFallback && !string.IsNullOrWhiteSpace(youtubeApiKey))
-        {
-            return await SearchYouTubeAsync(request, maximum, youtubeApiKey, cancellationToken).ConfigureAwait(false);
-        }
-
-        var query = youtubeFallback ? $"site:youtube.com/watch {request.Query}" : request.Query;
+        var query = request.Query;
         // Technical reference material is often English even when the conversation is German.
         // SearXNG's CSE engine turns de-DE into a strict document-language filter.
-        var language = youtubeFallback ? request.Language ?? "de-DE"
-            : SearxngSearchProfiles.SearchLanguage(request.Profile, query, request.Language);
-        var profileEngines = SearxngSearchProfiles.Engines(youtubeFallback ? "general" : request.Profile, query)?.Split(',');
+        var language = SearxngSearchProfiles.SearchLanguage(request.Profile, query, request.Language);
+        var profileEngines = SearxngSearchProfiles.Engines(request.Profile, query)?.Split(',');
         var skipped = new List<SearchEngineFailure>();
         var selectedEngines = profileEngines?.Where(engine =>
         {
@@ -174,7 +166,7 @@ public sealed partial class WebResearchService : IDisposable
             throw new SearxngEngineUnavailableException(failures);
         if (results.Count == 0 && allowLanguageRetry && language != "all" && request.Profile != "images")
         {
-            var retried = await SearchCoreAsync(request with { Language = "all" }, youtubeFallback,
+            var retried = await SearchCoreAsync(request with { Language = "all" },
                 allowLanguageRetry: false, cancellationToken).ConfigureAwait(false);
             var combined = failures.Concat(retried.EngineFailures ?? []).DistinctBy(failure => failure.Engine, StringComparer.OrdinalIgnoreCase).ToArray();
             return retried with { EngineFailures = combined.Length > 0 ? combined : null,
@@ -184,7 +176,7 @@ public sealed partial class WebResearchService : IDisposable
             request.Query,
             results,
             "searxng",
-            youtubeFallback,
+            false,
             DateTimeOffset.UtcNow,
             failures.Count > 0 ? failures : null,
             language,
@@ -222,171 +214,6 @@ public sealed partial class WebResearchService : IDisposable
 
     private static string CleanDiagnostic(string value, int maximum) =>
         new(value.Take(maximum).Select(static character => char.IsControl(character) ? ' ' : character).ToArray());
-
-    private async Task<WebSearchResponse> SearchYouTubeAsync(
-        WebSearchRequest request,
-        int maximum,
-        string apiKey,
-        CancellationToken cancellationToken)
-    {
-        var language = NormalizeLanguage(request.Language);
-        var query = new StringBuilder()
-            .Append("part=snippet&type=video&safeSearch=moderate")
-            .Append("&maxResults=").Append(maximum.ToString(CultureInfo.InvariantCulture))
-            .Append("&q=").Append(Uri.EscapeDataString(request.Query));
-        if (language is not null)
-        {
-            query.Append("&relevanceLanguage=").Append(Uri.EscapeDataString(language));
-        }
-
-        var client = _httpClientFactory.CreateClient(nameof(WebResearchService) + ".YouTube");
-        client.Timeout = TimeSpan.FromSeconds(20);
-        using var searchRequest = CreateGoogleRequest(
-            new UriBuilder("https://www.googleapis.com/youtube/v3/search") { Query = query.ToString() }.Uri,
-            apiKey);
-        using var searchResponse = await client.SendAsync(searchRequest, cancellationToken).ConfigureAwait(false);
-        searchResponse.EnsureSuccessStatusCode();
-        using var searchDocument = JsonDocument.Parse(
-            await searchResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-
-        var items = new List<YouTubeSearchItem>();
-        if (searchDocument.RootElement.TryGetProperty("items", out var rawItems))
-        {
-            foreach (var raw in rawItems.EnumerateArray().Take(maximum))
-            {
-                if (!raw.TryGetProperty("id", out var id)
-                    || !raw.TryGetProperty("snippet", out var snippet)
-                    || GetString(id, "videoId") is not { Length: > 0 } videoId
-                    || GetString(snippet, "title") is not { Length: > 0 } title)
-                {
-                    continue;
-                }
-
-                items.Add(new YouTubeSearchItem(
-                    videoId,
-                    WebUtility.HtmlDecode(title),
-                    WebUtility.HtmlDecode(GetString(snippet, "description") ?? string.Empty),
-                    WebUtility.HtmlDecode(GetString(snippet, "channelTitle") ?? "YouTube"),
-                    ParsePublishedAt(GetString(snippet, "publishedAt")),
-                    ReadThumbnail(snippet)));
-            }
-        }
-
-        var durations = await ReadYouTubeDurationsAsync(client, items, apiKey, cancellationToken).ConfigureAwait(false);
-        var results = items.Select(item => new WebSearchResult(
-            item.Title,
-            $"https://www.youtube.com/watch?v={Uri.EscapeDataString(item.VideoId)}",
-            item.Description,
-            item.Channel,
-            item.PublishedAt,
-            item.ThumbnailUrl,
-            durations.GetValueOrDefault(item.VideoId))).ToArray();
-        return new WebSearchResponse(
-            request.Query,
-            results,
-            "youtube-data-api-v3",
-            false,
-            DateTimeOffset.UtcNow);
-    }
-
-    private static async Task<IReadOnlyDictionary<string, string>> ReadYouTubeDurationsAsync(
-        HttpClient client,
-        IReadOnlyList<YouTubeSearchItem> items,
-        string apiKey,
-        CancellationToken cancellationToken)
-    {
-        if (items.Count == 0)
-        {
-            return new Dictionary<string, string>(StringComparer.Ordinal);
-        }
-
-        var ids = string.Join(',', items.Select(static item => item.VideoId));
-        var uri = new UriBuilder("https://www.googleapis.com/youtube/v3/videos")
-        {
-            Query = $"part=contentDetails&id={Uri.EscapeDataString(ids)}",
-        }.Uri;
-        using var request = CreateGoogleRequest(uri, apiKey);
-        using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        using var document = JsonDocument.Parse(
-            await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
-        var durations = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (!document.RootElement.TryGetProperty("items", out var rawItems))
-        {
-            return durations;
-        }
-
-        foreach (var raw in rawItems.EnumerateArray())
-        {
-            if (GetString(raw, "id") is not { Length: > 0 } id
-                || !raw.TryGetProperty("contentDetails", out var details)
-                || GetString(details, "duration") is not { Length: > 0 } duration)
-            {
-                continue;
-            }
-            durations[id] = FormatDuration(duration);
-        }
-        return durations;
-    }
-
-    private static HttpRequestMessage CreateGoogleRequest(Uri uri, string apiKey)
-    {
-        var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.TryAddWithoutValidation("X-Goog-Api-Key", apiKey);
-        return request;
-    }
-
-    private static string? NormalizeLanguage(string? language)
-    {
-        if (string.IsNullOrWhiteSpace(language))
-        {
-            return null;
-        }
-        var normalized = language.Trim().Split('-', '_')[0];
-        return normalized.Length is 2 or 3 ? normalized : null;
-    }
-
-    private static DateTimeOffset? ParsePublishedAt(string? value) =>
-        DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var published)
-            ? published
-            : null;
-
-    private static string? ReadThumbnail(JsonElement snippet)
-    {
-        if (!snippet.TryGetProperty("thumbnails", out var thumbnails))
-        {
-            return null;
-        }
-        foreach (var name in new[] { "high", "medium", "default" })
-        {
-            if (thumbnails.TryGetProperty(name, out var thumbnail)
-                && GetString(thumbnail, "url") is { Length: > 0 } url)
-            {
-                return url;
-            }
-        }
-        return null;
-    }
-
-    private static string FormatDuration(string value)
-    {
-        try
-        {
-            var duration = XmlConvert.ToTimeSpan(value);
-            var totalHours = checked((int)duration.TotalHours);
-            return totalHours > 0
-                ? $"{totalHours}:{duration.Minutes:00}:{duration.Seconds:00}"
-                : $"{duration.Minutes}:{duration.Seconds:00}";
-        }
-        catch (FormatException)
-        {
-            return value;
-        }
-        catch (OverflowException)
-        {
-            return value;
-        }
-    }
 
     public static async Task<WebFetchResponse> FetchAsync(WebFetchRequest request, CancellationToken cancellationToken = default)
     {
@@ -968,12 +795,4 @@ public sealed partial class WebResearchService : IDisposable
 
     [GeneratedRegex("\\s+", RegexOptions.CultureInvariant)]
     private static partial Regex WhitespaceRegex();
-
-    private sealed record YouTubeSearchItem(
-        string VideoId,
-        string Title,
-        string Description,
-        string Channel,
-        DateTimeOffset? PublishedAt,
-        string? ThumbnailUrl);
 }

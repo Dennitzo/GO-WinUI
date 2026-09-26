@@ -17,6 +17,7 @@ public sealed class LocalCodingToolExecutor
     {
         ".git", ".vs", ".venv", "venv", "node_modules", "bin", "obj", "__pycache__", ".next", "dist",
         ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".cache", "htmlcov", "unsloth-tmp",
+        "Binaries", "DerivedDataCache", "Intermediate", "Saved",
     };
     private static readonly string[] IgnoredDirectoryPatterns = ["*.egg-info", "pytest-of-*", "pytest-<digits>"];
     private readonly string _root;
@@ -50,6 +51,7 @@ public sealed class LocalCodingToolExecutor
             "coding.edit" => await WriteAsync(arguments, edit: true, cancellationToken).ConfigureAwait(false),
             "coding.command" => await CommandAsync(arguments, cancellationToken).ConfigureAwait(false),
             "coding.gitDiff" => await GitDiffAsync(arguments, cancellationToken).ConfigureAwait(false),
+            "coding.undo" => await UndoAsync(arguments, cancellationToken).ConfigureAwait(false),
             _ => throw new ArgumentException($"Unbekanntes Coding-Werkzeug: {toolName}."),
         };
         _evidence?.SetResult(result);
@@ -68,7 +70,7 @@ public sealed class LocalCodingToolExecutor
 
     private JsonElement List(JsonElement args, CancellationToken cancellationToken)
     {
-        var directory = ResolvePath(OptionalString(args, "path") ?? ".");
+        var directory = ResolveReadPath(OptionalString(args, "path") ?? ".");
         var maximum = Integer(args, "maximumEntries", 100, 1, 200);
         var entries = new List<object>();
         var totalCharacters = 0;
@@ -103,7 +105,7 @@ public sealed class LocalCodingToolExecutor
     private async Task<JsonElement> SearchAsync(JsonElement args, CancellationToken cancellationToken)
     {
         var query = RequiredString(args, "query", 1, 512);
-        var root = ResolvePath(OptionalString(args, "path") ?? ".");
+        var root = ResolveReadPath(OptionalString(args, "path") ?? ".");
         var maximum = Integer(args, "maximumResults", 25, 1, 50);
         var matches = new List<object>();
         var outputSize = 0;
@@ -140,7 +142,7 @@ public sealed class LocalCodingToolExecutor
 
     private async Task<JsonElement> ReadAsync(JsonElement args, CancellationToken cancellationToken)
     {
-        var path = ResolvePath(RequiredString(args, "path", 1, 1_024));
+        var path = ResolveReadPath(RequiredString(args, "path", 1, 1_024));
         // Direct reads are complete; only an explicit line range limits the returned content.
         // Search and mutation retain their independent safety limits.
         var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
@@ -345,6 +347,30 @@ public sealed class LocalCodingToolExecutor
             diff = await RunProcessAsync("git", ["-c", "core.fsmonitor=false", "--literal-pathspecs", "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--", pathspec], directory, 30, cancellationToken, GitProgress("git-diff-working")).ConfigureAwait(false);
         }
         return Serialize(new { success = status.Success && diff.Success && stagedDiff?.Success != false, status, diff, stagedDiff, note = "Unversionierte Dateien erscheinen im Status; ihr Inhalt ist nicht Bestandteil von git diff." });
+    }
+
+    private async Task<JsonElement> UndoAsync(JsonElement args, CancellationToken cancellationToken)
+    {
+        var directory = ResolvePath(OptionalString(args, "path") ?? ".");
+        var pathspec = ".";
+        if (File.Exists(directory))
+        {
+            pathspec = Path.GetFileName(directory);
+            directory = Path.GetDirectoryName(directory)!;
+        }
+        var result = await RunProcessAsync("git", ["-c", "core.fsmonitor=false", "--literal-pathspecs", "--no-optional-locks",
+            "restore", "--staged", "--worktree", "--", pathspec], directory, 30, cancellationToken).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+        {
+            var notRepository = result.Stderr.Contains("not a git repository", StringComparison.OrdinalIgnoreCase);
+            return Serialize(new { result.Success, result.ExitCode, result.TimedOut, result.Stdout, result.Stderr,
+                result.Truncated, result.ElapsedMilliseconds,
+                errorCode = notRepository ? "coding.git_not_repository" : "coding.git_restore_failed",
+                message = notRepository ? "Im Zielordner ist kein Git-Repository verfügbar. Dateiwerkzeuge und die tatsächlichen Änderungs-Diffs von coding.write/edit bleiben nutzbar."
+                    : "Git-Restore fehlgeschlagen; die ursprüngliche Fehlerausgabe und der Exitcode sind enthalten." });
+        }
+        return Serialize(new { success = result.Success, result,
+            note = "Getätigte Änderungen wurden zurückgesetzt; git diff zeigt den bereinigten Stand. Neu erstellte (untracked) Dateien bleiben bestehen." });
     }
 
     private async Task<CodingCommandResult> RunProcessAsync(string executable, string[] arguments, string directory, int seconds,
@@ -607,6 +633,15 @@ public sealed class LocalCodingToolExecutor
         return ResolvePath(Path.IsPathFullyQualified(directory) ? Path.GetRelativePath(_root, directory) : directory);
     }
 
+    private string ResolveReadPath(string path)
+    {
+        if (path.Length > 1_024 || path.Any(char.IsControl))
+            throw new UnauthorizedAccessException("Der Pfad enthält ungültige Zeichen oder ist zu lang.");
+        return Path.IsPathFullyQualified(path)
+            ? Path.GetFullPath(path)
+            : Path.GetFullPath(Path.Combine(_root, path));
+    }
+
     private string ResolvePath(string relative, bool mutation = false)
     {
         if (relative.Length > 1_024 || Path.IsPathRooted(relative) || relative.Any(char.IsControl) || relative.Contains(':'))
@@ -669,7 +704,9 @@ public sealed class LocalCodingToolExecutor
         : text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", newline, StringComparison.Ordinal);
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
     private static JsonElement Serialize<T>(T value) => JsonSerializer.SerializeToElement(value, JsonOptions);
-    private string Relative(string path) => Path.GetRelativePath(_root, path).Replace(Path.DirectorySeparatorChar, '/');
+    private string Relative(string path) => string.Equals(path, _root, _pathComparison) || path.StartsWith(_rootPrefix, _pathComparison)
+        ? Path.GetRelativePath(_root, path).Replace(Path.DirectorySeparatorChar, '/')
+        : path.Replace(Path.DirectorySeparatorChar, '/');
     private static string? OptionalString(JsonElement args, string name) => args.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static string RequiredString(JsonElement args, string name, int minimum, int maximum) =>
         OptionalString(args, name) is { } text && text.Length >= minimum && text.Length <= maximum

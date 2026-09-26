@@ -88,9 +88,6 @@ public sealed class GoAiClient : IDisposable
     public Task<WebSearchResponse> SearchWebAsync(WebSearchRequest request, CancellationToken cancellationToken = default) =>
         PostAsync<WebSearchRequest, WebSearchResponse>("v1/research/web", request, cancellationToken);
 
-    public Task<WebSearchResponse> SearchYouTubeAsync(WebSearchRequest request, CancellationToken cancellationToken = default) =>
-        PostAsync<WebSearchRequest, WebSearchResponse>("v1/research/youtube", request, cancellationToken);
-
     public Task<WebFetchResponse> FetchWebAsync(WebFetchRequest request, CancellationToken cancellationToken = default) =>
         PostAsync<WebFetchRequest, WebFetchResponse>("v1/research/fetch", request, cancellationToken);
 

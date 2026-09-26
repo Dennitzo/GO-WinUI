@@ -36,7 +36,7 @@ public sealed class SpeechStreamingLiveTests(ITestOutputHelper output)
         var chats = environment.Get<IChatRepository>();
         var documents = environment.Get<IDocumentIngestor>();
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
-        var broker = new LocalToolBroker(connection, null!, documents, null!, chats);
+        var broker = new LocalToolBroker(connection, documents, null!, chats);
         using var service = new GoAiAssistantService(connection, chats, environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(), environment.Get<IGoAiRunRepository>(), environment.Get<IClientToolExecutionRepository>(),
             environment.Get<IBinaryObjectStore>(), documents, new DocumentContextPreparationService(documents),

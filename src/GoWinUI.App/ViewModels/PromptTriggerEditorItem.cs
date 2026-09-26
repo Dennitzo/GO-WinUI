@@ -114,8 +114,6 @@ public sealed partial class PromptTriggerEditorItem : ObservableObject
         PromptTriggerAction.VideoAnalysis => "Video analysieren",
         PromptTriggerAction.ImageAnalysis => "Bild analysieren",
         PromptTriggerAction.WebSearch => "Websuche",
-        PromptTriggerAction.YouTubeSearch => "YouTube-Suche",
-        PromptTriggerAction.BricsCad => "BricsCAD",
         PromptTriggerAction.VoiceInput => "Sprachsteuerung",
         PromptTriggerAction.LiveCaptions => "Live-Untertitel",
         PromptTriggerAction.LiveTranslation => "Live-Übersetzung",

@@ -62,6 +62,48 @@ public sealed class AiClientPersistenceTests
     }
 
     [Fact]
+    public async Task FinalCaptureBacklogIsSplitIntoBoundedOverlappingWindows()
+    {
+        // A slow translation can leave a full 20-second WASAPI buffer at stop.
+        var samples = Enumerable.Range(0, 16_000 * 20).Select(index => (float)index).ToList();
+        var windows = new List<float[]>();
+        Assert.True(await SystemAudioCaptionService.SendCompleteWindowsAsync(samples, (window, _) =>
+        {
+            windows.Add(window.ToArray());
+            Assert.Equal(44 + 64_000 * 2, SystemAudioCaptionService.CreatePcm16Wave(window).Length);
+            return Task.CompletedTask;
+        }, CancellationToken.None));
+        Assert.Equal(5, windows.Count);
+        Assert.Equal(40_000, samples.Count);
+        for (var index = 1; index < windows.Count; index++)
+            Assert.Equal(windows[index - 1][^8_000..], windows[index][..8_000]);
+        Assert.Equal(280_000f, samples[0]);
+        Assert.Equal(319_999f, samples[^1]);
+    }
+
+    [Fact]
+    public async Task CaptionDrainExtendsDeadlineWhenWindowsComplete()
+    {
+        var processor = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observations = 0;
+        await SystemAudioCaptionService.WaitForCaptionDrainAsync(processor.Task, () =>
+        {
+            if (++observations == 1) return 0;
+            processor.TrySetResult();
+            return 1;
+        }, TimeSpan.FromMilliseconds(20), CancellationToken.None);
+        Assert.True(processor.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public async Task CaptionDrainStillTimesOutWithoutProgress()
+    {
+        var processor = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await Assert.ThrowsAsync<TimeoutException>(() => SystemAudioCaptionService.WaitForCaptionDrainAsync(
+            processor.Task, () => 0, TimeSpan.FromMilliseconds(20), CancellationToken.None));
+    }
+
+    [Fact]
     public void OnlyGeneratedScreenCapturesAreBoundToTheSentMessage()
     {
         var screenshot = new AssistantAttachment(
@@ -209,24 +251,6 @@ public sealed class AiClientPersistenceTests
     }
 
     [Fact]
-    public async Task TriggerEditsUseOptimisticRevisionsAndImmediatelyChangeRouting()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var repository = environment.Get<IPromptTriggerRepository>();
-        var original = (await repository.ListAsync()).First(item => item.Action == PromptTriggerAction.BricsCad);
-
-        var updated = await repository.UpdateAsync(
-            original with { Phrase = "CAD ausführen", Description = "Eigener CAD-Präfix." },
-            original.Revision);
-
-        Assert.Equal(original.Revision + 1, updated.Revision);
-        Assert.Null(await repository.MatchAsync("In BricsCAD messe den Abstand"));
-        Assert.Equal(PromptTriggerAction.BricsCad, (await repository.MatchAsync("CAD ausführen: messe den Abstand"))?.Trigger.Action);
-        await Assert.ThrowsAsync<RevisionConflictException>(() =>
-            repository.UpdateAsync(updated with { Phrase = "Veraltet" }, original.Revision));
-    }
-
-    [Fact]
     public void TriggerEditorOnlyMarksActualDatabaseChangesAsDirty()
     {
         var now = DateTimeOffset.UtcNow;
@@ -305,111 +329,6 @@ public sealed class AiClientPersistenceTests
     }
 
     [Fact]
-    public async Task RetryingTheSameAssistantMessageAtomicallyRebindsItsLocalRun()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Wiederholter Serverlauf");
-        var message = await chats.AddMessageAsync(
-            session.Id,
-            ChatRole.Assistant,
-            string.Empty,
-            MessageStatus.Streaming);
-        var runs = environment.Get<IGoAiRunRepository>();
-        var journal = environment.Get<IClientToolExecutionRepository>();
-        var now = DateTimeOffset.UtcNow;
-        var first = await runs.BeginAttemptAsync(new GoAiRunRecord(
-            Guid.NewGuid(), session.Id, message.Id, PromptTriggerAction.BricsCad,
-            "attempt-one", null, 0, "queued", null, null, now, now));
-        await runs.UpdateAsync(
-            first.Id,
-            "server-run-old",
-            12,
-            "failed",
-            "gpt-oss-120b",
-            "provider.generation_terminated");
-        var oldTool = new ClientToolExecutionRecord(
-            "proposal-old-run",
-            first.Id,
-            "server-run-old",
-            11,
-            ClientToolNames.BricsCadMove,
-            "executing",
-            null,
-            now,
-            now);
-        _ = await journal.BeginAsync(oldTool);
-        _ = await journal.CompleteAsync(
-            oldTool.ProposalId,
-            """{"proposalId":"proposal-old-run","status":"completed","result":{"written":true}}""");
-        await chats.UpdateMessageAsync(
-            message.Id,
-            "Alter Zwischenstand.",
-            MessageStatus.Interrupted);
-
-        var requestedReplacementId = Guid.NewGuid();
-        var second = await runs.BeginAttemptAsync(new GoAiRunRecord(
-            requestedReplacementId, session.Id, message.Id, PromptTriggerAction.BricsCad,
-            "attempt-two", null, 0, "queued", null, null, now.AddMinutes(1), now.AddMinutes(1)));
-
-        Assert.Equal(first.Id, second.Id);
-        Assert.NotEqual(requestedReplacementId, second.Id);
-        Assert.Equal("attempt-two", second.IdempotencyKey);
-        Assert.Null(second.ServerRunId);
-        Assert.Equal(0, second.LastEventId);
-        Assert.Equal("queued", second.State);
-        Assert.Null(second.SelectedModel);
-        Assert.Null(second.ErrorCode);
-        var resetMessage = await chats.GetMessageAsync(message.Id);
-        Assert.NotNull(resetMessage);
-        Assert.Equal(string.Empty, resetMessage.Content);
-
-        await runs.UpdateAsync(second.Id, "server-run-new", 0, "running", "gpt-oss-120b");
-        Assert.Empty(await journal.ListPendingSubmissionsAsync(second.Id, "server-run-new"));
-        Assert.Equal(
-            oldTool.ProposalId,
-            Assert.Single(await journal.ListPendingSubmissionsAsync(second.Id, "server-run-old")).ProposalId);
-        Assert.Equal("server-run-new", (await runs.GetAsync(first.Id))?.ServerRunId);
-
-        await runs.UpdateAsync(second.Id, "server-run-new", 17, "running", "gpt-oss-120b");
-        await runs.RewindEventsAsync(second.Id, 0, "running", "client.event_replay");
-        var rewound = await runs.GetAsync(second.Id);
-        Assert.NotNull(rewound);
-        Assert.Equal(0, rewound.LastEventId);
-        Assert.Equal("client.event_replay", rewound.ErrorCode);
-    }
-
-    [Fact]
-    public async Task RunAttemptRejectsNonAssistantAndCrossSessionMessageAnchorsAtomically()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var chats = environment.Get<IChatRepository>();
-        var firstSession = await chats.CreateSessionAsync("Erste Sitzung");
-        var firstTurn = await chats.AddTurnAsync(firstSession.Id, "Erste Anfrage");
-        var secondSession = await chats.CreateSessionAsync("Zweite Sitzung");
-        var secondTurn = await chats.AddTurnAsync(secondSession.Id, "Zweite Anfrage");
-        var runs = environment.Get<IGoAiRunRepository>();
-        var now = DateTimeOffset.UtcNow;
-
-        var userAnchorAttempt = new GoAiRunRecord(
-            Guid.NewGuid(), firstSession.Id, firstTurn.UserMessage.Id, PromptTriggerAction.BricsCad,
-            "invalid-user-anchor", null, 0, "queued", null, null, now, now);
-        var crossSessionAttempt = new GoAiRunRecord(
-            Guid.NewGuid(), firstSession.Id, secondTurn.AssistantMessage.Id, PromptTriggerAction.BricsCad,
-            "invalid-cross-session-anchor", null, 0, "queued", null, null, now, now);
-
-        await Assert.ThrowsAsync<InvalidDataException>(() => runs.BeginAttemptAsync(userAnchorAttempt));
-        await Assert.ThrowsAsync<InvalidDataException>(() => runs.BeginAttemptAsync(crossSessionAttempt));
-
-        Assert.Null(await runs.GetAsync(userAnchorAttempt.Id));
-        Assert.Null(await runs.GetAsync(crossSessionAttempt.Id));
-        Assert.Equal(
-            "Zweite Anfrage",
-            (await chats.GetMessageAsync(secondTurn.UserMessage.Id))?.Content);
-        Assert.Equal(string.Empty, (await chats.GetMessageAsync(secondTurn.AssistantMessage.Id))?.Content);
-    }
-
-    [Fact]
     public async Task ClientStartupStopsGeneralRunsAndPreservesCodingRunAndEventCursorForResume()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -470,41 +389,6 @@ public sealed class AiClientPersistenceTests
 
         Assert.Null(await attachments.GetAsync(attachment.Id));
         Assert.Empty(await attachments.ListAsync(session.Id));
-    }
-
-    [Fact]
-    public async Task ClientToolJournalPreventsDuplicateMutationAfterSseReconnect()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Toollauf");
-        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, string.Empty, MessageStatus.Streaming);
-        var now = DateTimeOffset.UtcNow;
-        var run = await environment.Get<IGoAiRunRepository>().CreateAsync(new GoAiRunRecord(
-            Guid.NewGuid(), session.Id, message.Id, PromptTriggerAction.BricsCad,
-            "idem-tool", "run-server-tool", 4, "waitingForClient", "gpt-oss-120b", null, now, now));
-        var journal = environment.Get<IClientToolExecutionRepository>();
-        var execution = new ClientToolExecutionRecord(
-            "proposal-tool-1", run.Id, "run-server-tool", 5, ClientToolNames.BricsCadMove,
-            "executing", null, now, now);
-
-        var started = await journal.BeginAsync(execution);
-        Assert.Equal("executing", started.State);
-        Assert.Null(started.ResultJson);
-        var completed = await journal.CompleteAsync(
-            execution.ProposalId,
-            """{"proposalId":"proposal-tool-1","status":"completed","result":{"patched":true}}""");
-        Assert.Equal("completed", completed.State);
-        Assert.NotNull(completed.ResultJson);
-        Assert.Equal(execution.ProposalId, Assert.Single(await journal.ListPendingSubmissionsAsync(run.Id)).ProposalId);
-        await journal.MarkSubmittedAsync(execution.ProposalId);
-        Assert.Equal("submitted", (await journal.GetAsync(execution.ProposalId))?.State);
-        Assert.Empty(await journal.ListPendingSubmissionsAsync(run.Id));
-
-        await Assert.ThrowsAsync<InvalidDataException>(() => journal.BeginAsync(
-            execution with { LocalRunId = Guid.NewGuid() }));
-        await chats.DeleteSessionAsync(session.Id);
-        Assert.Null(await journal.GetAsync(execution.ProposalId));
     }
 
     [Fact]

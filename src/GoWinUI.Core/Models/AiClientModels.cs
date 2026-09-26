@@ -15,15 +15,12 @@ public enum PromptTriggerAction
     VideoAnalysis,
     ImageAnalysis,
     WebSearch,
-    YouTubeSearch,
-    BricsCad,
     VoiceInput,
     LiveCaptions,
     LiveTranslation,
     Audiobook,
     Coding,
     DocumentCreate,
-    Blender,
 }
 
 public enum PromptTriggerMatchMode

@@ -1,4 +1,4 @@
-﻿using GoAi.Contracts;
+using GoAi.Contracts;
 using GoAi.Server.Core.Runs;
 using System.Text.Json;
 
@@ -63,11 +63,7 @@ public sealed class AgentToolCatalogTests
     {
         var catalog = new AgentToolCatalog();
         var withoutClient = catalog.GetAvailableTools(CreateRequest(null));
-        var withBricsCad = catalog.GetAvailableTools(CreateRequest(["bricscad"]));
-
         Assert.DoesNotContain(withoutClient, static tool => !tool.ServerSide);
-        Assert.Contains(withBricsCad, static tool => tool.Name == ClientToolNames.BricsCadMove);
-        Assert.DoesNotContain(withBricsCad, static tool => tool.Name == ClientToolNames.DocumentRead);
 
         var withDocuments = catalog.GetAvailableTools(CreateRequest(["documents"]));
         Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsList);
@@ -186,7 +182,6 @@ public sealed class AgentToolCatalogTests
 
         Assert.DoesNotContain(tools, static tool => tool.Name == "web.search");
         Assert.DoesNotContain(tools, static tool => tool.Name == "web.fetch");
-        Assert.DoesNotContain(tools, static tool => tool.Name == "youtube.search");
         Assert.DoesNotContain(tools, static tool => tool.Name == "image.generate");
     }
 

@@ -35,7 +35,21 @@ public sealed class StorageCleanupService : BackgroundService
         var paths = new List<string>();
         await using (var select = connection.CreateCommand())
         {
-            select.CommandText = "SELECT upload_id FROM uploads WHERE expires_at <= $now UNION ALL SELECT artifact_id FROM artifacts WHERE expires_at <= $now;";
+            select.CommandText = """
+                SELECT upload.upload_id
+                FROM uploads upload
+                WHERE upload.expires_at <= $now
+                  AND NOT EXISTS (
+                    SELECT 1 FROM runs run
+                    WHERE run.state IN ('Queued', 'Running', 'WaitingForClient')
+                      AND (
+                        EXISTS (SELECT 1 FROM json_each(run.request_json, '$.uploadIds') item WHERE item.value = upload.upload_id)
+                        OR EXISTS (SELECT 1 FROM json_tree(run.request_json) item WHERE item.key = 'uploadId' AND item.value = upload.upload_id)
+                      )
+                  )
+                UNION ALL
+                SELECT artifact_id FROM artifacts WHERE expires_at <= $now;
+                """;
             select.Parameters.AddWithValue("$now", now);
             await using var reader = await select.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -47,7 +61,16 @@ public sealed class StorageCleanupService : BackgroundService
         await using (var delete = connection.CreateCommand())
         {
             delete.CommandText = """
-                DELETE FROM uploads WHERE expires_at <= $now;
+                DELETE FROM uploads AS upload
+                WHERE expires_at <= $now
+                  AND NOT EXISTS (
+                    SELECT 1 FROM runs run
+                    WHERE run.state IN ('Queued', 'Running', 'WaitingForClient')
+                      AND (
+                        EXISTS (SELECT 1 FROM json_each(run.request_json, '$.uploadIds') item WHERE item.value = upload.upload_id)
+                        OR EXISTS (SELECT 1 FROM json_tree(run.request_json) item WHERE item.key = 'uploadId' AND item.value = upload.upload_id)
+                      )
+                  );
                 DELETE FROM artifacts WHERE expires_at <= $now;
                 DELETE FROM client_tool_proposals
                 WHERE expires_at <= $now AND NOT EXISTS (

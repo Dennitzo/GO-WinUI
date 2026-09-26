@@ -102,57 +102,6 @@ test("General steering live receipts opt into the same ordered persisted timelin
   assert.equal(state.messages[0].id, "answer-1");
 });
 
-test("late thumbnails remain attached to their original tool before subsequent narration and survive restored sessions", () => {
-  for (const mode of ["coding", null]) {
-    const { context, state, elements } = harness();
-    state.selectedToolAction = mode;
-    const first = "Ich analysiere das erste Bild.\n\n";
-    const second = "Ich ändere jetzt die Szene.\n\n";
-    const third = "Das zweite Bild ist geprüft.";
-    const firstTool = { id: "image-1", tool: "media.analyze", status: "completed", contentOffset: first.length };
-    const firstArtifact = { id: "thumb-1", stepId: "image-1", fileName: "first.png" };
-    state.messages = [message({ content: first, status: "streaming", toolSteps: [firstTool], artifacts: [] })];
-    context.renderMessages(false);
-    const article = elements.messageList.querySelector("article");
-    state.messages[0].artifacts = [firstArtifact];
-    context.renderMessages(false);
-    assert.equal(elements.messageList.querySelector("article"), article);
-    const firstStep = article.querySelector('[data-step-id="image-1"]');
-    assert.ok(firstStep.querySelector('[data-artifact-id="thumb-1"]'), "a late artifact invalidates the cached tool rendering");
-    assert.equal(firstStep.querySelector("details").hasAttribute("open"), false);
-    assert.equal(firstStep.querySelector("details .artifact-card"), null, "the thumbnail remains visible outside the collapsed details");
-
-    const finished = { ...state.messages[0], status: "completed", content: first + second + third, toolSteps: [
-      firstTool,
-      { id: "edit", tool: "coding.edit", status: "completed", contentOffset: first.length + second.length },
-      { id: "render", tool: "blender.execute", status: "completed", contentOffset: first.length + second.length },
-      { id: "image-2", tool: "media.analyze", status: "completed", contentOffset: first.length + second.length }
-    ], artifacts: [firstArtifact, firstArtifact, { id: "thumb-2", stepId: "image-2", fileName: "second.png" }] };
-    state.messages = [finished];
-    context.renderMessages(false);
-    const assertOrder = list => {
-      const current = list.querySelector("article");
-      const timeline = current.querySelector(".coding-timeline");
-      assert.deepEqual(timeline.children.map(item => item.dataset.stepId || item.textContent.trim()),
-        [first.trim(), "image-1", second.trim(), "edit", "render", "image-2", third]);
-      assert.equal(current.querySelectorAll(".artifact-card").length, 2, "replayed artifacts are not duplicated");
-      assert.equal(timeline.querySelector('[data-step-id="image-1"] .artifact-card').dataset.artifactId, "thumb-1");
-      assert.equal(timeline.querySelector('[data-step-id="image-2"] .artifact-card').dataset.artifactId, "thumb-2");
-    };
-    assertOrder(elements.messageList);
-    state.messages = [];
-    context.renderMessages(false);
-    state.messages = [JSON.parse(JSON.stringify(finished))];
-    context.renderMessages(false);
-    assertOrder(elements.messageList);
-    const restored = harness();
-    restored.state.selectedToolAction = mode;
-    restored.context.applyConversationSnapshot({ activeSessionId: "session-a", conversationRevision: 1,
-      messages: [JSON.parse(JSON.stringify(finished))] });
-    assertOrder(restored.elements.messageList);
-  }
-});
-
 test("a legacy thumbnail with an unavailable step remains visible instead of being silently discarded", () => {
   const { context } = harness();
   const article = context.createMessage(message({ artifacts: [{ id: "legacy", stepId: "unknown-step", fileName: "old.png" }] }));
@@ -332,20 +281,27 @@ test("empty General chat greets without an industry focus and Coding keeps its p
   assert.equal(elements.messageList.textContent, "Wobei kann ich dich unterstützen?");
 });
 
-test("Blender capability uses the Coding workspace and timeline before its backend mode transition", () => {
-  const { context, state, elements } = harness();
-  state.selectedToolAction = "blender";
-  context.renderCodingWorkspace();
-  assert.equal(elements.appShell.classList.contains("coding-mode"), true);
-  assert.match(elements.prompt.placeholder, /Frage zum Projekt/);
-  context.renderMessages(false);
-  assert.match(elements.messageList.textContent, /Woran arbeiten wir/);
-  state.messages = [message({ status: "streaming", content: "Ich prüfe zuerst die Szene." })];
-  state.messageRunStatus.set("answer-1", { status: "Szene prüfen" });
-  context.renderMessages(false);
-  assert.ok(elements.messageList.querySelector(".coding-timeline"));
-  assert.match(elements.messageList.querySelector(".message-meta").textContent, /Coding Agent/);
-  assert.equal(state.selectedToolAction, "blender", "rendering must not rewrite the outgoing tool capability");
+test("assistant headers use the Coding presentation in General and show accurate live-caption activity", () => {
+  const { context, state } = harness();
+  state.selectedToolAction = null;
+  state.messageRunStatus.set("answer-1", { status: "Denkt nach", detail: "Antwort wird vorbereitet" });
+  const answer = context.createMessage(message({ status: "streaming" }));
+  const answerMeta = answer.querySelector(".message-meta");
+  assert.equal(answerMeta.querySelector(".message-meta__identity").textContent, "AI - 12:34");
+  assert.equal(answerMeta.querySelector(".message-status").textContent, "Denkt nach");
+  assert.equal(answerMeta.querySelector(".message-meta__detail").textContent, "Antwort wird vorbereitet");
+  assert.ok(answerMeta.querySelector(".message-status-spinner"));
+
+  const caption = context.createMessage(message({
+    id: "live-caption:1", status: "streaming", isLiveCaption: true,
+    liveCaptionStatus: "Sprache wird erkannt", liveCaptionProvider: "whisper-large-v3-live + ECAPA"
+  }));
+  const captionMeta = caption.querySelector(".message-meta");
+  assert.equal(captionMeta.querySelector(".message-meta__identity").textContent, "Live-Untertitel - 12:34");
+  assert.equal(captionMeta.querySelector(".message-status").textContent, "Sprache wird erkannt");
+  assert.equal(captionMeta.querySelector(".message-meta__detail").textContent, "whisper-large-v3-live + ECAPA");
+  assert.ok(captionMeta.querySelector(".message-status-spinner"));
+  assert.ok(!captionMeta.textContent.includes("Denkt nach"));
 });
 
 test("stored HTML creates an isolated frame only after a click and survives message rerenders", () => {

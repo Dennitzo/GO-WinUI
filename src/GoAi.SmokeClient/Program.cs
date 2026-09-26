@@ -162,9 +162,6 @@ async Task<object> RunLiveSmokeAsync()
     var web = await client.SearchWebAsync(new WebSearchRequest(options.SearchQuery, 3, "de-DE"));
     Ensure(web.Results.Count > 0, "SearXNG returned no web results.");
     Ensure(string.Equals(web.Provider, "searxng", StringComparison.OrdinalIgnoreCase), "Unexpected web provider.");
-    var youtube = await client.SearchYouTubeAsync(new WebSearchRequest("Wissenschaft einfach erklärt", 3, "de-DE"));
-    Ensure(youtube.Results.Count > 0, "YouTube fallback returned no results.");
-    Ensure(youtube.IsFallback, "YouTube search did not report the configured SearXNG fallback.");
     var fetched = await client.FetchWebAsync(new WebFetchRequest("https://example.com/"));
     Ensure(fetched.IsUntrusted && fetched.Content.Length > 0, "Protected web fetch did not return untrusted content.");
 
@@ -243,7 +240,6 @@ async Task<object> RunLiveSmokeAsync()
             image = imageRun.Snapshot.RunId,
         },
         webResults = web.Results.Count,
-        youtubeFallback = youtube.IsFallback,
         transcriptionSegments = transcription.Segments.Count,
         liveCaption = caption.Text,
         ttsProvider = speech.Provider,

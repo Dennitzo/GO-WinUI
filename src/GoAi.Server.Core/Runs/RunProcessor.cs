@@ -199,9 +199,7 @@ public sealed partial class RunProcessor : BackgroundService
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ToolCalls;
-        return UsesBlenderGeneralBudget(request, effectiveTools)
-            ? Math.Max(options.MaximumToolCalls, options.BlenderMaximumToolCalls)
-            : options.MaximumToolCalls;
+        return options.MaximumToolCalls;
     }
 
     internal static int ResolveMaximumModelRounds(RunRequest request, GoAiServerOptions options,
@@ -210,14 +208,8 @@ public sealed partial class RunProcessor : BackgroundService
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ModelRounds;
         var generalRounds = request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
             ? options.WorkspaceMaximumModelRounds : options.MaximumModelRounds;
-        return UsesBlenderGeneralBudget(request, effectiveTools)
-            ? Math.Max(generalRounds, options.BlenderMaximumModelRounds) : generalRounds;
+        return generalRounds;
     }
-
-    private static bool UsesBlenderGeneralBudget(RunRequest request, IReadOnlyList<AgentToolSpec> effectiveTools) =>
-        request.Mode == RunMode.General
-        && request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
-        && effectiveTools.Any(static tool => tool.Name == WorkspaceTools.Blender);
 
     private async Task ProcessConversationAsync(
         string runId,
@@ -456,7 +448,7 @@ public sealed partial class RunProcessor : BackgroundService
                     {
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
-                        if ((isCoding || call.Name == WorkspaceTools.Blender && UsesBlenderGeneralBudget(request, effectiveTools))
+                        if (isCoding
                             && string.IsNullOrWhiteSpace(pendingProposalId))
                             CodingLoopGuard.ThrowIfRepeatedFailure(messages, call, workingState);
                         tool = _toolCatalog.Resolve(call.Name, availableTools);
@@ -506,7 +498,7 @@ public sealed partial class RunProcessor : BackgroundService
                         }
                         messages.Add(new LmChatMessage(
                             "tool",
-                            isCoding || call.Name == WorkspaceTools.Blender
+                            isCoding
                                 ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult), call.Name) : SerializeClientToolResult(clientResult),
                             ToolCallId: call.Id));
                         if (workingState is not null)
@@ -561,7 +553,7 @@ public sealed partial class RunProcessor : BackgroundService
                         else
                         {
                             result = await _toolExecutor.ExecuteAsync(tool.Name, call.Arguments, runId,
-                                selection.ModelId, request.ReasoningEffort, cancellationToken).ConfigureAwait(false);
+                                selection.ModelId, request.ReasoningEffort, request.UploadIds, cancellationToken).ConfigureAwait(false);
                         }
                         foreach (var artifact in result.Artifacts)
                         {
@@ -595,7 +587,7 @@ public sealed partial class RunProcessor : BackgroundService
                         }
                         messages.Add(new LmChatMessage(
                             "tool",
-                            isCoding || call.Name == WorkspaceTools.Blender
+                            isCoding
                                 ? CodingLoopGuard.BoundToolResult(result.Result.GetRawText(), call.Name) : result.Result.GetRawText(),
                             ToolCallId: call.Id));
                         if (workingState is not null && tool.Name != CodingWorkingStateTools.PlanTool)
@@ -662,7 +654,12 @@ public sealed partial class RunProcessor : BackgroundService
             var effort = _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
             var selectableTools = budgetSummary ? [] : availableTools.ToArray();
             var modelTools = CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding);
-            var liveTextGate = new IncrementalVisibleTextGate(enabled: true, bufferUntilComplete: true);
+            // A turn following go.selectTool has exactly one purpose: emit the
+            // selected structured call. Some local models narrate that intent
+            // before (or instead of) returning JSON. Keep this protocol-only
+            // turn out of the visible answer, including its private reasoning.
+            var suppressRequiredToolTurn = selectedToolName is not null;
+            var liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn, bufferUntilComplete: true);
             CodingTextReconciler? codingText = null;
             var firstReasoningFragment = true;
             var reasoningPublished = false;
@@ -688,11 +685,14 @@ public sealed partial class RunProcessor : BackgroundService
                         if (!string.IsNullOrEmpty(progress.ReasoningDelta))
                         {
                             interruptedReasoning.Append(progress.ReasoningDelta);
-                            await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
-                                new ReasoningDeltaEvent(progress.ReasoningDelta, (int)Math.Min(roundCount + 1, int.MaxValue),
-                                    ReplaceFrom: firstReasoningFragment ? 0 : null, State: "running"), token).ConfigureAwait(false);
-                            firstReasoningFragment = false;
-                            reasoningPublished = true;
+                            if (!suppressRequiredToolTurn)
+                            {
+                                await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
+                                    new ReasoningDeltaEvent(progress.ReasoningDelta, (int)Math.Min(roundCount + 1, int.MaxValue),
+                                        ReplaceFrom: firstReasoningFragment ? 0 : null, State: "running"), token).ConfigureAwait(false);
+                                firstReasoningFragment = false;
+                                reasoningPublished = true;
+                            }
                         }
                         return;
                     }
@@ -711,7 +711,7 @@ public sealed partial class RunProcessor : BackgroundService
 
                     if (progress.State == "generationRetry")
                     {
-                        liveTextGate = new IncrementalVisibleTextGate(enabled: true, bufferUntilComplete: true);
+                        liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn, bufferUntilComplete: true);
                         codingText?.RestartAttempt();
                         firstReasoningFragment = true;
                         interruptedContent.Clear();
@@ -882,15 +882,6 @@ public sealed partial class RunProcessor : BackgroundService
                     throw new GeneralContextBudgetException(exception.EstimatedTokens, exception.BudgetTokens);
                 }
 
-                if (roundCount == 0
-                    && request.SessionContext is not null
-                    && contextPlan.WasCompacted)
-                {
-                    throw new SessionContextBudgetException(
-                        contextPlan.EstimatedInputTokens,
-                        contextPlan.InputTokenBudget);
-                }
-
                 var documentContext = request.DocumentContext;
                 var documentPrepared = documentContext?.Mode == DocumentContextMode.Prepared;
                 var documentDetail = documentContext switch
@@ -967,7 +958,8 @@ public sealed partial class RunProcessor : BackgroundService
                         requiredContextLength: contextLength,
                         sessionCacheKey: !isCoding && string.IsNullOrWhiteSpace(request.SessionId) ? null
                             : ModelRuntimeClient.BuildSessionCacheKey(request.SessionId ?? runId, selection.Role,
-                                isCoding ? request.CodingOptions?.WorkspacePath : null),
+                                isCoding ? request.CodingOptions?.WorkspacePath
+                                    : request.WorkspacePath),
                         nativeProgress: nativeProgress).ConfigureAwait(false);
                     {
                         // Commit the actual native prompt on every successful turn,
@@ -1198,8 +1190,9 @@ public sealed partial class RunProcessor : BackgroundService
                     }
                     messages.Add(new LmChatMessage(
                         "system",
-                        $"Der letzte Turn lieferte den ausgewählten Tool-Call '{expectedToolName}' nicht vollständig. "
-                        + "Wähle einen Werkzeugnamen erneut aus dem kompakten Katalog oder liefere die normale Abschlussantwort."));
+                        $"Das vollständige Schema für '{expectedToolName}' liegt bereits vor. Antworte jetzt ausschließlich "
+                        + $"mit genau einem strukturierten Aufruf von '{expectedToolName}' und ohne sichtbaren Text. "
+                        + $"Rufe nicht erneut '{AgentToolCatalog.SelectorToolName}' auf."));
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     continue;
                 }
@@ -1797,6 +1790,7 @@ public sealed partial class RunProcessor : BackgroundService
             ClientToolNames.CodingEdit => "Ich wende die vorgeschlagenen Änderungen auf „" + StringArgument(arguments, "path") + "“ an.",
             ClientToolNames.CodingCommand => "Ich führe „" + StringArgument(arguments, "executable") + "“ im Projektordner aus und prüfe die Ausgabe.",
             ClientToolNames.CodingGitDiff => "Ich prüfe den Git-Status und die Änderungen im Projekt.",
+            ClientToolNames.CodingUndo => "Ich setze die getätigten Änderungen im Projekt zurück.",
             ClientToolNames.CodingSearchHistory => "Ich suche im Verlauf dieser Sitzung nach „" + StringArgument(arguments, "query") + "“.",
             ClientToolNames.CodingSearchKnowledge => "Ich suche in den Dokumenten dieser Sitzung nach „" + StringArgument(arguments, "query") + "“.",
             ClientToolNames.CodingRenderHtml => "Ich öffne die vorgeschlagene HTML-Vorschau.",
@@ -1819,7 +1813,7 @@ public sealed partial class RunProcessor : BackgroundService
     {
         var value = toolName switch
         {
-            "web.search" or "youtube.search" => StringArgument(arguments, "query"),
+            "web.search" => StringArgument(arguments, "query"),
             "web.fetch" => StringArgument(arguments, "url"),
             CodingDeepResearchPipeline.ToolName => StringArgument(arguments, "task"),
             _ => null,

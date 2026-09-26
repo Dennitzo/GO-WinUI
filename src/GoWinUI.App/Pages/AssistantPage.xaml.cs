@@ -461,6 +461,9 @@ public sealed partial class AssistantPage : Page, IDisposable
                 case "document.pick":
                     await PickDocumentAsync(args.Envelope, bridge);
                     break;
+                case "document.paste":
+                    await PasteDocumentsAsync(args.Envelope, bridge);
+                    break;
                 case "chat.exportPdf":
                     await ExportPdfAsync(args.Envelope, bridge, selectedMessageOnly: false);
                     break;
@@ -1290,8 +1293,69 @@ public sealed partial class AssistantPage : Page, IDisposable
             return;
         }
 
+        await ImportStorageFilesAsync(sessionId, files, bridge, envelope.RequestId);
+    }
+
+    private async Task PasteDocumentsAsync(WebBridgeEnvelope envelope, AssistantWebBridge bridge)
+    {
+        if (!TryReadGuid(envelope.Payload, "sessionId", out var sessionId))
+        {
+            throw new InvalidOperationException("Öffne oder erstelle zuerst eine Sitzung.");
+        }
+
+        var content = Clipboard.GetContent();
+        if (content.Contains(StandardDataFormats.StorageItems))
+        {
+            var storageItems = await content.GetStorageItemsAsync();
+            var files = storageItems.OfType<StorageFile>().ToArray();
+            if (files.Length > 0)
+            {
+                await ImportStorageFilesAsync(sessionId, files, bridge, envelope.RequestId);
+                return;
+            }
+        }
+
+        if (!content.Contains(StandardDataFormats.Bitmap))
+        {
+            throw new InvalidOperationException("Die Zwischenablage enthält keine einfügbaren Dateien oder Bilder.");
+        }
+
+        var bitmapReference = await content.GetBitmapAsync();
+        var bitmapSource = await bitmapReference.OpenReadAsync();
+        await using var bitmap = bitmapSource.AsStreamForRead();
+        var contentType = NormalizeClipboardImageContentType(bitmapSource.ContentType);
+        var extension = ResolveClipboardImageExtension(contentType);
+        var fileName = $"Zwischenablage-{DateTimeOffset.Now:yyyyMMdd-HHmmss}{extension}";
+        await bridge.PostAsync("document.import.started", new { files = new[] { fileName } }, envelope.RequestId);
+        try
+        {
+            await _coordinator.ImportAttachmentAsync(
+                sessionId,
+                fileName,
+                contentType,
+                bitmap,
+                _lifetime?.Token ?? CancellationToken.None);
+            await bridge.PostAsync("document.import.progress", new { remaining = Array.Empty<string>() }, envelope.RequestId);
+        }
+        finally
+        {
+            await bridge.PostAsync("document.import.completed", new { }, envelope.RequestId);
+        }
+        await bridge.PostAsync(
+            "document.changed",
+            await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None),
+            envelope.RequestId);
+    }
+
+    private async Task ImportStorageFilesAsync(
+        Guid sessionId,
+        IEnumerable<StorageFile> sourceFiles,
+        AssistantWebBridge bridge,
+        string requestId)
+    {
+        var files = sourceFiles.ToArray();
         var pendingNames = files.Select(static file => file.Name).ToList();
-        await bridge.PostAsync("document.import.started", new { files = pendingNames }, envelope.RequestId);
+        await bridge.PostAsync("document.import.started", new { files = pendingNames }, requestId);
         try
         {
             foreach (var file in files)
@@ -1316,18 +1380,40 @@ public sealed partial class AssistantPage : Page, IDisposable
                         _lifetime?.Token ?? CancellationToken.None);
                 }
                 pendingNames.Remove(file.Name);
-                await bridge.PostAsync("document.import.progress", new { remaining = pendingNames }, envelope.RequestId);
+                await bridge.PostAsync("document.import.progress", new { remaining = pendingNames }, requestId);
             }
         }
         finally
         {
-            await bridge.PostAsync("document.import.completed", new { }, envelope.RequestId);
+            await bridge.PostAsync("document.import.completed", new { }, requestId);
         }
         await bridge.PostAsync(
             "document.changed",
             await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None),
-            envelope.RequestId);
+            requestId);
     }
+
+    private static string NormalizeClipboardImageContentType(string? contentType) =>
+        contentType?.Trim().ToLowerInvariant() switch
+        {
+            "image/jpeg" or "image/jpg" => "image/jpeg",
+            "image/x-png" => "image/png",
+            "image/gif" => "image/gif",
+            "image/webp" => "image/webp",
+            "image/bmp" => "image/bmp",
+            "image/tiff" => "image/tiff",
+            _ => "image/png",
+        };
+
+    private static string ResolveClipboardImageExtension(string contentType) => contentType switch
+    {
+        "image/jpeg" => ".jpg",
+        "image/gif" => ".gif",
+        "image/webp" => ".webp",
+        "image/bmp" => ".bmp",
+        "image/tiff" => ".tiff",
+        _ => ".png",
+    };
 
     private async Task CaptureScreenshotAsync(WebBridgeEnvelope envelope, AssistantWebBridge bridge)
     {
@@ -1944,10 +2030,9 @@ public sealed partial class AssistantPage : Page, IDisposable
     private async Task OpenArtifactAsync(JsonElement payload)
     {
         if (!TryReadGuid(payload, "artifactId", out var artifactId)
-            || await _artifacts.GetAsync(artifactId, _lifetime?.Token ?? CancellationToken.None) is not { } artifact
-            || !artifact.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            || await _artifacts.GetAsync(artifactId, _lifetime?.Token ?? CancellationToken.None) is not { } artifact)
         {
-            throw new InvalidOperationException("Das zu öffnende Bild wurde nicht gefunden.");
+            throw new InvalidOperationException("Das zu öffnende Artefakt wurde nicht gefunden.");
         }
 
         var path = await _previews.MaterializeOriginalAsync(
@@ -1956,7 +2041,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         var file = await StorageFile.GetFileFromPathAsync(path);
         if (!await Launcher.LaunchFileAsync(file))
         {
-            throw new InvalidOperationException("Das Bild konnte nicht im Standardprogramm geöffnet werden.");
+            throw new InvalidOperationException("Das Artefakt konnte nicht im Standardprogramm geöffnet werden.");
         }
     }
 

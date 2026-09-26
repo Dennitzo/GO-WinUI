@@ -103,23 +103,18 @@
   };
 
   const byId = id => document.getElementById(id);
-  // Blender is a persistent Coding-agent mode: it survives session switches, page
-  // reloads and follow-up prompts until the user deselects it.
-  const persistentToolActions = new Set(["bricsCad", "audiobook", "coding", "blender"]);
+  const persistentToolActions = new Set(["audiobook", "coding"]);
   const toolVisuals = Object.freeze({
     coding: ["Coding", "M8 6l-6 6 6 6M16 6l6 6-6 6M14 3l-4 18"],
     audioAnalysis: ["Audio analysieren", "M4 12h2m2-5 4 10 3-7 2 4h3"],
     documentCreate: ["Dokument erstellen", "M6 3h8l4 4v14H6zM14 3v5h4M9 12h6M9 16h6"],
-    blender: ["Blender", "M12 3l9 5v9l-9 5-9-5V8zM3 8l9 5 9-5M12 13v9"],
     imageAnalysis: ["Bild analysieren", "M4 5h16v14H4zM7 15l3-3 3 3 2-2 2 2"],
     imageGeneration: ["Bild erstellen", "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
-    bricsCad: ["BricsCAD", "M4 18V6l8-3 8 3v12l-8 3zM12 3v18M4 6l8 4 8-4"],
     audiobook: ["Hörbuch erstellen", "M4 5c3-1 5-1 8 1v14c-3-2-5-2-8-1zM20 5c-3-1-5-1-8 1v14c3-2 5-2 8-1z"],
     translation: ["Übersetzen", "M4 5h10M9 3v2c0 5-2 8-5 10M6 9c2 3 4 5 8 7M15 9l5 12M18 9l-5 12M14 18h7"],
     videoAnalysis: ["Video analysieren", "M3 6h13v12H3zM16 10l5-3v10l-5-3z"],
     textToSpeech: ["Vorlesen", "M5 9v6h4l5 4V5L9 9zM17 9c1 1 1 5 0 6M19 6c3 3 3 9 0 12"],
     webSearch: ["Websuche", "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16 16l5 5M4 11h14M11 4c3 3 3 11 0 14M11 4c-3 3-3 11 0 14"],
-    youTubeSearch: ["YouTube", "M3 7c0-2 1-3 3-3h12c2 0 3 1 3 3v10c0 2-1 3-3 3H6c-2 0-3-1-3-3zM10 9l5 3-5 3z"],
     "screen.capture": ["Bild aufnehmen", "M4 7h4l2-2h4l2 2h4v12H4zM12 10a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
     "screenClip.toggle": ["Video aufnehmen", "M3 6h13v12H3zM16 10l5-3v10l-5-3z"],
     "liveCaption.start": ["Live-Untertitel", "M4 8h2M4 12h4M4 16h2M10 7v10M14 9v6M18 6v12M22 9v6"]
@@ -169,12 +164,6 @@
     contextStrip: byId("context-strip"),
     activeTools: byId("active-tool-chips"),
     documents: byId("document-chips"),
-    liveCaption: byId("live-caption"),
-    liveCaptionTitle: byId("live-caption-title"),
-    liveCaptionStatus: byId("live-caption-status"),
-    liveCaptionTranscript: byId("live-caption-transcript"),
-    liveCaptionError: byId("live-caption-error"),
-    stopLiveCaption: byId("stop-live-caption"),
     microphone: byId("microphone"),
     screenClip: document.querySelector('[data-tool-immediate="screenClip.toggle"]'),
     overlay: byId("workflow-overlay"),
@@ -295,11 +284,16 @@
   function timeLabel(value) {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "";
+    const dateText = new Intl.DateTimeFormat(document.documentElement.lang || "de", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(date);
     const valueText = new Intl.DateTimeFormat(document.documentElement.lang || "de", {
       hour: "2-digit",
       minute: "2-digit"
     }).format(date);
-    return `${valueText} Uhr`;
+    return `${dateText} · ${valueText} Uhr`;
   }
 
   function sessionShortLabel(title) {
@@ -530,11 +524,32 @@
   }
 
   function renderSessions() {
+    const bySessionActivity = (a, b) => {
+      const pinned = Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned));
+      if (pinned) return pinned;
+      const left = Date.parse(a.updatedAt || a.createdAt || "");
+      const right = Date.parse(b.updatedAt || b.createdAt || "");
+      if (Number.isFinite(left) && Number.isFinite(right) && left !== right) return right - left;
+      const leftRaw = String(a.updatedAt || a.createdAt || "");
+      const rightRaw = String(b.updatedAt || b.createdAt || "");
+      return leftRaw < rightRaw ? 1 : leftRaw > rightRaw ? -1 : 0;
+    };
     const query = elements.sessionSearch.value.trim().toLocaleLowerCase();
     const matchesQuery = item => !query || String(item.title || "").toLocaleLowerCase().includes(query);
     elements.sessionList.replaceChildren();
 
-    const groups = Array.isArray(state.sessionGroups) ? state.sessionGroups : [];
+    const groups = (Array.isArray(state.sessionGroups) ? state.sessionGroups : []).slice().sort((left, right) => {
+      const latestActivity = group => {
+        const memberIds = new Set((Array.isArray(group.sessionIds) ? group.sessionIds : []).map(String));
+        const memberDates = state.sessions
+          .filter(session => String(session.sessionGroupId || "") === String(group.id) || memberIds.has(String(session.id)))
+          .map(session => Date.parse(session.updatedAt || session.createdAt || ""))
+          .filter(Number.isFinite);
+        const created = Date.parse(group.createdAt || "");
+        return Math.max(Number.isFinite(created) ? created : 0, ...memberDates, 0);
+      };
+      return latestActivity(right) - latestActivity(left);
+    });
     const assignedIds = new Set();
 
     for (const group of groups) {
@@ -545,7 +560,7 @@
       for (const session of members) assignedIds.add(String(session.id));
       const matchesProject = query && String(group.name || "").toLocaleLowerCase().includes(query);
       const groupSessions = members.filter(session => matchesProject || matchesQuery(session))
-        .sort((a, b) => Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned)));
+        .sort(bySessionActivity);
       const collapsed = query ? false : Boolean(group.isCollapsed);
       if (!groupSessions.length && (!group.workspacePath || query && !matchesProject)) continue;
       elements.sessionList.append(createProjectRow({
@@ -562,6 +577,11 @@
         onNewSession: () => {
           if (!group.workspacePath) { showToast("Für dieses Projekt ist kein Projektordner hinterlegt.", true); return; }
           flushDraft();
+          // Do not visually carry the previous session's persistent chip while
+          // the new General session is being created by the backend.
+          state.selectedToolAction = null;
+          state.persistentToolAction = null;
+          renderContext();
           post("session.projectCreate", { workspacePath: group.workspacePath });
           document.body.classList.remove("sessions-open");
         }
@@ -569,7 +589,7 @@
     }
 
     const ungroupedSessions = state.sessions.filter(session => !assignedIds.has(String(session.id)) && matchesQuery(session))
-      .sort((a, b) => Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned)));
+      .sort(bySessionActivity);
     if (ungroupedSessions.length) {
       const collapsed = query ? false : readUngroupedCollapsed();
       elements.sessionList.append(createProjectRow({
@@ -579,7 +599,13 @@
         addable: true,
         collapsed,
         sessions: ungroupedSessions,
-        onNewSession: () => { flushDraft(); post("session.create", {}); },
+        onNewSession: () => {
+          flushDraft();
+          state.selectedToolAction = null;
+          state.persistentToolAction = null;
+          renderContext();
+          post("session.create", {});
+        },
         onToggle: nextCollapsed => {
           persistUngroupedCollapsed(nextCollapsed);
           renderSessions();
@@ -590,7 +616,7 @@
 
   function renderMessages(scrollToEnd) {
     renderCodingChanges();
-    if (["coding", "blender"].includes(state.selectedToolAction) || state.messages.some(message => message.toolSteps?.length
+    if (["coding"].includes(state.selectedToolAction) || state.messages.some(message => message.toolSteps?.length
       || state.codingActivity.get(String(message.id))?.some(step => step.kind === "tool"))) {
       renderCodingMessages(scrollToEnd);
       return;
@@ -604,7 +630,7 @@
     if (!state.messages.length && state.activeSessionId) {
       const empty = document.createElement("div");
       empty.className = "chat-empty-state";
-      if (["coding", "blender"].includes(state.selectedToolAction)) {
+      if (["coding"].includes(state.selectedToolAction)) {
         const heading = document.createElement("h2");
         heading.textContent = "Woran arbeiten wir?";
         const description = document.createElement("p");
@@ -1102,7 +1128,7 @@
 
   function createMessage(message, previousArticle = null) {
     const role = String(message.role).toLowerCase();
-    const hasTimeline = role === "assistant" && (["coding", "blender"].includes(state.selectedToolAction) || message.toolSteps?.length
+    const hasTimeline = role === "assistant" && (["coding"].includes(state.selectedToolAction) || message.toolSteps?.length
       || state.codingActivity.get(String(message.id))?.some(step => step.kind === "tool"));
     // Failed runs without generated text store their error as a content fallback.
     // Display it once; retain the original message for copy/export and persistence.
@@ -1126,23 +1152,42 @@
       const meta = document.createElement("div");
       meta.className = "message-meta";
       const messageTime = timeLabel(message.createdAt || message.updatedAt);
-      const assistantLabel = ["coding", "blender"].includes(state.selectedToolAction) ? "Coding Agent" : "AI";
-      meta.textContent = messageTime ? `${assistantLabel} - ${messageTime}` : assistantLabel;
+      const assistantLabel = ["coding"].includes(state.selectedToolAction) ? "Coding Agent" : "AI";
+      const displayLabel = message.isLiveCaption ? "Live-Untertitel" : assistantLabel;
+      const identity = document.createElement("span");
+      identity.className = "message-meta__identity";
+      identity.textContent = messageTime ? `${displayLabel} - ${messageTime}` : displayLabel;
+      meta.append(identity);
       const liveStatus = state.messageRunStatus.get(String(message.id));
-      if (message.status && !message.tool && !liveStatus && !["completed", "Completed"].includes(message.status)) {
+      const appendActivity = (label, detail, spinning = false, failed = false) => {
+        const activity = document.createElement("span");
+        activity.className = "message-meta__activity";
+        if (spinning) {
+          const spinner = document.createElement("span");
+          spinner.className = "message-status-spinner";
+          spinner.setAttribute("aria-hidden", "true");
+          activity.append(spinner);
+        }
         const status = document.createElement("span");
-        status.className = `message-status ${String(message.status).toLowerCase()}`;
-        status.textContent = statusLabel(message.status);
-        meta.append(" · ", status);
-      }
-      if (liveStatus?.status && !hasTimeline) {
-        const spinner = document.createElement("span");
-        spinner.className = "message-status-spinner";
-        spinner.setAttribute("aria-hidden", "true");
-        const status = document.createElement("span");
-        status.className = "message-status streaming";
-        status.textContent = runStatusText(liveStatus);
-        meta.append(" · ", spinner, status);
+        status.className = `message-status${spinning ? " streaming" : ""}${failed ? " failed" : ""}`;
+        status.textContent = label;
+        activity.append(status);
+        if (detail) {
+          const information = document.createElement("span");
+          information.className = "message-meta__detail";
+          information.textContent = detail;
+          activity.append(information);
+        }
+        meta.append(activity);
+      };
+      if (message.isLiveCaption) {
+        appendActivity(message.liveCaptionStatus || "Sprache wird erkannt", message.liveCaptionProvider, true);
+      } else if (message.status && !message.tool && !liveStatus && !["completed", "Completed"].includes(message.status)) {
+        const normalizedStatus = String(message.status).toLowerCase();
+        appendActivity(statusLabel(message.status), null,
+          ["pending", "streaming"].includes(normalizedStatus), normalizedStatus === "failed");
+      } else if (liveStatus?.status && !hasTimeline) {
+        appendActivity(liveStatus.status, runStatusText(liveStatus), true);
       }
       body.append(meta);
     }
@@ -1157,7 +1202,7 @@
     content.className = "message-content";
     if (["streaming", "Streaming"].includes(message.status)) content.classList.add("stream-cursor");
     content.append(globalThis.goMarkdown.render(sanitizeVisibleMessageContent(contentMessage.content)));
-    if (["coding", "blender"].includes(state.selectedToolAction)) enhanceCodingCodeBlocks(content);
+    if (["coding"].includes(state.selectedToolAction)) enhanceCodingCodeBlocks(content);
     annotateReadableSpeechBlocks(contentMessage, article, content);
     body.append(content);
     }
@@ -1185,7 +1230,9 @@
       error.append(heading, detail);
       body.append(error);
     }
-    body.append(createMessageFooter(message, article));
+    if (!message.isLiveCaption) {
+      body.append(createMessageFooter(message, article));
+    }
 
     article.append(body);
     return article;
@@ -1194,7 +1241,7 @@
   function createArtifactList(items) {
     const list = document.createElement("div");
     list.className = "message-artifacts";
-    for (const artifact of items) {
+    for (const artifact of items.filter(isVisibleArtifact)) {
       const card = document.createElement("section");
       card.className = "artifact-card";
       card.dataset.artifactId = artifact.id;
@@ -1240,6 +1287,12 @@
       footer.className = "artifact-card__footer";
       const info = document.createElement("span");
       info.textContent = `${artifact.fileName || "Artefakt"} · ${formatBytes(artifact.length)}`;
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "artifact-card__open";
+      open.textContent = "Öffnen";
+      open.title = `${artifact.fileName || "Artefakt"} im Standardprogramm öffnen`;
+      open.addEventListener("click", () => post("artifact.open", { artifactId: artifact.id }));
       const save = document.createElement("button");
       save.type = "button";
       save.textContent = isCapturedMedia
@@ -1250,7 +1303,7 @@
             : "Screenshot speichern")
         : "Speichern unter";
       save.addEventListener("click", () => post("artifact.save", { artifactId: artifact.id }));
-      footer.append(info, save);
+      footer.append(info, open, save);
       card.append(footer);
       list.append(card);
       if (mediaType.startsWith("image/") || mediaType.startsWith("audio/") || mediaType.startsWith("video/")) {
@@ -1276,6 +1329,10 @@
       }
     }
     return list;
+  }
+
+  function isVisibleArtifact(artifact) {
+    return String(artifact?.metadata?.role || "").toLowerCase() !== "vision_input";
   }
 
   function formatBytes(value) {
@@ -1317,15 +1374,6 @@
 
   function codingToolLabel(value, inputJson) {
     const name = String(value || "");
-    if (name === "blender.execute") {
-      try {
-        const input = typeof inputJson === "string" ? JSON.parse(inputJson) : inputJson;
-        const label = ({ info: "Blender und Szenenstand prüfen", scaffold: "3D-Projekt vorbereiten",
-          run: "3D-Modell aufbauen oder ändern", stage: "3D-Etappe modellieren", preview: "Blender-Zwischenstand anzeigen", inspect: "3D-Geometrie prüfen",
-          render: "3D-Ansichten rendern", open: "Blender-Szene öffnen" })[input?.operation];
-        if (label) return label;
-      } catch { /* Historic entries retain the general tool label. */ }
-    }
     return ({
       "assistant.reasoning": "Denkprozess",
       "document.agent": "Historischer Dokumentauftrag",
@@ -1334,7 +1382,6 @@
       "image.input": "Bild oder Screenshot laden",
       "media.analyze": "Bild analysieren",
       "media.inspect": "Medien prüfen",
-      "blender.execute": "Blender",
       "workspace.open": "Projektanwendung öffnen",
       "speech.synthesize": "Audio erstellen",
       "coding.list": "Projekt erkunden",
@@ -1347,6 +1394,7 @@
       "coding.edit": "Datei bearbeiten",
       "coding.command": "Befehl ausführen",
       "coding.gitDiff": "Änderungen prüfen",
+      "coding.undo": "Änderungen zurücknehmen",
       "coding.patch": "Änderung anwenden",
       "coding.applyPatch": "Änderung anwenden",
       "coding.run": "Befehl ausführen",
@@ -1542,7 +1590,7 @@
   }
 
   function renderCodingWorkspace() {
-    const coding = ["coding", "blender"].includes(state.selectedToolAction);
+    const coding = ["coding"].includes(state.selectedToolAction);
     elements.appShell.classList.toggle("coding-mode", coding);
     elements.prompt.placeholder = coding ? "Änderung beschreiben oder Frage zum Projekt stellen …" : "Nachricht eingeben …";
     renderCodingChanges();
@@ -1555,7 +1603,7 @@
       host: elements.codingChanges, onLayout: schedulePromptResize
     });
     view.update(state.changesSummary, { sessionId: state.activeSessionId, messageId: latest?.id,
-      workspacePath: state.codingWorkspacePath, isCoding: ["coding", "blender"].includes(state.selectedToolAction), toolSteps: latest?.toolSteps });
+      workspacePath: state.codingWorkspacePath, isCoding: ["coding"].includes(state.selectedToolAction), toolSteps: latest?.toolSteps });
     updateContextStripVisibility();
   }
 
@@ -1572,10 +1620,8 @@
   }
 
   function runStatusText(liveStatus) {
-    const status = String(liveStatus?.status || "").trim();
     const detail = cleanStatusMetadata(liveStatus?.detail);
-    const model = visibleModelLabel(liveStatus?.model || state.model);
-    return uniqueStatusParts(status, model ? `Modell: ${model}` : null, detail).join(" · ");
+    return uniqueStatusParts(detail).join(" · ");
   }
 
   function cleanStatusMetadata(value) {
@@ -1710,6 +1756,23 @@
       remove.textContent = "×";
       chip.append(createToolIcon(iconPath), text, remove);
       chip.addEventListener("click", () => selectToolAction(null));
+      elements.activeTools.append(chip);
+    }
+
+    if (state.liveCaption?.isActive) {
+      const [label, iconPath] = toolVisuals["liveCaption.start"];
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "active-tool-chip";
+      chip.title = `${label} beenden`;
+      chip.setAttribute("aria-label", `${label} beenden`);
+      const text = document.createElement("span");
+      text.textContent = label;
+      const remove = document.createElement("span");
+      remove.className = "active-tool-chip__remove";
+      remove.textContent = "×";
+      chip.append(createToolIcon(iconPath), text, remove);
+      chip.addEventListener("click", () => post("liveCaption.stop", {}));
       elements.activeTools.append(chip);
     }
 
@@ -1917,7 +1980,8 @@
       && !globalThis.goVoiceCapture?.isStarting
       && !state.voiceStarting
       && (elements.codingChanges?.hidden ?? true)
-      && !state.speechStatus?.active;
+      && !state.speechStatus?.active
+      && !state.liveCaption?.isActive;
   }
 
   function renderComposerAction() {
@@ -2007,19 +2071,27 @@
 
   function renderLiveCaption() {
     const caption = state.liveCaption || {};
-    const hasContent = Boolean(caption.isActive);
-    elements.liveCaption.hidden = !hasContent;
-    elements.liveCaptionTitle.textContent = caption.mode === "translateToEnglish"
-      ? "Live-Übersetzung · Englisch"
-      : "Live-Untertitel";
-    elements.liveCaptionStatus.textContent = [caption.status, caption.provider].filter(Boolean).join(" · ");
-    elements.liveCaptionTranscript.textContent = caption.transcript || (caption.isActive
-      ? "Warte auf Windows-Systemaudio …"
-      : "Noch kein Sprachinhalt erkannt.");
-    elements.liveCaptionError.textContent = caption.error || "";
-    elements.liveCaptionError.hidden = !caption.error;
-    elements.stopLiveCaption.hidden = !caption.isActive;
-    elements.liveCaptionTranscript.scrollTop = elements.liveCaptionTranscript.scrollHeight;
+    // Live captions use the same message stream as ordinary assistant output.
+    state.messages = state.messages.filter(message => !message.isLiveCaption);
+    if (caption.isActive) {
+      const startedAt = caption.startedAt || new Date().toISOString();
+      state.messages.push({
+        id: `live-caption:${startedAt}`,
+        sessionId: state.activeSessionId,
+        role: "assistant",
+        status: "streaming",
+        content: (caption.transcript || "Warte auf Windows-Systemaudio …")
+          .replace(/\r?\n/g, "\n\n"),
+        error: caption.error || null,
+        createdAt: startedAt,
+        updatedAt: new Date().toISOString(),
+        isLiveCaption: true,
+        liveCaptionStatus: caption.status,
+        liveCaptionProvider: caption.provider
+      });
+    }
+    renderContext();
+    renderMessages(Boolean(caption.isActive));
   }
 
   function renderMicrophone() {
@@ -2465,7 +2537,7 @@
       && persistentFallback
         ? persistentFallback
         : requested;
-    if (state.deepResearch && state.selectedToolAction && !["coding", "blender"].includes(state.selectedToolAction)) {
+    if (state.deepResearch && state.selectedToolAction && !["coding"].includes(state.selectedToolAction)) {
       state.deepResearch = false;
       persistDeepResearch();
     }
@@ -2510,8 +2582,8 @@
 
   function selectDeepResearch(enabled) {
     if (!ensureEditableContext()) return;
-    if (enabled && state.selectedToolAction && !["coding", "blender"].includes(state.selectedToolAction)) {
-      selectToolAction(["coding", "blender"].includes(state.persistentToolAction) ? state.persistentToolAction : null, false);
+    if (enabled && state.selectedToolAction && !["coding"].includes(state.selectedToolAction)) {
+      selectToolAction(["coding"].includes(state.persistentToolAction) ? state.persistentToolAction : null, false);
     }
     state.deepResearch = Boolean(enabled);
     persistDeepResearch();
@@ -2670,7 +2742,6 @@
     const serverToolAction = normalizeToolAction(payload.selectedToolAction);
     state.persistentToolAction = persistentToolActions.has(serverToolAction) ? serverToolAction : null;
     const activeOneShotTool = state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction);
-    // Persistent modes (Coding, Blender, BricsCAD, Hörbuch) follow the backend
     // session state; a one-shot chip survives idle refreshes while composing.
     if (previousSessionId !== state.activeSessionId || !activeOneShotTool) {
       selectToolAction(serverToolAction, false);
@@ -2916,7 +2987,6 @@
             }
           }
         }
-        // A Blender send can change the persistent mode on the backend. Apply
         // that session state before choosing the completed one-shot fallback.
         clearCompletedOneShotToolAction();
         renderSessions();
@@ -3281,6 +3351,17 @@
     renderStatus();
     scheduleDraftSave();
   });
+  elements.prompt.addEventListener("paste", event => {
+    const clipboard = event.clipboardData;
+    if (!clipboard) return;
+    const containsFiles = clipboard.files.length > 0
+      || Array.from(clipboard.items || []).some(item => item.kind === "file");
+    if (!containsFiles) return;
+    event.preventDefault();
+    if (ensureEditableContext()) {
+      post("document.paste", { sessionId: state.activeSessionId });
+    }
+  });
   elements.prompt.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -3383,7 +3464,6 @@
       setToolsMenuOpen(false);
     });
   }
-  elements.stopLiveCaption.addEventListener("click", () => post("liveCaption.stop", {}));
   document.addEventListener("pointerdown", event => {
     if (event.button === 2) captureReadFromContextTarget(event);
   }, { capture: true });

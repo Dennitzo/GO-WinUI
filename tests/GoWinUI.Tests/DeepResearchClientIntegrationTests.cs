@@ -1,7 +1,6 @@
 using GoAi.Contracts;
 using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
-using GoWinUI.BricsCad.Protocol;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -43,8 +42,7 @@ public sealed class DeepResearchClientIntegrationTests
         var requests = new List<RunRequest>();
         using var connection = new GoAiConnectionService(settings, NullLogger<GoAiConnectionService>.Instance,
             () => new RequestCaptureHandler(requests));
-        await using var bricsCad = new BricsCadBridgeHost();
-        var broker = new LocalToolBroker(connection, bricsCad, documents, null!, chats);
+        var broker = new LocalToolBroker(connection, documents, null!, chats);
         using var microphone = new MicrophoneTranscriptionService(connection, settings,
             NullLogger<MicrophoneTranscriptionService>.Instance);
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);

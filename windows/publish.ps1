@@ -74,7 +74,6 @@ $manifest = [ordered]@{
     buildId = Get-GoBuildId
     builtAtUtc = Get-GoBuiltAt
     executableSha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-    bricsCadContractSha256 = Get-GoContractHash
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 

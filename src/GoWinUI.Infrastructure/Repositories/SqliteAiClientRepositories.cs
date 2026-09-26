@@ -760,6 +760,7 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
                 """;
             Bind(command, run);
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            await PersistSessionToolAsync(connection, transaction, run, token).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
         return run;
     }
@@ -818,6 +819,7 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
                     """;
                 Bind(command, run);
                 await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+                await PersistSessionToolAsync(connection, transaction, run, token).ConfigureAwait(false);
             }
 
             await using (var resetAnchor = connection.CreateCommand())
@@ -975,6 +977,37 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         command.Parameters.AddWithValue("$created", SqlitePromptTriggerRepository.Format(run.CreatedAt));
         command.Parameters.AddWithValue("$updated", SqlitePromptTriggerRepository.Format(run.UpdatedAt));
         command.Parameters.AddWithValue("$workspace", (object?)run.WorkspacePath ?? DBNull.Value);
+    }
+
+    private static async Task PersistSessionToolAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        GoAiRunRecord run,
+        CancellationToken cancellationToken)
+    {
+        var persistent = run.Action switch
+        {
+            PromptTriggerAction.Coding => (Action: "code", Variant: (string?)null),
+            PromptTriggerAction.Audiobook => (Action: "audiobook", Variant: (string?)null),
+            _ => ((string Action, string? Variant)?)null,
+        };
+        if (persistent is null) return;
+
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE chat_sessions
+            SET persistent_tool_action=$action,
+                persistent_tool_variant=NULL,
+                persistent_tool_variant_v2=$variant,
+                updated_at=$updated
+            WHERE id=$session;
+            """;
+        command.Parameters.AddWithValue("$session", run.SessionId.ToString("D"));
+        command.Parameters.AddWithValue("$action", persistent.Value.Action);
+        command.Parameters.AddWithValue("$variant", (object?)persistent.Value.Variant ?? DBNull.Value);
+        command.Parameters.AddWithValue("$updated", SqlitePromptTriggerRepository.Format(run.UpdatedAt));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static string? NormalizeWorkspace(string? workspace)

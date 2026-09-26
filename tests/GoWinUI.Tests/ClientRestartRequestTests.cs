@@ -1,7 +1,6 @@
 using GoAi.Contracts;
 using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
-using GoWinUI.BricsCad.Protocol;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure;
@@ -103,8 +102,7 @@ public sealed class ClientRestartRequestTests
         var clientIds = new HashSet<string>(StringComparer.Ordinal);
         using var connection = new GoAiConnectionService(settings, NullLogger<GoAiConnectionService>.Instance,
             () => new CatalogHandler(clientIds));
-        await using var bricsCad = new BricsCadBridgeHost();
-        var broker = new LocalToolBroker(connection, bricsCad, documents, null!, chats);
+        var broker = new LocalToolBroker(connection, documents, null!, chats);
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         using var service = new GoAiAssistantService(connection, chats,
             provider.GetRequiredService<IAssistantAttachmentRepository>(), provider.GetRequiredService<IChatArtifactRepository>(),

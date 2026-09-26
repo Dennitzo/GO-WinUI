@@ -7,6 +7,14 @@ namespace GoAi.Server.Tests;
 
 public sealed class LiveCaptionServiceTests
 {
+    [Fact]
+    public void ExcessiveRecognitionCharacterRunsAreCollapsedBeforeTranslation()
+    {
+        var noisy = "No! No! " + new string('o', 1200);
+        Assert.Equal("No! No! ooo", LiveCaptionService.CollapseCharacterRuns(noisy));
+        Assert.Equal("Hallo Welt", LiveCaptionService.CollapseCharacterRuns("Hallo Welt"));
+    }
+
     [Theory]
     [InlineData("de")]
     [InlineData("de-DE")]

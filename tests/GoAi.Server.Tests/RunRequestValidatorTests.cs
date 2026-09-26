@@ -1,4 +1,4 @@
-﻿using GoAi.Contracts;
+using GoAi.Contracts;
 using GoAi.Server.Core.Gateway;
 using GoAi.Server.Core.Runs;
 
@@ -18,36 +18,6 @@ public sealed class RunRequestValidatorTests
             ClientCapabilities: ["coding"], Limits: new RunLimits(TimeoutSeconds: timeout));
         RunRequestValidator.Validate(request);
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request with { Limits = new RunLimits(TimeoutSeconds: -1) }));
-    }
-
-    [Fact]
-    public void GeneralBlenderWorkspaceCanContinueProductiveStagesWithoutWallClockDeadline()
-    {
-        var request = new RunRequest(GoAiProtocol.Version, RunMode.General,
-            [new("user", [new("text", "Baue das Modell in geprüften Etappen; Qualität vor Zeit.")])],
-            ClientCapabilities: ["workspace", "blender"], Limits: new(TimeoutSeconds: 0));
-        RunRequestValidator.Validate(request);
-        Assert.Contains(new AgentToolCatalog().GetAvailableTools(request), tool => tool.Name == WorkspaceTools.Blender);
-        Assert.Equal(Timeout.InfiniteTimeSpan, RunProcessor.ResolveRemainingRunTime(
-            DateTimeOffset.UtcNow.AddDays(-2), request.Limits!.TimeoutSeconds!.Value, DateTimeOffset.UtcNow));
-        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request with { Limits = new(TimeoutSeconds: -1) }));
-    }
-
-    [Theory]
-    [InlineData(RunMode.General, true, false)]
-    [InlineData(RunMode.General, false, true)]
-    [InlineData(RunMode.General, false, false)]
-    [InlineData(RunMode.Auto, true, true)]
-    public void UnlimitedGeneralDurationCannotBeEnabledWithoutTheBlenderWorkspaceScope(
-        RunMode mode, bool workspace, bool blender)
-    {
-        var capabilities = new List<string>();
-        if (workspace) capabilities.Add("workspace");
-        if (blender) capabilities.Add("blender");
-        var request = new RunRequest(GoAiProtocol.Version, mode, [new("user", [new("text", "Auftrag")])],
-            ClientCapabilities: capabilities, Limits: new(TimeoutSeconds: 0));
-        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request));
-        RunRequestValidator.Validate(request with { Limits = new(TimeoutSeconds: 3600) });
     }
 
     [Fact]
@@ -217,7 +187,7 @@ public sealed class RunRequestValidatorTests
         RunRequestValidator.Validate(request);
 
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
-            request with { ClientCapabilities = ["bricscad"] }));
+            request with { ClientCapabilities = ["unknown-capability"] }));
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
             request with { AllowedServerTools = ["web.search"] }));
     }

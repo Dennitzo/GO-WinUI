@@ -47,7 +47,6 @@ internal static class GatewayEndpoints
         endpoints.MapGet("/v1/artifacts/{artifactId}", GetArtifactAsync);
 
         endpoints.MapPost("/v1/research/web", SearchWebAsync);
-        endpoints.MapPost("/v1/research/youtube", SearchYouTubeAsync);
         endpoints.MapPost("/v1/research/fetch", FetchWebAsync);
 
         endpoints.MapPost("/v1/audio/transcriptions", TranscribeAudioAsync);
@@ -411,14 +410,7 @@ internal static class GatewayEndpoints
     {
         var request = await ReadJsonAsync<WebSearchRequest>(context).ConfigureAwait(false);
         var research = context.RequestServices.GetRequiredService<WebResearchService>();
-        await WriteJsonAsync(context, await research.SearchAsync(request, youtubeFallback: false, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
-    }
-
-    private static async Task SearchYouTubeAsync(HttpContext context)
-    {
-        var request = await ReadJsonAsync<WebSearchRequest>(context).ConfigureAwait(false);
-        var research = context.RequestServices.GetRequiredService<WebResearchService>();
-        await WriteJsonAsync(context, await research.SearchAsync(request, youtubeFallback: true, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+        await WriteJsonAsync(context, await research.SearchAsync(request, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     private static async Task FetchWebAsync(HttpContext context)

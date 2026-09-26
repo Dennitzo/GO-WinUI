@@ -19,7 +19,7 @@ public sealed class SearxngSearchTests
     public async Task HttpSuccessWithBlockedEnginesIsAConcreteFailureWithoutHiddenRetryOrFallback()
     {
         using var handler = new SearchHandler(Unavailable);
-        var exception = await Assert.ThrowsAsync<SearxngEngineUnavailableException>(() => Service(handler).SearchAsync(new("asyncio TaskGroup", Profile: "general"), false));
+        var exception = await Assert.ThrowsAsync<SearxngEngineUnavailableException>(() => Service(handler).SearchAsync(new("asyncio TaskGroup", Profile: "general")));
         Assert.Equal(HttpStatusCode.ServiceUnavailable, exception.StatusCode);
         Assert.Equal(3, exception.Failures.Count);
         Assert.Equal(1, handler.Calls);
@@ -38,7 +38,7 @@ public sealed class SearxngSearchTests
     {
         const string response = """{"results":[{"title":"TaskGroup","url":"https://discuss.python.org/t/asyncio/1","content":"Original discussion","engine":"discuss.python"}],"unresponsive_engines":[["brave","HTTP error 429"]]}""";
         using var handler = new SearchHandler(response);
-        var search = await Service(handler).SearchAsync(new("asyncio TaskGroup", Profile: "python"), false);
+        var search = await Service(handler).SearchAsync(new("asyncio TaskGroup", Profile: "python"));
         Assert.Equal("searxng", search.Provider);
         Assert.False(search.IsFallback);
         Assert.Equal("discuss.python", Assert.Single(search.Results).Source);
@@ -61,7 +61,7 @@ public sealed class SearxngSearchTests
     public async Task TechnicalProfilesSelectOnlyAllowlistedLocalSearxngEngines(string profile, string query, string engines)
     {
         using var handler = new SearchHandler("""{"results":[],"unresponsive_engines":[]}""");
-        var search = await Service(handler).SearchAsync(new(query, Profile: profile), false);
+        var search = await Service(handler).SearchAsync(new(query, Profile: profile));
         Assert.Equal("searxng", search.Provider);
         Assert.False(search.IsFallback);
         Assert.Empty(search.Results);
@@ -94,7 +94,7 @@ public sealed class SearxngSearchTests
     {
         const string query = "CUDA Python multiprocessing spawn shared memory cupy worker processes GPU";
         using var handler = new SearchHandler("""{"results":[{"title":"CUDA","url":"https://docs.nvidia.com/"}],"unresponsive_engines":[]}""");
-        var search = await Service(handler).SearchAsync(new(query, Language: language, Profile: profile), false);
+        var search = await Service(handler).SearchAsync(new(query, Language: language, Profile: profile));
         Assert.Equal(query, search.Query);
         Assert.Equal(expectedLanguage, search.SearchLanguage);
         Assert.Contains("q=" + query, Uri.UnescapeDataString(handler.LastUri!.Query), StringComparison.Ordinal);
@@ -109,11 +109,11 @@ public sealed class SearxngSearchTests
             """{"results":[],"unresponsive_engines":[["brave","too many requests"]]}""",
             """{"results":[{"title":"Multiprocessing","url":"https://docs.python.org/3/library/multiprocessing.html","engine":"google cse"}],"unresponsive_engines":[]}""");
         var service = Service(handler);
-        var initial = await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false);
+        var initial = await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"));
         Assert.Empty(initial.Results);
         Assert.Equal("brave", Assert.Single(initial.EngineFailures!).Engine);
         Assert.NotNull(initial.SearchGuidance);
-        var result = await service.SearchAsync(new("CUDA multiprocessing spawn", Profile: "python"), false);
+        var result = await service.SearchAsync(new("CUDA multiprocessing spawn", Profile: "python"));
         Assert.Single(result.Results);
         Assert.Equal("searxng", result.Provider);
         Assert.False(result.IsFallback);
@@ -132,9 +132,9 @@ public sealed class SearxngSearchTests
         using var handler = new SearchHandler("""{"results":[],"unresponsive_engines":[["brave","HTTP error 429"]]}""");
         var clock = new TestTimeProvider();
         var service = new WebResearchService(new TestClientFactory(handler), Options.Create(new GoAiServerOptions()), clock);
-        await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false);
+        await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"));
         clock.Now += TimeSpan.FromMinutes(3);
-        await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false);
+        await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"));
         Assert.Contains("brave", handler.LastUri!.Query, StringComparison.Ordinal);
         Assert.Equal(2, handler.Calls);
     }
@@ -146,8 +146,8 @@ public sealed class SearxngSearchTests
             """{"results":[],"unresponsive_engines":[["brave","too many requests"]]}""",
             """{"results":[],"unresponsive_engines":[]}""");
         var service = Service(handler);
-        await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false);
-        var result = await service.SearchAsync(new("CUDA multiprocessing spawn", Profile: "python"), false);
+        await service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"));
+        var result = await service.SearchAsync(new("CUDA multiprocessing spawn", Profile: "python"));
         Assert.Empty(result.Results);
         Assert.Equal(HealthyPythonEngines, result.SearchedEngines);
         Assert.Equal("brave", Assert.Single(result.EngineFailures!).Engine);
@@ -163,8 +163,8 @@ public sealed class SearxngSearchTests
     {
         using var handler = new SearchHandler("""{"results":[],"unresponsive_engines":[["google cse","HTTP error 429"],["bing","CAPTCHA"],["brave","too many requests"],["stackoverflow","CAPTCHA"]]}""");
         var service = Service(handler);
-        await Assert.ThrowsAsync<SearxngEngineUnavailableException>(() => service.SearchAsync(new("ProcessPoolExecutor", Profile: "python"), false));
-        var exception = await Assert.ThrowsAsync<SearxngEngineUnavailableException>(() => service.SearchAsync(new("CUDA multiprocessing spawn", Profile: "python"), false));
+        await Assert.ThrowsAsync<SearxngEngineUnavailableException>(() => service.SearchAsync(new("ProcessPoolExecutor", Profile: "python")));
+        var exception = await Assert.ThrowsAsync<SearxngEngineUnavailableException>(() => service.SearchAsync(new("CUDA multiprocessing spawn", Profile: "python")));
         Assert.Equal(4, exception.Failures.Count);
         Assert.All(exception.Failures, failure => Assert.Contains("ausgelassen", failure.Reason, StringComparison.Ordinal));
         Assert.Equal(1, handler.Calls);
@@ -175,11 +175,11 @@ public sealed class SearxngSearchTests
     {
         using var handler = new SearchHandler("""{"results":[],"unresponsive_engines":[]}""");
         var service = Service(handler);
-        var search = await service.SearchAsync(new("new programming API"), false);
+        var search = await service.SearchAsync(new("new programming API"));
         Assert.Empty(search.Results);
         Assert.Contains("engines=google cse,bing,brave", Uri.UnescapeDataString(handler.LastUri!.Query), StringComparison.Ordinal);
         Assert.Equal("all", search.SearchLanguage);
-        await Assert.ThrowsAsync<ArgumentException>(() => service.SearchAsync(new("API", Profile: "https://other-provider.example/"), false));
+        await Assert.ThrowsAsync<ArgumentException>(() => service.SearchAsync(new("API", Profile: "https://other-provider.example/")));
         Assert.Equal(2, handler.Calls);
         var catalog = new AgentToolCatalog();
         var tool = catalog.GetAvailableTools(new(GoAiProtocol.Version, RunMode.Coding, [new("user", [new("text", "API")])], AllowedServerTools: ["web.search"]))
@@ -203,7 +203,7 @@ public sealed class SearxngSearchTests
     {
         var failures = Enumerable.Range(0, 20).Select(static index => new[] { "engine\r\n" + index, new string('x', 500) }).ToArray();
         using var handler = new SearchHandler(JsonSerializer.Serialize(new { results = Array.Empty<object>(), unresponsive_engines = failures }));
-        var response = await Service(handler).SearchAsync(new("API", Language: "all"), false);
+        var response = await Service(handler).SearchAsync(new("API", Language: "all"));
         Assert.Equal(8, response.EngineFailures!.Count);
         Assert.All(response.EngineFailures, static failure =>
         {
@@ -218,15 +218,15 @@ public sealed class SearxngSearchTests
     public async Task GeneralSearchUsesHealthyEnginesAndSkipsKnownBlocksOnNextQuery()
     {
         using var handler = new SearchHandler(
-            """{"results":[{"title":"Blender","url":"https://docs.blender.org/","engine":"google cse"}],"unresponsive_engines":[["brave","HTTP error 429"]]}""",
-            """{"results":[{"title":"Blender API","url":"https://docs.blender.org/api/","engine":"bing"}],"unresponsive_engines":[]}""");
+            """{"results":[{"title":"Python","url":"https://python.org/","engine":"google cse"}],"unresponsive_engines":[["brave","HTTP error 429"]]}""",
+            """{"results":[{"title":"Python API","url":"https://docs.python.org/3/","engine":"bing"}],"unresponsive_engines":[]}""");
         using var service = Service(handler);
-        await service.SearchAsync(new("Blender"), false);
-        var next = await service.SearchAsync(new("Blender API"), false);
+        await service.SearchAsync(new("Python"));
+        var next = await service.SearchAsync(new("Python API"));
         Assert.Equal(2, handler.Calls);
         Assert.Equal("searxng", next.Provider);
         Assert.False(next.IsFallback);
-        Assert.Equal(["google cse", "bing"], next.SearchedEngines);
+        Assert.Equal(["google cse", "bing", "stackoverflow"], next.SearchedEngines);
         Assert.DoesNotContain("brave", handler.LastUri!.Query, StringComparison.Ordinal);
         Assert.Contains("ausgelassen", Assert.Single(next.EngineFailures!).Reason, StringComparison.Ordinal);
     }
@@ -236,9 +236,9 @@ public sealed class SearxngSearchTests
     {
         using var handler = new SearchHandler(
             """{"results":[],"unresponsive_engines":[["brave","CAPTCHA"]]}""",
-            """{"results":[{"title":"API","url":"https://docs.blender.org/api/","engine":"google cse"}],"unresponsive_engines":[]}""");
+            """{"results":[{"title":"API","url":"https://docs.python.org/3/","engine":"google cse"}],"unresponsive_engines":[]}""");
         using var service = Service(handler);
-        var result = await service.SearchAsync(new("Blender Python API", Language: "de-DE", Profile: "general"), false);
+        var result = await service.SearchAsync(new("Python API", Language: "de-DE", Profile: "general"));
         Assert.Single(result.Results);
         Assert.Equal(2, handler.Calls);
         Assert.Equal("all", result.SearchLanguage);
@@ -251,14 +251,14 @@ public sealed class SearxngSearchTests
     [Fact]
     public async Task ConcurrentIdenticalSearchesShareShortLivedResultsButRefreshAfterExpiry()
     {
-        using var handler = new SearchHandler("""{"results":[{"title":"API","url":"https://docs.blender.org/api/"}],"unresponsive_engines":[]}""");
+        using var handler = new SearchHandler("""{"results":[{"title":"API","url":"https://docs.python.org/3/"}],"unresponsive_engines":[]}""");
         var clock = new TestTimeProvider();
         using var service = new WebResearchService(new TestClientFactory(handler), Options.Create(new GoAiServerOptions()), clock);
-        var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => service.SearchAsync(new("Blender"), false)));
+        var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => service.SearchAsync(new("Python"))));
         Assert.Equal(1, handler.Calls);
         Assert.All(results, result => Assert.Single(result.Results));
         clock.Now += TimeSpan.FromSeconds(46);
-        await service.SearchAsync(new("Blender"), false);
+        await service.SearchAsync(new("Python"));
         Assert.Equal(2, handler.Calls);
     }
 
@@ -273,7 +273,7 @@ public sealed class SearxngSearchTests
              "unresponsive_engines":[]}
             """);
         using var service = Service(handler);
-        var result = await service.SearchAsync(new("site:docs.python.org asyncio TaskGroup", MaximumResults: 1), false);
+        var result = await service.SearchAsync(new("site:docs.python.org asyncio TaskGroup", MaximumResults: 1));
         Assert.Equal("TaskGroup", Assert.Single(result.Results).Title);
         Assert.Equal("all", result.SearchLanguage);
         Assert.False(result.IsFallback);

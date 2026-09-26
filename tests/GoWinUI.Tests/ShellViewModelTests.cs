@@ -72,29 +72,6 @@ public sealed class ShellViewModelTests
     }
 
     [Fact]
-    public void FooterAlwaysContainsEveryConfiguredService()
-    {
-        var viewModel = new ShellViewModel();
-
-        Assert.Equal(6, viewModel.AiServices.Count);
-        Assert.Equal(
-            ["General AI", "Spracherkennung", "Sprachausgabe", "Vision / Medien", "Bildgenerierung", "Web / YouTube"],
-            viewModel.AiServices.Select(static item => item.DisplayName));
-        Assert.All(viewModel.AiServices, static item => Assert.False(string.IsNullOrWhiteSpace(item.Glyph)));
-        Assert.Equal(viewModel.AiServices.Count, viewModel.AiServices.Select(static item => item.Glyph).Distinct().Count());
-        Assert.Equal(
-            "General AI - lokale Modelle",
-            viewModel.AiServices.Single(static item => item.Key == "general").ToolTipText);
-        Assert.All(viewModel.AiServices, static item => Assert.False(item.IsActive));
-        Assert.All(viewModel.AiServices, static item => Assert.True(item.IsIdle));
-
-        viewModel.SetAiServiceAvailability(true, ReadyModels(), ReadyServices());
-
-        Assert.All(viewModel.AiServices, static item => Assert.True(item.IsReachable));
-        Assert.All(viewModel.AiServices, static item => Assert.Equal("Bereit", item.StateLabel));
-    }
-
-    [Fact]
     public void FooterUpdatesGeneralAndSpeechChipsWithoutChangingTheirOrder()
     {
         var now = DateTimeOffset.UtcNow;

@@ -35,8 +35,8 @@ if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
     throw "Smoke check failed; publish manifest is missing: $ManifestPath"
 }
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-if ($manifest.mode -ne $Mode -or $manifest.bricsCadContractSha256 -ne (Get-GoContractHash)) {
-    throw 'Smoke check failed; publish manifest does not match mode or BricsCAD contract.'
+if ($manifest.mode -ne $Mode) {
+    throw 'Smoke check failed; publish manifest does not match mode.'
 }
 
 if ($Mode -eq 'Folder') {
@@ -66,13 +66,6 @@ else {
     }
 }
 
-$forbiddenCadFiles = @('BrxMgd.dll', 'TD_Mgd.dll', 'TD_MgdBrep.dll', 'GOBricsCad.dll')
-foreach ($file in $forbiddenCadFiles) {
-    if (Get-ChildItem -LiteralPath $PublishDirectory -Recurse -File -Filter $file -ErrorAction SilentlyContinue) {
-        throw "Smoke check failed; optional BricsCAD dependency leaked into the app artifact: $file"
-    }
-}
-
 $smokeBase = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'GO-WinUI-Smoke'))
 $smokeRoot = [IO.Path]::GetFullPath((Join-Path $smokeBase ([Guid]::NewGuid().ToString('N'))))
 if (-not [string]::Equals([IO.Path]::GetDirectoryName($smokeRoot), $smokeBase, [StringComparison]::OrdinalIgnoreCase)) {
@@ -80,11 +73,9 @@ if (-not [string]::Equals([IO.Path]::GetDirectoryName($smokeRoot), $smokeBase, [
 }
 New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
 $previousDataDirectory = $env:GO_DATA_DIRECTORY
-$previousBridgeDirectory = $env:GO_BRIDGE_DIRECTORY
 $previousInstanceKey = $env:GO_SMOKE_INSTANCE_KEY
 $previousBundleExtractBaseDirectory = $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR
 $env:GO_DATA_DIRECTORY = Join-Path $smokeRoot 'Data'
-$env:GO_BRIDGE_DIRECTORY = Join-Path $smokeRoot 'Bridge'
 $env:GO_SMOKE_INSTANCE_KEY = [Guid]::NewGuid().ToString('N')
 if ($Mode -eq 'SingleFile') {
     $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = Join-Path $smokeRoot 'Bundle'
@@ -94,8 +85,7 @@ try {
     $process = Start-Process -FilePath (Join-Path $PublishDirectory 'GO.exe') -PassThru -WindowStyle Hidden
     $runtimeFiles = @(
         (Join-Path $env:GO_DATA_DIRECTORY 'GO.db'),
-        (Join-Path $env:GO_DATA_DIRECTORY 'settings.json'),
-        (Join-Path $env:GO_BRIDGE_DIRECTORY 'active.json')
+        (Join-Path $env:GO_DATA_DIRECTORY 'settings.json')
     )
     $webViewData = Join-Path $env:GO_DATA_DIRECTORY 'WebView2'
     $requiresWebViewInitialization = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq
@@ -177,7 +167,6 @@ finally {
         $process.WaitForExit(5000) | Out-Null
     }
     $env:GO_DATA_DIRECTORY = $previousDataDirectory
-    $env:GO_BRIDGE_DIRECTORY = $previousBridgeDirectory
     $env:GO_SMOKE_INSTANCE_KEY = $previousInstanceKey
     $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = $previousBundleExtractBaseDirectory
     $smokeRoot = [IO.Path]::GetFullPath($smokeRoot)

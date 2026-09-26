@@ -13,7 +13,7 @@ public sealed partial class AgentToolCatalog
     private static readonly string[] SelectorRequiredProperties = ["name"];
     private static readonly string[] DefaultServerTools =
     [
-        "web.search", "web.fetch", "youtube.search", "media.inspect", "media.analyze",
+        "web.search", "web.fetch", "media.inspect", "media.analyze",
         "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve",
     ];
     private readonly Dictionary<string, AgentToolSpec> _tools = CreateTools();
@@ -52,20 +52,9 @@ public sealed partial class AgentToolCatalog
             names.UnionWith([ClientToolNames.DocumentsList, ClientToolNames.DocumentsSearch, ClientToolNames.DocumentsReadPages]);
         }
         if (HasCapability(capabilities, "visual-tools")) names.Add(WorkspaceTools.ImageInput);
-        if (HasCapability(capabilities, "blender")) names.Add(WorkspaceTools.Blender);
         if (HasCapability(capabilities, "workspace")) names.Add(WorkspaceTools.Open);
         // PDF bytes are never model-generated. document.create edits a bounded
         // canonical source and delegates rendering to GO's deterministic path.
-        if (HasCapability(capabilities, "bricscad"))
-        {
-            names.UnionWith(
-            [
-                ClientToolNames.BricsCadGeometryQuery,
-                ClientToolNames.BricsCadMeasure,
-                ClientToolNames.BricsCadMove,
-                ClientToolNames.BricsCadAction,
-            ]);
-        }
 
         return names
             .OrderBy(static name => name, StringComparer.Ordinal)
@@ -223,7 +212,7 @@ public sealed partial class AgentToolCatalog
                 }
                 RequireString(value, "reference", 1, 1024);
                 var documentFormat = RequireString(value, "format", 1, 16);
-                if (documentFormat is not ("markdown" or "text" or "docx" or "pdf"))
+                if (documentFormat is not ("markdown" or "text" or "docx" or "pdf" or "xlsx"))
                 {
                     throw new ArgumentException("document.create format is not supported.");
                 }
@@ -248,7 +237,6 @@ public sealed partial class AgentToolCatalog
                 OptionalInteger(value, "endPage", 1, 1_000_000);
                 break;
             case "web.search":
-            case "youtube.search":
                 RequireString(value, "query", 1, 500);
                 OptionalInteger(value, "maximumResults", 1, 20);
                 OptionalString(value, "language", 2, 16);
@@ -293,12 +281,6 @@ public sealed partial class AgentToolCatalog
                 RequireStringArray(value, "documents", 1, 256, 32_768);
                 OptionalInteger(value, "topK", 1, 20);
                 break;
-            case ClientToolNames.BricsCadGeometryQuery:
-            case ClientToolNames.BricsCadMeasure:
-            case ClientToolNames.BricsCadMove:
-            case ClientToolNames.BricsCadAction:
-                RequireString(value, "operation", 1, 128);
-                break;
         }
     }
 
@@ -307,13 +289,12 @@ public sealed partial class AgentToolCatalog
         var tools = new[]
         {
             Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Für aktuelle Fakten nutze profile=general; für konkrete Bildwünsche nutze profile=images und präzise Motive. Bildtreffer enthalten die Quellseite in url und die Bildadresse in thumbnailUrl; nur passende HTTPS-Bildadressen als Markdown-Bild anzeigen. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern zu genau einem Aspekt. Keine Sammelabfragen. Technische Profile suchen sprachübergreifend, die Antwort bleibt deutsch. Alle Profile bleiben bei SearXNG ohne Anbieter-Fallback und lassen gesperrte Engines aus. Bei leeren Treffern verkürze die Abfrage oder prüfe bekannte Originalquellen mit web.fetch.", ToolRiskClass.ReadOnly, WebSearchSchema()),
-            Server("youtube.search", "Suche YouTube; ohne API-Key wird ein sichtbar gekennzeichneter SearXNG-Fallback verwendet.", ToolRiskClass.ReadOnly, SearchSchema()),
             Server("web.fetch", "Durchsuche eine öffentliche HTTP(S)-Quelle SSRF-geschützt nach konkreten Phrasen. Bevorzuge queries und bündele bis zu acht unabhängig zu suchende Phrasen in einem Abruf. Zurückgegeben werden ausschließlich begrenzte Trefferfenster aus Webseiten, PDF-, DOCX- und RTF-Dokumenten, niemals die gesamte Quelle. Ohne Suchphrase liefert das Werkzeug nur eine kurze Vorschau und fordert eine gezielte Wiederholung an. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, WebFetchSchema()),
             Server(CodingDeepResearchPipeline.ToolName, "Recherchiere komplexe Coding-Fragen autonom: plane mehrere Teilfragen, suche über SearXNG, prüfe Originalquellen und liefere eine belegte Synthese mit Quellen und Unsicherheiten. Nutze dies für Architekturvergleiche, aktuelle API-/Versionsfragen oder widersprüchliche Informationen. Für eine einzelne Frage reichen web.search und web.fetch. Task enthält nur die öffentliche technische Frage, keine Zugangsdaten oder lokalen Dateiinhalte. Grenzen: 2–3 geplante Suchfragen mit höchstens einer verkürzten Wiederholung bei leeren Treffern, 2–6 Quellen, maximal 8 Modellturns, insgesamt 9 Webaufrufe und 7 Minuten innerhalb des verbleibenden Laufbudgets.", ToolRiskClass.ReadOnly, Parse("""
                 {"type":"object","properties":{"task":{"type":"string","minLength":1,"maxLength":4000},"maximumSearches":{"type":"integer","minimum":2,"maximum":3,"default":3,"description":"Anzahl geplanter Suchfragen; bei leeren Treffern höchstens eine kürzere Wiederholung je Frage innerhalb des gemeinsamen Webbudgets."},"maximumSources":{"type":"integer","minimum":2,"maximum":6,"default":4}},"required":["task"],"additionalProperties":false}
                 """)),
             Server("media.inspect", "Extrahiere sichere Metadaten, Audio und zeitcodierte Frames eines Uploads.", ToolRiskClass.ReadOnly, MediaSchema()),
-            Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem ausgewählten DeepSeek-Modell mit integriertem Vision; bei Textmodellen ohne Vision bleibt der bestehende Fallback. Die Analyse erhält das tatsächliche Bild und protokolliert die verwendete Modell-ID. Für Blender-Referenzen erfasse Silhouette, Proportionen, Baugruppen und Materialien; trenne sichtbare Merkmale von Annahmen. Für Blender-Render nenne im prompt die Ansicht, konkreten Designanforderungen und belegten Referenzmerkmale und übergib die Referenzbilder als referenceUploadIds: Vision vergleicht dann Referenz und Render Bauteil für Bauteil und liefert je Abweichung eine konkrete Änderungsanweisung mit Richtung, Achse und geschätztem Betrag relativ zu einem sichtbaren Bezugsmaß. Vision antwortet ausführlich mit genauen Geometriebeschreibungen und nennt immer weitere Verbesserungen; ein Kriterium gilt erst als erfüllt, wenn die Antwort keinen Unterschied mehr benennt. Prüfe jedes Kriterium als erfüllt, verletzt oder nicht beurteilbar mit sichtbarem Befund, betroffener Baugruppe und gezieltem Korrekturvorschlag. Verdeckte Details gelten nicht als bestanden. Prüfe Anzahl, Anordnung, Symmetrie, Anschlussstellen, Durchdringungen, Bodenabstand, Farben, Licht und Sichtbarkeit nur soweit im Bild erkennbar.", ToolRiskClass.ReadOnly, MediaSchema()),
+            Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem ausgewählten Vision-Modell. Die Analyse erhält das tatsächliche Bild und protokolliert die verwendete Modell-ID. Trenne sichtbare Merkmale klar von Annahmen und beantworte die konkrete Prüffrage.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("image.generate", "Erzeuge Bilder mit Z-Image-Turbo.", ToolRiskClass.ReadOnly, ImageSchema()),
             Server("math.evaluate", "Führe deterministische skalare, Vektor- oder Matrixoperationen ohne Skriptausführung aus.", ToolRiskClass.ReadOnly, MathSchema()),
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
@@ -323,10 +304,6 @@ public sealed partial class AgentToolCatalog
             Client(ClientToolNames.DocumentsList, "Liste alle fertig aufbereiteten Dokumente der aktuellen GO-Sitzung mit Dateiname und Seitenzahl.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{},"required":[],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsSearch, "Durchsuche den persistenten lokalen Dokumentindex promptbezogen und liefere Originalbelege mit Dateiname und Seite.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"query":{"type":"string"},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":200000}},"required":["query"],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsReadPages, "Lese einen konkreten Seitenbereich eines Sitzungsdokuments als zitierfähigen Originalbeleg.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"documentId":{"type":"string"},"startPage":{"type":"integer","minimum":1},"endPage":{"type":"integer","minimum":1}},"required":["documentId","startPage","endPage"],"additionalProperties":false}""")),
-            Client(ClientToolNames.BricsCadGeometryQuery, "Lese freigegebene BricsCAD-Geometrie.", ToolRiskClass.ReadOnly, CadSchema()),
-            Client(ClientToolNames.BricsCadMeasure, "Führe eine lesende BricsCAD-Messung aus.", ToolRiskClass.ReadOnly, CadSchema()),
-            Client(ClientToolNames.BricsCadMove, "Führe eine typisierte BricsCAD-Verschiebung automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
-            Client(ClientToolNames.BricsCadAction, "Führe eine typisierte BricsCAD-Aktion automatisch aus.", ToolRiskClass.CadMutation, CadSchema()),
         };
         return tools.Concat(WorkspaceToolSpecs()).Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
     }
@@ -361,7 +338,7 @@ public sealed partial class AgentToolCatalog
         """);
 
     private static JsonElement DocumentCreateSchema() => Parse("""
-        {"type":"object","properties":{"operation":{"type":"string","enum":["create","appendSection","replaceSection"]},"reference":{"type":"string","description":"Beim Erstellen ein Dateiname, beim Bearbeiten die documentId des Sitzungsdokuments."},"format":{"type":"string","enum":["markdown","text","docx","pdf"]},"sectionId":{"type":"string","description":"Stabile eindeutige Abschnitts-ID."},"heading":{"type":"string"},"content":{"type":"string","description":"Nur der neue oder geänderte Abschnitt als Markdown, nie das gesamte bestehende Dokument erneut."},"expectedSha256":{"type":"string","description":"Für Bearbeitungen verpflichtender SHA-256 aus document.read oder document.create."}},"required":["operation","reference","format","sectionId","content"],"additionalProperties":false}
+        {"type":"object","properties":{"operation":{"type":"string","enum":["create","appendSection","replaceSection"]},"reference":{"type":"string","description":"Beim Erstellen ein Dateiname, beim Bearbeiten die documentId des Sitzungsdokuments."},"format":{"type":"string","enum":["markdown","text","docx","pdf","xlsx"]},"sectionId":{"type":"string","description":"Stabile eindeutige Abschnitts-ID."},"heading":{"type":"string"},"content":{"type":"string","description":"Nur der neue oder geänderte Abschnitt als Markdown, nie das gesamte bestehende Dokument erneut."},"expectedSha256":{"type":"string","description":"Für Bearbeitungen verpflichtender SHA-256 aus document.read oder document.create."}},"required":["operation","reference","format","sectionId","content"],"additionalProperties":false}
         """);
 
     private static JsonElement ImageSchema() => Parse("""
@@ -384,10 +361,6 @@ public sealed partial class AgentToolCatalog
         "{\"type\":\"object\",\"properties\":{\"" + name
         + "\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\""
         + name + "\"],\"additionalProperties\":false}");
-
-    private static JsonElement CadSchema() => Parse("""
-        {"type":"object","properties":{"operation":{"type":"string"},"arguments":{"type":"object","additionalProperties":true}},"required":["operation"],"additionalProperties":false}
-        """);
 
     private static JsonElement Schema(string required, params (string Name, string Type)[] properties) =>
         Schema([required], properties);

@@ -10,7 +10,7 @@ public sealed class LocalToolBrokerAutomaticExecutionTests : IAsyncLifetime
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "go-auto-tools-" + Guid.NewGuid().ToString("N"));
     // These tests exercise only Coding branches, with the production broker and no UI or authorization callback.
-    private readonly LocalToolBroker _broker = new(null!, null!, null!, null!, null!);
+    private readonly LocalToolBroker _broker = new(null!, null!, null!, null!);
 
     public async Task InitializeAsync()
     {

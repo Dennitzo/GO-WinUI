@@ -77,13 +77,16 @@ public enum LiveCaptionProfile
 }
 
 public sealed record LiveCaptionSessionRequest(
+    // Explicit null means auto-detect; omitting it restores the legacy German default on deserialization.
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.Never)]
     string? Language = "de",
     LiveCaptionMode Mode = LiveCaptionMode.Transcribe,
     int SampleRate = GoAiProtocol.LiveCaptionSampleRate,
     int Channels = 1,
     int WindowMilliseconds = 4_000,
     int OverlapMilliseconds = 500,
-    LiveCaptionProfile Profile = LiveCaptionProfile.Captions);
+    LiveCaptionProfile Profile = LiveCaptionProfile.Captions,
+    string? PreferredGeneralModelId = null);
 
 public sealed record LiveCaptionChunkMetadata(
     string TurnId,

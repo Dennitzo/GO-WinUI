@@ -271,7 +271,11 @@ public sealed class LiveCaptionService : BackgroundService
                 : string.IsNullOrWhiteSpace(transcription.Text)
                     ? []
                     : [new TranscriptionSegment(0, session.Request.WindowMilliseconds / 1000d, transcription.Text, "Person 1")];
-            var uniqueRawSegments = RemoveRepeatedSegments(session.RawTranscript, rawSegments);
+            var normalizedRawSegments = rawSegments
+                .Select(static segment => segment with { Text = CollapseCharacterRuns(segment.Text) })
+                .Where(static segment => !string.IsNullOrWhiteSpace(segment.Text))
+                .ToArray();
+            var uniqueRawSegments = RemoveRepeatedSegments(session.RawTranscript, normalizedRawSegments);
             var uniqueRawText = string.Join(' ', uniqueRawSegments.Select(static segment => segment.Text)).Trim();
             IReadOnlyList<TranscriptionSegment> displaySegments = uniqueRawSegments;
             var provider = transcription.Provider;
@@ -288,6 +292,7 @@ public sealed class LiveCaptionService : BackgroundService
                     var translation = await _workers.TranslateCaptionSegmentsAsync(
                         displaySegments,
                         session.SessionId,
+                        session.Request.PreferredGeneralModelId,
                         cancellationToken).ConfigureAwait(false);
                     displaySegments = translation.Segments;
                     provider += $" + {translation.ModelId} → Deutsch";
@@ -1049,6 +1054,29 @@ public sealed class LiveCaptionService : BackgroundService
             result.Append(segment.Text.Trim());
         }
         return result.ToString();
+    }
+
+    internal static string CollapseCharacterRuns(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+        var result = new StringBuilder(text.Length);
+        var previous = '\0';
+        var runLength = 0;
+        foreach (var character in text)
+        {
+            if (char.ToLowerInvariant(character) == char.ToLowerInvariant(previous))
+            {
+                runLength++;
+                if (char.IsLetterOrDigit(character) && runLength > 3) continue;
+            }
+            else
+            {
+                previous = character;
+                runLength = 1;
+            }
+            result.Append(character);
+        }
+        return result.ToString().Trim();
     }
 
     private static void AppendBoundedPlainTranscript(CaptionSession session, string text)

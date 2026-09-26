@@ -5,7 +5,7 @@
   const allowedOutbound = new Set([
     "app.ready", "conversation.refresh", "chat.send", "chat.steer", "chat.cancel", "session.create", "session.open",
     "reasoning.get", "reasoning.set",
-    "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "session.groupCollapse", "session.projectCreate", "session.workspaceCreate", "document.pick",
+    "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "session.groupCollapse", "session.projectCreate", "session.workspaceCreate", "document.pick", "document.paste",
     "document.remove", "workflow.list", "workflow.insert", "workflow.create",
     "workflow.update", "workflow.delete",
     "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",

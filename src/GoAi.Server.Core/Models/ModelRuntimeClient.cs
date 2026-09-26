@@ -222,6 +222,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         Func<ModelRuntimeProgress, CancellationToken, ValueTask>? nativeProgress = null,
         bool structuredToolOnly = false,
         string? sessionCacheKey = null,
+        JsonElement? responseSchema = null,
         CancellationToken cancellationToken = default)
     {
         ValidateToolChoice(tools, requireToolCall, requiredToolName);
@@ -267,6 +268,14 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 ["parallel_tool_calls"] = coding,
             };
             ApplyModelSampling(body, modelId);
+            if (responseSchema is { } schema)
+            {
+                body["response_format"] = new
+                {
+                    type = "json_schema",
+                    json_schema = new { name = "response", strict = true, schema },
+                };
+            }
             ApplyReasoningSettings(body, modelId, modelRole, reasoningEffort);
             if (coding)
             {
@@ -430,6 +439,42 @@ public sealed partial class ModelRuntimeClient : IDisposable
         string? reasoningEffort,
         CancellationToken cancellationToken = default)
     {
+        var result = await AnalyzeImagesResultAsync(modelId, prompt, imagePaths, reasoningEffort,
+            responseSchema: null, maximumOutputTokens: int.MaxValue, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (string.Equals(result.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
+            throw new ModelGenerationTerminatedException("vision_output_limit");
+        return string.IsNullOrWhiteSpace(result.Content)
+            ? throw new JsonException("Das Vision-Modell lieferte keine Textantwort.")
+            : result.Content;
+    }
+
+    public async Task<JsonElement> AnalyzeImagesStructuredAsync(
+        string modelId,
+        string prompt,
+        IReadOnlyList<string> imagePaths,
+        JsonElement responseSchema,
+        string? reasoningEffort,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await AnalyzeImagesResultAsync(modelId, prompt, imagePaths, reasoningEffort,
+            responseSchema, maximumOutputTokens: 8192, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (string.Equals(result.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
+            throw new ModelGenerationTerminatedException("vision_schema_output_limit");
+        if (string.IsNullOrWhiteSpace(result.Content))
+            throw new JsonException("Das Vision-Modell lieferte keine strukturierte Antwort.");
+        using var parsed = JsonDocument.Parse(result.Content);
+        return parsed.RootElement.Clone();
+    }
+
+    private async Task<LmChatResult> AnalyzeImagesResultAsync(
+        string modelId,
+        string prompt,
+        IReadOnlyList<string> imagePaths,
+        string? reasoningEffort,
+        JsonElement? responseSchema,
+        int maximumOutputTokens,
+        CancellationToken cancellationToken)
+    {
         if (imagePaths.Count is < 1 or > 48)
         {
             throw new ArgumentOutOfRangeException(nameof(imagePaths));
@@ -470,6 +515,14 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 new { role = "user", content = content.ToArray() },
             },
         };
+        if (responseSchema is { } schema)
+        {
+            body["response_format"] = new
+            {
+                type = "json_schema",
+                json_schema = new { name = "visual_scene_spec", strict = true, schema },
+            };
+        }
         await UpdateSessionCacheAsync("prepare", preparation.InstanceId, null, cancellationToken).ConfigureAwait(false);
         ApplyReasoningSettings(body, preparation.InstanceId, "vision", reasoningEffort);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -482,12 +535,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
         var result = await CompleteStreamingChatWithBoundedRetryAsync(body,
             new Dictionary<string, string>(StringComparer.Ordinal), ObserveVisionProgressAsync,
-            structuredToolOnly: false, preparation.ContextLength, maximumOutputTokens: null,
+            structuredToolOnly: false, preparation.ContextLength, maximumOutputTokens,
             timeout.Token).ConfigureAwait(false);
-        var text = result.Content;
-        return string.IsNullOrWhiteSpace(text)
-            ? throw new JsonException("Das Vision-Modell lieferte keine Textantwort.")
-            : text;
+        return result;
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -1058,6 +1108,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         public int GeneratedFragments { get; private set; }
         public bool HadReasoning { get; private set; }
         public bool FinishObserved { get; private set; }
+        public string? FinishReason { get; private set; }
         public bool Done { get; set; }
         public string? LastReasoningDelta { get; private set; }
         public string? LastToolDelta { get; private set; }
@@ -1113,6 +1164,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 && !string.IsNullOrWhiteSpace(finish.GetString()))
             {
                 FinishObserved = true;
+                FinishReason = finish.GetString();
             }
             if (!choice.TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object)
             {
@@ -1198,7 +1250,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 InputTokens,
                 OutputTokens > 0 ? OutputTokens : GeneratedFragments,
                 HadReasoning,
-                ReasoningTokens, _measurement.Build(), ReasoningContent: _reasoningContent.ToString());
+                ReasoningTokens, _measurement.Build(), ReasoningContent: _reasoningContent.ToString(),
+                FinishReason: FinishReason);
         }
 
         public bool TryBuildCompleteToolCall(
@@ -1223,7 +1276,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     InputTokens,
                     OutputTokens > 0 ? OutputTokens : GeneratedFragments,
                     HadReasoning,
-                    ReasoningTokens, _measurement.Build(), ReasoningContent: _reasoningContent.ToString());
+                    ReasoningTokens, _measurement.Build(), ReasoningContent: _reasoningContent.ToString(),
+                    FinishReason: FinishReason);
                 return true;
             }
 
@@ -1378,6 +1432,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
             throw new JsonException("Die native llama-Antwort enthält keine Auswahl.");
         }
         var message = choices[0].GetProperty("message");
+        var finishReason = choices[0].TryGetProperty("finish_reason", out var finish)
+            && finish.ValueKind == JsonValueKind.String ? finish.GetString() : null;
         var calls = new List<LmToolCall>();
         if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
         {
@@ -1443,7 +1499,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
             inputTokens,
             outputTokens,
             hasReasoningContent || reasoningTokens > 0,
-            reasoningTokens, measurement.Build(), ReasoningContent: reasoningContent);
+            reasoningTokens, measurement.Build(), ReasoningContent: reasoningContent,
+            FinishReason: finishReason);
     }
 
     internal static bool TryParseReasoningToolCall(

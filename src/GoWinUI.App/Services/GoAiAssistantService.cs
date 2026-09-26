@@ -91,6 +91,7 @@ public sealed partial class GoAiAssistantService(
     RecentActivityService recentActivity,
     ILogger<GoAiAssistantService> logger) : IDisposable
 {
+    private const int MaximumPromptRetries = 3;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
     private static readonly JsonSerializerOptions ToolDisplayJsonOptions = new() { WriteIndented = true };
     private static readonly Action<ILogger, string, string, Exception?> RunDiagnostic = LoggerMessage.Define<string, string>(
@@ -966,7 +967,8 @@ public sealed partial class GoAiAssistantService(
             catch (Exception exception) when (ShouldRetryCurrentPrompt(
                 trigger?.Trigger.Action,
                 exception,
-                cancellationToken))
+                cancellationToken)
+                && retryCount < MaximumPromptRetries)
             {
                 retryCount++;
                 var delay = PromptRetryDelay(retryCount);
@@ -1019,10 +1021,6 @@ public sealed partial class GoAiAssistantService(
         // Sonderdienste gelten ausschliesslich fuer den aktuell erkannten Datenbank-Trigger.
         // Medien aus einer vorherigen Nachricht duerfen keinen Folgelauf umdeuten.
         var action = trigger?.Trigger.Action;
-        if (action == PromptTriggerAction.BricsCad && !toolBroker.IsBricsCadAvailable)
-        {
-            throw new InvalidOperationException("Das GO-BricsCAD-Plugin ist nicht verbunden. Öffne BricsCAD und stelle die GO-Bridge-Verbindung her.");
-        }
         var isMediaAnalysis = action is PromptTriggerAction.AudioAnalysis
             or PromptTriggerAction.VideoAnalysis
             or PromptTriggerAction.ImageAnalysis;
@@ -2458,7 +2456,6 @@ public sealed partial class GoAiAssistantService(
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
         var action = trigger?.Trigger.Action;
         if (action == PromptTriggerAction.DocumentCreate) originalPrompt = "Lies, bearbeite oder erstelle die angeforderten Dokumente direkt mit document.read/document.create und geeigneten Workspace-Werkzeugen. Prüfe das Ergebnis. Dokumentauftrag: " + originalPrompt;
-        if (action == PromptTriggerAction.Blender) originalPrompt = "Nutze blender.execute und die Workspace-Werkzeuge für diesen Blender-Auftrag: " + originalPrompt;
         var audiobook = action == PromptTriggerAction.Audiobook;
         if (UsesCodingAgent(action))
         {
@@ -2476,9 +2473,6 @@ public sealed partial class GoAiAssistantService(
             var availableCodingModel = codingCatalog.Models.FirstOrDefault(model => model.Downloaded
                 && string.Equals(model.Id, codingModel, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException("Das ausgewählte Coding-AI-Modell ist nicht verfügbar.");
-            // Blender is a Coding task with its modeling instructions. Keep the
-            // existing Coding context, tools, continuation and evidence path.
-            // Document pages are read on demand, without a separate General run.
             var codingPrompt = originalPrompt;
             var attachedDocuments = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
             if (attachedDocuments.Count > 0)
@@ -2497,8 +2491,7 @@ public sealed partial class GoAiAssistantService(
                 RunMode.Coding,
                 codingMessages,
                 UploadIds: uploaded.Select(item => item.Upload.UploadId).ToArray(),
-                ClientCapabilities: codingConfiguration.Capabilities.Concat(WorkspaceClientCapabilities)
-                    .Concat(toolBroker.IsBricsCadAvailable ? BricsCadClientCapabilities : []).Distinct().ToArray(),
+                ClientCapabilities: codingConfiguration.Capabilities.Concat(WorkspaceClientCapabilities).Distinct().ToArray(),
                 Limits: CreateChatRunLimits(availableCodingModel.ContextTokens, unlimitedDuration: true),
                 SessionId: sessionId.ToString("D"),
                 AllowedServerTools: GetAllowedServerTools(PromptTriggerAction.Coding),
@@ -2587,30 +2580,19 @@ public sealed partial class GoAiAssistantService(
         }
         messages.Add(new RunMessage("user", latestParts));
 
-        if (action == PromptTriggerAction.BricsCad && !toolBroker.IsBricsCadAvailable)
-        {
-            throw new InvalidOperationException(
-                "Das GO-BricsCAD-Plugin ist nicht verbunden. Öffne BricsCAD und stelle die GO-Bridge-Verbindung her.");
-        }
         var capabilities = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "documentIo", "documents", "visual-tools",
         };
         if (!string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath) && Directory.Exists(codingSession.CodingWorkspacePath))
-            capabilities.UnionWith(["coding", "coding.evidence", "workspace", "blender"]);
-        if (toolBroker.IsBricsCadAvailable)
-        {
-            capabilities.Add("bricscad");
-        }
+            capabilities.UnionWith(["coding", "coding.evidence", "workspace"]);
         if (documentContext?.Descriptor.DocumentCount > 0)
         {
             capabilities.Add("documents");
         }
 
         var mode = action is PromptTriggerAction.Translation
-            or PromptTriggerAction.BricsCad
             or PromptTriggerAction.WebSearch
-            or PromptTriggerAction.YouTubeSearch
             or PromptTriggerAction.Audiobook
                 ? RunMode.General
                 : RunMode.Auto;
@@ -2630,6 +2612,10 @@ public sealed partial class GoAiAssistantService(
             SessionContext: sessionContext.Descriptor,
             ConversationProfile: audiobook ? ConversationProfile.Audiobook : ConversationProfile.General,
             ReasoningEffort: await ResolveRequestedReasoningAsync(client, selectedModel, "general", cancellationToken).ConfigureAwait(false),
+            WorkspacePath: !string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath)
+                && Directory.Exists(codingSession.CodingWorkspacePath)
+                ? Path.GetFullPath(codingSession.CodingWorkspacePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                : null,
             DeepResearch: trigger?.DeepResearch == true);
     }
 
@@ -2637,7 +2623,7 @@ public sealed partial class GoAiAssistantService(
         current.SelectedModel?.Trim();
 
     internal static bool UsesCodingAgent(PromptTriggerAction? action) =>
-        action is PromptTriggerAction.Coding or PromptTriggerAction.Blender;
+        action is PromptTriggerAction.Coding;
 
     internal static string BuildCodingDocumentCatalog(IReadOnlyList<StoredDocument> attachedDocuments) =>
         "GO_DOCUMENT_ATTACHMENTS\nDie Sitzung enthält " + attachedDocuments.Count.ToString(CultureInfo.InvariantCulture)
@@ -2660,10 +2646,7 @@ public sealed partial class GoAiAssistantService(
         TimeoutSeconds: unlimitedDuration ? 0 : 3_600);
 
     internal static RunLimits CreateGeneralChatRunLimits(int contextLength, PromptTriggerAction? action,
-        IReadOnlyCollection<string> capabilities) => CreateChatRunLimits(contextLength,
-            unlimitedDuration: action == PromptTriggerAction.Blender
-                && capabilities.Contains("workspace", StringComparer.OrdinalIgnoreCase)
-                && capabilities.Contains("blender", StringComparer.OrdinalIgnoreCase));
+        IReadOnlyCollection<string> capabilities) => CreateChatRunLimits(contextLength);
 
     internal static int CalculateCodingHistoryBudget(int contextLength, string prompt)
     {
@@ -2733,18 +2716,16 @@ public sealed partial class GoAiAssistantService(
         return messages;
     }
 
-    internal static readonly string[] WorkspaceClientCapabilities = ["documentIo", "documents", "visual-tools", "blender", "workspace"];
-    private static readonly string[] BricsCadClientCapabilities = ["bricscad"];
+    internal static readonly string[] WorkspaceClientCapabilities = ["documentIo", "documents", "visual-tools", "workspace"];
 
     internal static IReadOnlyList<string> GetAllowedServerTools(
         PromptTriggerAction? action,
         string? prompt = null) => action switch
     {
         PromptTriggerAction.WebSearch => ["web.search", "web.fetch"],
-        PromptTriggerAction.Coding => ["web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze", "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve"],
-        PromptTriggerAction.YouTubeSearch => ["youtube.search", "web.fetch"],
+        PromptTriggerAction.Coding => ["web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze", "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve"],
         PromptTriggerAction.Audiobook => [],
-        _ => ["math.evaluate", "context.embed", "context.retrieve", "web.search", "web.fetch", "web.deepResearch", "youtube.search", "media.inspect", "media.analyze", "image.generate", "speech.synthesize"],
+        _ => ["math.evaluate", "context.embed", "context.retrieve", "web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze", "image.generate", "speech.synthesize"],
     };
 
     internal static string BuildWebResearchPrompt(string prompt)
@@ -2936,13 +2917,9 @@ public sealed partial class GoAiAssistantService(
         {
             PromptTriggerAction.Translation =>
                 "Übersetze den folgenden Inhalt präzise gemäß der Nutzerangabe. Bewahre Fachbegriffe, Zahlen, Einheiten, Tabellen und Struktur. Ergänze keine neuen Fakten.\n\n" + RequireRemaining(trigger, "Gib den zu übersetzenden Inhalt und optional die Zielsprache an."),
-            PromptTriggerAction.BricsCad =>
-                "Bearbeite die folgende Aufgabe mit den angebotenen typisierten BricsCAD-Werkzeugen. Leseoperationen dürfen direkt vorgeschlagen werden; jede CAD-Mutation muss lokal bestätigt werden.\n\n" + RequireRemaining(trigger, "Beschreibe nach „In BricsCAD“ die gewünschte Aufgabe."),
             PromptTriggerAction.WebSearch =>
                 BuildWebResearchPrompt(
                     RequireRemaining(trigger, "Gib nach der Triggerphrase einen Such- und Antwortauftrag an.")),
-            PromptTriggerAction.YouTubeSearch =>
-                "Nutze zwingend zuerst das serverseitige Werkzeug youtube.search. Bereite die Suchergebnisse anschließend mit dem allgemeinen Modell gemäß dem vollständigen Nutzerauftrag auf. Berücksichtige Sprache, Thema und gewünschtes Ausgabeformat; gib nicht bloß eine rohe Trefferliste zurück.\n\nYouTube-Such- und Antwortauftrag:\n" + RequireRemaining(trigger, "Gib nach der Triggerphrase einen YouTube-Suchauftrag an."),
             PromptTriggerAction.AudioAnalysis =>
                 (hasDocumentContext
                     ? "Analysiere vorrangig den angehängten Dokumentkontext."

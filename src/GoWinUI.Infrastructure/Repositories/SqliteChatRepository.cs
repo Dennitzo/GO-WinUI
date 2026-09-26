@@ -14,7 +14,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path,session_group_id,persistent_tool_variant
+            SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path,session_group_id,persistent_tool_variant_v2
             FROM chat_sessions
             WHERE $search='' OR rowid IN (SELECT rowid FROM session_search WHERE session_search MATCH $fts)
             ORDER BY is_pinned DESC, updated_at DESC;
@@ -35,7 +35,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path,session_group_id,persistent_tool_variant FROM chat_sessions WHERE id=$id;";
+        command.CommandText = "SELECT id,title,created_at,updated_at,selected_workflow_id,draft,is_pinned,pinned_at,persistent_tool_action,conversation_revision,coding_workspace_path,session_group_id,persistent_tool_variant_v2 FROM chat_sessions WHERE id=$id;";
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSession(reader) : null;
@@ -478,12 +478,11 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
-            // Blender is the Coding agent with modelling instructions. The legacy CHECK
-            // constraint only knows 'code', so the variant column keeps the exact chip.
             command.CommandText = """
                 UPDATE chat_sessions
                 SET persistent_tool_action=$action,
                     persistent_tool_variant=$variant,
+                    persistent_tool_variant_v2=$variantV2,
                     updated_at=$now
                 WHERE id=$id;
                 """;
@@ -491,10 +490,11 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             command.Parameters.AddWithValue("$action", action switch
             {
                 null => DBNull.Value,
-                PersistentToolAction.Coding or PersistentToolAction.Blender => "code",
+                PersistentToolAction.Coding => "code",
                 _ => SqliteMapping.EnumName(action.Value),
             });
-            command.Parameters.AddWithValue("$variant", action == PersistentToolAction.Blender ? "blender" : DBNull.Value);
+            command.Parameters.AddWithValue("$variant", DBNull.Value);
+            command.Parameters.AddWithValue("$variantV2", DBNull.Value);
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken);
@@ -737,10 +737,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         if (reader.IsDBNull(8)) return null;
         var stored = reader.GetString(8);
         if (stored != "code") return reader.ReadEnum<PersistentToolAction>(8);
-        var variant = reader.FieldCount > 12 && !reader.IsDBNull(12) ? reader.GetString(12) : null;
-        return string.Equals(variant, "blender", StringComparison.OrdinalIgnoreCase)
-            ? PersistentToolAction.Blender
-            : PersistentToolAction.Coding;
+        return PersistentToolAction.Coding;
     }
 
     internal static ChatMessage ReadMessage(SqliteDataReader reader) => new(

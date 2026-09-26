@@ -162,11 +162,14 @@ public sealed class RunSteeringClientTests
         await chats.SaveToolStepAsync(turn.AssistantMessage.Id, new("unfinished-tool", "coding.write", "running",
             "Unveränderter Werkzeugbeleg", InputJson: "{\"path\":\"old.txt\"}", ContentOffset: 7));
         var before = await ReadMessageRowAsync();
-        var sessionBefore = JsonSerializer.Serialize(await chats.GetSessionAsync(session.Id));
         var now = DateTimeOffset.UtcNow;
         var run = await runs.CreateAsync(new(Guid.NewGuid(), session.Id, turn.AssistantMessage.Id,
             PromptTriggerAction.Coding, Guid.NewGuid().ToString("N"), "run-already-cancelled", 41, "running",
             "fixture", null, now, now, WorkspacePath: workspace));
+        // Creating a Coding run intentionally persists the session's active tool and updates
+        // the session timestamp. Capture the baseline after that fixture setup so this test
+        // measures only mutations caused by ResumePendingAsync.
+        var sessionBefore = JsonSerializer.Serialize(await chats.GetSessionAsync(session.Id));
         await environment.Get<ISettingsStore>().SaveAsync(new AppSettings
             { IsAiConnectionEnabled = true, GoAiServerUrl = "http://127.0.0.1:65000" });
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());

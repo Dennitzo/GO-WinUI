@@ -1,4 +1,4 @@
-﻿using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using GoAi.Contracts;
@@ -203,28 +203,6 @@ public sealed class WebResearchServiceTests
         Assert.Empty(targeted.Matches);
     }
 
-    [Fact]
-    public async Task YouTubeKeyUsesOfficialApiWithoutExposingKeyInUrl()
-    {
-        var handler = new YouTubeHandler();
-        var service = new WebResearchService(
-            new TestHttpClientFactory(handler),
-            Options.Create(new GoAiServerOptions { YouTubeApiKey = "secret-youtube-key" }));
-
-        var response = await service.SearchAsync(
-            new WebSearchRequest("Wissenschaft einfach erklärt", 5, "de-DE"),
-            youtubeFallback: true);
-
-        Assert.Equal("youtube-data-api-v3", response.Provider);
-        Assert.False(response.IsFallback);
-        var result = Assert.Single(response.Results);
-        Assert.Equal("Wissen & Einführung", result.Title);
-        Assert.Equal("https://www.youtube.com/watch?v=video-1", result.Url);
-        Assert.Equal("Wissenskanal", result.Source);
-        Assert.Equal("1:02", result.Duration);
-        Assert.Equal(2, handler.RequestCount);
-    }
-
     [Theory]
     [InlineData("http://127.0.0.1/private")]
     [InlineData("http://192.168.0.1/router")]
@@ -248,29 +226,4 @@ public sealed class WebResearchServiceTests
         public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
     }
 
-    private sealed class YouTubeHandler : HttpMessageHandler
-    {
-        public int RequestCount { get; private set; }
-
-        protected override Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request,
-            CancellationToken cancellationToken)
-        {
-            RequestCount++;
-            Assert.NotNull(request.RequestUri);
-            Assert.DoesNotContain("key=", request.RequestUri.Query, StringComparison.OrdinalIgnoreCase);
-            Assert.Equal("secret-youtube-key", Assert.Single(request.Headers.GetValues("X-Goog-Api-Key")));
-            var json = request.RequestUri.AbsolutePath.EndsWith("/search", StringComparison.Ordinal)
-                ? """
-                  {"items":[{"id":{"videoId":"video-1"},"snippet":{"title":"Wissen &amp; Einführung","description":"Grundlagenwissen","channelTitle":"Wissenskanal","publishedAt":"2026-08-13T12:00:00Z","thumbnails":{"high":{"url":"https://example.invalid/high.jpg"}}}}]}
-                  """
-                : """
-                  {"items":[{"id":"video-1","contentDetails":{"duration":"PT1M2S"}}]}
-                  """;
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            {
-                Content = new StringContent(json, Encoding.UTF8, "application/json"),
-            });
-        }
-    }
 }

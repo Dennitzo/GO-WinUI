@@ -157,6 +157,28 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
+    public void ComposerPasteRoutesFilesAndImagesThroughTheNativeAttachmentImport()
+    {
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("document.paste"));
+        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
+        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
+        var page = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "src", "GoWinUI.App", "Pages", "AssistantPage.xaml.cs"));
+
+        Assert.Contains("\"document.paste\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("elements.prompt.addEventListener(\"paste\"", app, StringComparison.Ordinal);
+        Assert.Contains("clipboard.files.length > 0", app, StringComparison.Ordinal);
+        Assert.Contains("item.kind === \"file\"", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"document.paste\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
+        Assert.Contains("case \"document.paste\":", page, StringComparison.Ordinal);
+        Assert.Contains("StandardDataFormats.StorageItems", page, StringComparison.Ordinal);
+        Assert.Contains("StandardDataFormats.Bitmap", page, StringComparison.Ordinal);
+        Assert.Contains("ImportStorageFilesAsync(sessionId, files", page, StringComparison.Ordinal);
+        Assert.Contains("_coordinator.ImportAttachmentAsync(", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
@@ -253,8 +275,11 @@ public sealed class AssistantWorkflowTests
         Assert.Contains("voice-context-chip", app, StringComparison.Ordinal);
         Assert.DoesNotContain("voice-listening-preview", app, StringComparison.Ordinal);
         Assert.Contains("Ich höre zu", app, StringComparison.Ordinal);
-        Assert.Contains("const hasContent = Boolean(caption.isActive);", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("caption.isActive || caption.error", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("id=\"live-caption\"", html, StringComparison.Ordinal);
+        Assert.Contains("isLiveCaption: true", app, StringComparison.Ordinal);
+        Assert.Contains("state.liveCaption?.isActive", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"liveCaption.stop\", {})", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("Live-Untertitel beenden", app, StringComparison.Ordinal);
         Assert.DoesNotContain("start-live-translation", html, StringComparison.Ordinal);
         Assert.Contains("artifact.provider === \"screen-capture\"", app, StringComparison.Ordinal);
         Assert.Contains("message-artifacts--captures", app, StringComparison.Ordinal);
@@ -288,12 +313,9 @@ public sealed class AssistantWorkflowTests
     [Theory]
     [InlineData("webSearch", PromptTriggerAction.WebSearch)]
     [InlineData("imageGeneration", PromptTriggerAction.ImageGeneration)]
-    [InlineData("youTubeSearch", PromptTriggerAction.YouTubeSearch)]
-    [InlineData("bricsCad", PromptTriggerAction.BricsCad)]
     [InlineData("audiobook", PromptTriggerAction.Audiobook)]
     [InlineData("textToSpeech", PromptTriggerAction.TextToSpeech)]
     [InlineData("documentCreate", PromptTriggerAction.DocumentCreate)]
-    [InlineData("blender", PromptTriggerAction.Blender)]
     public void ExplicitComposerToolCreatesOneShotTrigger(string tool, PromptTriggerAction expected)
     {
         var match = AssistantCoordinator.CreateToolMatch(tool, "Aufgabe ohne Präfix");
@@ -1197,7 +1219,7 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void YouTubeSearchActionReceivesYouTubeAndFetchTools()
+    public void WebSearchActionReceivesSearchAndFetchTools()
     {
         var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.WebSearch);
 
@@ -1270,7 +1292,7 @@ public sealed class AssistantWorkflowTests
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("new Set([\"bricsCad\", \"audiobook\", \"coding\", \"blender\"])", app, StringComparison.Ordinal);
+        Assert.Contains("new Set([\"audiobook\", \"coding\"])", app, StringComparison.Ordinal);
         Assert.Contains("!persistentToolActions.has(state.selectedToolAction)", app, StringComparison.Ordinal);
         Assert.Contains("clearCompletedOneShotToolAction();", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.completed\":", app, StringComparison.Ordinal);
@@ -1320,7 +1342,7 @@ public sealed class AssistantWorkflowTests
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
         Assert.Contains("runStatusText(liveStatus)", app, StringComparison.Ordinal);
-        Assert.Contains("uniqueStatusParts(status, model ? `Modell: ${model}` : null, detail)", app, StringComparison.Ordinal);
+        Assert.Contains("uniqueStatusParts(detail)", app, StringComparison.Ordinal);
         var startedBlock = app[
             app.IndexOf("case \"chat.started\":", StringComparison.Ordinal)..
             app.IndexOf("case \"chat.delta\":", StringComparison.Ordinal)];
@@ -1814,7 +1836,7 @@ public sealed class AssistantWorkflowTests
         Assert.Equal(created.Id, settings.Current.ActiveSessionId);
         Assert.Equal(group.Id, created.SessionGroupId);
         Assert.Equal(environment.Directory, created.CodingWorkspacePath);
-        Assert.Equal(PersistentToolAction.Coding, created.PersistentToolAction);
+        Assert.Null(created.PersistentToolAction);
         Assert.False(Assert.Single(await chats.ListSessionGroupsAsync()).IsCollapsed);
         Assert.True((await chats.GetSessionAsync(first.Id))!.IsPinned);
         Assert.NotNull(await chats.GetMessageAsync(message.Id));

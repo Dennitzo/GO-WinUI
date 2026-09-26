@@ -18,6 +18,7 @@ public sealed record SystemAudioCaptionSnapshot(
 
 public sealed class SystemAudioCaptionService(
     GoAiConnectionService connection,
+    SettingsCoordinator settings,
     ILogger<SystemAudioCaptionService> logger) : IDisposable
 {
     private const int TargetSampleRate = GoAiProtocol.LiveCaptionSampleRate;
@@ -99,7 +100,8 @@ public sealed class SystemAudioCaptionService(
                         TargetSampleRate,
                         1,
                         WindowMilliseconds,
-                        OverlapMilliseconds),
+                        OverlapMilliseconds,
+                        PreferredGeneralModelId: GoAiAssistantService.ResolvePreferredModel(settings.Current)),
                     cancellationToken).ConfigureAwait(false);
                 _serverSessionId = session.SessionId;
 
@@ -224,16 +226,14 @@ public sealed class SystemAudioCaptionService(
             {
                 await _audioAvailable.WaitAsync(cancellationToken).ConfigureAwait(false);
                 DrainResampler(output);
-                while (_samples.Count >= WindowSamples)
-                {
-                    await SendWindowAsync(_samples.GetRange(0, WindowSamples), cancellationToken).ConfigureAwait(false);
-                    _samples.RemoveRange(0, WindowSamples - OverlapSamples);
-                    _sentWindow = true;
-                }
+                _sentWindow |= await SendCompleteWindowsAsync(_samples, SendWindowAsync, cancellationToken).ConfigureAwait(false);
 
                 if (_finishing)
                 {
                     DrainResampler(output);
+                    // Inference may have accumulated another capture buffer while the
+                    // preceding windows were sent. The final flush has the same limits.
+                    _sentWindow |= await SendCompleteWindowsAsync(_samples, SendWindowAsync, cancellationToken).ConfigureAwait(false);
                     var minimum = _sentWindow ? OverlapSamples + MinimumFinalSamples : MinimumFinalSamples;
                     if (_samples.Count >= minimum)
                     {
@@ -266,6 +266,21 @@ public sealed class SystemAudioCaptionService(
         {
             CaptionFailed(logger, $"cleanup_{exception.GetType().Name}", exception);
         }
+    }
+
+    internal static async Task<bool> SendCompleteWindowsAsync(
+        List<float> samples,
+        Func<IReadOnlyList<float>, CancellationToken, Task> sendWindow,
+        CancellationToken cancellationToken)
+    {
+        var sent = false;
+        while (samples.Count >= WindowSamples)
+        {
+            await sendWindow(samples.GetRange(0, WindowSamples), cancellationToken).ConfigureAwait(false);
+            samples.RemoveRange(0, WindowSamples - OverlapSamples);
+            sent = true;
+        }
+        return sent;
     }
 
     private void DrainResampler(float[] output)
@@ -321,7 +336,8 @@ public sealed class SystemAudioCaptionService(
         {
             try
             {
-                await _processor.WaitAsync(TimeSpan.FromSeconds(90), cancellationToken).ConfigureAwait(false);
+                await WaitForCaptionDrainAsync(_processor, () => Interlocked.Read(ref _sequence),
+                    TimeSpan.FromSeconds(90), cancellationToken).ConfigureAwait(false);
             }
             catch (TimeoutException)
             {
@@ -365,6 +381,25 @@ public sealed class SystemAudioCaptionService(
             }
         }
         ReleaseSessionResources();
+    }
+
+    internal static async Task WaitForCaptionDrainAsync(
+        Task processor, Func<long> getSequence, TimeSpan progressTimeout, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var sequence = getSequence();
+            try
+            {
+                await processor.WaitAsync(progressTimeout, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (TimeoutException) when (getSequence() > sequence)
+            {
+                // Slow translation is still making progress. Bound inactivity,
+                // not the total time required to drain several valid windows.
+            }
+        }
     }
 
     private void ReleaseSessionResources()

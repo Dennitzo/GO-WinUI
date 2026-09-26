@@ -22,7 +22,7 @@ public sealed class CodingDeepResearchTests
         var request = Request();
         RunRequestValidator.Validate(request);
         var tools = new AgentToolCatalog().GetAvailableTools(request);
-        Assert.Equal(14, tools.Count);
+        Assert.Equal(15, tools.Count);
         Assert.False(StagedWebResearchPipeline.IsRequested(request, tools));
         var definitions = RunProcessor.CreateModelToolDefinitions(tools, null, directTools: true);
         Assert.All(ResearchTools, name => Assert.Contains(definitions, tool => tool.Name == name));

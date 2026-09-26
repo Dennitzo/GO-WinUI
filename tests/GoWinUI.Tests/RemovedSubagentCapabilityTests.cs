@@ -6,20 +6,6 @@ namespace GoWinUI.Tests;
 
 public sealed class RemovedSubagentCapabilityTests
 {
-    [Fact]
-    public void WorkspaceCapabilitiesKeepDirectDocumentToolsWithoutDelegation()
-    {
-        var capabilities = GoAiAssistantService.WorkspaceClientCapabilities;
-
-        Assert.Contains("documentIo", capabilities);
-        Assert.Contains("documents", capabilities);
-        Assert.Contains("workspace", capabilities);
-        Assert.Contains("visual-tools", capabilities);
-        Assert.Contains("blender", capabilities);
-        Assert.DoesNotContain(capabilities, IsRemovedCapability);
-        Assert.Equal(capabilities.Length, capabilities.Distinct(StringComparer.OrdinalIgnoreCase).Count());
-    }
-
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

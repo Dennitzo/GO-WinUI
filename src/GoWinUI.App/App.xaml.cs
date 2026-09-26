@@ -1,7 +1,6 @@
 using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
 using GoAi.Contracts;
-using GoWinUI.BricsCad.Protocol;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure;
@@ -71,10 +70,6 @@ public partial class App : Application
             .ConfigureServices(services =>
             {
                 services.AddGoInfrastructure(options => options.DataDirectory = DataDirectory);
-                services.AddSingleton<BricsCadBridgeHost>();
-                services.AddSingleton<IBricsCadBridgeHost>(static provider => provider.GetRequiredService<BricsCadBridgeHost>());
-                services.AddSingleton<BricsCadBridgeLifecycle>();
-                services.AddHostedService(static provider => provider.GetRequiredService<BricsCadBridgeLifecycle>());
                 services.AddSingleton<SettingsCoordinator>();
                 services.AddSingleton<NativeModelRuntimeService>();
                 services.AddSingleton<GoAiConnectionService>();

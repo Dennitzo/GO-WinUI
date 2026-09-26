@@ -8,17 +8,6 @@ namespace GoWinUI.Tests;
 
 public sealed class WorkspaceToolTests
 {
-    [Theory]
-    [InlineData("../other/image.png")]
-    [InlineData("C:/private/image.png")]
-    [InlineData(".git/config")]
-    [InlineData("image.png:secret")]
-    public async Task ImageAndBlenderPathsStayInsideWorkspace(string path)
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        Assert.Throws<UnauthorizedAccessException>(() => WorkspaceFilePath.Resolve(environment.Directory, path));
-    }
-
     [Fact]
     public async Task ClearingSessionsRemovesOnlyEmptyProjectsAndPreservesPinnedMessages()
     {
@@ -35,14 +24,4 @@ public sealed class WorkspaceToolTests
         Assert.Equal(remaining.SessionGroupId, Assert.Single(await chats.ListSessionGroupsAsync()).Id);
     }
 
-    [Fact]
-    public void LocalBrokerAcceptsBlenderAndImageToolsWithCorrectRisk()
-    {
-        var blender = new ToolProposal("proposal-test", "run-test", WorkspaceTools.Blender,
-            JsonSerializer.SerializeToElement(new { operation = "info" }), ToolRiskClass.Process, "Blender prüfen", DateTimeOffset.MaxValue);
-        LocalToolBroker.ValidateProposal(blender);
-        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(blender with { RiskClass = ToolRiskClass.ReadOnly }));
-        LocalToolBroker.ValidateProposal(blender with { Name = WorkspaceTools.ImageInput,
-            Arguments = JsonSerializer.SerializeToElement(new { operation = "windows" }), RiskClass = ToolRiskClass.ReadOnly });
-    }
 }

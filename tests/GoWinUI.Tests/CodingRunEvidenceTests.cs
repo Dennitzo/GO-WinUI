@@ -152,7 +152,7 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
         var reference = await previous.RecordAsync("step", "coding.list", EmptyArguments,
             JsonSerializer.SerializeToElement(new { entries = HistoricalTestListing }));
         var current = new CodingRunEvidenceStore(Data, _session, "run-command");
-        var broker = new LocalToolBroker(null!, null!, null!, null!, null!);
+        var broker = new LocalToolBroker(null!, null!, null!, null!);
         var proposal = Proposal("coding.readOutput", new { evidenceId = reference.EvidenceId, stream = "result", maximumCharacters = 6000 });
 
         var read = await broker.ExecuteAsync(proposal, _session, null, Workspace, evidenceStore: current);
@@ -223,7 +223,7 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
             exit 7
             """;
         await File.WriteAllTextAsync(Path.Combine(Workspace, "probe.ps1"), script, new UTF8Encoding(true));
-        var broker = new LocalToolBroker(null!, null!, null!, null!, null!);
+        var broker = new LocalToolBroker(null!, null!, null!, null!);
         var store = new CodingRunEvidenceStore(Data, _session, "run-command");
         var progress = new List<CodingCommandProgress>();
         var command = Proposal("coding.command", new { executable = "powershell.exe",
@@ -263,7 +263,7 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
     [Fact]
     public async Task EvidenceStorageFailureAfterCommittedWritePreservesAppliedReceiptAndAddsWarning()
     {
-        var broker = new LocalToolBroker(null!, null!, null!, null!, null!);
+        var broker = new LocalToolBroker(null!, null!, null!, null!);
         var store = new CodingRunEvidenceStore(Data, _session, "run-command");
         var proposal = Proposal("coding.write", new { path = "committed.txt", content = "written once" }, ToolRiskClass.LocalMutation);
         var result = await broker.ExecuteAsync(proposal, _session, null, Workspace, commandProgress: async progress =>
@@ -288,7 +288,7 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
     [Fact]
     public async Task UpfrontEvidenceStorageFailurePreventsMutation()
     {
-        var broker = new LocalToolBroker(null!, null!, null!, null!, null!);
+        var broker = new LocalToolBroker(null!, null!, null!, null!);
         var store = new CodingRunEvidenceStore(Data, _session, "run-command");
         Directory.CreateDirectory(Path.Combine(Data, "Cache", "CodingRuns", "run-command", "scope.json"));
         var result = await broker.ExecuteAsync(Proposal("coding.write", new { path = "never.txt", content = "must not be written" }, ToolRiskClass.LocalMutation),

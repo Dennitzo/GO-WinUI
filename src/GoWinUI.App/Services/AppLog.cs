@@ -60,25 +60,4 @@ internal static partial class AppLog
 
     [LoggerMessage(EventId = 1400, Level = LogLevel.Error, Message = "Settings UI action failed")]
     public static partial void SettingsActionFailed(ILogger logger, Exception exception);
-
-    [LoggerMessage(EventId = 1500, Level = LogLevel.Information, Message = "BricsCAD bridge listening on loopback port {Port}")]
-    public static partial void BricsCadBridgeStarted(ILogger logger, int port);
-
-    [LoggerMessage(EventId = 1501, Level = LogLevel.Warning, Message = "BricsCAD bridge could not be started")]
-    public static partial void BricsCadBridgeStartFailed(ILogger logger, Exception exception);
-
-    [LoggerMessage(EventId = 1502, Level = LogLevel.Information, Message = "BricsCAD plugin connected: version {PluginVersion}, build {PluginBuildId}")]
-    public static partial void BricsCadPluginConnected(ILogger logger, string pluginVersion, string pluginBuildId);
-
-    [LoggerMessage(EventId = 1503, Level = LogLevel.Information, Message = "BricsCAD plugin disconnected: {Reason}")]
-    public static partial void BricsCadPluginDisconnected(ILogger logger, string reason);
-
-    [LoggerMessage(EventId = 1504, Level = LogLevel.Information, Message = "BricsCAD capabilities received: {PropertyCount} top-level properties")]
-    public static partial void BricsCadCapabilitiesReceived(ILogger logger, int propertyCount);
-
-    [LoggerMessage(EventId = 1505, Level = LogLevel.Debug, Message = "BricsCAD event received: {EventName}")]
-    public static partial void BricsCadEventReceived(ILogger logger, string eventName);
-
-    [LoggerMessage(EventId = 1506, Level = LogLevel.Warning, Message = "BricsCAD bridge diagnostic: {Details}")]
-    public static partial void BricsCadBridgeDiagnostic(ILogger logger, Exception? exception, string details);
 }

@@ -132,6 +132,7 @@ public interface IDocumentFileCodec
     IReadOnlySet<string> ReadableExtensions { get; }
     Task<IReadOnlyList<string>> ReadAsync(string path, CancellationToken cancellationToken = default);
     Task WriteDocxAsync(string sourceMarkdown, string outputPath, CancellationToken cancellationToken = default);
+    Task WriteXlsxAsync(string sourceMarkdown, string outputPath, CancellationToken cancellationToken = default);
 }
 
 public interface IGoAiRunRepository

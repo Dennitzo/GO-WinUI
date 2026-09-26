@@ -5,6 +5,7 @@ using System.Xml;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
+using DocumentFormat.OpenXml.Spreadsheet;
 using GoWinUI.Core.Contracts;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
@@ -19,7 +20,7 @@ public sealed partial class DocumentFileCodec : IDocumentFileCodec
 {
     private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".pdf", ".docx", ".txt", ".md", ".markdown", ".csv", ".json", ".xml",
+        ".pdf", ".docx", ".xlsx", ".txt", ".md", ".markdown", ".csv", ".json", ".xml",
         ".html", ".htm", ".rtf", ".log", ".ini", ".yaml", ".yml", ".tex",
     };
 
@@ -43,6 +44,7 @@ public sealed partial class DocumentFileCodec : IDocumentFileCodec
         {
             ".pdf" => ReadPdf(fullPath, cancellationToken),
             ".docx" => ReadDocx(fullPath, cancellationToken),
+            ".xlsx" => ReadXlsx(fullPath, cancellationToken),
             ".xml" => await ReadXmlAsync(fullPath, cancellationToken).ConfigureAwait(false),
             ".html" or ".htm" => await ReadHtmlAsync(fullPath, cancellationToken).ConfigureAwait(false),
             ".rtf" => [StripRtf(await ReadTextAsync(fullPath, cancellationToken).ConfigureAwait(false))],
@@ -95,10 +97,73 @@ public sealed partial class DocumentFileCodec : IDocumentFileCodec
                     }
 
                     line = NormalizeInlineMarkdown(line);
-                    paragraph.Append(new Run(new Text(line) { Space = SpaceProcessingModeValues.Preserve }));
+                    paragraph.Append(new DocumentFormat.OpenXml.Wordprocessing.Run(new DocumentFormat.OpenXml.Wordprocessing.Text(line) { Space = SpaceProcessingModeValues.Preserve }));
                     body.Append(paragraph);
                 }
                 mainPart.Document.Save();
+            }, cancellationToken).ConfigureAwait(false);
+            File.Move(temporaryPath, fullPath, overwrite: true);
+        }
+        finally
+        {
+            try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); }
+            catch (IOException) { }
+        }
+    }
+
+    public async Task WriteXlsxAsync(
+        string sourceMarkdown,
+        string outputPath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sourceMarkdown);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        var fullPath = Path.GetFullPath(outputPath);
+        var directory = Path.GetDirectoryName(fullPath)
+            ?? throw new InvalidOperationException("Der XLSX-Zielpfad ist ungültig.");
+        Directory.CreateDirectory(directory);
+        var temporaryPath = Path.Combine(directory, Path.GetFileName(fullPath) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                using var document = SpreadsheetDocument.Create(
+                    temporaryPath,
+                    SpreadsheetDocumentType.Workbook,
+                    autoSave: true);
+                var workbook = document.AddWorkbookPart();
+                workbook.Workbook = new Workbook();
+                var worksheetPart = workbook.AddNewPart<WorksheetPart>();
+                worksheetPart.Worksheet = new Worksheet();
+                var sheetData = new SheetData();
+                worksheetPart.Worksheet.Append(sheetData);
+                var sheets = new Sheets();
+                var sheet = new Sheet
+                {
+                    Id = workbook.GetIdOfPart(worksheetPart),
+                    SheetId = 1U,
+                    Name = "Dokument",
+                };
+                sheets.Append(sheet);
+                workbook.Workbook.Append(sheets);
+                foreach (var rawLine in sourceMarkdown.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n'))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (IsSectionMarker(rawLine) || string.IsNullOrWhiteSpace(rawLine)) continue;
+                    var row = new Row();
+                    foreach (var cellText in rawLine.Split('|', StringSplitOptions.TrimEntries))
+                    {
+                        var cell = new Cell
+                        {
+                            DataType = CellValues.String,
+                            CellValue = new CellValue(NormalizeInlineMarkdown(cellText)),
+                        };
+                        row.Append(cell);
+                    }
+                    sheetData.Append(row);
+                }
+                workbook.Workbook.Save();
             }, cancellationToken).ConfigureAwait(false);
             File.Move(temporaryPath, fullPath, overwrite: true);
         }
@@ -130,10 +195,27 @@ public sealed partial class DocumentFileCodec : IDocumentFileCodec
         foreach (var paragraph in body.Descendants<Paragraph>())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var text = string.Concat(paragraph.Descendants<Text>().Select(static node => node.Text)).Trim();
+            var text = string.Concat(paragraph.Descendants<DocumentFormat.OpenXml.Wordprocessing.Text>().Select(static node => node.Text)).Trim();
             if (text.Length > 0) paragraphs.Add(text);
         }
         return paragraphs.Count == 0 ? [string.Empty] : paragraphs;
+    }
+
+    private static List<string> ReadXlsx(string path, CancellationToken cancellationToken)
+    {
+        using var document = SpreadsheetDocument.Open(path, false);
+        var workbook = document.WorkbookPart?.WorksheetParts.FirstOrDefault()?.Worksheet
+            ?? throw new InvalidDataException("XLSX enthält kein Arbeitsblatt.");
+        var rows = workbook.Descendants<Row>().ToList();
+        var lines = new List<string>(rows.Count);
+        foreach (var row in rows)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var cells = row.Descendants<Cell>().Select(static cell => cell.InnerText?.Trim() ?? string.Empty);
+            var line = string.Join(" | ", cells.Where(static text => text.Length > 0));
+            if (line.Length > 0) lines.Add(line);
+        }
+        return lines.Count == 0 ? [string.Empty] : lines;
     }
 
     private static async Task<IReadOnlyList<string>> ReadXmlAsync(string path, CancellationToken cancellationToken)

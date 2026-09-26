@@ -101,10 +101,11 @@ public sealed class WorkerOrchestrator : IDisposable
     public async Task<(IReadOnlyList<TranscriptionSegment> Segments, string ModelId)> TranslateCaptionSegmentsAsync(
         IReadOnlyList<TranscriptionSegment> segments,
         string sessionId,
+        string? preferredGeneralModelId = null,
         CancellationToken cancellationToken = default)
     {
-        var modelId = _options.GeneralModelId;
-        var contextLength = _options.GeneralContextLength;
+        var modelId = string.IsNullOrWhiteSpace(preferredGeneralModelId)
+            ? _options.GeneralModelId : preferredGeneralModelId.Trim();
         if (segments.Count == 0)
         {
             return (segments, modelId);
@@ -112,12 +113,22 @@ public sealed class WorkerOrchestrator : IDisposable
         await using var lease = await _scheduler.AcquireAsync(
             "caption-translation",
             sessionId,
-            GpuLeaseMode.Shared,
+            GpuLeaseMode.CodingSecondary,
             cancellationToken).ConfigureAwait(false);
-        _ = await _modelRuntime.EnsureModelLoadedAsync(
-            modelId,
-            contextLength,
-            cancellationToken).ConfigureAwait(false);
+        // CompleteChatAsync loads the selected model using its fitted runtime context.
+        // A fixed server-default context can exceed the selected model's capacity.
+        var status = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var selectedModel = ModelRuntimeClient.ResolveModelStatus(status.Models, modelId, "general");
+        if (selectedModel is null)
+        {
+            throw new InvalidOperationException(
+                $"Das General-Modell '{modelId}' für die Live-Untertitel ist nicht verfügbar. Prüfe die General-AI-Auswahl und den Modellserver in den Einstellungen.");
+        }
+        if (selectedModel.ReasoningEfforts?.Contains("none") != true)
+        {
+            throw new InvalidOperationException(
+                $"Das General-Modell '{modelId}' unterstützt für Live-Untertitel keinen reasoning-freien Modus.");
+        }
         var input = JsonSerializer.Serialize(segments.Select(static segment => segment.Text));
         var result = await _modelRuntime.CompleteChatAsync(
             modelId,
@@ -128,7 +139,15 @@ public sealed class WorkerOrchestrator : IDisposable
                 new LmChatMessage("user", input),
             ],
             [],
-            maximumOutputTokens: null,
+            maximumOutputTokens: Math.Clamp(128 + input.Length * 2, 512, 4096),
+            reasoningEffort: "none",
+            responseSchema: JsonSerializer.SerializeToElement(new
+            {
+                type = "array",
+                items = new { type = "string" },
+                minItems = segments.Count,
+                maxItems = segments.Count,
+            }),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var content = result.Content
@@ -150,9 +169,33 @@ public sealed class WorkerOrchestrator : IDisposable
         {
             throw new JsonException("Caption translation returned an empty segment.");
         }
+        for (var index = 0; index < translated.Length; index++)
+        {
+            ValidateCaptionTranslation(segments[index].Text, translated[index]!);
+        }
         return (
             segments.Select((segment, index) => segment with { Text = translated[index]!.Trim() }).ToArray(),
             modelId);
+    }
+
+    internal static void ValidateCaptionTranslation(string source, string translated)
+    {
+        var sourceWords = source.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+        var translatedWords = translated.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+        if (translated.Length > Math.Max(256, source.Length * 3 + 64)
+            || translatedWords > Math.Max(24, sourceWords * 4 + 8))
+        {
+            throw new JsonException("Caption translation expanded beyond a faithful translation.");
+        }
+
+        var sourceLower = source.ToLowerInvariant();
+        var translatedLower = translated.ToLowerInvariant();
+        string[] metaPhrases = ["die eingabe", "ich analysiere", "ausgabe entsprechend", "vorgabe", "json-array", "struktur und bedeutung"];
+        if (metaPhrases.Any(phrase => translatedLower.Contains(phrase, StringComparison.Ordinal)
+            && !sourceLower.Contains(phrase, StringComparison.Ordinal)))
+        {
+            throw new JsonException("Caption translation contained model commentary.");
+        }
     }
 
     public async Task WarmSpeechResourcesAsync(CancellationToken cancellationToken = default)

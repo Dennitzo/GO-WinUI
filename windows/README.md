@@ -8,8 +8,6 @@ Der vollständige Clientbuild führt Restore, Release-Build, Tests, win-x64-Sing
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1
 ```
 
-Das Ergebnis liegt unter `artifacts\portable\win-x64\GO.exe`. BricsCAD wird nur mit
-`-IncludeBricsCadPlugin` oder über `build-bricscad-plugin.ps1` zusätzlich gebaut.
 
 ## Native Modelle und Docker-Gateway
 
@@ -150,7 +148,6 @@ Konfiguration weiterverwendet.
 
 | Skript | Zweck |
 |---|---|
-| `build-bricscad-plugin.ps1` | BricsCAD-Plugin separat bauen |
 | `remove-obsolete-artifacts.ps1` | regenerierbare Alt-Builds und frühere Modelltestausgaben entfernen; Diagnose-Traces behalten |
 | `remove-legacy-ai-server-autostart.ps1` | Autostart der früheren Windows-Server-App entfernen |
 | `remove-legacy-ai-server-installation.ps1` | bereits migrierte frühere Serverinstallation bereinigen; aktive Docker-Daten und Migrationsbackup erhalten |

@@ -7,6 +7,48 @@ namespace GoAi.Server.Tests;
 public sealed class StorageCleanupServiceTests
 {
     [Fact]
+    public async Task CleanupKeepsExpiredUploadReferencedByActiveRun()
+    {
+        using var context = new TestServerContext();
+        var uploadId = "upload-" + Guid.NewGuid().ToString("N");
+        var uploadDirectory = Path.Combine(context.Options.UploadDirectory, uploadId);
+        Directory.CreateDirectory(uploadDirectory);
+        await File.WriteAllTextAsync(Path.Combine(uploadDirectory, "payload.bin"), "image");
+
+        await using (var connection = await context.Database.OpenConnectionAsync())
+        {
+            var expired = GoAi.Server.Core.Data.GoAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow.AddMinutes(-1));
+            await using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO uploads(upload_id, file_name, media_type, total_length, total_sha256,
+                    chunk_size, chunk_count, state, created_at, expires_at)
+                VALUES($id, 'reference.webp', 'image/webp', 5, $sha, 5, 1, 'complete', $expired, $expired);
+                """;
+            insert.Parameters.AddWithValue("$id", uploadId);
+            insert.Parameters.AddWithValue("$sha", new string('a', 64));
+            insert.Parameters.AddWithValue("$expired", expired);
+            _ = await insert.ExecuteNonQueryAsync();
+        }
+
+        var repository = new RunRepository(context.Database, new RunEventNotifier());
+        _ = await repository.CreateAsync(new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Coding,
+            [new RunMessage("user", [new ContentPart("upload", UploadId: uploadId)])],
+            UploadIds: [uploadId]), null);
+
+        var cleanup = new StorageCleanupService(context.Database, context.WrappedOptions);
+        await cleanup.CleanupExpiredAsync();
+
+        await using var verify = await context.Database.OpenConnectionAsync();
+        await using var count = verify.CreateCommand();
+        count.CommandText = "SELECT COUNT(*) FROM uploads WHERE upload_id = $id;";
+        count.Parameters.AddWithValue("$id", uploadId);
+        Assert.Equal(1L, Convert.ToInt64(await count.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture));
+        Assert.True(Directory.Exists(uploadDirectory));
+    }
+
+    [Fact]
     public async Task CleanupRemovesExpiredTerminalRunEventsAndReleasedLeases()
     {
         using var context = new TestServerContext();

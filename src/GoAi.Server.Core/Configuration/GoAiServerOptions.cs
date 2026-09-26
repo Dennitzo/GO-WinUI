@@ -42,7 +42,6 @@ public sealed class GoAiServerOptions
 
     public int EmbeddingContextLength { get; set; } = ModelContextProfiles.BgeM3Maximum;
 
-    public string? YouTubeApiKey { get; set; }
 
     public int ModelTtlSeconds { get; set; } = 600;
 
@@ -50,9 +49,6 @@ public sealed class GoAiServerOptions
 
     public int MaximumToolCalls { get; set; } = 30;
 
-    public int BlenderMaximumToolCalls { get; set; } = 96;
-
-    public int BlenderMaximumModelRounds { get; set; } = 192;
 
     public int WorkspaceMaximumModelRounds { get; set; } = 64;
 

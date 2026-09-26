@@ -63,7 +63,6 @@ services:
       GO_AI_MEDIA_WORKER_URL: http://media:8080
       GO_AI_IMAGE_WORKER_URL: http://image:8080
       GO_AI_WORKER_DATA_DIRECTORY: /data
-      GO_AI_YOUTUBE_API_KEY: ${GO_AI_YOUTUBE_API_KEY:-}
       NVIDIA_VISIBLE_DEVICES: all
     gpus: all
     extra_hosts:

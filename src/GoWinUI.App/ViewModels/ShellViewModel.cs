@@ -26,7 +26,7 @@ public sealed partial class ShellViewModel : ObservableObject
         AiServices.Add(new(TextToSpeechService, "Sprachausgabe", "Ausgewählter Provider · GPU 1", "\uE767", "Sprachausgabe - ausgewählter Provider", false, false, "Wird geprüft"));
         AiServices.Add(new(VisionMediaService, "Vision / Medien", "Qwen3-VL + Media Worker", "\uE722", "Vision / Medien - Qwen3-VL", false, false, "Wird geprüft"));
         AiServices.Add(new(ImageService, "Bildgenerierung", "Z-Image-Turbo · Docker", "\uE8B9", "Bildgenerierung - Z-Image-Turbo", false, false, "Wird geprüft"));
-        AiServices.Add(new(ResearchService, "Web / YouTube", "SearXNG / YouTube API", "\uE721", "Web / YouTube - SearXNG / YouTube API", false, false, "Wird geprüft"));
+        AiServices.Add(new(ResearchService, "Web", "SearXNG", "\uE721", "Web - SearXNG", false, false, "Wird geprüft"));
     }
 
     [ObservableProperty]
@@ -232,7 +232,7 @@ public sealed partial class ShellViewModel : ObservableObject
         "text-to-speech" => TextToSpeechService,
         "vision" or "media-analysis" or "audio-analysis" or "video-audio-fusion" => VisionMediaService,
         "image-generation" => ImageService,
-        "web-search" or "youtube-search" or "web-fetch" => ResearchService,
+        "web-search" or "web-fetch" => ResearchService,
         _ => null,
     };
 

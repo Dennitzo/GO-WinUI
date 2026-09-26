@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using GoAi.Contracts;
-using GoWinUI.BricsCad.Protocol;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.Core.Coding;
@@ -11,13 +10,12 @@ using GoWinUI.Core.Coding;
 namespace GoWinUI.App.Services;
 
 /// <summary>
-/// Executes session document and optional BricsCAD tools, plus Coding tools
+/// Executes session document and Coding tools
 /// bound to the active run's selected project. Valid tools execute automatically
 /// under the user's standing authorization, including local processes and CAD mutations.
 /// </summary>
 public sealed class LocalToolBroker(
     GoAiConnectionService connection,
-    IBricsCadBridgeHost bricsCad,
     IDocumentIngestor documents,
     LocalDocumentToolService documentTools,
     IChatRepository chats)
@@ -25,8 +23,6 @@ public sealed class LocalToolBroker(
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
     private static readonly SearchValues<char> EvidenceIdCharacters = SearchValues.Create("0123456789abcdef");
-
-    public bool IsBricsCadAvailable => bricsCad.IsConnected;
 
     public async Task<ClientToolResult> ExecuteAsync(
         ToolProposal proposal,
@@ -124,9 +120,6 @@ public sealed class LocalToolBroker(
                     sessionId,
                     proposal.Arguments,
                     cancellationToken).ConfigureAwait(false),
-                ClientToolNames.BricsCadGeometryQuery or ClientToolNames.BricsCadMeasure
-                    or ClientToolNames.BricsCadMove or ClientToolNames.BricsCadAction =>
-                    await RunBricsCadAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false),
                 _ => throw new InvalidOperationException(
                     $"Das Clientwerkzeug '{proposal.Name}' ist in GO nicht verfügbar."),
             };
@@ -185,14 +178,12 @@ public sealed class LocalToolBroker(
             "coding.list" or "coding.search" or "coding.read" or "coding.gitDiff"
                 or "coding.searchHistory" or "coding.searchKnowledge" or "coding.renderHtml"
                 or "coding.readOutput" or "coding.searchRunEvidence" => ToolRiskClass.ReadOnly,
-            "coding.write" or "coding.edit" => ToolRiskClass.LocalMutation,
-            "coding.command" or WorkspaceTools.Blender or WorkspaceTools.Open => ToolRiskClass.Process,
+            "coding.write" or "coding.edit" or "coding.undo" => ToolRiskClass.LocalMutation,
+            "coding.command" or WorkspaceTools.Open => ToolRiskClass.Process,
             WorkspaceTools.ImageInput => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentRead or ClientToolNames.DocumentsList
-                or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages
-                or ClientToolNames.BricsCadGeometryQuery or ClientToolNames.BricsCadMeasure => ToolRiskClass.ReadOnly,
+                or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentCreate => ToolRiskClass.LocalMutation,
-            ClientToolNames.BricsCadMove or ClientToolNames.BricsCadAction => ToolRiskClass.CadMutation,
             _ => throw new InvalidDataException($"Das Clientwerkzeug '{proposal.Name}' ist nicht freigegeben."),
         };
         if (proposal.RiskClass != expectedRisk)
@@ -302,20 +293,6 @@ public sealed class LocalToolBroker(
                 ValidateInteger(arguments, "startPage", 1, 1_000_000);
                 ValidateInteger(arguments, "endPage", 1, 1_000_000);
                 break;
-            case ClientToolNames.BricsCadGeometryQuery:
-            case ClientToolNames.BricsCadMeasure:
-            case ClientToolNames.BricsCadMove:
-            case ClientToolNames.BricsCadAction:
-                ValidateProperties(arguments, ["operation"], ["operation", "arguments"]);
-                var cadOperation = ValidateString(arguments, "operation", 1, 128);
-                if (arguments.TryGetProperty("arguments", out var cadArguments)
-                    && (cadArguments.ValueKind != JsonValueKind.Object
-                        || cadArguments.GetRawText().Length > 1_048_576))
-                {
-                    throw new InvalidDataException("Die BricsCAD-Werkzeugargumente sind ungültig oder zu groß.");
-                }
-                ValidateCadOperation(proposal.Name, cadOperation);
-                break;
         }
     }
 
@@ -415,64 +392,6 @@ public sealed class LocalToolBroker(
             })
             .ToArray();
         return new { pages };
-    }
-
-    private async Task<object> RunBricsCadAsync(
-        string toolName,
-        JsonElement arguments,
-        CancellationToken cancellationToken)
-    {
-        if (!bricsCad.IsConnected)
-        {
-            throw new InvalidOperationException("Das GO-BricsCAD-Plugin ist nicht verbunden.");
-        }
-        var operation = RequiredString(arguments, "operation");
-        ValidateCadOperation(toolName, operation);
-        var parameters = arguments.TryGetProperty("arguments", out var value) && value.ValueKind == JsonValueKind.Object
-            ? JsonNode.Parse(value.GetRawText())?.AsObject() ?? new JsonObject()
-            : new JsonObject();
-        var response = await bricsCad.RequestAsync(
-            operation,
-            parameters,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (!response.Ok)
-        {
-            throw new BridgeRemoteException(response);
-        }
-        return new
-        {
-            operation,
-            provider = response.Provider ?? BridgeProtocol.Provider,
-            result = response.Result,
-        };
-    }
-
-    private static void ValidateCadOperation(string toolName, string operation)
-    {
-        var valid = toolName switch
-        {
-            ClientToolNames.BricsCadGeometryQuery => operation is
-                "geometry.query" or "selection.describe" or "entity.describe" or "layers.list"
-                or "bim.objects.query" or "bim.components.query",
-            ClientToolNames.BricsCadMeasure => operation is
-                "measurement.bbox" or "measurement.length" or "measurement.area",
-            ClientToolNames.BricsCadMove => operation is "geometry.move" or "bim.move",
-            ClientToolNames.BricsCadAction => operation is
-                "pipes.validateNetwork" or "bim.host.point.resolve"
-                or "layers.create" or "layers.rename" or "layers.setColor" or "layers.batch"
-                or "entity.setLayer" or "entity.setName" or "selection.set" or "bim.selection.set"
-                or "geometry.create" or "geometry.copy" or "geometry.rotate" or "geometry.scale" or "geometry.delete"
-                or "profile.extrude" or "circle.extrude" or "rectangles.extrude"
-                or "pipes.createNetworkSolids" or "annotations.createRoomDimensions"
-                or "document.save" or "undo.last" or "undo.redo"
-                or "bim.classify" or "bim.create" or "bricscad.assoc.evaluate",
-            _ => false,
-        };
-        if (!valid)
-        {
-            throw new InvalidOperationException(
-                $"Die BricsCAD-Operation '{operation}' passt nicht zu {toolName}.");
-        }
     }
 
     private static void ValidateIdentifier(string value, string name)

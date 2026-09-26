@@ -31,7 +31,6 @@
   <ItemGroup>
     <ProjectReference Include="..\GoAi.Client\GoAi.Client.csproj" />
     <ProjectReference Include="..\GoAi.Contracts\GoAi.Contracts.csproj" />
-    <ProjectReference Include="..\GoWinUI.BricsCad.Protocol\GoWinUI.BricsCad.Protocol.csproj" />
     <ProjectReference Include="..\GoWinUI.Core\GoWinUI.Core.csproj" />
     <ProjectReference Include="..\GoWinUI.Infrastructure\GoWinUI.Infrastructure.csproj" />
   </ItemGroup>
@@ -85,10 +84,6 @@
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
-    <EmbeddedResource Include="Assets\Blender\*.py" />
-    <EmbeddedResource Include="Assets\Blender\MODELING_GUIDE.md" />
-    <Content Remove="Assets\Blender\**\*.pyc" />
-    <None Remove="Assets\Blender\**\*.pyc" />
   </ItemGroup>
 
   <ItemGroup>

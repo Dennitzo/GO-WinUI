@@ -331,19 +331,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WebSearchResponse"
-  /v1/research/youtube:
-    post:
-      summary: YouTube durchsuchen
-      operationId: searchYouTube
-      requestBody:
-        $ref: "#/components/requestBodies/WebSearch"
-      responses:
-        "200":
-          description: YouTube-Ergebnisse; ohne API-Key sichtbar als SearXNG-Fallback markiert.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/WebSearchResponse"
   /v1/research/fetch:
     post:
       summary: Öffentliche Webquelle geschützt abrufen
@@ -871,7 +858,7 @@ components:
           type: array
           maxItems: 16
           items:
-            enum: [bricscad, screenCapture, documents, documentIo, pdf, coding]
+            enum: [screenCapture, documents, documentIo, workspace, visual-tools, pdf, coding, coding.evidence]
         allowedServerTools:
           type: array
           maxItems: 32
@@ -883,7 +870,7 @@ components:
             and 420 seconds within the remaining run budget. Results retain verified source URLs,
             verbatim evidence, uncertainties and provider=searxng/isFallback=false.
           items:
-            enum: [web.search, web.fetch, web.deepResearch, youtube.search, media.inspect, media.analyze, image.generate, math.evaluate, context.embed, context.retrieve]
+            enum: [web.search, web.fetch, web.deepResearch, media.inspect, media.analyze, image.generate, speech.synthesize, math.evaluate, context.embed, context.retrieve]
         limits:
           $ref: "#/components/schemas/RunLimits"
         sessionId:
@@ -1608,6 +1595,9 @@ components:
       type: object
       additionalProperties: false
       properties:
+        preferredGeneralModelId:
+          type: [string, "null"]
+          description: General model selected by the client for German caption translation; omitted clients use the server default.
         language:
           type: [string, "null"]
           maxLength: 16
