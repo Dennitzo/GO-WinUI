@@ -390,7 +390,8 @@ public sealed class CodingWorkingStateIntegrationTests
         var system = Assert.Single(second.Messages, message => message.Role == "system").Content!;
         Assert.Equal("Legacy policy\n\n" + CodingAgentPolicy.ReasoningLanguagePrompt
             + "\n\n" + CodingAgentPolicy.StagedExecutionAndNarrationPrompt
-            + "\n\n" + CodingAgentPolicy.WorkspaceDependenciesPrompt, system);
+            + "\n\n" + CodingAgentPolicy.WorkspaceDependenciesPrompt
+            + "\n\n" + CodingAgentPolicy.ScientificResearchPrompt, system);
         Assert.Equal(first.Messages[0], second.Messages[0]);
         Assert.Empty(harness.Handler.Requests);
     }

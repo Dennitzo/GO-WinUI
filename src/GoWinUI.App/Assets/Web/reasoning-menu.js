@@ -18,7 +18,6 @@
   if (!button) return;
   const menu = document.getElementById("reasoning-menu");
   const list = document.getElementById("reasoning-options");
-  const label = document.getElementById("reasoning-label");
   const detail = document.getElementById("reasoning-detail");
   let modelId = "", role = "general", profile = null, pending = null, running = false;
   function close(focus = false) {
@@ -29,8 +28,8 @@
     const choices = options(profile), selected = selection(profile, choices);
     button.disabled = running || Boolean(pending) || !modelId || !profile?.available || !choices.length;
     if (running || !modelId || !pending && (!profile?.available || !choices.length)) close();
-    label.textContent = "Reasoning";
     button.title = selected ? `Reasoning: ${names[selected] || selected}` : "Keine wählbare Reasoning-Stufe verfügbar";
+    button.setAttribute("aria-label", button.title);
     detail.textContent = pending ? "Modellinformationen werden geladen …" : profile?.detail
       || (choices.length ? "Auswahl wird für dieses Modell gespeichert." : "Das Modell bietet keine wählbaren Reasoning-Stufen.");
     list.replaceChildren();
@@ -95,7 +94,14 @@
     } else if (message.type === "host.error" && message.requestId === pending) {
       pending = null; profile = { ...profile, selected: null, levels: [], available: false, detail: "Modellinformationen konnten nicht geladen werden." }; render();
     } else if (message.type === "chat.started") { running = true; close(); render(); }
-    else if (["chat.completed", "chat.failed", "chat.cancelled"].includes(message.type)) { running = false; render(); }
+    else if (["chat.completed", "chat.failed", "chat.cancelled"].includes(message.type)) {
+      running = false;
+      // A model runtime can become reachable while a run is loading. Recover the
+      // choices immediately instead of leaving the Science composer disabled until
+      // a later navigation or full snapshot happens.
+      if (modelId && !pending && !profile?.available) refresh();
+      else render();
+    }
   });
   render();
 })();

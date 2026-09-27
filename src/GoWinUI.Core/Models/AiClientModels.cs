@@ -21,6 +21,8 @@ public enum PromptTriggerAction
     Audiobook,
     Coding,
     DocumentCreate,
+    Extension,
+    PlanMode,
 }
 
 public enum PromptTriggerMatchMode
@@ -40,13 +42,32 @@ public sealed record PromptTrigger(
     int Priority,
     long Revision,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? ExtensionActionId = null);
 
 public sealed record PromptTriggerMatch(
     PromptTrigger Trigger,
     string OriginalPrompt,
     string RemainingPrompt,
-    bool DeepResearch = false);
+    bool DeepResearch = false,
+    string DeepResearchProfile = "auto");
+
+public static class DeepResearchProfiles
+{
+    public const string Auto = "auto";
+    public const string Web = "web";
+    public const string ScientificEvidence = "scientificEvidence";
+    public const string SystematicReview = "systematicReview";
+    public const string ScopingReview = "scopingReview";
+    public const string LiteratureUpdate = "literatureUpdate";
+    public const string ReplicationAudit = "replicationAudit";
+    public const string OpenProblem = "openProblem";
+    public const string MathematicalInvestigation = "mathematicalInvestigation";
+
+    public static bool IsValid(string? value) => value is
+        Auto or Web or ScientificEvidence or SystematicReview or ScopingReview
+        or LiteratureUpdate or ReplicationAudit or OpenProblem or MathematicalInvestigation;
+}
 
 public sealed record AssistantAttachment(
     Guid Id,
@@ -96,7 +117,8 @@ public sealed record GoAiRunRecord(
     string? ErrorCode,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    string? WorkspacePath = null);
+    string? WorkspacePath = null,
+    string? ExtensionActionId = null);
 
 public sealed record ClientToolExecutionRecord(
     string ProposalId,

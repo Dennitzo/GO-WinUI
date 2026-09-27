@@ -24,6 +24,16 @@
   }
   respond @preflight 204
 
+  redir /assistant /assistant/ 308
+  handle_path /assistant/* {
+    reverse_proxy {env.ASSISTANT_LAN_WEB_UPSTREAM} {
+      transport http {
+        versions 1.1
+        dial_timeout 5s
+      }
+    }
+  }
+
   reverse_proxy gateway:8080 {
     transport http {
       versions 1.1

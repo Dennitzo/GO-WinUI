@@ -13,7 +13,7 @@ public sealed class CodingAgentTests
 {
     private static RunRequest Request() => new(GoAiProtocol.Version, RunMode.Coding,
         [new RunMessage("user", [new ContentPart("text", "Implementiere und teste eine kleine Funktion.")])],
-        ClientCapabilities: ["coding"], PreferredCodingModelId: "coding/test.gguf");
+        ClientCapabilities: ["coding", "coding.process"], PreferredCodingModelId: "coding/test.gguf");
 
     [Fact]
     public void CodingModeRequiresWorkspaceCapabilityAndAcceptsIndependentModel()
@@ -33,11 +33,13 @@ public sealed class CodingAgentTests
     {
         var catalog = new AgentToolCatalog();
         var tools = catalog.GetAvailableTools(Request());
-        Assert.Equal(12, tools.Count);
-        Assert.All(tools, tool => Assert.StartsWith("coding.", tool.Name, StringComparison.Ordinal));
+        Assert.Equal(21, tools.Count);
+        Assert.All(tools, tool => Assert.True(tool.Name.StartsWith("coding.", StringComparison.Ordinal)
+            || tool.Name.StartsWith("math.", StringComparison.Ordinal)
+            || tool.Name.StartsWith("research.code.", StringComparison.Ordinal)));
         Assert.All(tools.Where(tool => tool.Name != "coding.updatePlan"), tool => Assert.False(tool.ServerSide));
         var definitions = RunProcessor.CreateModelToolDefinitions(tools, null, directTools: true);
-        Assert.Equal(12, definitions.Length);
+        Assert.Equal(21, definitions.Length);
         Assert.DoesNotContain(definitions, tool => tool.Name == AgentToolCatalog.SelectorToolName);
         var generalTools = catalog.GetAvailableTools(Request() with { Mode = RunMode.General });
         Assert.DoesNotContain(generalTools, tool => tool.Name.StartsWith("coding.", StringComparison.Ordinal));

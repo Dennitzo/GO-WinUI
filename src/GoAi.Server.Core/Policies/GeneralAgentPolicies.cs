@@ -161,11 +161,11 @@ public static class GeneralAgentPolicies
             TimeZoneInfo.FindSystemTimeZoneById("Europe/Berlin")).ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
         var envelope = new
         {
-            schema = "go.ai.agent.envelope.v1",
+            schema = "assistant.agent.envelope.v1",
             route = isAudiobook ? "audiobook" : "general",
             conversationProfile = request.ConversationProfile?.ToString().ToLowerInvariant() ?? "general",
             currentDateEuropeBerlin = localToday,
-            expectedResponse = "go.ai.agent.message.v1",
+            expectedResponse = "assistant.agent.message.v1",
             toolSelection = effectiveTools.Count == 0 ? "none" : "names_then_selected_schema",
             clientCapabilities = request.ClientCapabilities ?? [],
             documentContextPresent = request.DocumentContext is not null

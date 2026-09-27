@@ -59,9 +59,9 @@ public sealed class RunSteeringClientTests
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         var runs = environment.Get<IGoAiRunRepository>();
-        var session = await chats.CreateSessionAsync("Umlenken");
+        var session = await chats.CreateSessionAsync("Umlenken", coding ? ChatMode.Coding : ChatMode.General);
         var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "workspace")).FullName;
-        if (coding) await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: true);
+        if (coding) await chats.SetCodingWorkspacePathAsync(session.Id, workspace);
         var turn = await chats.AddTurnAsync(session.Id, "Ursprünglicher Auftrag");
         var rawPrefix = metadata ? "GO_SESSION_TITLE: Versteckt\r\nAlt.\r\nZweite." : "Alt. ";
         var visiblePrefix = RunVisibleText.Canonicalize(rawPrefix);

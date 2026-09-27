@@ -1,7 +1,25 @@
 (() => {
   "use strict";
   const pending = new Map();
-  const storageKey = sessionId => `go.assistant.steer.v1:${sessionId}`;
+  const storageKey = sessionId => `assistant.run-steering.v1:${sessionId}`;
+  const legacyStorageKey = sessionId => `go.assistant.steer.v1:${sessionId}`;
+
+  function readStoredValue(sessionId) {
+    const storage = globalThis.localStorage;
+    if (!storage) return null;
+    const canonicalKey = storageKey(sessionId);
+    const legacyKey = legacyStorageKey(sessionId);
+    const canonical = storage.getItem(canonicalKey);
+    if (canonical !== null) {
+      storage.removeItem(legacyKey);
+      return canonical;
+    }
+    const legacy = storage.getItem(legacyKey);
+    if (legacy === null) return null;
+    storage.setItem(canonicalKey, legacy);
+    storage.removeItem(legacyKey);
+    return legacy;
+  }
 
   function canSteer(state) {
     return Boolean(state.isRunning && state.activeSessionId
@@ -11,7 +29,7 @@
   function stored(sessionId) {
     if (pending.has(sessionId)) return pending.get(sessionId);
     try {
-      const value = JSON.parse(globalThis.localStorage?.getItem(storageKey(sessionId)) || "null");
+      const value = JSON.parse(readStoredValue(sessionId) || "null");
       if (value?.sessionId === sessionId && typeof value.inputId === "string" && typeof value.prompt === "string") return value;
     } catch { /* Optional storage must not prevent a new steering request. */ }
     return null;
@@ -73,7 +91,10 @@
     const request = stored(sessionId);
     if (!request || request.inputId !== payload?.inputId) return { accepted: false, clearDraft: false };
     pending.delete(sessionId);
-    try { globalThis.localStorage?.removeItem(storageKey(sessionId)); } catch { /* Optional storage. */ }
+    try {
+      globalThis.localStorage?.removeItem(storageKey(sessionId));
+      globalThis.localStorage?.removeItem(legacyStorageKey(sessionId));
+    } catch { /* Optional storage. */ }
     const sameSession = sessionId === String(state.activeSessionId || "");
     return { accepted: true, clearDraft: sameSession && String(composerText || "").trim() === request.prompt, sameSession };
   }

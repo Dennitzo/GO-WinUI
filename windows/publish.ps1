@@ -74,6 +74,13 @@ $manifest = [ordered]@{
     buildId = Get-GoBuildId
     builtAtUtc = Get-GoBuiltAt
     executableSha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+    files = @(Get-ChildItem -LiteralPath $OutputDirectory -Recurse -File | Sort-Object FullName | ForEach-Object {
+        [ordered]@{
+            path = ([IO.Path]::GetRelativePath($OutputDirectory, $_.FullName) -replace '\\', '/')
+            length = $_.Length
+            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    })
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 

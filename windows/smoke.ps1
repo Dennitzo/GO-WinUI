@@ -125,6 +125,7 @@ try {
     }
     $nativeRuntimeFiles = @(
         'Assets\NativeRuntime\windows\manage-coding-llama.ps1',
+        'Assets\NativeRuntime\windows\manage-llama-server.ps1',
         'Assets\NativeRuntime\workers\coding\catalog.py'
     )
     foreach ($nativeRuntimeFile in $nativeRuntimeFiles) {

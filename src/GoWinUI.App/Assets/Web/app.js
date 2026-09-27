@@ -13,6 +13,29 @@
     documentGroupStatus: { total: 0, ready: 0, processing: 0, failed: 0, status: "ready" },
     pendingDocumentImports: [],
     activeSessionId: null,
+    chatMode: "general",
+    scienceView: "overview",
+    workspacePath: null,
+    codingWorkspacePath: null,
+    actionDescriptors: [],
+    activeActionIds: new Set(),
+    assistantTitle: "AI Assistent",
+    projectMemory: {
+      available: false,
+      projectKey: null,
+      projectId: null,
+      projectLabel: "Projektgedächtnis",
+      autoCaptureEnabled: true,
+      entries: [],
+      selectedEntryId: null,
+      isEditing: false,
+      disabledReason: null
+    },
+    scientificResearch: { available: true, projects: [], selectedProjectId: null, detail: null, disabledReason: null, revision: 0 },
+    scienceCapabilities: {},
+    scienceChatVisible: true,
+    scienceExporting: false,
+    scienceRequestedProjectId: null,
     selectedWorkflowEditorId: null,
     isWorkflowEditing: false,
     pendingWorkflowTitle: null,
@@ -21,7 +44,9 @@
     activeRunId: null,
     activeRunSessionId: null,
     activeRunMessageId: null,
+    runQueue: { active: null, pending: [], queueDepth: 0, isIdle: true },
     pendingChatSend: null,
+    pendingPlanImplementation: null,
     contextSource: "estimated",
     contextProfile: null,
     contextMeasurementMessageId: null,
@@ -51,9 +76,12 @@
     codingPreviewDialog: null,
     artifactPreviewUrls: new Map(),
     artifactPreviewPending: new Set(),
+    selectedExtensionActionId: null,
+    persistentExtensionActionId: null,
     selectedToolAction: null,
     persistentToolAction: null,
     deepResearch: false,
+    deepResearchProfile: "auto",
     pendingCaptureRequest: null,
     waitingForCapture: false,
     captureStopRequested: false,
@@ -103,7 +131,8 @@
   };
 
   const byId = id => document.getElementById(id);
-  const persistentToolActions = new Set(["audiobook", "coding"]);
+  const persistentToolActions = new Set(["audiobook", "planMode"]);
+  const persistentExtensionActionIds = new Set(["builtin.audiobook/create", "builtin.coding/plan-mode"]);
   const toolVisuals = Object.freeze({
     coding: ["Coding", "M8 6l-6 6 6 6M16 6l6 6-6 6M14 3l-4 18"],
     audioAnalysis: ["Audio analysieren", "M4 12h2m2-5 4 10 3-7 2 4h3"],
@@ -115,14 +144,140 @@
     videoAnalysis: ["Video analysieren", "M3 6h13v12H3zM16 10l5-3v10l-5-3z"],
     textToSpeech: ["Vorlesen", "M5 9v6h4l5 4V5L9 9zM17 9c1 1 1 5 0 6M19 6c3 3 3 9 0 12"],
     webSearch: ["Websuche", "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16 16l5 5M4 11h14M11 4c3 3 3 11 0 14M11 4c-3 3-3 11 0 14"],
+    planMode: ["Planmodus", "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"],
     "screen.capture": ["Bild aufnehmen", "M4 7h4l2-2h4l2 2h4v12H4zM12 10a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
     "screenClip.toggle": ["Video aufnehmen", "M3 6h13v12H3zM16 10l5-3v10l-5-3z"],
     "liveCaption.start": ["Live-Untertitel", "M4 8h2M4 12h4M4 16h2M10 7v10M14 9v6M18 6v12M22 9v6"]
   });
 
+  const actionIcons = Object.freeze({
+    attachment: "M12 5v14M5 12h14",
+    web: toolVisuals.webSearch[1],
+    research: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16 16l5 5M8 11h6M11 8v6",
+    audio: toolVisuals.audioAnalysis[1],
+    image: toolVisuals.imageAnalysis[1],
+    video: toolVisuals.videoAnalysis[1],
+    document: toolVisuals.documentCreate[1],
+    generateImage: toolVisuals.imageGeneration[1],
+    audiobook: toolVisuals.audiobook[1],
+    pdf: "M6 3h8l4 4v14H6zM14 3v5h4M9 13h6M9 17h4",
+    translate: toolVisuals.translation[1],
+    speech: toolVisuals.textToSpeech[1],
+    captions: toolVisuals["liveCaption.start"][1],
+    workflow: "M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01",
+    memory: "M7 4h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3zM9 9h6M9 13h6M9 17h4",
+    plan: toolVisuals.planMode[1],
+    extension: "M8 3v4M16 3v4M5 7h14v6a7 7 0 0 1-14 0zM9 20h6"
+  });
+
+  // Read-only aliases keep old snapshots and native capture events readable.
+  // They never populate the menu; the current snapshot catalog is its sole source.
+  const legacyExtensionActionIds = Object.freeze({
+    audioAnalysis: "builtin.media/audio-analysis",
+    imageAnalysis: "builtin.media/image-analysis",
+    imageGeneration: "builtin.image/generate",
+    audiobook: "builtin.audiobook/create",
+    documentCreate: "builtin.documents/create",
+    textToSpeech: "builtin.speech/read-aloud",
+    translation: "builtin.speech/translate",
+    videoAnalysis: "builtin.media/video-analysis",
+    webSearch: "builtin.web/web-search",
+    deepResearch: "builtin.web/deep-research",
+    planMode: "builtin.coding/plan-mode"
+  });
+
   function normalizeToolAction(action) {
     const value = action || null;
     return value && Object.prototype.hasOwnProperty.call(toolVisuals, value) ? value : null;
+  }
+
+  function normalizeExtensionActionId(actionId) {
+    const value = String(actionId || "").trim();
+    return value || null;
+  }
+
+  function extensionActionIdForToolAction(toolAction) {
+    const alias = String(toolAction || "").trim();
+    if (!alias) return null;
+    const descriptor = (Array.isArray(state.actionDescriptors) ? state.actionDescriptors : [])
+      .find(item => [item?.toolAction, item?.toolToggle, item?.captureAction].includes(alias));
+    return normalizeExtensionActionId(descriptor?.actionId || legacyExtensionActionIds[alias]);
+  }
+
+  function toolActionForExtensionActionId(actionId) {
+    const normalized = normalizeExtensionActionId(actionId);
+    if (!normalized) return null;
+    const descriptor = (Array.isArray(state.actionDescriptors) ? state.actionDescriptors : [])
+      .find(item => String(item?.actionId || "").trim() === normalized);
+    const descriptorAlias = normalizeToolAction(descriptor?.toolAction);
+    if (descriptorAlias) return descriptorAlias;
+    const legacyAlias = Object.entries(legacyExtensionActionIds)
+      .find(([, candidate]) => candidate === normalized)?.[0];
+    return normalizeToolAction(legacyAlias);
+  }
+
+  function normalizeScheduledRun(run, fallbackPosition = 0) {
+    if (!run || !run.sessionId) return null;
+    const position = Number(run.position);
+    return {
+      ...run,
+      sessionId: String(run.sessionId),
+      ticketId: run.ticketId ? String(run.ticketId) : null,
+      requestId: run.requestId ? String(run.requestId) : null,
+      state: String(run.state || (fallbackPosition > 0 ? "queued" : "running")).toLocaleLowerCase(),
+      position: Number.isFinite(position) ? position : fallbackPosition
+    };
+  }
+
+  function normalizeRunQueue(value) {
+    const raw = value?.runQueue || value || {};
+    const active = normalizeScheduledRun(raw.active, 0);
+    const pending = (Array.isArray(raw.pending) ? raw.pending : [])
+      .map((run, index) => normalizeScheduledRun(run, index + 1))
+      .filter(Boolean);
+    const queueDepth = Number(raw.queueDepth);
+    return {
+      active,
+      pending,
+      queueDepth: Number.isFinite(queueDepth) && queueDepth >= 0 ? queueDepth : pending.length,
+      isIdle: typeof raw.isIdle === "boolean" ? raw.isIdle : !active && pending.length === 0
+    };
+  }
+
+  function scheduledRunForSession(sessionId) {
+    const id = String(sessionId || "");
+    if (!id) return null;
+    const queue = state.runQueue || {};
+    if (String(queue.active?.sessionId || "") === id) return { ...queue.active, queueState: "active" };
+    const pending = (queue.pending || []).find(run => String(run.sessionId || "") === id);
+    return pending ? { ...pending, queueState: "queued" } : null;
+  }
+
+  function applyRunQueue(value) {
+    state.runQueue = normalizeRunQueue(value);
+    const active = state.runQueue.active;
+    state.isAiBusy = !state.runQueue.isIdle || Boolean(state.isRunning);
+    if (active) {
+      state.activeRunSessionId = active.sessionId;
+    } else if (!state.isRunning) {
+      state.activeRunSessionId = null;
+      state.activeRunId = null;
+      state.activeRunMessageId = null;
+    }
+  }
+
+  function removeScheduledRun(sessionId, requestId = null, includeActive = false) {
+    const id = String(sessionId || "");
+    const request = String(requestId || "");
+    const matches = run => String(run?.sessionId || "") === id
+      && (!request || !run?.requestId || String(run.requestId) === request);
+    const queue = normalizeRunQueue(state.runQueue);
+    if (matches(queue.active) && (includeActive || !state.isRunning)) queue.active = null;
+    queue.pending = queue.pending.filter(run => !matches(run));
+    queue.pending.forEach((run, index) => { run.position = index + 1; });
+    queue.queueDepth = queue.pending.length;
+    queue.isIdle = !queue.active && queue.pending.length === 0;
+    applyRunQueue(queue);
   }
 
   function createToolIcon(pathData) {
@@ -141,14 +296,16 @@
     sessionSearch: byId("session-search"),
     toggleSessions: byId("toggle-sessions"),
     clearSessions: byId("clear-sessions"),
-    pinSession: byId("pin-session"),
+    modeSwitcherButton: byId("mode-switcher-button"),
+    modeSwitcherMenu: byId("mode-switcher-menu"),
+    modeSwitcherLabel: byId("mode-switcher-label"),
+    modeSwitcherInitial: byId("mode-switcher-initial"),
     newSession: byId("new-session"),
     messageList: byId("message-list"),
     messageScroll: byId("message-scroll"),
     codingChanges: byId("coding-changes"),
     prompt: byId("prompt"),
     chatPane: document.querySelector(".chat-pane"),
-    chatHeader: document.querySelector(".chat-header"),
     composerRegion: document.querySelector(".composer-region"),
     composerSpeechStatus: byId("composer-speech-status"),
     composerSpeechDetail: byId("composer-speech-detail"),
@@ -158,12 +315,16 @@
     send: byId("send"),
     toolsButton: byId("tools-button"),
     toolsMenu: byId("tools-menu"),
-    workflowsButton: byId("open-workflows"),
+    toolsMenuContent: byId("tools-menu-content"),
     context: byId("context-meter"),
     contextLabel: byId("context-label"),
     contextStrip: byId("context-strip"),
     activeTools: byId("active-tool-chips"),
     documents: byId("document-chips"),
+    workspaceOverlay: byId("workspace-overlay"),
+    workspacePickerForm: byId("workspace-picker-form"),
+    workspacePath: byId("workspace-path"),
+    workspacePathOptions: byId("workspace-path-options"),
     microphone: byId("microphone"),
     screenClip: document.querySelector('[data-tool-immediate="screenClip.toggle"]'),
     overlay: byId("workflow-overlay"),
@@ -196,18 +357,74 @@
     cancelWorkflowEdit: byId("cancel-workflow-edit"),
     selectWorkflow: byId("select-workflow"),
     saveWorkflow: byId("save-workflow"),
-    newWorkflow: byId("new-workflow")
+    newWorkflow: byId("new-workflow"),
+    memoryOverlay: byId("memory-overlay"),
+    memoryProjectLabel: byId("memory-project-label"),
+    memoryAutoCapture: byId("memory-auto-capture"),
+    memoryDisabledReason: byId("memory-disabled-reason"),
+    memoryList: byId("memory-list"),
+    memoryEmpty: byId("memory-empty"),
+    memoryPreview: byId("memory-preview"),
+    memoryPreviewKind: byId("memory-preview-kind"),
+    memoryPreviewTitle: byId("memory-preview-title"),
+    memoryPreviewContent: byId("memory-preview-content"),
+    memoryPreviewSource: byId("memory-preview-source"),
+    memoryPreviewUpdated: byId("memory-preview-updated"),
+    memoryPreviewConfirmed: byId("memory-preview-confirmed"),
+    memoryEditor: byId("memory-editor"),
+    memoryEntryId: byId("memory-entry-id"),
+    memoryEntryVersion: byId("memory-entry-version"),
+    memoryEntryKind: byId("memory-entry-kind"),
+    memoryEntryContent: byId("memory-entry-content"),
+    pinMemoryEntry: byId("pin-memory-entry"),
+    deleteMemoryEntry: byId("delete-memory-entry"),
+    confirmMemoryEntry: byId("confirm-memory-entry"),
+    editMemoryEntry: byId("edit-memory-entry"),
+    cancelMemoryEdit: byId("cancel-memory-edit"),
+    saveMemoryEntry: byId("save-memory-entry"),
+    newMemoryEntry: byId("new-memory-entry"),
+    scienceWorkbench: byId("science-workbench"),
+    scienceWorkbenchStatus: byId("science-workbench-status"),
+    scienceWorkbenchContent: byId("science-workbench-content"),
+    scienceProjectTitle: byId("science-project-title"),
+    scienceProfile: byId("science-profile"),
+    scienceCheckpoint: byId("science-checkpoint"),
+    scienceSandbox: byId("science-sandbox"),
+    scienceAlert: byId("science-alert"),
+    scienceExport: byId("science-export"),
+    scienceChatToggle: byId("science-chat-toggle"),
+    conversationPane: byId("conversation-pane")
   };
 
-  const sidebarStorageKey = "go.assistant.sessions-collapsed";
+  const sidebarStorageKey = "assistant.ui.sessions-collapsed";
+  const legacySidebarStorageKey = "go.assistant.sessions-collapsed";
   const chatScroll = globalThis.createGoChatScroll({
     scroller: elements.messageScroll, content: elements.messageList, button: byId("scroll-to-latest")
   });
-  const sessionScrollStoragePrefix = "go.assistant.session-scroll.v1:";
-  const ungroupedSessionStorageKey = "go-session-ungrouped-collapsed";
+  const sessionScrollStoragePrefix = "assistant.ui.session-scroll.v1:";
+  const legacySessionScrollStoragePrefix = "go.assistant.session-scroll.v1:";
+  const ungroupedSessionStorageKey = "assistant.ui.ungrouped-sessions-collapsed";
+  const legacyUngroupedSessionStorageKey = "go-session-ungrouped-collapsed";
   let draftTimer = 0;
   let pendingDraft = null;
   let promptResizeFrame = 0;
+
+  function readMigratedStorage(canonicalKey, ...legacyKeys) {
+    const storage = globalThis.localStorage;
+    const canonicalValue = storage.getItem(canonicalKey);
+    if (canonicalValue !== null) {
+      for (const legacyKey of legacyKeys) storage.removeItem(legacyKey);
+      return canonicalValue;
+    }
+    for (const legacyKey of legacyKeys) {
+      const legacyValue = storage.getItem(legacyKey);
+      if (legacyValue === null) continue;
+      storage.setItem(canonicalKey, legacyValue);
+      storage.removeItem(legacyKey);
+      return legacyValue;
+    }
+    return null;
+  }
 
   function resizePrompt() {
     const prompt = elements.prompt;
@@ -217,10 +434,9 @@
     const bottom = Math.min(pane.bottom, viewport ? viewport.offsetTop + viewport.height : globalThis.innerHeight);
     const overhead = elements.composerRegion.getBoundingClientRect().height - prompt.getBoundingClientRect().height;
     const minimum = parseFloat(globalThis.getComputedStyle(prompt).minHeight) || 58;
-    // Reserve the actual toolbar, attachments and header; the conversation can
+    // Reserve the actual toolbar and attachments; the conversation can
     // yield its space to the draft until the available window height is filled.
-    const maximum = Math.max(minimum, Math.floor(bottom - pane.top
-      - elements.chatHeader.getBoundingClientRect().height - overhead - 12));
+    const maximum = Math.max(minimum, Math.floor(bottom - pane.top - overhead - 12));
     const previousScroll = prompt.scrollTop;
     prompt.style.maxHeight = `${maximum}px`;
     prompt.style.overflowY = "hidden";
@@ -252,6 +468,10 @@
       showToast(error instanceof Error ? error.message : String(error), true);
       return null;
     }
+  }
+
+  function resourceUrl(value) {
+    return globalThis.goBridge?.resourceUrl?.(value) || String(value || "");
   }
 
   function showToast(message, isError) {
@@ -297,8 +517,64 @@
   }
 
   function sessionShortLabel(title) {
-    const words = String(title || "GO").trim().split(/\s+/).filter(Boolean);
-    return words.slice(0, 2).map(word => word[0]).join("").slice(0, 2) || "GO";
+    const words = String(title || state.assistantTitle || "AI").trim().split(/\s+/).filter(Boolean);
+    return words.slice(0, 2).map(word => word[0]).join("").slice(0, 2) || "AI";
+  }
+
+  function normalizeChatMode(value) {
+    const mode = String(value || "").trim().toLocaleLowerCase();
+    if (["claudescience", "claude-science", "science"].includes(mode)) return "claudescience";
+    if (["coding", "code", "codex"].includes(mode)) return "coding";
+    if (["general", "chat", "chatgpt"].includes(mode)) return "general";
+    return null;
+  }
+
+  function sessionMatchesMode(session) {
+    const sessionMode = normalizeChatMode(session?.chatMode);
+    // Older hosts already return a mode-scoped list without annotating every
+    // row. Keep those rows visible during the protocol migration.
+    return !sessionMode || sessionMode === state.chatMode;
+  }
+
+  function sessionBelongsToGroup(session, group) {
+    if (!session || !group) return false;
+    if (Object.prototype.hasOwnProperty.call(session, "sessionGroupId")) {
+      return String(session.sessionGroupId || "") === String(group.id || "");
+    }
+    return (Array.isArray(group.sessionIds) ? group.sessionIds : [])
+      .some(sessionId => String(sessionId) === String(session.id));
+  }
+
+  function setModeMenuOpen(open) {
+    elements.modeSwitcherMenu.hidden = !open;
+    elements.modeSwitcherButton.setAttribute("aria-expanded", String(open));
+  }
+
+  function renderModeSwitcher() {
+    const coding = state.chatMode === "coding";
+    const label = state.chatMode === "claudescience" ? "Claude Science" : coding ? "Codex" : "ChatGPT";
+    elements.modeSwitcherLabel.textContent = label;
+    elements.modeSwitcherInitial.textContent = label[0];
+    elements.modeSwitcherButton.title = `${label}-Ansicht wechseln`;
+    elements.appShell.dataset.chatMode = state.chatMode;
+    elements.newSession.title = state.chatMode === "claudescience" ? "Neues Forschungsvorhaben starten" : "Projektordner auswählen";
+    elements.newSession.setAttribute("aria-label", state.chatMode === "claudescience" ? "Neues Forschungsvorhaben starten" : "Neues Projekt: Workspace auswählen");
+    const projectsHeading = document.querySelector(".sidebar-projects-heading .sidebar-title");
+    if (projectsHeading) projectsHeading.textContent = state.chatMode === "claudescience" ? "Forschung" : "Projekte";
+    for (const option of elements.modeSwitcherMenu.querySelectorAll("[data-chat-mode]")) {
+      const selected = normalizeChatMode(option.dataset.chatMode) === state.chatMode;
+      option.setAttribute("aria-checked", String(selected));
+      option.classList.toggle("active", selected);
+    }
+  }
+
+  function switchChatMode(value) {
+    const chatMode = normalizeChatMode(value);
+    if (!chatMode || chatMode === state.chatMode) { setModeMenuOpen(false); return; }
+    flushDraft();
+    setModeMenuOpen(false);
+    post("mode.switch", { chatMode });
+    document.body.classList.remove("sessions-open");
   }
 
   function setSessionsCollapsed(collapsed, persist) {
@@ -312,7 +588,7 @@
   }
 
   function restoreSessionsCollapsed() {
-    try { setSessionsCollapsed(globalThis.localStorage.getItem(sidebarStorageKey) === "1", false); }
+    try { setSessionsCollapsed(readMigratedStorage(sidebarStorageKey, legacySidebarStorageKey) === "1", false); }
     catch { setSessionsCollapsed(false, false); }
   }
 
@@ -320,10 +596,16 @@
     return `${sessionScrollStoragePrefix}${String(sessionId || "")}`;
   }
 
+  function legacySessionScrollStorageKey(sessionId) {
+    return `${legacySessionScrollStoragePrefix}${String(sessionId || "")}`;
+  }
+
   function readSessionScrollPosition(sessionId) {
     if (!sessionId) return null;
     try {
-      const value = JSON.parse(globalThis.localStorage.getItem(sessionScrollStorageKey(sessionId)) || "null");
+      const value = JSON.parse(readMigratedStorage(
+        sessionScrollStorageKey(sessionId),
+        legacySessionScrollStorageKey(sessionId)) || "null");
       if (!value || !Number.isFinite(value.top) || !Number.isFinite(value.left)) return null;
       return value;
     } catch {
@@ -387,7 +669,7 @@
   }
 
   function readUngroupedCollapsed() {
-    try { return globalThis.localStorage.getItem(ungroupedSessionStorageKey) === "1"; }
+    try { return readMigratedStorage(ungroupedSessionStorageKey, legacyUngroupedSessionStorageKey) === "1"; }
     catch { return false; }
   }
 
@@ -398,19 +680,34 @@
 
   function createSessionItem(session) {
     const item = document.createElement("div");
-    item.className = `session-item${session.id === state.activeSessionId ? " active" : ""}${session.isPinned ? " pinned" : ""}`;
+    item.className = `session-item${session.id === state.activeSessionId ? " active" : ""}`;
     item.setAttribute("role", "listitem");
+
+    const scheduledRun = scheduledRunForSession(session.id);
+    if (scheduledRun) {
+      item.dataset.queueState = scheduledRun.queueState;
+      if (scheduledRun.queueState === "queued") item.dataset.queuePosition = String(scheduledRun.position);
+    }
 
     const open = document.createElement("button");
     open.type = "button";
     open.className = "session-item__open";
-    open.title = `${session.title || "Neue Sitzung"}\nRechtsklick zum Umbenennen`;
+    const queueLabel = scheduledRun?.queueState === "active"
+      ? "Läuft"
+      : scheduledRun ? `Warteschlange · Platz ${scheduledRun.position}` : null;
+    open.title = [session.title || "Neue Sitzung", queueLabel, "Rechtsklick zum Umbenennen"].filter(Boolean).join("\n");
     const main = document.createElement("span");
     main.className = "session-item__main";
     const title = document.createElement("span");
     title.className = "session-item__title";
     title.textContent = session.title || "Neue Sitzung";
     main.append(title);
+    if (queueLabel) {
+      const status = document.createElement("span");
+      status.className = `message-status${scheduledRun.queueState === "active" ? " streaming" : ""}`;
+      status.textContent = queueLabel;
+      main.append(status);
+    }
     const short = document.createElement("span");
     short.className = "session-item__short";
     short.textContent = sessionShortLabel(session.title);
@@ -482,7 +779,7 @@
       const add = document.createElement("button");
       add.type = "button";
       add.className = "session-group__add";
-      add.disabled = state.isAiBusy || state.isRunning;
+      add.disabled = state.isAiBusy || state.isRunning || Boolean(state.pendingChatSend);
       add.setAttribute("aria-label", `Neue Sitzung im Projekt ${name}`);
       add.title = `Neue Sitzung im Projekt ${name} starten`;
       const compose = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -519,14 +816,42 @@
   function createWorkspaceProject() {
     if (state.isRunning || state.isAiBusy || state.pendingChatSend) return;
     flushDraft();
-    post("session.workspaceCreate", {});
+    if (state.chatMode === "claudescience") {
+      post("session.create", { chatMode: state.chatMode });
+      document.body.classList.remove("sessions-open");
+      return;
+    }
+    if (globalThis.goBridge?.isLanBrowser) {
+      openWorkspacePicker();
+      document.body.classList.remove("sessions-open");
+      return;
+    }
+    post("session.workspaceCreate", { chatMode: state.chatMode });
     document.body.classList.remove("sessions-open");
+  }
+
+  function openWorkspacePicker() {
+    closeWorkflows();
+    closeProjectMemory();
+    elements.workspacePathOptions.replaceChildren();
+    const paths = [...new Set((state.sessionGroups || [])
+      .map(group => String(group.workspacePath || "").trim()).filter(Boolean))];
+    for (const path of paths) {
+      const option = document.createElement("option");
+      option.value = path;
+      elements.workspacePathOptions.append(option);
+    }
+    elements.workspacePath.value = paths[0] || state.workspacePath || "";
+    elements.workspaceOverlay.hidden = false;
+    requestAnimationFrame(() => elements.workspacePath.focus());
+  }
+
+  function closeWorkspacePicker() {
+    elements.workspaceOverlay.hidden = true;
   }
 
   function renderSessions() {
     const bySessionActivity = (a, b) => {
-      const pinned = Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned));
-      if (pinned) return pinned;
       const left = Date.parse(a.updatedAt || a.createdAt || "");
       const right = Date.parse(b.updatedAt || b.createdAt || "");
       if (Number.isFinite(left) && Number.isFinite(right) && left !== right) return right - left;
@@ -536,13 +861,15 @@
     };
     const query = elements.sessionSearch.value.trim().toLocaleLowerCase();
     const matchesQuery = item => !query || String(item.title || "").toLocaleLowerCase().includes(query);
+    const visibleSessions = state.sessions.filter(sessionMatchesMode);
     elements.sessionList.replaceChildren();
 
-    const groups = (Array.isArray(state.sessionGroups) ? state.sessionGroups : []).slice().sort((left, right) => {
+    const groups = (Array.isArray(state.sessionGroups) ? state.sessionGroups : [])
+      .filter(group => visibleSessions.some(session => sessionBelongsToGroup(session, group)))
+      .slice().sort((left, right) => {
       const latestActivity = group => {
-        const memberIds = new Set((Array.isArray(group.sessionIds) ? group.sessionIds : []).map(String));
-        const memberDates = state.sessions
-          .filter(session => String(session.sessionGroupId || "") === String(group.id) || memberIds.has(String(session.id)))
+        const memberDates = visibleSessions
+          .filter(session => sessionBelongsToGroup(session, group))
           .map(session => Date.parse(session.updatedAt || session.createdAt || ""))
           .filter(Number.isFinite);
         const created = Date.parse(group.createdAt || "");
@@ -553,20 +880,18 @@
     const assignedIds = new Set();
 
     for (const group of groups) {
-      const groupIds = new Set((Array.isArray(group.sessionIds) ? group.sessionIds : []).map(id => String(id)));
-      const members = state.sessions.filter(session => Object.prototype.hasOwnProperty.call(session, "sessionGroupId")
-        ? String(session.sessionGroupId || "") === String(group.id)
-        : groupIds.has(String(session.id)));
+      const members = visibleSessions.filter(session => sessionBelongsToGroup(session, group));
       for (const session of members) assignedIds.add(String(session.id));
       const matchesProject = query && String(group.name || "").toLocaleLowerCase().includes(query);
       const groupSessions = members.filter(session => matchesProject || matchesQuery(session))
         .sort(bySessionActivity);
       const collapsed = query ? false : Boolean(group.isCollapsed);
-      if (!groupSessions.length && (!group.workspacePath || query && !matchesProject)) continue;
+      if (!groupSessions.length && query && !matchesProject) continue;
       elements.sessionList.append(createProjectRow({
         id: group.id,
         name: group.name || "Projekt",
         workspacePath: group.workspacePath || null,
+        addable: Boolean(group.workspacePath),
         collapsed,
         sessions: groupSessions,
         onToggle: nextCollapsed => {
@@ -581,14 +906,16 @@
           // the new General session is being created by the backend.
           state.selectedToolAction = null;
           state.persistentToolAction = null;
+          state.selectedExtensionActionId = null;
+          state.persistentExtensionActionId = null;
           renderContext();
-          post("session.projectCreate", { workspacePath: group.workspacePath });
+          post("session.projectCreate", { workspacePath: group.workspacePath, chatMode: state.chatMode });
           document.body.classList.remove("sessions-open");
         }
       }));
     }
 
-    const ungroupedSessions = state.sessions.filter(session => !assignedIds.has(String(session.id)) && matchesQuery(session))
+    const ungroupedSessions = visibleSessions.filter(session => !assignedIds.has(String(session.id)) && matchesQuery(session))
       .sort(bySessionActivity);
     if (ungroupedSessions.length) {
       const collapsed = query ? false : readUngroupedCollapsed();
@@ -603,8 +930,10 @@
           flushDraft();
           state.selectedToolAction = null;
           state.persistentToolAction = null;
+          state.selectedExtensionActionId = null;
+          state.persistentExtensionActionId = null;
           renderContext();
-          post("session.create", {});
+          post("session.create", { chatMode: state.chatMode });
         },
         onToggle: nextCollapsed => {
           persistUngroupedCollapsed(nextCollapsed);
@@ -616,21 +945,30 @@
 
   function renderMessages(scrollToEnd) {
     renderCodingChanges();
-    if (["coding"].includes(state.selectedToolAction) || state.messages.some(message => message.toolSteps?.length
+    if ((state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction))) || state.messages.some(message => message.toolSteps?.length
       || state.codingActivity.get(String(message.id))?.some(step => step.kind === "tool"))) {
       renderCodingMessages(scrollToEnd);
       return;
     }
     const previousScrollTop = elements.messageScroll.scrollTop;
     const previousScrollLeft = elements.messageScroll.scrollLeft;
-    elements.messageList.replaceChildren();
+    const existing = new Map([...elements.messageList.children]
+      .filter(item => item.dataset?.messageId)
+      .map(item => [String(item.dataset.messageId), item]));
+    let index = 0;
     for (const message of state.messages) {
-      elements.messageList.append(createMessage(message));
+      const old = existing.get(String(message.id));
+      const next = createMessage(message, old);
+      const article = old ? globalThis.goCodingTimeline.reconcile(old, next) : next;
+      const at = elements.messageList.children[index];
+      if (article !== at) elements.messageList.insertBefore(article, at || null);
+      index++;
     }
+    while (elements.messageList.children.length > index) elements.messageList.lastChild.remove();
     if (!state.messages.length && state.activeSessionId) {
       const empty = document.createElement("div");
       empty.className = "chat-empty-state";
-      if (["coding"].includes(state.selectedToolAction)) {
+      if (state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction))) {
         const heading = document.createElement("h2");
         heading.textContent = "Woran arbeiten wir?";
         const description = document.createElement("p");
@@ -1117,6 +1455,7 @@
   function sanitizeVisibleMessageContent(value) {
     const marker = /GO(?:\\?_)?SESSION(?:\\?_)?TITLE\s*:\s*/ig;
     return String(value || "")
+      .replace(/```assistant-plan\s*[\s\S]*?```/gi, "")
       .replace(/\r\n?/g, "\n")
       .split("\n")
       .filter(line => !/^\s*(?:#{1,6}\s*)?(?:(?:\*\*|__|`)+\s*)?GO_SESSION_TITLE\s*:/i.test(
@@ -1126,9 +1465,84 @@
       .trim();
   }
 
+  function parsePlanInteraction(value) {
+    const match = /```assistant-plan\s*([\s\S]*?)```/i.exec(String(value || ""));
+    if (!match) return null;
+    try {
+      const parsed = JSON.parse(match[1]);
+      return parsed && ["questions", "plan"].includes(parsed.kind) ? parsed : null;
+    } catch { return null; }
+  }
+
+  function createPlanInteraction(value) {
+    const plan = parsePlanInteraction(value);
+    if (!plan) return null;
+    const card = document.createElement("section");
+    card.className = "plan-interaction";
+    const title = document.createElement("strong");
+    title.textContent = plan.kind === "questions" ? "Entscheidungen für den Plan" : String(plan.title || "Plan ist bereit");
+    card.append(title);
+    if (plan.kind === "questions") {
+      const form = document.createElement("form");
+      form.className = "plan-questions";
+      for (const [index, question] of (Array.isArray(plan.questions) ? plan.questions : []).slice(0, 3).entries()) {
+        const field = document.createElement("fieldset");
+        const legend = document.createElement("legend");
+        legend.textContent = String(question?.text || `Frage ${index + 1}`);
+        field.append(legend);
+        const name = `plan-${Date.now()}-${index}`;
+        for (const option of (Array.isArray(question?.options) ? question.options : []).slice(0, 6)) {
+          const label = document.createElement("label");
+          const input = document.createElement("input");
+          input.type = "radio"; input.name = name; input.value = String(option?.label || option?.id || "Option");
+          const copy = document.createElement("span");
+          copy.textContent = [option?.label, option?.description].filter(Boolean).join(" · ");
+          label.append(input, copy); field.append(label);
+        }
+        if (question?.allowFreeText !== false) {
+          const manual = document.createElement("input");
+          manual.type = "text"; manual.className = "plan-manual-answer";
+          manual.placeholder = "Eigene Antwort oder Änderung …";
+          field.append(manual);
+        }
+        form.append(field);
+      }
+      const submit = document.createElement("button");
+      submit.type = "submit"; submit.className = "primary"; submit.textContent = "Antworten übernehmen";
+      form.append(submit);
+      form.addEventListener("submit", event => {
+        event.preventDefault();
+        const answers = [...form.querySelectorAll("fieldset")].map(field => {
+          const question = field.querySelector("legend")?.textContent || "Frage";
+          const selected = field.querySelector('input[type="radio"]:checked')?.value;
+          const manual = field.querySelector(".plan-manual-answer")?.value?.trim();
+          return `${question}: ${manual || selected || "Keine Auswahl"}`;
+        });
+        setPromptValue("Antworten auf die Planungsfragen:\n" + answers.join("\n"));
+        void submitPrompt();
+      });
+      card.append(form);
+    } else {
+      const actions = document.createElement("div");
+      actions.className = "plan-actions";
+      const change = document.createElement("button");
+      change.type = "button"; change.className = "secondary"; change.textContent = "Änderungen eingeben";
+      change.addEventListener("click", () => { elements.prompt.focus(); setPromptValue("Ändere den Plan bitte wie folgt: "); });
+      const implement = document.createElement("button");
+      implement.type = "button"; implement.className = "primary"; implement.textContent = "Plan implementieren";
+      implement.addEventListener("click", () => {
+        if (!ensureEditableContext()) return;
+        state.pendingPlanImplementation = "Implementiere jetzt den zuletzt abgestimmten Plan vollständig. Prüfe die Änderungen mit den passenden Builds und Tests.";
+        post("action.invoke", { actionId: "builtin.coding/plan-mode", sessionId: state.activeSessionId, selectionBehavior: "toggle", enabled: false });
+      });
+      actions.append(change, implement); card.append(actions);
+    }
+    return card;
+  }
+
   function createMessage(message, previousArticle = null) {
     const role = String(message.role).toLowerCase();
-    const hasTimeline = role === "assistant" && (["coding"].includes(state.selectedToolAction) || message.toolSteps?.length
+    const hasTimeline = role === "assistant" && ((state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction))) || message.toolSteps?.length
       || state.codingActivity.get(String(message.id))?.some(step => step.kind === "tool"));
     // Failed runs without generated text store their error as a content fallback.
     // Display it once; retain the original message for copy/export and persistence.
@@ -1152,7 +1566,8 @@
       const meta = document.createElement("div");
       meta.className = "message-meta";
       const messageTime = timeLabel(message.createdAt || message.updatedAt);
-      const assistantLabel = ["coding"].includes(state.selectedToolAction) ? "Coding Agent" : "AI";
+        const assistantLabel = state.chatMode === "claudescience" ? "Claude Science"
+          : state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction)) ? "Codex" : "AI";
       const displayLabel = message.isLiveCaption ? "Live-Untertitel" : assistantLabel;
       const identity = document.createElement("span");
       identity.className = "message-meta__identity";
@@ -1202,7 +1617,7 @@
     content.className = "message-content";
     if (["streaming", "Streaming"].includes(message.status)) content.classList.add("stream-cursor");
     content.append(globalThis.goMarkdown.render(sanitizeVisibleMessageContent(contentMessage.content)));
-    if (["coding"].includes(state.selectedToolAction)) enhanceCodingCodeBlocks(content);
+    if (state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction))) enhanceCodingCodeBlocks(content);
     annotateReadableSpeechBlocks(contentMessage, article, content);
     body.append(content);
     }
@@ -1212,6 +1627,12 @@
       toolBox.textContent = [message.tool.tool, message.tool.context, message.tool.detail, message.tool.status]
         .filter(Boolean).join(" · ");
       body.append(toolBox);
+    }
+    if (role === "assistant") {
+      const planInteraction = typeof createPlanInteraction === "function"
+        ? createPlanInteraction(contentMessage.content)
+        : null;
+      if (planInteraction) body.append(planInteraction);
     }
     // Media artifacts bound to a tool step render inside the coding timeline.
     // Only unanchored captures/documents stay at the message end.
@@ -1312,14 +1733,14 @@
           const image = card.querySelector("img");
           const audio = card.querySelector("audio");
           const video = card.querySelector("video");
-          if (image && cached.url) image.src = cached.url;
+          if (image && cached.url) image.src = resourceUrl(cached.url);
           if (audio && cached.url) {
-            audio.src = cached.url;
+            audio.src = resourceUrl(cached.url);
             audio.load();
           }
           if (video && cached.url) {
-            video.src = cached.url;
-            if (cached.posterUrl) video.poster = cached.posterUrl;
+            video.src = resourceUrl(cached.url);
+            if (cached.posterUrl) video.poster = resourceUrl(cached.posterUrl);
             video.load();
           }
         } else if (!state.artifactPreviewPending.has(String(artifact.id))) {
@@ -1546,8 +1967,9 @@
     frame.title = "Isolierte HTML-Vorschau ohne Netzwerkzugriff";
     frame.setAttribute("sandbox", "allow-scripts");
     frame.setAttribute("referrerpolicy", "no-referrer");
-    // The native resource handler loads the persisted result. Never inject model HTML into GO's document.
-    frame.src = `https://go-coding-preview.local/coding/${encodeURIComponent(messageId)}/${encodeURIComponent(stepId)}`;
+    // The native resource handler loads the persisted result. Never inject model HTML into the assistant document.
+    const previewUrl = `https://assistant-coding-preview.local/coding/${encodeURIComponent(messageId)}/${encodeURIComponent(stepId)}`;
+    frame.src = globalThis.goBridge?.resourceUrl?.(previewUrl) || previewUrl;
     dialog.append(header, frame);
     dialog.addEventListener("close", () => {
       if (state.codingPreviewDialog === dialog) state.codingPreviewDialog = null;
@@ -1590,10 +2012,188 @@
   }
 
   function renderCodingWorkspace() {
-    const coding = ["coding"].includes(state.selectedToolAction);
+    const coding = state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction));
     elements.appShell.classList.toggle("coding-mode", coding);
-    elements.prompt.placeholder = coding ? "Änderung beschreiben oder Frage zum Projekt stellen …" : "Nachricht eingeben …";
+    elements.appShell.classList.toggle("science-mode", state.chatMode === "claudescience");
+    elements.prompt.placeholder = state.chatMode === "claudescience"
+      ? "Forschungsfrage, Analyse oder Manuskriptauftrag eingeben …"
+      : coding ? "Änderung beschreiben oder Frage zum Projekt stellen …" : "Nachricht eingeben …";
+    renderScienceWorkbench();
     renderCodingChanges();
+  }
+
+  function renderScienceWorkbench() {
+    const visible = state.chatMode === "claudescience";
+    elements.scienceWorkbench.hidden = !visible;
+    elements.conversationPane.classList.toggle("science-conversation", visible);
+    elements.appShell.classList.toggle("science-chat-hidden", visible && !state.scienceChatVisible);
+    if (!visible) return;
+    const science = state.scientificResearch || {};
+    const projects = Array.isArray(science.projects) ? science.projects : [];
+    const detail = science.detail;
+    const project = detail?.project || projects.find(item => item.id === science.selectedProjectId) || projects[0] || null;
+    elements.scienceProjectTitle.textContent = project?.interpretedQuestion || project?.originalQuestion || "Neues Forschungsvorhaben";
+    elements.scienceWorkbenchStatus.textContent = project
+      ? `${project.status || "active"} · aktualisiert ${timeLabel(project.updatedAt)}`
+      : science.disabledReason || "Beschreibe rechts eine Forschungsfrage. Deep Research legt daraus ein nachvollziehbares Vorhaben an.";
+    elements.scienceProfile.textContent = project?.profile || "Automatisch";
+    elements.scienceCheckpoint.textContent = detail?.checkpoint
+      ? `${detail.checkpoint.stage || "Checkpoint"} · R${detail.checkpoint.revision || 0}` : "Kein Checkpoint";
+    elements.scienceSandbox.textContent = state.scienceCapabilities?.sandbox === false ? "Sandbox nicht bereit" : "Lokale Sandbox";
+    elements.scienceExport.disabled = !project || state.scienceExporting || !state.scienceCapabilities?.export;
+    elements.scienceExport.textContent = state.scienceExporting ? "Export läuft …" : "Exportieren";
+    elements.scienceChatToggle.setAttribute("aria-pressed", String(state.scienceChatVisible));
+    elements.scienceChatToggle.setAttribute("aria-label", state.scienceChatVisible ? "Chatpanel ausblenden" : "Chatpanel einblenden");
+    const warning = science.disabledReason || (project?.status === "conflictingEvidence" ? "Die Evidenz ist widersprüchlich. Prüfe die markierten Aussagen." : "");
+    elements.scienceAlert.hidden = !warning;
+    elements.scienceAlert.textContent = warning;
+    elements.scienceWorkbenchContent.replaceChildren();
+    if (!detail) renderScienceLanding(projects);
+    else renderScienceView(detail, project);
+    for (const tab of elements.scienceWorkbench.querySelectorAll("[data-science-view]")) {
+      const selected = tab.dataset.scienceView === state.scienceView;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.classList.toggle("active", selected);
+    }
+  }
+
+  function scienceElement(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  }
+
+  function scienceSection(title, description) {
+    const section = scienceElement("section", "science-card");
+    const header = scienceElement("header", "science-card__header");
+    header.append(scienceElement("h2", "", title));
+    if (description) header.append(scienceElement("p", "", description));
+    section.append(header);
+    return section;
+  }
+
+  function scienceEmpty(text) {
+    return scienceElement("p", "science-empty", text);
+  }
+
+  function renderScienceLanding(projects) {
+    const landing = scienceElement("div", "science-landing");
+    const copy = scienceElement("div", "science-landing__copy");
+    copy.append(scienceElement("span", "science-eyebrow", "Lokale wissenschaftliche Arbeitsumgebung"),
+      scienceElement("h2", "", "Von der Forschungsfrage bis zum reproduzierbaren Ergebnis"),
+      scienceElement("p", "", "DeepSeek recherchiert, plant, berechnet und prüft in einer isolierten Sandbox. Quellen, Code, Umgebungen und Ergebnisse bleiben gemeinsam nachvollziehbar."));
+    landing.append(copy);
+    if (projects.length) {
+      const list = scienceSection("Vorhaben dieser Sitzung", "Wähle ein Vorhaben, um seinen letzten belastbaren Stand zu öffnen.");
+      const grid = scienceElement("div", "science-project-grid");
+      for (const item of projects) {
+        const button = scienceElement("button", "science-project-card");
+        button.type = "button";
+        button.append(scienceElement("strong", "", item.interpretedQuestion || item.originalQuestion || item.id),
+          scienceElement("span", "", `${item.profile || "Automatisch"} · ${item.status || "unresolved"}`),
+          scienceElement("small", "", `Aktualisiert ${timeLabel(item.updatedAt)}`));
+        button.addEventListener("click", () => openScienceProject(item.id));
+        grid.append(button);
+      }
+      list.append(grid); landing.append(list);
+    } else {
+      landing.append(scienceEmpty("Noch kein Vorhaben gespeichert. Stelle rechts eine Forschungsfrage oder füge Daten und Literatur hinzu."));
+    }
+    elements.scienceWorkbenchContent.append(landing);
+  }
+
+  function appendScienceRows(section, items, emptyText, render) {
+    const list = scienceElement("div", "science-rows");
+    for (const item of Array.isArray(items) ? items : []) {
+      const value = render(item);
+      const row = scienceElement(value.href ? "a" : "article", "science-row");
+      if (value.href) {
+        row.href = value.href;
+        row.target = "_blank";
+        row.rel = "noopener noreferrer";
+      }
+      row.append(scienceElement("strong", "", value.title), scienceElement("span", "", value.meta || ""));
+      if (value.detail) row.append(scienceElement("p", "", value.detail));
+      list.append(row);
+    }
+    if (!list.children.length) list.append(scienceEmpty(emptyText));
+    section.append(list);
+  }
+
+  function renderScienceView(detail, project) {
+    const view = state.scienceView || "overview";
+    const root = scienceElement("div", `science-view science-view--${view}`);
+    if (view === "overview") {
+      const metrics = scienceElement("div", "science-metrics");
+      for (const [label, value] of [["Planschritte", detail.nodes?.length || 0], ["Quellen", detail.works?.length || 0],
+        ["Experimente", detail.experiments?.length || 0], ["Prüfungen", detail.verifications?.length || 0]]) {
+        const metric = scienceElement("div", "science-metric"); metric.append(scienceElement("strong", "", value), scienceElement("span", "", label)); metrics.append(metric);
+      }
+      root.append(metrics);
+      const question = scienceSection("Forschungsfrage", "Original und präzisierte Interpretation");
+      question.append(scienceElement("p", "science-question", project?.interpretedQuestion || project?.originalQuestion || ""));
+      if (project?.interpretedQuestion && project?.originalQuestion !== project.interpretedQuestion)
+        question.append(scienceElement("blockquote", "", project.originalQuestion));
+      root.append(question);
+      const plan = scienceSection("Forschungsplan", "Aktive, belegte und noch offene Schritte");
+      appendScienceRows(plan, detail.nodes, "Noch kein Forschungsgraph gespeichert.", item => ({ title: item.title || item.id,
+        meta: `${item.nodeType || "Question"} · ${item.status || "planned"} · ${Math.round(Number(item.confidence || 0) * 100)} %` }));
+      root.append(plan);
+    } else if (view === "research") {
+      const works = scienceSection("Literaturmatrix", `${detail.works?.length || 0} aufgelöste Arbeiten`);
+      appendScienceRows(works, detail.works, "Noch keine geprüften Arbeiten gespeichert.", item => ({ title: item.title || item.workId,
+        meta: `${item.versionKind || "work"} · ${item.screeningStatus || "pending"} · ${item.evidenceLevel || "ohne Evidenzklasse"}`, href: item.canonicalUrl }));
+      const evidence = scienceSection("Geprüfte Fundstellen", "Nur geöffnete und verortete Belege gelten als zitierfähig.");
+      appendScienceRows(evidence, detail.evidence, "Noch keine zitierfähigen Fundstellen gespeichert.", item => ({ title: item.normalizedStatement || item.id,
+        meta: [item.evidenceLevel, item.page && `Seite ${item.page}`, item.section].filter(Boolean).join(" · "), detail: item.exactExcerpt }));
+      root.append(works, evidence);
+    } else if (view === "data") {
+      const inputs = scienceSection("Eingaben und Datensätze", "Anhänge werden gehasht und als unveränderte Eingaben der lokalen Sandbox bereitgestellt.");
+      appendScienceRows(inputs, [...(state.documents || []), ...(state.attachments || [])], "Noch keine Daten oder Dokumente angehängt.", item => ({
+        title: item.fileName || item.title || item.name || item.id, meta: item.status || item.contentType || "Eingabe", detail: item.error || "" }));
+      root.append(inputs);
+    } else if (view === "analysis") {
+      const experiments = scienceSection("Reproduzierbare Analysen", "Befehl, Umgebung, Ergebnis und fachliche Prüfung bleiben getrennt sichtbar.");
+      appendScienceRows(experiments, detail.experiments, "Noch keine ausführbaren Experimente gespeichert.", item => ({
+        title: item.commandText || item.id, meta: `${item.verificationStatus || "unresolved"} · ${timeLabel(item.updatedAt)}`, detail: item.resultArtifactsJson || "" }));
+      root.append(experiments);
+    } else if (view === "figures") {
+      const figures = scienceSection("Abbildungen und Ergebnisartefakte", "Versionierte Ergebnisse werden mit erzeugendem Lauf und Prüfstatus verknüpft.");
+      const artifacts = state.messages.flatMap(message => Array.isArray(message.artifacts) ? message.artifacts : []);
+      appendScienceRows(figures, artifacts, "Noch keine Abbildungen oder Ergebnisartefakte gespeichert.", item => ({
+        title: item.fileName || item.name || item.id, meta: item.contentType || "Artefakt", detail: "Mit der erzeugenden Unterhaltung und dem Toolschritt verknüpft." }));
+      root.append(figures);
+    } else if (view === "manuscript") {
+      const manuscript = scienceSection("Manuskript", detail.report ? `${detail.report.reportKind || "Bericht"} · ${detail.report.conclusionStatus || "unresolved"}` : "Markdown- und LaTeX-Vorschau");
+      const content = scienceElement("div", "science-manuscript markdown-body");
+      content.append(globalThis.goMarkdown.render(detail.report?.contentMarkdown || "Noch kein Manuskript gespeichert. Deep Research erzeugt den Entwurf aus verifizierten Befunden."));
+      manuscript.append(content); root.append(manuscript);
+    } else if (view === "review") {
+      const verification = scienceSection("Prüfmatrix", "Quellen, Methode, Mathematik, Code, Daten und Robustheit werden unabhängig bewertet.");
+      appendScienceRows(verification, detail.verifications, "Noch keine Prüfungen gespeichert.", item => ({
+        title: item.method || item.targetId || item.id, meta: `${item.dimension || "robustness"} · ${item.status || "planned"}`, detail: `${item.targetType || "result"}: ${item.targetId || ""}` }));
+      const claims = scienceSection("Aussagen und Evidenzstatus", "Modellschluss, Berechnung und formale Verifikation bleiben unterscheidbar.");
+      appendScienceRows(claims, detail.claims, "Noch keine klassifizierten Aussagen gespeichert.", item => ({
+        title: item.statement || item.id, meta: `${item.claimClass || "modelInference"} · ${item.conclusionStatus || "unresolved"} · ${Math.round(Number(item.confidence || 0) * 100)} %` }));
+      root.append(verification, claims);
+    } else {
+      const provenance = scienceSection("Provenienz", "Unveränderliche Verbindung zwischen Plan, Lauf, Evidenz, Artefakt und Bericht.");
+      const checkpoint = detail.checkpoint;
+      appendScienceRows(provenance, [
+        ...(checkpoint ? [{ title: `${checkpoint.stage || "Checkpoint"} · Revision ${checkpoint.revision || 0}`, meta: `Run ${checkpoint.runId || "unbekannt"}`, detail: checkpoint.stateJson }] : []),
+        ...(detail.nodes || []).map(item => ({ title: item.title || item.id, meta: `${item.nodeType || "Node"} · ${item.status || "planned"}`, detail: item.checkpointId ? `Checkpoint ${item.checkpointId}` : "" })),
+        ...(detail.edges || []).map(item => ({ title: `${item.fromNodeId} → ${item.toNodeId}`, meta: item.edgeType || "dependsOn" }))
+      ], "Noch keine Provenienzereignisse gespeichert.", item => item);
+      root.append(provenance);
+    }
+    elements.scienceWorkbenchContent.append(root);
+  }
+
+  function openScienceProject(projectId) {
+    if (!projectId || state.scienceRequestedProjectId === projectId) return;
+    state.scienceRequestedProjectId = projectId;
+    post("research.open", { sessionId: state.activeSessionId, projectId, expectedRevision: state.scientificResearch?.revision || 0 });
   }
 
   function renderCodingChanges() {
@@ -1603,7 +2203,7 @@
       host: elements.codingChanges, onLayout: schedulePromptResize
     });
     view.update(state.changesSummary, { sessionId: state.activeSessionId, messageId: latest?.id,
-      workspacePath: state.codingWorkspacePath, isCoding: ["coding"].includes(state.selectedToolAction), toolSteps: latest?.toolSteps });
+      workspacePath: state.codingWorkspacePath, isCoding: state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction)), toolSteps: latest?.toolSteps });
     updateContextStripVisibility();
   }
 
@@ -1741,9 +2341,31 @@
     elements.activeTools.replaceChildren();
     elements.documents.replaceChildren();
     renderDeepResearch();
+    renderScienceWorkbench();
 
-    if (state.selectedToolAction && toolVisuals[state.selectedToolAction]) {
-      const [label, iconPath] = toolVisuals[state.selectedToolAction];
+    if (state.workspacePath) {
+      const workspace = String(state.workspacePath);
+      const trimmed = workspace.replace(/[\\/]+$/, "");
+      const label = trimmed.split(/[\\/]/).filter(Boolean).at(-1) || trimmed || workspace;
+      const chip = document.createElement("div");
+      chip.className = "active-tool-chip workspace-context-chip";
+      chip.title = `Workspace: ${workspace}`;
+      chip.setAttribute("aria-label", `Workspace ${label}`);
+      const text = document.createElement("span");
+      text.textContent = label;
+      chip.append(createToolIcon("M3 7V5h6l2 2h10v13H3Z"), text);
+      elements.activeTools.append(chip);
+    }
+
+    const selectedDescriptor = state.selectedExtensionActionId
+      ? availableActionDescriptors().find(item => item.actionId === state.selectedExtensionActionId)
+      : null;
+    const displaysToolChip = selectedDescriptor
+      && !["builtin.coding/run", "builtin.general/run"].includes(selectedDescriptor.actionId);
+    if (displaysToolChip || state.selectedToolAction && !["coding", "general"].includes(state.selectedToolAction) && toolVisuals[state.selectedToolAction]) {
+      const fallbackVisual = toolVisuals[state.selectedToolAction] || ["Erweiterungsaktion", actionIcons.extension];
+      const label = selectedDescriptor?.displayName || fallbackVisual[0];
+      const iconPath = actionIcons[selectedDescriptor?.iconKey] || fallbackVisual[1];
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = "active-tool-chip";
@@ -1755,7 +2377,9 @@
       remove.className = "active-tool-chip__remove";
       remove.textContent = "×";
       chip.append(createToolIcon(iconPath), text, remove);
-      chip.addEventListener("click", () => selectToolAction(null));
+      chip.addEventListener("click", () => selectedDescriptor
+        ? invokeActionDescriptor(selectedDescriptor)
+        : selectToolAction(null));
       elements.activeTools.append(chip);
     }
 
@@ -1972,7 +2596,8 @@
   function updateContextStripVisibility() {
     elements.contextStrip.hidden = state.documents.length === 0
       && state.attachments.length === 0
-      && !state.selectedToolAction
+      && !state.selectedExtensionActionId
+      && (!state.selectedToolAction || state.selectedToolAction === "coding")
       && !state.deepResearch
       && !isAudioCaptureActive()
       && !isScreenClipActive()
@@ -1992,17 +2617,34 @@
     const canRetrySteer = Boolean(globalThis.goRunSteering?.pendingRetry(state, elements.prompt.value));
     const preparing = Boolean(state.pendingChatSend);
     const hasText = Boolean(elements.prompt.value.trim());
+    const scheduledRun = scheduledRunForSession(state.activeSessionId);
+    const isQueued = scheduledRun?.queueState === "queued";
+    const isStarting = scheduledRun?.queueState === "active" && !canSteer;
+    const canCancelScheduled = Boolean(scheduledRun && !canSteer && !hasText && !preparing);
+    const foreignRunActive = Boolean(state.runQueue?.active
+      && String(state.runQueue.active.sessionId) !== String(state.activeSessionId || ""));
     const canStop = canSteer && !hasText && !preparing;
     elements.send.hidden = false;
-    elements.send.classList.toggle("send-button--stop", canStop);
-    elements.send.disabled = preparing || (!hasText && !canStop)
-      || Boolean((state.isAiBusy || state.isRunning) && !canSteer && !canRetrySteer);
+    elements.send.classList.toggle("send-button--stop", canStop || canCancelScheduled);
+    elements.send.disabled = preparing || (!hasText && !canStop && !canCancelScheduled)
+      || Boolean(hasText && (isQueued || isStarting) && !canRetrySteer);
     elements.send.title = preparing ? "Der Auftrag wird vorbereitet. Deine weitere Eingabe bleibt erhalten."
       : canStop ? "Antwort stoppen"
-      : (state.isAiBusy || state.isRunning) && !canSteer && !canRetrySteer ? "In einer anderen Sitzung läuft eine Antwort."
+      : canCancelScheduled ? isQueued ? `Auftrag von Platz ${scheduledRun.position} aus der Warteschlange entfernen` : "Startenden Auftrag abbrechen"
+      : isQueued ? `Diese Sitzung wartet auf Platz ${scheduledRun.position}. Ein zweiter Auftrag wird nicht eingereiht.`
+      : isStarting ? "Der Auftrag dieser Sitzung wird gestartet."
       : canRetrySteer ? "Umlenkung erneut bestätigen" : canSteer ? "Laufenden Auftrag umlenken" : "Nachricht senden";
+    if (!canSteer && !canRetrySteer && !scheduledRun && foreignRunActive) {
+      elements.send.title = "Nachricht zur Warteschlange hinzufügen";
+    }
     elements.send.setAttribute("aria-label", preparing ? "Wird vorbereitet" : canStop ? "Antwort stoppen"
-      : canSteer || canRetrySteer ? "Umlenken" : "Senden");
+      : canCancelScheduled ? "Aus Warteschlange entfernen"
+      : canSteer || canRetrySteer ? "Umlenken"
+      : foreignRunActive ? "Einreihen" : "Senden");
+    elements.prompt.placeholder = isQueued ? `Warteschlange · Platz ${scheduledRun.position}`
+      : isStarting ? "Auftrag wird gestartet …"
+      : foreignRunActive ? "Nachricht eingeben und einreihen …"
+      : "Nachricht eingeben …";
   }
 
   function renderStatus() {
@@ -2014,12 +2656,14 @@
     for (const button of elements.sessionList?.querySelectorAll(".session-group__add") || []) {
       button.disabled = state.isRunning || state.isAiBusy || preparing;
     }
-    const hasUnpinnedSessions = state.sessions.some(session => !session.isPinned);
-    elements.clearSessions.disabled = state.isRunning || state.isAiBusy || preparing || !hasUnpinnedSessions;
-    elements.clearSessions.title = hasUnpinnedSessions
-      ? "Alle nicht angepinnten Sitzungen löschen"
-      : "Keine nicht angepinnten Sitzungen vorhanden";
+    const hasVisibleSessions = state.sessions.some(session => !session.chatMode
+      || String(session.chatMode).toLocaleLowerCase() === String(state.chatMode || "general").toLocaleLowerCase());
+    elements.clearSessions.disabled = state.isRunning || state.isAiBusy || preparing || !hasVisibleSessions;
+    elements.clearSessions.title = hasVisibleSessions
+      ? "Alle Sitzungen in dieser Ansicht löschen"
+      : "Keine Sitzungen in dieser Ansicht vorhanden";
     elements.clearSessions.setAttribute("aria-label", elements.clearSessions.title);
+    if (typeof updateActionMenuState === "function") updateActionMenuState();
 
     const usedValue = Math.max(0, Number(state.contextUsed) || 0);
     const limitValue = Math.max(1, Number(state.contextLimit) || 8192);
@@ -2155,7 +2799,7 @@
   function microphoneErrorMessage(error) {
     const name = String(error?.name || "");
     if (name === "NotAllowedError" || name === "SecurityError") {
-      return "Der Mikrofonzugriff wurde nicht erlaubt. Erlaube GO den Zugriff im WebView2-Dialog und versuche es erneut.";
+      return `Der Mikrofonzugriff wurde nicht erlaubt. Erlaube ${state.assistantTitle || "dem AI Assistenten"} den Zugriff im WebView2-Dialog und versuche es erneut.`;
     }
     if (name === "NotFoundError" || name === "DevicesNotFoundError") {
       return "Windows meldet kein verfügbares Mikrofon.";
@@ -2210,6 +2854,179 @@
   function setToolsMenuOpen(open) {
     elements.toolsMenu.hidden = !open;
     elements.toolsButton.setAttribute("aria-expanded", String(open));
+    if (open) {
+      updateActionMenuState();
+      elements.toolsMenu.querySelector(".service-option:not(:disabled)")?.focus();
+    }
+  }
+
+  function isSelectableAction(descriptor) {
+    const kind = String(descriptor?.actionKind ?? "").replace(/[_\s-]/g, "").toLocaleLowerCase();
+    const behavior = String(descriptor?.selectionBehavior ?? "").toLocaleLowerCase();
+    return Boolean(descriptor?.toolAction || descriptor?.toolToggle || behavior === "toggle"
+      || kind === "selectabletool" || kind === "1");
+  }
+
+  function availableActionDescriptors() {
+    const descriptors = new Map();
+    for (const raw of Array.isArray(state.actionDescriptors) ? state.actionDescriptors : []) {
+      const actionId = String(raw?.actionId || "").trim();
+      const displayName = String(raw?.displayName || "").trim();
+      if (!actionId || !displayName) continue;
+      descriptors.set(actionId, {
+        actionId,
+        displayName,
+        description: String(raw.description || ""),
+        iconKey: String(raw.iconKey || "extension"),
+        groupId: String(raw.groupId || "extensions"),
+        groupLabel: String(raw.groupLabel || "Erweiterungen"),
+        groupOrder: Number.isFinite(Number(raw.groupOrder)) ? Number(raw.groupOrder) : 100,
+        itemOrder: Number.isFinite(Number(raw.itemOrder)) ? Number(raw.itemOrder) : 100,
+        actionKind: String(raw.actionKind || "immediate"),
+        selectionBehavior: String(raw.selectionBehavior || "none").toLocaleLowerCase(),
+        toolAction: raw.toolAction ? String(raw.toolAction) : null,
+        toolToggle: raw.toolToggle ? String(raw.toolToggle) : null,
+        captureAction: raw.captureAction ? String(raw.captureAction) : null,
+        supportedChatModes: Array.isArray(raw.supportedChatModes)
+          ? raw.supportedChatModes.map(normalizeChatMode).filter(Boolean)
+          : null,
+        disabledReason: raw.disabledReason ? String(raw.disabledReason) : null
+      });
+    }
+    return [...descriptors.values()]
+      .filter(item => item.actionId !== "builtin.coding" && item.toolAction !== "coding")
+      .filter(item => !item.supportedChatModes?.length || item.supportedChatModes.includes(state.chatMode))
+      .sort((left, right) => Number(left.groupOrder) - Number(right.groupOrder)
+        || Number(left.itemOrder) - Number(right.itemOrder)
+        || left.displayName.localeCompare(right.displayName, "de"));
+  }
+
+  function isActionDescriptorActive(descriptor) {
+    if (!descriptor) return false;
+    const deepResearchActionId = extensionActionIdForToolAction("deepResearch");
+    return descriptor.actionId === deepResearchActionId
+      ? Boolean(state.deepResearch)
+      : descriptor.actionId === state.selectedExtensionActionId
+        || state.activeActionIds.has(descriptor.actionId)
+        || Boolean(descriptor.toolAction && descriptor.toolAction === state.selectedToolAction);
+  }
+
+  function resolvedActionDisabledReason(descriptor) {
+    if (!descriptor) return null;
+    if (descriptor.actionId !== "builtin.documents/export-chat-pdf") {
+      return descriptor.disabledReason || null;
+    }
+    if (!state.activeSessionId || state.messages.length === 0) {
+      return "Der Chat enthält noch keine Nachrichten.";
+    }
+    return descriptor.disabledReason === "Der Chat enthält noch keine Nachrichten."
+      ? null
+      : descriptor.disabledReason || null;
+  }
+
+  function updateActionMenuState() {
+    for (const button of elements.toolsMenuContent.querySelectorAll(".service-option")) {
+      const descriptor = button._actionDescriptor;
+      if (!descriptor) continue;
+      const disabledReason = resolvedActionDisabledReason(descriptor);
+      button.disabled = Boolean(disabledReason);
+      button.title = disabledReason || descriptor.description || descriptor.displayName;
+      const active = isActionDescriptorActive(descriptor);
+      button.classList.toggle("active", active);
+      if (isSelectableAction(descriptor)) {
+        button.setAttribute("aria-checked", String(active));
+      }
+      const status = button.querySelector(".action-menu__status");
+      if (status) status.hidden = !active;
+    }
+  }
+
+  function invokeActionDescriptor(descriptor) {
+    if (!descriptor || resolvedActionDisabledReason(descriptor)) return;
+    const isExport = descriptor.actionId === "builtin.documents/export-chat-pdf";
+    const opensLibrary = ["builtin.workflows/open-library", "builtin.memory/open-library"].includes(descriptor.actionId);
+    if (isExport && (!state.activeSessionId || state.messages.length === 0)) return;
+    if (!isExport && !opensLibrary && !ensureEditableContext()) return;
+
+    if (descriptor.actionId === "builtin.workflows/open-library") {
+      openWorkflows();
+      post("workflow.list", {});
+      setToolsMenuOpen(false);
+      return;
+    }
+    if (descriptor.actionId === "builtin.memory/open-library") {
+      openProjectMemory();
+      setToolsMenuOpen(false);
+      return;
+    }
+
+    const payload = { actionId: descriptor.actionId, sessionId: state.activeSessionId };
+    if (isSelectableAction(descriptor)) {
+      payload.selectionBehavior = "toggle";
+      payload.enabled = !isActionDescriptorActive(descriptor);
+    }
+    post("action.invoke", payload);
+    setToolsMenuOpen(false);
+    elements.prompt.focus();
+  }
+
+  function renderActionMenu() {
+    elements.toolsMenuContent.replaceChildren();
+    const groups = new Map();
+    for (const descriptor of availableActionDescriptors()) {
+      const key = descriptor.groupId || "extensions";
+      if (!groups.has(key)) groups.set(key, {
+        id: key,
+        label: descriptor.groupLabel || "Erweiterungen",
+        order: Number(descriptor.groupOrder) || 100,
+        items: []
+      });
+      groups.get(key).items.push(descriptor);
+    }
+
+    for (const group of [...groups.values()].sort((left, right) => left.order - right.order)) {
+      const section = document.createElement("section");
+      section.className = "action-menu__group";
+      section.dataset.groupId = group.id;
+      if (group.id !== "add") {
+        const heading = document.createElement("div");
+        heading.className = "action-menu__group-title";
+        heading.textContent = group.label;
+        section.append(heading);
+      }
+      for (const descriptor of group.items) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "service-option action-menu__item";
+        const selectable = isSelectableAction(descriptor);
+        button.setAttribute("role", selectable ? "menuitemcheckbox" : "menuitem");
+        if (selectable) {
+          if (descriptor.toolToggle) button.dataset.toolToggle = descriptor.toolToggle;
+          button.setAttribute("aria-checked", "false");
+        }
+        if (descriptor.toolAction) button.dataset.toolAction = descriptor.toolAction;
+        if (descriptor.toolImmediate) button.dataset.toolImmediate = descriptor.toolImmediate;
+        button.dataset.actionId = descriptor.actionId;
+        button._actionDescriptor = descriptor;
+        button.append(createToolIcon(actionIcons[descriptor.iconKey] || actionIcons.extension));
+        const copy = document.createElement("span");
+        copy.className = "action-menu__copy";
+        const title = document.createElement("strong");
+        title.textContent = descriptor.displayName;
+        const description = document.createElement("span");
+        description.textContent = descriptor.description;
+        copy.append(title, description);
+        const status = document.createElement("span");
+        status.className = "action-menu__status";
+        status.textContent = "✓";
+        status.hidden = true;
+        button.append(copy, status);
+        button.addEventListener("click", () => invokeActionDescriptor(descriptor));
+        section.append(button);
+      }
+      elements.toolsMenuContent.append(section);
+    }
+    if (typeof updateActionMenuState === "function") updateActionMenuState();
   }
 
   function closeAttachmentMenu() {
@@ -2318,7 +3135,7 @@
     elements.workflowTags.value = (workflow?.tags || []).join(", ");
     elements.workflowDescription.value = workflow?.description || "";
     elements.workflowSummary.value = workflow?.contextSummary || "";
-    elements.workflowContent.value = readableWorkflowContent(workflow?.contentJson || '{"schema":"go.general.workflow.v1","blocks":[]}');
+    elements.workflowContent.value = readableWorkflowContent(workflow?.contentJson || '{"schema":"assistant.workflow.v1","blocks":[]}');
     const locked = Boolean(workflow?.isBuiltIn);
     for (const control of elements.workflowEditor.querySelectorAll("input:not([type=hidden]), textarea")) {
       control.disabled = locked;
@@ -2336,8 +3153,9 @@
   }
 
   function openWorkflows() {
+    closeWorkspacePicker();
+    closeProjectMemory();
     elements.overlay.hidden = false;
-    post("workflow.list", { search: elements.workflowSearch.value });
     showWorkflowPreview(selectedWorkflowForDialog());
     requestAnimationFrame(() => elements.workflowSearch.focus());
   }
@@ -2345,6 +3163,161 @@
   function closeWorkflows() {
     elements.overlay.hidden = true;
     state.isWorkflowEditing = false;
+  }
+
+  const memoryKindLabels = Object.freeze({
+    requirement: "Anforderung",
+    decision: "Entscheidung",
+    milestone: "Meilenstein",
+    errorResolution: "Fehlerlösung",
+    verification: "Verifikation"
+  });
+
+  function normalizeMemoryKind(value) {
+    const compact = String(value ?? "").replace(/[_\s-]/g, "").toLocaleLowerCase();
+    if (compact === "decision" || compact === "1") return "decision";
+    if (compact === "milestone" || compact === "2") return "milestone";
+    if (compact === "errorresolution" || compact === "3") return "errorResolution";
+    if (compact === "verification" || compact === "4") return "verification";
+    return "requirement";
+  }
+
+  function selectedMemoryEntry() {
+    return state.projectMemory.entries.find(item => item.id === state.projectMemory.selectedEntryId) || null;
+  }
+
+  function memoryEntryHeading(entry) {
+    const firstLine = String(entry?.content || "").split(/\r?\n/, 1)[0].trim();
+    return firstLine || "Leerer Gedächtniseintrag";
+  }
+
+  function renderProjectMemoryList() {
+    elements.memoryList.replaceChildren();
+    for (const entry of state.projectMemory.entries) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `memory-item${entry.id === state.projectMemory.selectedEntryId ? " active" : ""}`;
+      button.setAttribute("role", "listitem");
+      const copy = document.createElement("span");
+      copy.className = "memory-item__copy";
+      const title = document.createElement("strong");
+      title.textContent = memoryEntryHeading(entry);
+      const detail = document.createElement("span");
+      const kind = normalizeMemoryKind(entry.kind);
+      detail.textContent = `${memoryKindLabels[kind]} · ${entry.source || "Unbekannte Quelle"}`;
+      copy.append(title, detail);
+      button.append(copy);
+      if (entry.isPinned) {
+        const pin = document.createElement("span");
+        pin.className = "memory-item__pin";
+        pin.textContent = "★";
+        pin.setAttribute("aria-label", "Angepinnt");
+        button.append(pin);
+      }
+      button.addEventListener("click", () => showMemoryPreview(entry));
+      elements.memoryList.append(button);
+    }
+    if (!state.projectMemory.entries.length) {
+      const empty = document.createElement("p");
+      empty.className = "workflow-list-empty";
+      empty.textContent = state.projectMemory.available
+        ? "Noch keine Erkenntnisse für dieses Projekt."
+        : "Kein Projektgedächtnis verfügbar.";
+      elements.memoryList.append(empty);
+    }
+  }
+
+  function setMemoryFooterMode(editing, entry) {
+    const persisted = Boolean(entry?.id);
+    elements.deleteMemoryEntry.disabled = !persisted;
+    elements.confirmMemoryEntry.disabled = !persisted;
+    elements.editMemoryEntry.disabled = !persisted;
+    elements.deleteMemoryEntry.hidden = editing || !persisted;
+    elements.confirmMemoryEntry.hidden = editing || !persisted;
+    elements.editMemoryEntry.hidden = editing || !persisted;
+    elements.cancelMemoryEdit.hidden = !editing;
+    elements.saveMemoryEntry.hidden = !editing;
+  }
+
+  function showMemoryPreview(entry) {
+    state.projectMemory.isEditing = false;
+    state.projectMemory.selectedEntryId = entry?.id || null;
+    elements.memoryEditor.hidden = true;
+    elements.memoryEmpty.hidden = Boolean(entry);
+    elements.memoryPreview.hidden = !entry;
+    if (entry) {
+      const kind = normalizeMemoryKind(entry.kind);
+      elements.memoryPreviewKind.textContent = memoryKindLabels[kind];
+      elements.memoryPreviewTitle.textContent = memoryEntryHeading(entry);
+      elements.memoryPreviewContent.textContent = entry.content || "";
+      elements.memoryPreviewSource.textContent = entry.source || "Unbekannt";
+      elements.memoryPreviewUpdated.textContent = timeLabel(entry.updatedAt);
+      elements.memoryPreviewConfirmed.textContent = entry.lastConfirmedAt
+        ? timeLabel(entry.lastConfirmedAt)
+        : "Noch nicht bestätigt";
+      elements.pinMemoryEntry.textContent = entry.isPinned ? "★" : "☆";
+      elements.pinMemoryEntry.setAttribute("aria-pressed", String(Boolean(entry.isPinned)));
+      elements.pinMemoryEntry.setAttribute("aria-label", entry.isPinned
+        ? "Gedächtniseintrag lösen"
+        : "Gedächtniseintrag anpinnen");
+    }
+    setMemoryFooterMode(false, entry);
+    renderProjectMemoryList();
+  }
+
+  function showMemoryEditor(entry) {
+    if (!state.projectMemory.available) return;
+    state.projectMemory.isEditing = true;
+    state.projectMemory.selectedEntryId = entry?.id || null;
+    elements.memoryEntryId.value = entry?.id || "";
+    elements.memoryEntryVersion.value = String(entry?.version || 0);
+    elements.memoryEntryKind.value = normalizeMemoryKind(entry?.kind);
+    elements.memoryEntryContent.value = entry?.content || "";
+    elements.memoryEmpty.hidden = true;
+    elements.memoryPreview.hidden = true;
+    elements.memoryEditor.hidden = false;
+    setMemoryFooterMode(true, entry);
+    renderProjectMemoryList();
+    requestAnimationFrame(() => elements.memoryEntryContent.focus());
+  }
+
+  function applyProjectMemorySnapshot(payload) {
+    const previousSelection = state.projectMemory.selectedEntryId;
+    state.projectMemory = {
+      ...state.projectMemory,
+      available: payload?.available !== false && Boolean(payload?.projectKey),
+      projectKey: payload?.projectKey || null,
+      projectId: payload?.projectId || null,
+      projectLabel: payload?.projectLabel || "Projektgedächtnis",
+      autoCaptureEnabled: payload?.autoCaptureEnabled !== false,
+      entries: Array.isArray(payload?.entries) ? payload.entries : [],
+      disabledReason: payload?.disabledReason || null
+    };
+    const selected = state.projectMemory.entries.find(item => item.id === previousSelection)
+      || state.projectMemory.entries[0]
+      || null;
+    state.projectMemory.selectedEntryId = selected?.id || null;
+    elements.memoryProjectLabel.textContent = state.projectMemory.projectLabel;
+    elements.memoryAutoCapture.checked = state.projectMemory.autoCaptureEnabled;
+    elements.memoryAutoCapture.disabled = !state.projectMemory.available;
+    elements.newMemoryEntry.disabled = !state.projectMemory.available;
+    elements.memoryDisabledReason.hidden = !state.projectMemory.disabledReason;
+    elements.memoryDisabledReason.textContent = state.projectMemory.disabledReason || "";
+    if (!state.projectMemory.isEditing) showMemoryPreview(selected);
+    else renderProjectMemoryList();
+  }
+
+  function openProjectMemory() {
+    closeWorkspacePicker();
+    closeWorkflows();
+    elements.memoryOverlay.hidden = false;
+    state.projectMemory.isEditing = false;
+    post("memory.list", { sessionId: state.activeSessionId });
+  }
+
+  function closeProjectMemory() {
+    elements.memoryOverlay.hidden = true;
+    state.projectMemory.isEditing = false;
   }
 
   async function postChatRequest(payload) {
@@ -2364,7 +3337,7 @@
 
   function resumePendingCaptureRequest() {
     const request = state.pendingCaptureRequest;
-    const action = request?.toolAction || state.selectedToolAction;
+    const action = toolActionForExtensionActionId(request?.extensionActionId) || state.selectedToolAction;
     if (!state.waitingForCapture || !request || !hasMediaAnalysisContext(action)) return;
     state.waitingForCapture = false;
     void postChatRequest(request);
@@ -2373,7 +3346,9 @@
   async function handleComposerAction() {
     if (state.pendingChatSend) return;
     if (elements.prompt.value.trim()) await submitPrompt();
-    else if (globalThis.goRunSteering?.canSteer(state)) post("chat.cancel", {});
+    else if (globalThis.goRunSteering?.canSteer(state) || scheduledRunForSession(state.activeSessionId)) {
+      post("chat.cancel", { sessionId: state.activeSessionId });
+    }
   }
 
   async function submitPrompt() {
@@ -2388,12 +3363,15 @@
       if (retry === "unbound") showToast("Diese Umlenkung ist noch nicht bestätigt. Die Eingabe bleibt erhalten; es wird kein neuer Auftrag gestartet.", true);
       return;
     }
-    if (state.isRunning || state.isAiBusy) {
-      if (!globalThis.goRunSteering?.canSteer(state)) {
-        showToast("In einer anderen Sitzung läuft eine Antwort. Öffne diese Sitzung zum Umlenken.", true);
-        return;
-      }
+    const scheduledRun = scheduledRunForSession(state.activeSessionId);
+    if (globalThis.goRunSteering?.canSteer(state)) {
       globalThis.goRunSteering.request(state, prompt, post);
+      return;
+    }
+    if (scheduledRun) {
+      showToast(scheduledRun.queueState === "queued"
+        ? `Diese Sitzung wartet bereits auf Platz ${scheduledRun.position}.`
+        : "Der Auftrag dieser Sitzung wird gerade gestartet.", true);
       return;
     }
     state.voiceTurn = null;
@@ -2403,14 +3381,24 @@
     draftTimer = 0;
     pendingDraft = null;
     const sessionId = state.activeSessionId;
+    const automaticResearch = state.chatMode === "claudescience" && shouldAutoResearch(prompt);
+    const useDeepResearch = Boolean(state.deepResearch || automaticResearch);
     const sent = await postChatRequest({
       sessionId: state.activeSessionId,
+      chatMode: state.chatMode,
       prompt,
       documentIds: state.documents.map(item => item.id),
-      toolAction: state.selectedToolAction,
-      deepResearch: Boolean(state.deepResearch)
+      extensionActionId: state.selectedExtensionActionId,
+      deepResearch: useDeepResearch,
+      deepResearchProfile: useDeepResearch ? (state.deepResearchProfile || "auto") : null
     });
     if (sent !== null && state.activeSessionId === sessionId && elements.prompt.value.trim() === prompt) setPromptValue("");
+  }
+
+  function shouldAutoResearch(prompt) {
+    const text = String(prompt || "").trim();
+    if (text.length > 700) return true;
+    return /\b(deep research|systematic review|scoping review|literature review|meta-analysis|paper|publikation|primärquelle|quellen|zitiere|forschungslage|stand der forschung|hypothese|replikation|beweise|herleitung|gegenbeispiel|datensatz|statistisch|experiment|wissenschaftlich|aktuellste studien|vergleich der evidenz)\b/i.test(text);
   }
 
   function appendVoiceDictation(baseText, transcript) {
@@ -2521,7 +3509,7 @@
   }
 
   function ensureEditableContext() {
-    if (!state.isRunning && !state.isAiBusy && !state.pendingChatSend) return true;
+    if (!state.isRunning && !scheduledRunForSession(state.activeSessionId) && !state.pendingChatSend) return true;
     showToast("Während des laufenden Auftrags kannst du mit Text umlenken. Werkzeuge, Workspace und Anhänge lassen sich danach ändern.", true);
     return false;
   }
@@ -2529,14 +3517,44 @@
   function selectToolAction(action, persist = true) {
     if (persist && !ensureEditableContext()) return;
     const previous = state.selectedToolAction;
-    const requested = normalizeToolAction(action);
+    const previousExtensionActionId = state.selectedExtensionActionId
+      || extensionActionIdForToolAction(previous);
+    const requested = normalizeToolAction(action) === "coding" ? null : normalizeToolAction(action);
+    const requestedExtensionActionId = extensionActionIdForToolAction(requested);
+    if (persist) {
+      const targetExtensionActionId = requestedExtensionActionId || previousExtensionActionId;
+      if (!targetExtensionActionId) return;
+      const descriptor = availableActionDescriptors().find(item => item.actionId === targetExtensionActionId);
+      if (!descriptor) {
+        showToast("Diese Erweiterungsaktion ist derzeit nicht verfügbar.", true);
+        return;
+      }
+      post("action.invoke", {
+        actionId: descriptor.actionId,
+        sessionId: state.activeSessionId,
+        selectionBehavior: "toggle",
+        enabled: Boolean(requested)
+      });
+      return;
+    }
     const persistentFallback = normalizeToolAction(state.persistentToolAction);
+    const persistentFallbackExtensionActionId = state.persistentExtensionActionId
+      || extensionActionIdForToolAction(persistentFallback);
     state.selectedToolAction = !requested
       && previous
       && !persistentToolActions.has(previous)
       && persistentFallback
         ? persistentFallback
         : requested;
+    state.selectedExtensionActionId = !requestedExtensionActionId
+      && previousExtensionActionId
+      && !persistentExtensionActionIds.has(previousExtensionActionId)
+      && persistentFallbackExtensionActionId
+        ? persistentFallbackExtensionActionId
+        : requestedExtensionActionId;
+    if (state.selectedExtensionActionId && !state.selectedToolAction) {
+      state.selectedToolAction = toolActionForExtensionActionId(state.selectedExtensionActionId);
+    }
     if (state.deepResearch && state.selectedToolAction && !["coding"].includes(state.selectedToolAction)) {
       state.deepResearch = false;
       persistDeepResearch();
@@ -2544,49 +3562,69 @@
     for (const option of document.querySelectorAll(".service-option[data-tool-action]")) {
       option.classList.toggle("active", option.dataset.toolAction === state.selectedToolAction);
     }
-    const selected = document.querySelector(`.service-option[data-tool-action="${state.selectedToolAction || ""}"] span`);
-    elements.toolsButton.title = selected ? `Aktiv: ${selected.textContent}` : "Tools";
+    elements.toolsButton.title = "Hinzufügen";
+    if (typeof updateActionMenuState === "function") updateActionMenuState();
     renderContext();
     if (!state.messages.length) renderMessages(false);
-    if (persist && state.activeSessionId) {
-      const selectedIsPersistent = persistentToolActions.has(state.selectedToolAction);
-      const explicitlyClearedPersistent = !state.selectedToolAction && persistentToolActions.has(previous);
-      if (selectedIsPersistent || explicitlyClearedPersistent) {
-        state.persistentToolAction = selectedIsPersistent ? state.selectedToolAction : null;
-        post("session.tool", {
-          sessionId: state.activeSessionId,
-          action: state.persistentToolAction
-        });
-      }
-    }
   }
 
   function clearCompletedOneShotToolAction() {
-    if (state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction)) {
+    if (state.selectedExtensionActionId
+      && state.selectedExtensionActionId !== state.persistentExtensionActionId) {
+      state.selectedExtensionActionId = state.persistentExtensionActionId;
+      state.selectedToolAction = toolActionForExtensionActionId(state.persistentExtensionActionId);
+      if (typeof updateActionMenuState === "function") updateActionMenuState();
+      renderContext();
+    } else if (state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction)) {
       selectToolAction(state.persistentToolAction, false);
     }
   }
 
   function persistDeepResearch() {
     if (!state.activeSessionId) return;
-    try { globalThis.localStorage.setItem(`go.assistant.deep-research.v1:${state.activeSessionId}`, state.deepResearch ? "1" : "0"); }
+    try {
+      globalThis.localStorage.setItem(`assistant.session.deep-research.v1:${state.activeSessionId}`, state.deepResearch ? "1" : "0");
+      globalThis.localStorage.setItem(`assistant.session.deep-research-profile.v1:${state.activeSessionId}`, state.deepResearchProfile || "auto");
+    }
     catch { /* Optional WebView storage must not prevent sending a prompt. */ }
   }
 
   function restoreDeepResearch() {
     state.deepResearch = false;
+    state.deepResearchProfile = "auto";
     if (!state.activeSessionId) return;
-    try { state.deepResearch = globalThis.localStorage.getItem(`go.assistant.deep-research.v1:${state.activeSessionId}`) === "1"; }
+    try {
+      state.deepResearch = readMigratedStorage(
+        `assistant.session.deep-research.v1:${state.activeSessionId}`,
+        `go.assistant.deep-research.v1:${state.activeSessionId}`) === "1";
+      const profile = globalThis.localStorage.getItem(`assistant.session.deep-research-profile.v1:${state.activeSessionId}`);
+      if (["auto", "web", "scientificEvidence", "systematicReview", "scopingReview", "literatureUpdate",
+        "replicationAudit", "openProblem", "mathematicalInvestigation"].includes(profile)) state.deepResearchProfile = profile;
+    }
     catch { /* Default to ordinary chat when storage is unavailable. */ }
   }
 
-  function selectDeepResearch(enabled) {
-    if (!ensureEditableContext()) return;
-    if (enabled && state.selectedToolAction && !["coding"].includes(state.selectedToolAction)) {
-      selectToolAction(["coding"].includes(state.persistentToolAction) ? state.persistentToolAction : null, false);
+  function selectDeepResearch(enabled, persist = true) {
+    if (persist) {
+      if (!ensureEditableContext()) return;
+      const actionId = extensionActionIdForToolAction("deepResearch");
+      const descriptor = availableActionDescriptors().find(item => item.actionId === actionId);
+      if (!descriptor) {
+        showToast("Deep Research ist derzeit nicht verfügbar.", true);
+        return;
+      }
+      post("action.invoke", {
+        actionId: descriptor.actionId,
+        sessionId: state.activeSessionId,
+        selectionBehavior: "toggle",
+        enabled: Boolean(enabled)
+      });
+      return;
     }
+    if (enabled && (state.selectedExtensionActionId || state.selectedToolAction)) selectToolAction(null, false);
     state.deepResearch = Boolean(enabled);
     persistDeepResearch();
+    if (typeof updateActionMenuState === "function") updateActionMenuState();
     renderContext();
   }
 
@@ -2595,23 +3633,59 @@
       option.classList.toggle("active", Boolean(state.deepResearch));
       option.setAttribute("aria-checked", state.deepResearch ? "true" : "false");
     }
-    if (!state.deepResearch) return;
-    const chip = document.createElement("button");
-    chip.type = "button";
+    if (!state.deepResearch || state.chatMode === "claudescience") return;
+    const chip = document.createElement("div");
     chip.className = "active-tool-chip";
     chip.dataset.toolToggle = "deepResearch";
-    chip.title = "Deep Research abwählen";
-    chip.setAttribute("aria-label", chip.title);
-    const text = document.createElement("span");
-    text.textContent = "Deep Research";
-    const remove = document.createElement("span");
+    const profile = document.createElement("select");
+    profile.className = "active-tool-chip__profile";
+    profile.setAttribute("aria-label", "Deep-Research-Profil");
+    for (const [value, label] of [["auto", "Deep Research · Automatisch"], ["web", "Webrecherche"],
+      ["scientificEvidence", "Wissenschaftliche Evidenz"], ["systematicReview", "Systematischer Review"],
+      ["scopingReview", "Scoping Review"], ["literatureUpdate", "Literatur aktualisieren"],
+      ["replicationAudit", "Replikationsprüfung"], ["openProblem", "Offenes Forschungsproblem"],
+      ["mathematicalInvestigation", "Mathematische Untersuchung"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      option.selected = value === state.deepResearchProfile;
+      profile.append(option);
+    }
+    profile.addEventListener("change", () => {
+      state.deepResearchProfile = profile.value;
+      persistDeepResearch();
+    });
+    const status = document.createElement("button");
+    status.type = "button";
+    status.className = "active-tool-chip__details";
+    status.textContent = "Stand";
+    status.title = "Gespeicherten Forschungsstand öffnen";
+    status.addEventListener("click", () => openScientificResearch());
+    const remove = document.createElement("button");
+    remove.type = "button";
     remove.className = "active-tool-chip__remove";
     remove.textContent = "×";
-    chip.append(createToolIcon(toolVisuals.webSearch[1]), text, remove);
-    chip.addEventListener("click", () => selectDeepResearch(false));
+    remove.title = "Deep Research abwählen";
+    remove.setAttribute("aria-label", remove.title);
+    remove.addEventListener("click", () => selectDeepResearch(false));
+    chip.append(createToolIcon(toolVisuals.webSearch[1]), profile, status, remove);
     elements.activeTools.append(chip);
   }
 
+  function openScientificResearch() {
+    state.scienceView = "overview";
+    post("research.list", { sessionId: state.activeSessionId });
+    renderScienceWorkbench();
+  }
+
+  function closeScientificResearch() {
+    state.scienceChatVisible = true;
+    renderScienceWorkbench();
+  }
+
+  function renderScientificResearch() {
+    renderScienceWorkbench();
+  }
   function resetTransientVoiceStateForSessionChange() {
     const browserCaptureActive = Boolean(
       globalThis.goVoiceCapture?.isActive
@@ -2657,13 +3731,13 @@
 
   function contextProfileForSnapshot(payload) {
     return JSON.stringify([payload.activeSessionId || "", payload.reasoningRole || "general",
-      payload.reasoningModelId || "", String(payload.codingWorkspacePath || "").toLocaleLowerCase()]);
+      payload.reasoningModelId || "", String(payload.workspacePath || payload.codingWorkspacePath || "").toLocaleLowerCase()]);
   }
 
   function persistMeasuredContext() {
     if (state.contextSource !== "measured" || !state.contextProfile) return;
     try {
-      globalThis.localStorage.setItem(`go.assistant.context.v1:${state.contextProfile}`, JSON.stringify({
+      globalThis.localStorage.setItem(`assistant.context.measurement.v1:${state.contextProfile}`, JSON.stringify({
         messageId: state.contextMeasurementMessageId,
         used: state.contextUsed, limit: state.contextLimit, truncated: state.contextWasTruncated
       }));
@@ -2680,7 +3754,9 @@
     state.contextNotice = payload.contextNotice || null;
     if (state.contextSource !== "measured") {
       try {
-        const saved = JSON.parse(globalThis.localStorage.getItem(`go.assistant.context.v1:${state.contextProfile}`) || "null");
+        const saved = JSON.parse(readMigratedStorage(
+          `assistant.context.measurement.v1:${state.contextProfile}`,
+          `go.assistant.context.v1:${state.contextProfile}`) || "null");
         if (saved && saved.messageId === (state.messages.at(-1)?.id || null)
           && Number.isFinite(saved.used) && saved.used >= 0 && Number.isFinite(saved.limit) && saved.limit > 0) {
           state.contextUsed = saved.used;
@@ -2702,12 +3778,46 @@
   }
 
   function applySnapshot(payload) {
+    globalThis.goBridge?.configureContract?.(payload?.bridgeContract);
     const dialogWasOpen = !elements.overlay.hidden;
+    const memoryWasOpen = Boolean(elements.memoryOverlay && !elements.memoryOverlay.hidden);
+    const researchWasOpen = state.chatMode === "claudescience";
     const editorSelection = state.selectedWorkflowEditorId;
     const wasEditing = state.isWorkflowEditing;
     const previousSessionId = state.activeSessionId;
+    const previousPersistentExtensionActionId = state.persistentExtensionActionId;
     const nextSessionId = payload.activeSessionId || null;
     const sessionChanged = previousSessionId !== nextSessionId;
+    const serverToolAction = normalizeToolAction(payload.selectedToolAction);
+    const activeSession = (Array.isArray(payload.sessions) ? payload.sessions : [])
+      .find(session => String(session.id || "") === String(nextSessionId || ""));
+    const serverExtensionActionId = normalizeExtensionActionId(payload.selectedExtensionActionId)
+      || extensionActionIdForToolAction(serverToolAction);
+    const persistentExtensionActionId = normalizeExtensionActionId(payload.persistentExtensionActionId)
+      || normalizeExtensionActionId(activeSession?.persistentExtensionActionId)
+      || serverExtensionActionId;
+    const snapshotModeValue = String(payload.chatMode ?? payload.selectedChatMode ?? "").trim().toLocaleLowerCase();
+    const snapshotMode = ["claudescience", "claude-science", "science"].includes(snapshotModeValue)
+      ? "claudescience"
+      : ["coding", "code", "codex"].includes(snapshotModeValue)
+        ? "coding"
+      : ["general", "chat", "chatgpt"].includes(snapshotModeValue)
+        ? "general"
+        : serverToolAction === "coding" ? "coding" : "general";
+    state.chatMode = snapshotMode;
+    state.scienceCapabilities = payload.scienceCapabilities || state.scienceCapabilities || {};
+    state.assistantTitle = String(payload.productIdentity?.assistantTitle || payload.assistantTitle || "AI Assistent").trim() || "AI Assistent";
+    document.title = state.assistantTitle;
+    if (Array.isArray(payload.actionDescriptors) || Array.isArray(payload.extensionActions)) {
+      state.actionDescriptors = Array.isArray(payload.actionDescriptors)
+        ? payload.actionDescriptors
+        : payload.extensionActions;
+    }
+    if (Array.isArray(payload.activeExtensionActionIds) || Array.isArray(payload.selectedExtensionActionIds)) {
+      state.activeActionIds = new Set((payload.activeExtensionActionIds || payload.selectedExtensionActionIds)
+        .map(value => String(value || "").trim())
+        .filter(Boolean));
+    }
     if (sessionChanged) { closeCodingPreview(); state.changesSummary = null; }
     const nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
     const currentSessionMessagesChanged = !sessionChanged
@@ -2723,7 +3833,15 @@
     state.attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
     state.documentGroupStatus = payload.documentGroupStatus || { total: 0, ready: 0, processing: 0, failed: 0, status: "ready" };
     state.activeSessionId = nextSessionId;
-    if (sessionChanged) restoreDeepResearch();
+    if (sessionChanged) {
+      restoreDeepResearch();
+      try {
+        state.scienceView = globalThis.localStorage.getItem(`assistant.science.view.v1:${state.activeSessionId}`) || "overview";
+        state.scienceChatVisible = globalThis.localStorage.getItem("assistant.science.chat-visible.v1") !== "0";
+      } catch { state.scienceView = "overview"; }
+      if (!["overview", "research", "data", "analysis", "figures", "manuscript", "review", "provenance"].includes(state.scienceView)) state.scienceView = "overview";
+      state.scienceRequestedProjectId = null;
+    }
     globalThis.goVoiceCapture?.setSessionId(state.activeSessionId);
     if (previousSessionId !== state.activeSessionId) {
       state.messageRunStatus.clear();
@@ -2731,20 +3849,35 @@
     }
     state.isRunning = Boolean(payload.isRunning);
     state.isAiBusy = Boolean(payload.isAiBusy ?? payload.isRunning);
-    state.activeRunSessionId = payload.activeRunSessionId || (state.isRunning ? nextSessionId : null);
+    applyRunQueue(payload.runQueue || {
+      active: payload.activeRunSessionId ? { sessionId: payload.activeRunSessionId, state: "running", position: 0 } : null,
+      pending: [],
+      isIdle: !payload.isAiBusy
+    });
+    state.activeRunSessionId = payload.activeRunSessionId || state.runQueue.active?.sessionId
+      || (state.isRunning ? nextSessionId : null);
     state.activeRunId = payload.activeRunId || null;
     state.loadedFiles = payload.loadedFiles ?? null;
     state.model = payload.model || null;
-    state.codingWorkspacePath = payload.codingWorkspacePath || null;
+    state.workspacePath = payload.workspacePath || payload.codingWorkspacePath || null;
+    // Compatibility alias for the Coding timeline while the shared workspace
+    // terminology is adopted throughout the client.
+    state.codingWorkspacePath = state.workspacePath;
     state.codingToolStepsExpanded = Boolean(payload.codingToolStepsExpanded);
     if (payload.changesSummary) applyCodingChanges(payload.changesSummary);
     restoreSnapshotContext(payload);
-    const serverToolAction = normalizeToolAction(payload.selectedToolAction);
-    state.persistentToolAction = persistentToolActions.has(serverToolAction) ? serverToolAction : null;
-    const activeOneShotTool = state.selectedToolAction && !persistentToolActions.has(state.selectedToolAction);
+    state.persistentExtensionActionId = persistentExtensionActionId;
+    state.persistentToolAction = toolActionForExtensionActionId(persistentExtensionActionId)
+      || (persistentToolActions.has(serverToolAction) ? serverToolAction : null);
+    const activeOneShotTool = state.selectedExtensionActionId
+      && state.selectedExtensionActionId !== previousPersistentExtensionActionId;
     // session state; a one-shot chip survives idle refreshes while composing.
     if (previousSessionId !== state.activeSessionId || !activeOneShotTool) {
-      selectToolAction(serverToolAction, false);
+      state.selectedExtensionActionId = serverExtensionActionId;
+      selectToolAction(toolActionForExtensionActionId(serverExtensionActionId) || serverToolAction, false);
+      if (serverExtensionActionId && !state.selectedExtensionActionId) {
+        state.selectedExtensionActionId = serverExtensionActionId;
+      }
     } else {
       selectToolAction(state.selectedToolAction, false);
     }
@@ -2771,8 +3904,9 @@
     if (sessionChanged) {
       setPromptValue(payload.draft || "");
     }
+    if (typeof renderModeSwitcher === "function") renderModeSwitcher();
+    if (typeof renderActionMenu === "function") renderActionMenu();
     renderSessions();
-    renderSessionPin();
     renderMessages(currentSessionMessagesChanged);
     if (sessionChanged) restoreSessionScrollPosition(state.activeSessionId);
     renderContext();
@@ -2794,16 +3928,16 @@
     } else {
       renderWorkflows();
     }
-  }
-
-  function renderSessionPin() {
-    const session = state.sessions.find(item => item.id === state.activeSessionId);
-    if (!elements.pinSession) return;
-    const label = session?.isPinned ? "Sitzung loslösen" : "Sitzung anpinnen";
-    elements.pinSession.textContent = label;
-    elements.pinSession.title = label;
-    elements.pinSession.setAttribute("aria-label", label);
-    elements.pinSession.disabled = !session;
+    if (memoryWasOpen && sessionChanged) {
+      post("memory.list", { sessionId: state.activeSessionId });
+    }
+    if (sessionChanged && state.chatMode === "claudescience") {
+      state.scientificResearch = { available: true, projects: [], selectedProjectId: null, detail: null, disabledReason: null };
+      post("research.list", { sessionId: state.activeSessionId });
+    } else if (researchWasOpen && sessionChanged) {
+      state.scientificResearch = { available: true, projects: [], selectedProjectId: null, detail: null, disabledReason: null };
+      post("research.list", { sessionId: state.activeSessionId });
+    }
   }
 
   function sortCommittedMessages() {
@@ -2833,13 +3967,23 @@
 
   function applyConversationSnapshot(payload) {
     if (!payload || String(payload.activeSessionId || "") !== String(state.activeSessionId || "")) return;
+    const incomingRevision = Number(payload.conversationRevision) || 0;
+    const currentRevision = Number(state.conversationRevision) || 0;
+    if (incomingRevision < currentRevision) {
+      // A refresh can finish after newer commit/stream packets have already
+      // reached this client. Never roll the visible conversation back; ask
+      // once more for the now-current durable snapshot instead.
+      state.conversationRefreshPending = false;
+      requestConversationRefresh();
+      return;
+    }
     state.codingToolStepsExpanded = Boolean(payload.codingToolStepsExpanded);
     const nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
     const messagesChanged = conversationMessagesDiffer(state.messages, nextMessages);
     state.messages = nextMessages;
     sortCommittedMessages();
     if (payload.changesSummary) applyCodingChanges(payload.changesSummary);
-    state.conversationRevision = Number(payload.conversationRevision) || 0;
+    state.conversationRevision = incomingRevision;
     state.conversationRefreshPending = false;
     pruneTerminalMessageRunStatuses();
     renderMessages(messagesChanged);
@@ -2877,6 +4021,55 @@
     renderMessages(true);
   }
 
+  function upsertLiveMessage(message, fallback = {}) {
+    if (!message?.id) return false;
+    const sessionId = message.sessionId || fallback.sessionId || state.activeSessionId;
+    if (String(sessionId || "") !== String(state.activeSessionId || "")) return false;
+    const index = state.messages.findIndex(item => String(item.id || "") === String(message.id));
+    const existing = index >= 0 ? state.messages[index] : null;
+    const existingRevision = Number(existing?.revision) || 0;
+    const incomingRevision = Number(message.revision) || 0;
+    if (existing && incomingRevision > 0 && incomingRevision < existingRevision) return false;
+    if (existing && isTerminalMessageStatus(existing.status) && !isTerminalMessageStatus(message.status)) return false;
+    const merged = {
+      ...(existing || {
+        sessionId,
+        role: fallback.role || "assistant",
+        createdAt: fallback.createdAt || new Date().toISOString()
+      }),
+      ...message,
+      sessionId
+    };
+    if (index >= 0) state.messages[index] = merged;
+    else state.messages.push(merged);
+    if (isTerminalMessageStatus(merged.status)) {
+      state.messageRunStatus.delete(String(merged.id));
+    }
+    sortCommittedMessages();
+    return true;
+  }
+
+  function applyLiveDelta(payload) {
+    if (!belongsToActiveSession(payload) || !payload?.messageId) return false;
+    const existing = state.messages.find(item => String(item.id || "") === String(payload.messageId));
+    if (existing && isTerminalMessageStatus(existing.status)) return false;
+    const incomingToolSteps = Array.isArray(payload.toolSteps) ? payload.toolSteps : existing?.toolSteps || [];
+    if (existing
+      && String(existing.content || "") === String(payload.content ?? existing.content ?? "")
+      && JSON.stringify(existing.toolSteps || []) === JSON.stringify(incomingToolSteps)) {
+      return false;
+    }
+    return upsertLiveMessage({
+      id: payload.messageId,
+      sessionId: payload.sessionId || existing?.sessionId || state.activeSessionId,
+      role: existing?.role || "assistant",
+      status: existing?.status || "streaming",
+      content: payload.content ?? existing?.content ?? "",
+      toolSteps: incomingToolSteps,
+      updatedAt: payload.updatedAt || existing?.updatedAt
+    });
+  }
+
   function handleHostMessage(event) {
     const { type, payload, requestId } = event.detail;
     switch (type) {
@@ -2892,6 +4085,30 @@
       case "coding.changes":
         applyCodingChanges(payload);
         break;
+      case "chat.queued": {
+        if (state.pendingChatSend?.requestId === requestId) {
+          state.pendingChatSend = null;
+          state.pendingCaptureRequest = null;
+          state.waitingForCapture = false;
+        }
+        applyRunQueue(payload?.runQueue || {
+          active: state.runQueue?.active || null,
+          pending: [...(state.runQueue?.pending || []), payload],
+          isIdle: false
+        });
+        renderSessions();
+        renderStatus();
+        const queued = scheduledRunForSession(payload?.sessionId);
+        if (queued?.queueState === "queued" && belongsToActiveSession(payload)) {
+          showToast(`Auftrag eingereiht · Platz ${queued.position}`);
+        }
+        break;
+      }
+      case "queue.changed":
+        applyRunQueue(payload?.runQueue || payload);
+        renderSessions();
+        renderStatus();
+        break;
       case "chat.started":
         if (state.pendingChatSend?.requestId === requestId) state.pendingChatSend = null;
         state.isAiBusy = true;
@@ -2904,6 +4121,23 @@
         state.pendingCaptureRequest = null;
         state.waitingForCapture = false;
         state.voiceTurn = null;
+        upsertLiveMessage(payload.userMessage, { role: "user" });
+        upsertLiveMessage(payload.message, { role: "assistant" });
+        if (Number.isFinite(payload.conversationRevision)) {
+          const currentRevision = Number(state.conversationRevision) || 0;
+          const incomingRevision = Number(payload.conversationRevision) || 0;
+          const coveredRevisionDelta = Number(Boolean(payload.userMessage?.id))
+            + Number(Boolean(payload.message?.id));
+          const hasUnexplainedRevisionGap = incomingRevision > currentRevision + coveredRevisionDelta;
+          state.conversationRevision = Math.max(currentRevision, incomingRevision);
+          state.conversationRefreshPending = false;
+          if (hasUnexplainedRevisionGap) requestConversationRefresh();
+        }
+        if (payload.session) {
+          const sessionIndex = state.sessions.findIndex(item => item.id === payload.session.id);
+          if (sessionIndex >= 0) state.sessions[sessionIndex] = payload.session;
+          else if (sessionMatchesMode(payload.session)) state.sessions.push(payload.session);
+        }
         if (Array.isArray(payload.attachments)) {
           state.attachments = payload.attachments;
           renderContext();
@@ -2933,6 +4167,7 @@
         if (state.contextWasTruncated) showToast(state.contextNotice || "Der Modellkontext wurde gekürzt.");
         break;
       case "chat.delta": {
+        if (applyLiveDelta(payload)) renderMessages(true);
         break;
       }
       case "chat.steer.accepted": {
@@ -2951,9 +4186,21 @@
       case "chat.cancelled":
       case "chat.failed":
         if (state.pendingChatSend?.requestId === requestId) state.pendingChatSend = null;
+        if (type === "chat.cancelled" && payload?.queued) {
+          removeScheduledRun(payload.sessionId, requestId);
+          if (belongsToActiveSession(payload)) {
+            state.runStatus = payload.runStatus || "Aus Warteschlange entfernt";
+            state.runDetail = null;
+            showToast(state.runStatus);
+          }
+          renderSessions();
+          renderStatus();
+          break;
+        }
         globalThis.goRunSteering?.observeRun(state);
-        state.isAiBusy = false;
-        state.activeRunSessionId = null;
+        removeScheduledRun(payload?.sessionId || payload?.message?.sessionId, requestId, true);
+        state.isAiBusy = !state.runQueue?.isIdle;
+        state.activeRunSessionId = state.runQueue?.active?.sessionId || null;
         state.activeRunId = null;
         state.activeRunMessageId = null;
         if (!belongsToActiveSession(payload)) {
@@ -2972,6 +4219,7 @@
         state.runStatus = payload.runStatus || null;
         state.runDetail = payload.runDetail || null;
         persistMeasuredContext();
+        upsertLiveMessage(payload.message, { role: "assistant" });
         // A terminal chat event ends the only active model run. Clear every
         // transient per-message status so a previously rendered card cannot
         // retain (or regain) a stale "Denkt nach" indicator.
@@ -2981,8 +4229,12 @@
           if (sessionIndex >= 0) state.sessions[sessionIndex] = payload.session;
           else state.sessions.push(payload.session);
           if (payload.session.id === state.activeSessionId) {
-            state.persistentToolAction = payload.session.persistentToolAction || null;
+            state.persistentExtensionActionId = normalizeExtensionActionId(payload.session.persistentExtensionActionId)
+              || extensionActionIdForToolAction(payload.session.persistentToolAction);
+            state.persistentToolAction = toolActionForExtensionActionId(state.persistentExtensionActionId)
+              || payload.session.persistentToolAction || null;
             if (!state.selectedToolAction || persistentToolActions.has(state.selectedToolAction)) {
+              state.selectedExtensionActionId = state.persistentExtensionActionId;
               selectToolAction(state.persistentToolAction, false);
             }
           }
@@ -3005,15 +4257,19 @@
           }
         }, 1800);
         break;
-      case "session.grouped":
+      case "session.grouped": {
         // A late grouping result only refreshes the sidebar. It must not replace
         // the active session, its measured context, draft, messages or scroll position.
+        // Mode switches can overtake an earlier grouping request. Ignore that
+        // stale response so General and Coding never replace each other's sidebar.
+        const groupedMode = normalizeChatMode(payload?.chatMode ?? payload?.selectedChatMode);
+        if (groupedMode && groupedMode !== state.chatMode) break;
         state.sessions = Array.isArray(payload.sessions) ? payload.sessions : state.sessions;
         state.sessionGroups = Array.isArray(payload.sessionGroups) ? payload.sessionGroups : state.sessionGroups;
         renderSessions();
-        renderSessionPin();
         renderStatus();
         break;
+      }
       case "session.changed":
       case "workflow.changed":
         applySnapshot(payload);
@@ -3068,6 +4324,77 @@
         }
         break;
       }
+      case "memory.snapshot":
+      case "memory.changed":
+        applyProjectMemorySnapshot(payload);
+        break;
+      case "research.snapshot":
+        if (payload?.sessionId && String(payload.sessionId) !== String(state.activeSessionId || "")) break;
+        {
+        const incomingRevision = Number(payload?.detail?.project?.revision || 0);
+        const currentRevision = Number(state.scientificResearch?.revision || 0);
+        if (payload?.detail && incomingRevision < currentRevision) break;
+        state.scientificResearch = {
+          available: payload?.available !== false,
+          projects: Array.isArray(payload?.projects) ? payload.projects : [],
+          selectedProjectId: payload?.selectedProjectId || null,
+          detail: payload?.detail || null,
+          disabledReason: payload?.disabledReason || null,
+          revision: Math.max(currentRevision, incomingRevision)
+        };
+        state.scienceRequestedProjectId = null;
+        renderScientificResearch();
+        const candidate = !payload?.detail && (payload?.selectedProjectId
+          || (Array.isArray(payload?.projects) ? payload.projects[0]?.id : null));
+        if (candidate) openScienceProject(candidate);
+        break;
+        }
+      case "research.exported":
+        state.scienceExporting = false;
+        renderScienceWorkbench();
+        showToast(`Forschungspaket erstellt: ${payload?.directory || "Workspace"}`);
+        break;
+      case "action.completed":
+        {
+          const descriptor = availableActionDescriptors().find(item => item.actionId === payload?.actionId);
+          const extensionActionId = normalizeExtensionActionId(payload?.extensionActionId || payload?.actionId)
+            || extensionActionIdForToolAction(payload?.toolAction);
+          const enabled = payload?.enabled !== false;
+          if (descriptor && isSelectableAction(descriptor)) {
+            if (enabled) state.activeActionIds.add(descriptor.actionId);
+            else state.activeActionIds.delete(descriptor.actionId);
+          }
+          const toolToggle = String(payload?.toolToggle || descriptor?.toolToggle || "");
+          const toolAction = toolActionForExtensionActionId(extensionActionId)
+            || normalizeToolAction(payload?.toolAction || descriptor?.toolAction);
+          if (toolToggle === "deepResearch") selectDeepResearch(enabled, false);
+          if (descriptor && isSelectableAction(descriptor) && toolToggle !== "deepResearch") {
+            if (persistentExtensionActionIds.has(extensionActionId)) {
+              state.persistentExtensionActionId = enabled ? extensionActionId : null;
+              state.persistentToolAction = enabled ? toolAction : null;
+            }
+            if (enabled) {
+              state.selectedExtensionActionId = extensionActionId;
+              state.selectedToolAction = toolAction;
+            } else if (state.selectedExtensionActionId === extensionActionId
+              || toolAction && state.selectedToolAction === toolAction) {
+              state.selectedExtensionActionId = state.persistentExtensionActionId;
+              state.selectedToolAction = state.persistentToolAction;
+            }
+            renderContext();
+          }
+          if (!enabled && extensionActionId === "builtin.coding/plan-mode" && state.pendingPlanImplementation) {
+            const implementationPrompt = state.pendingPlanImplementation;
+            state.pendingPlanImplementation = null;
+            setPromptValue(implementationPrompt);
+            void submitPrompt();
+          }
+          const captureAction = String(payload?.captureAction || descriptor?.captureAction || "");
+          if (enabled && ["audioAnalysis", "videoAnalysis", "imageAnalysis"].includes(captureAction)) {
+            void beginMediaCapture(captureAction);
+          }
+        }
+        break;
       case "workflow.draft":
         elements.overlay.hidden = false;
         showWorkflowEditor(payload.workflow || null);
@@ -3235,26 +4562,28 @@
       case "artifact.previewReady": {
         const artifactId = String(payload?.artifactId || "");
         state.artifactPreviewPending.delete(artifactId);
-        if (artifactId && payload?.url) state.artifactPreviewUrls.set(artifactId, {
-          url: payload.url,
-          posterUrl: payload.posterUrl || null
+        const previewUrl = resourceUrl(payload?.url);
+        const posterUrl = resourceUrl(payload?.posterUrl);
+        if (artifactId && previewUrl) state.artifactPreviewUrls.set(artifactId, {
+          url: previewUrl,
+          posterUrl: posterUrl || null
         });
         for (const card of document.querySelectorAll(".artifact-card")) {
           if (card.dataset.artifactId !== artifactId) continue;
           const image = card.querySelector("img");
           const audio = card.querySelector("audio");
           const video = card.querySelector("video");
-          if (image && payload?.url) {
+          if (image && previewUrl) {
             image.addEventListener("load", () => card.classList.remove("artifact-card--failed"), { once: true });
-            image.src = payload.url;
+            image.src = previewUrl;
           }
-          if (audio && payload?.url) {
-            audio.src = payload.url;
+          if (audio && previewUrl) {
+            audio.src = previewUrl;
             audio.load();
           }
-          if (video && payload?.url) {
-            video.src = payload.url;
-            if (payload?.posterUrl) video.poster = payload.posterUrl;
+          if (video && previewUrl) {
+            video.src = previewUrl;
+            if (posterUrl) video.poster = posterUrl;
             video.load();
           }
         }
@@ -3285,6 +4614,13 @@
         }
         break;
       case "host.error":
+        if (state.scienceExporting) {
+          state.scienceExporting = false;
+          if (state.chatMode === "claudescience") {
+            state.scientificResearch = { ...state.scientificResearch, disabledReason: payload.message || "Die Forschungsaktion ist fehlgeschlagen." };
+            renderScienceWorkbench();
+          }
+        }
         if (state.pendingChatSend?.requestId === requestId) {
           const pending = state.pendingChatSend;
           state.pendingChatSend = null;
@@ -3327,7 +4663,41 @@
   }
 
   restoreSessionsCollapsed();
+  renderModeSwitcher();
+  renderActionMenu();
 
+  elements.modeSwitcherButton.addEventListener("click", event => {
+    event.stopPropagation();
+    setToolsMenuOpen(false);
+    setModeMenuOpen(elements.modeSwitcherMenu.hidden);
+  });
+  elements.modeSwitcherMenu.addEventListener("click", event => event.stopPropagation());
+  for (const option of elements.modeSwitcherMenu.querySelectorAll("[data-chat-mode]")) {
+    option.addEventListener("click", () => switchChatMode(option.dataset.chatMode));
+  }
+  elements.scienceChatToggle.addEventListener("click", () => {
+    state.scienceChatVisible = !state.scienceChatVisible;
+    try { globalThis.localStorage.setItem("assistant.science.chat-visible.v1", state.scienceChatVisible ? "1" : "0"); }
+    catch { /* Layout preference is optional. */ }
+    renderScienceWorkbench();
+  });
+  elements.scienceExport.addEventListener("click", () => {
+    const projectId = state.scientificResearch?.selectedProjectId || state.scientificResearch?.detail?.project?.id;
+    if (!projectId || state.scienceExporting) return;
+    state.scienceExporting = true;
+    renderScienceWorkbench();
+    post("research.export", { sessionId: state.activeSessionId, projectId,
+      expectedRevision: state.scientificResearch?.detail?.project?.revision || 0 });
+  });
+  for (const tab of elements.scienceWorkbench.querySelectorAll("[data-science-view]")) {
+    tab.addEventListener("click", () => {
+      state.scienceView = tab.dataset.scienceView || "overview";
+      try { globalThis.localStorage.setItem(`assistant.science.view.v1:${state.activeSessionId}`, state.scienceView); }
+      catch { /* Session view is a convenience preference. */ }
+      if (state.scienceView === "research" || state.scienceView === "review") post("research.list", { sessionId: state.activeSessionId });
+      renderScienceWorkbench();
+    });
+  }
   elements.toggleSessions.addEventListener("click", () => {
     const collapsed = !elements.appShell.classList.contains("sessions-collapsed");
     setSessionsCollapsed(collapsed, true);
@@ -3335,16 +4705,33 @@
   });
   elements.newSession.addEventListener("click", createWorkspaceProject);
   elements.clearSessions.addEventListener("click", () => {
-    const hasUnpinnedSessions = state.sessions.some(session => !session.isPinned);
-    if (hasUnpinnedSessions && globalThis.confirm(
-      "Alle nicht angepinnten Sitzungen und ihre Nachrichten endgültig löschen? Angepinnte Sitzungen bleiben erhalten.")) {
+    const hasVisibleSessions = state.sessions.some(session => !session.chatMode
+      || String(session.chatMode).toLocaleLowerCase() === String(state.chatMode || "general").toLocaleLowerCase());
+    const label = state.chatMode === "claudescience" ? "Claude Science" : state.chatMode === "coding" ? "Codex" : "ChatGPT";
+    if (hasVisibleSessions && globalThis.confirm(
+      `Alle Sitzungen der ${label}-Ansicht und ihre Nachrichten endgültig löschen?`)) {
       flushDraft();
-      post("session.clear", {});
+      post("session.clear", { chatMode: state.chatMode });
     }
   });
   elements.sessionSearch.addEventListener("input", renderSessions);
   byId("open-sessions").addEventListener("click", () => document.body.classList.add("sessions-open"));
   byId("collapse-sessions").addEventListener("click", () => document.body.classList.remove("sessions-open"));
+  byId("close-workspace-picker").addEventListener("click", closeWorkspacePicker);
+  byId("cancel-workspace-picker").addEventListener("click", closeWorkspacePicker);
+  elements.workspaceOverlay.addEventListener("click", event => {
+    if (event.target === elements.workspaceOverlay) closeWorkspacePicker();
+  });
+  elements.workspacePickerForm.addEventListener("submit", event => {
+    event.preventDefault();
+    const workspacePath = elements.workspacePath.value.trim();
+    if (!workspacePath) {
+      elements.workspacePath.focus();
+      return;
+    }
+    post("session.projectCreate", { workspacePath, chatMode: state.chatMode });
+    closeWorkspacePicker();
+  });
 
   elements.prompt.addEventListener("input", () => {
     resizePrompt();
@@ -3359,7 +4746,14 @@
     if (!containsFiles) return;
     event.preventDefault();
     if (ensureEditableContext()) {
-      post("document.paste", { sessionId: state.activeSessionId });
+      if (globalThis.goBridge.isLanBrowser) {
+        const files = clipboard.files.length > 0
+          ? clipboard.files
+          : Array.from(clipboard.items || []).map(item => item.getAsFile()).filter(Boolean);
+        void globalThis.goBridge.uploadFiles(files, state.activeSessionId);
+      } else {
+        post("document.paste", { sessionId: state.activeSessionId });
+      }
     }
   });
   elements.prompt.addEventListener("keydown", event => {
@@ -3374,9 +4768,6 @@
   });
   elements.composerSpeechStop.addEventListener("click", () => {
     if (!elements.composerSpeechStop.disabled) post("microphone.stopSpeech", {});
-  });
-  byId("pick-document").addEventListener("click", () => {
-    if (ensureEditableContext()) post("document.pick", { sessionId: state.activeSessionId });
   });
   elements.microphone.addEventListener("click", async () => {
     if (state.voiceStarting) return;
@@ -3418,62 +4809,35 @@
   globalThis.addEventListener("beforeunload", () => {
     globalThis.goVoiceCapture?.stop(false);
   });
-  byId("export-pdf").addEventListener("click", () => post("chat.exportPdf", { sessionId: state.activeSessionId }));
-  elements.pinSession?.addEventListener("click", () => {
-    const session = state.sessions.find(item => item.id === state.activeSessionId);
-    if (session) post("session.pin", { sessionId: session.id, pinned: !session.isPinned });
-  });
-
   elements.toolsButton.addEventListener("click", event => {
     event.stopPropagation();
+    setModeMenuOpen(false);
     setToolsMenuOpen(elements.toolsMenu.hidden);
   });
   elements.toolsMenu.addEventListener("click", event => event.stopPropagation());
-  for (const option of document.querySelectorAll('[data-tool-toggle="deepResearch"]')) {
-    option.prepend(createToolIcon(toolVisuals.webSearch[1]));
-    option.addEventListener("click", () => {
-      selectDeepResearch(!state.deepResearch);
-      setToolsMenuOpen(false);
-      elements.prompt.focus();
-    });
-  }
-  for (const option of document.querySelectorAll(".service-option[data-tool-action]")) {
-    const visual = toolVisuals[option.dataset.toolAction];
-    if (visual) option.prepend(createToolIcon(visual[1]));
-    option.addEventListener("click", () => {
-      if (!ensureEditableContext()) return;
-      const action = option.dataset.toolAction;
-      const selecting = state.selectedToolAction !== action;
-      selectToolAction(selecting ? action : null);
-      setToolsMenuOpen(false);
-      elements.prompt.focus();
-      if (selecting && ["audioAnalysis", "videoAnalysis", "imageAnalysis"].includes(action)) {
-        void beginMediaCapture(action);
-      }
-    });
-  }
-  for (const option of document.querySelectorAll(".service-option[data-tool-immediate]")) {
-    const visual = toolVisuals[option.dataset.toolImmediate];
-    if (visual) option.prepend(createToolIcon(visual[1]));
-    option.addEventListener("click", () => {
-      if (!ensureEditableContext()) return;
-      const action = option.dataset.toolImmediate;
-      if (action === "screen.capture") post("screen.capture", { sessionId: state.activeSessionId });
-      else if (action === "screenClip.toggle") post(state.screenClip?.isRecording ? "screenClip.stop" : "screenClip.start", { sessionId: state.activeSessionId });
-      else if (action === "liveCaption.start") post("liveCaption.start", { mode: "transcribe" });
-      setToolsMenuOpen(false);
-    });
-  }
+  elements.toolsMenu.addEventListener("keydown", event => {
+    const items = [...elements.toolsMenu.querySelectorAll(".service-option")].filter(item => !item.disabled);
+    if (!items.length) return;
+    const current = items.indexOf(document.activeElement);
+    let next = current;
+    if (event.key === "ArrowDown") next = (current + 1 + items.length) % items.length;
+    else if (event.key === "ArrowUp") next = (current - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else return;
+    event.preventDefault();
+    items[next].focus();
+  });
   document.addEventListener("pointerdown", event => {
     if (event.button === 2) captureReadFromContextTarget(event);
   }, { capture: true });
   document.addEventListener("contextmenu", captureReadFromContextTarget, { capture: true });
   document.addEventListener("click", () => {
     setToolsMenuOpen(false);
+    setModeMenuOpen(false);
     closeAttachmentMenu();
   });
 
-  elements.workflowsButton.addEventListener("click", openWorkflows);
   byId("close-workflows").addEventListener("click", closeWorkflows);
   elements.overlay.addEventListener("click", event => {
     if (event.target === elements.overlay) closeWorkflows();
@@ -3529,11 +4893,64 @@
     post(payload.workflowId ? "workflow.update" : "workflow.create", payload);
   });
 
+  byId("close-memory").addEventListener("click", closeProjectMemory);
+  elements.memoryOverlay.addEventListener("click", event => {
+    if (event.target === elements.memoryOverlay) closeProjectMemory();
+  });
+  elements.memoryAutoCapture.addEventListener("change", () => {
+    if (!state.projectMemory.available) return;
+    post("memory.autoCapture", {
+      sessionId: state.activeSessionId,
+      projectKey: state.projectMemory.projectKey,
+      projectId: state.projectMemory.projectId,
+      enabled: elements.memoryAutoCapture.checked
+    });
+  });
+  elements.newMemoryEntry.addEventListener("click", () => showMemoryEditor(null));
+  elements.editMemoryEntry.addEventListener("click", () => showMemoryEditor(selectedMemoryEntry()));
+  elements.cancelMemoryEdit.addEventListener("click", () => showMemoryPreview(selectedMemoryEntry()));
+  elements.pinMemoryEntry.addEventListener("click", () => {
+    const entry = selectedMemoryEntry();
+    if (!entry) return;
+    post("memory.pin", { entryId: entry.id, version: Number(entry.version), isPinned: !entry.isPinned });
+  });
+  elements.confirmMemoryEntry.addEventListener("click", () => {
+    const entry = selectedMemoryEntry();
+    if (!entry) return;
+    post("memory.confirm", { entryId: entry.id, version: Number(entry.version) });
+  });
+  elements.deleteMemoryEntry.addEventListener("click", () => {
+    const entry = selectedMemoryEntry();
+    if (entry && globalThis.confirm("Diesen Gedächtniseintrag endgültig löschen?")) {
+      post("memory.delete", { entryId: entry.id, version: Number(entry.version) });
+    }
+  });
+  elements.memoryEditor.addEventListener("submit", event => {
+    event.preventDefault();
+    const content = elements.memoryEntryContent.value.trim();
+    if (!content) {
+      elements.memoryEntryContent.focus();
+      return;
+    }
+    const entryId = elements.memoryEntryId.value || null;
+    post(entryId ? "memory.update" : "memory.create", {
+      sessionId: state.activeSessionId,
+      entryId,
+      version: Number(elements.memoryEntryVersion.value || 0),
+      kind: elements.memoryEntryKind.value,
+      content,
+      source: "manual"
+    });
+  });
+
   globalThis.addEventListener("go:host-message", handleHostMessage);
   globalThis.addEventListener("keydown", event => {
     if (event.key !== "Escape") return;
     if (elements.documents.querySelector(".attachment-menu:not([hidden])")) closeAttachmentMenu();
     else if (!elements.toolsMenu.hidden) setToolsMenuOpen(false);
+    else if (!elements.modeSwitcherMenu.hidden) setModeMenuOpen(false);
+    else if (!elements.workspaceOverlay.hidden) closeWorkspacePicker();
+    else if (!elements.memoryOverlay.hidden) closeProjectMemory();
     else if (!elements.overlay.hidden) closeWorkflows();
   });
   globalThis.goCaptureDraft = () => ({ sessionId: state.activeSessionId, draft: elements.prompt.value });
@@ -3631,7 +5048,7 @@
     const heading = document.createElement("div");
     heading.className = "pdf-book__message-heading";
     const timestamp = message ? timeLabel(message.createdAt || message.updatedAt) : "";
-    heading.textContent = `${role === "user" ? "Du" : "GO AI"}${timestamp ? ` · ${timestamp}` : ""}`;
+    heading.textContent = `${role === "user" ? "Du" : state.assistantTitle}${timestamp ? ` · ${timestamp}` : ""}`;
     clone.querySelector(".message-body")?.prepend(heading);
     return clone;
   }
@@ -3654,7 +5071,7 @@
     header.className = "pdf-book__header";
     const eyebrow = document.createElement("div");
     eyebrow.className = "pdf-book__eyebrow";
-    eyebrow.textContent = "GO · AI ASSISTENT";
+    eyebrow.textContent = String(state.assistantTitle || "AI Assistent").toLocaleUpperCase();
     const title = document.createElement("h1");
     title.textContent = normalizedId ? `Nachricht aus „${sessionTitle}“` : sessionTitle;
     const subtitle = document.createElement("p");
@@ -3690,7 +5107,7 @@
   globalThis.visualViewport?.addEventListener("resize", schedulePromptResize);
   if (globalThis.ResizeObserver) {
     const promptLayoutObserver = new ResizeObserver(schedulePromptResize);
-    for (const node of [elements.chatPane, elements.chatHeader, elements.composerRegion, elements.prompt]) {
+    for (const node of [elements.chatPane, elements.composerRegion, elements.prompt]) {
       promptLayoutObserver.observe(node);
     }
   }

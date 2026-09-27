@@ -10,7 +10,7 @@ public sealed record AssistantArtifactPreview(string Url, string? PosterUrl = nu
 
 public sealed class AssistantArtifactPreviewService : IDisposable
 {
-    public const string VirtualHost = "go-preview.local";
+    public const string VirtualHost = "assistant-preview.local";
     private readonly IChatArtifactRepository _artifacts;
     private readonly IBinaryObjectStore _blobs;
     private readonly SemaphoreSlim _gate = new(1, 1);

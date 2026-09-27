@@ -12,6 +12,8 @@ function harness(mode = "coding", storage = new Map()) {
   const posted = [], toasts = [], savedDrafts = [];
   const state = { activeSessionId: "session-a", activeRunSessionId: "session-a", activeRunId: "run-a", activeRunMessageId: "answer-a", isRunning: true,
     isAiBusy: true, selectedToolAction: mode, documents: [{ id: "existing-document" }], sessions: [],
+    selectedExtensionActionId: null,
+    runQueue: { active: { ticketId: "ticket-a", sessionId: "session-a", requestId: "initial-a", state: "running", position: 0 }, pending: [], queueDepth: 0, isIdle: false },
     contextUsed: 100, contextLimit: 4096, contextSource: "measured", runStatus: "Denkt nach", runDetail: "Hauptmodell läuft",
     messages: [], codingActivity: new Map(), messageRunStatus: new Map(), voiceTurn: { text: "Original" }, pendingCaptureRequest: null };
   const elements = Object.fromEntries(["send", "prompt", "newSession", "clearSessions", "sessionList", "context", "contextLabel"]
@@ -34,7 +36,9 @@ function harness(mode = "coding", storage = new Map()) {
   });
   vm.runInContext("let draftTimer = 0, pendingDraft = null;", context);
   for (const script of ["bridge.js", "run-steering.js", "markdown.js", "coding-timeline.js"]) vm.runInContext(fs.readFileSync(path.join(root, script), "utf8"), context);
-  for (const name of ["post", "postChatRequest", "submitPrompt", "handleComposerAction", "setPromptValue", "renderComposerAction", "renderStatus", "handleHostMessage", "ensureEditableContext"]) {
+  for (const name of ["normalizeScheduledRun", "normalizeRunQueue", "scheduledRunForSession", "applyRunQueue", "removeScheduledRun",
+    "post", "postChatRequest", "submitPrompt", "handleComposerAction", "setPromptValue", "renderComposerAction", "renderStatus",
+    "isTerminalMessageStatus", "sortCommittedMessages", "upsertLiveMessage", "applyLiveDelta", "handleHostMessage", "ensureEditableContext"]) {
     const start = app.search(new RegExp(`  (?:async )?function ${name}\\(`));
     const ending = app.slice(start).match(/\r?\n {2}\}(?:\r?\n|$)/);
     assert.ok(start >= 0 && ending, name);
@@ -43,6 +47,11 @@ function harness(mode = "coding", storage = new Map()) {
   vm.runInContext(app.match(/  elements\.send\.addEventListener\("click", [^;]+;/)[0], context);
   return { state, elements, context, posted, toasts, savedDrafts, storage,
     host: (type, payload, requestId = "host-id") => receive({ data: { version: 1, type, payload, requestId } }) };
+}
+
+function makeIdle(harnessState) {
+  harnessState.state.isRunning = false;
+  harnessState.context.applyRunQueue({ active: null, pending: [], queueDepth: 0, isIdle: true });
 }
 
 for (const mode of ["coding", null]) {
@@ -100,18 +109,48 @@ test("retry reuses one input ID through a bridge error and fresh page without di
   assert.notEqual(restarted.posted[2].payload.inputId, first.payload.inputId, "a new input after acknowledgement gets a new key");
 });
 
-test("foreign active runs and stale mismatched session ownership cannot be steered through Enter", async () => {
+test("legacy steering retry storage migrates to the product-neutral key", () => {
+  const request = { sessionId: "session-a", prompt: "Priorität ändern", inputId: "legacy-input", expectedRunId: "run-a" };
+  const storage = new Map([["go.assistant.steer.v1:session-a", JSON.stringify(request)]]);
+  const h = harness("coding", storage);
+  assert.equal(h.context.goRunSteering.pendingRetry(h.state, request.prompt).inputId, "legacy-input");
+  assert.equal(storage.has("go.assistant.steer.v1:session-a"), false);
+  assert.equal(JSON.parse(storage.get("assistant.run-steering.v1:session-a")).inputId, "legacy-input");
+});
+
+test("a foreign active run accepts one new queued prompt without being steered", async () => {
   for (const isRunning of [false, true]) {
     const h = harness();
     h.state.activeSessionId = "session-b";
     h.state.isRunning = isRunning;
     h.context.renderStatus();
-    assert.equal(h.elements.send.disabled, true);
+    assert.equal(h.elements.send.disabled, false);
+    assert.equal(h.elements.send.getAttribute("aria-label"), "Einreihen");
     await h.context.submitPrompt();
-    assert.equal(h.posted.length, 0);
-    assert.ok(h.elements.prompt.value);
-    assert.ok(h.toasts.at(-1).text.includes("anderen Sitzung"));
+    assert.equal(h.posted.length, 1);
+    assert.equal(h.posted[0].type, "chat.send");
+    assert.equal(h.posted[0].payload.sessionId, "session-b");
+    assert.equal(Object.hasOwn(h.posted[0].payload, "toolAction"), false);
   }
+});
+
+test("a session already present in the profile queue cannot enqueue a duplicate", async () => {
+  const h = harness();
+  h.state.activeSessionId = "session-b";
+  h.state.isRunning = false;
+  h.context.applyRunQueue({
+    active: { ticketId: "ticket-a", sessionId: "session-a", requestId: "request-a", state: "running", position: 0 },
+    pending: [{ ticketId: "ticket-b", sessionId: "session-b", requestId: "request-b", state: "queued", position: 1 }],
+    queueDepth: 1,
+    isIdle: false
+  });
+  h.context.renderStatus();
+  assert.equal(h.elements.send.disabled, true);
+  assert.equal(h.elements.prompt.placeholder, "Warteschlange · Platz 1");
+  await h.context.submitPrompt();
+  assert.equal(h.posted.length, 0);
+  assert.match(h.toasts.at(-1).text, /wartet bereits auf Platz 1/);
+  assert.ok(h.elements.prompt.value, "the unsent duplicate remains editable");
 });
 
 test("delayed acknowledgement never clears another session or newly edited text", async () => {
@@ -143,8 +182,7 @@ test("idle submit retains its original General/Coding path and context changes a
   const h = harness(null);
   assert.equal(h.context.ensureEditableContext(), false);
   assert.ok(h.toasts.at(-1).text.includes("Anhänge"));
-  h.state.isRunning = false;
-  h.state.isAiBusy = false;
+  makeIdle(h);
   h.context.renderStatus();
   assert.equal(h.elements.send.getAttribute("aria-label"), "Senden");
   assert.equal(h.elements.send.classList.contains("send-button--stop"), false);
@@ -180,7 +218,7 @@ for (const mode of ["coding", null]) {
 
 test("combined button guards preparation and foreign runs across session switches and retains existing attachments", async () => {
   const h = harness(null);
-  h.state.isRunning = h.state.isAiBusy = false;
+  makeIdle(h);
   h.context.setPromptValue("");
   assert.equal(h.elements.send.disabled, true);
   assert.equal(h.elements.send.classList.contains("send-button--stop"), false);
@@ -198,16 +236,29 @@ test("combined button guards preparation and foreign runs across session switche
   assert.equal(h.posted.length, 1, "preparing is neither a second send nor a cancellation");
   assert.equal(h.elements.prompt.value, "Neue Priorität");
   h.state.activeSessionId = "session-b";
+  h.context.applyRunQueue({
+    active: { ticketId: "ticket-a", sessionId: "session-a", requestId: request.requestId, state: "running", position: 0 },
+    pending: [], queueDepth: 0, isIdle: false
+  });
   h.host("chat.started", { sessionId: "session-a", runId: "run-created", message: { id: "new-answer" } }, request.requestId);
-  h.state.isAiBusy = true;
   h.context.renderStatus();
   await h.elements.send.dispatch("click");
-  assert.equal(h.posted.length, 1);
-  h.context.setPromptValue("");
-  assert.equal(h.elements.send.disabled, true);
-  assert.equal(h.elements.send.classList.contains("send-button--stop"), false);
+  assert.equal(h.posted.length, 2);
+  assert.equal(h.posted[1].type, "chat.send");
+  assert.equal(h.posted[1].payload.sessionId, "session-b");
+  h.host("chat.queued", {
+    sessionId: "session-b", requestId: h.posted[1].requestId, position: 1,
+    runQueue: {
+      active: { ticketId: "ticket-a", sessionId: "session-a", requestId: request.requestId, state: "running", position: 0 },
+      pending: [{ ticketId: "ticket-b", sessionId: "session-b", requestId: h.posted[1].requestId, state: "queued", position: 1 }],
+      queueDepth: 1, isIdle: false
+    }
+  }, h.posted[1].requestId);
+  assert.equal(h.elements.send.disabled, false);
+  assert.equal(h.elements.send.classList.contains("send-button--stop"), true);
   await h.elements.send.dispatch("click");
-  assert.equal(h.posted.length, 1, "an empty composer in another session must never cancel the foreign run");
+  assert.equal(h.posted[2].type, "chat.cancel");
+  assert.equal(h.posted[2].payload.sessionId, "session-b", "the queued session cancels only its own ticket");
 });
 
 test("composer markup keeps the original arrow and stop icons inside one unlabeled action button", () => {
@@ -239,7 +290,7 @@ test("persisted steering becomes a user bubble at its exact response offset with
 
 test("a second Enter before chat.started preserves the new text and never dispatches a second initial run", async () => {
   const h = harness();
-  h.state.isRunning = h.state.isAiBusy = false;
+  makeIdle(h);
   await h.context.submitPrompt();
   const start = h.posted[0];
   assert.equal(start.type, "chat.send");
@@ -262,7 +313,7 @@ test("a second Enter before chat.started preserves the new text and never dispat
 test("correlated initial-send errors restore only an empty composer in their own session", async () => {
   for (const newer of [false, true, "different-session"]) {
     const h = harness(null);
-    h.state.isRunning = h.state.isAiBusy = false;
+    makeIdle(h);
     const original = h.elements.prompt.value;
     await h.context.submitPrompt();
     const request = h.posted[0];
@@ -282,6 +333,7 @@ test("lost steering response followed by terminal run retries the same input and
   const first = h.posted[0];
   h.state.isRunning = h.state.isAiBusy = false;
   h.state.activeRunId = h.state.activeRunSessionId = null;
+  h.context.applyRunQueue({ active: null, pending: [], queueDepth: 0, isIdle: true });
   h.context.renderStatus();
   assert.equal(h.elements.send.getAttribute("aria-label"), "Umlenken");
   await h.context.submitPrompt();
@@ -345,7 +397,7 @@ test("an unbound input cannot acquire the identity of a subsequent run in the sa
 
 test("unknown acknowledgements never clear drafts and capture cancellation preserves later typing", async () => {
   const h = harness(null);
-  h.state.isRunning = h.state.isAiBusy = false;
+  makeIdle(h);
   await h.context.submitPrompt();
   const first = h.posted[0];
   h.elements.prompt.value = "Neu verfasste Eingabe";

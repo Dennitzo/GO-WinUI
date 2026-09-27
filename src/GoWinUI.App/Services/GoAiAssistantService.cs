@@ -3,7 +3,10 @@ using GoAi.Contracts;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Chat;
 using GoWinUI.Core.Coding;
+using GoWinUI.Core.Extensions;
+using GoWinUI.Core.Memory;
 using GoWinUI.Core.Models;
+using GoWinUI.Core.Research;
 using Microsoft.Extensions.Logging;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -89,7 +92,11 @@ public sealed partial class GoAiAssistantService(
     MicrophoneTranscriptionService microphone,
     SettingsCoordinator settings,
     RecentActivityService recentActivity,
-    ILogger<GoAiAssistantService> logger) : IDisposable
+    ILogger<GoAiAssistantService> logger,
+    IProjectMemoryStore? projectMemory = null,
+    IExtensionActionCatalog? extensionActions = null,
+    IScientificResearchRepository? scientificResearch = null,
+    IResearchSandboxService? researchSandbox = null) : IDisposable
 {
     private const int MaximumPromptRetries = 3;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
@@ -98,6 +105,10 @@ public sealed partial class GoAiAssistantService(
         LogLevel.Information,
         new EventId(5300, nameof(RunDiagnostic)),
         "GO AI Client run {RunId}: {State}.");
+    private static readonly Action<ILogger, string, Exception?> ProjectMemoryUnavailable = LoggerMessage.Define<string>(
+        LogLevel.Warning,
+        new EventId(5301, nameof(ProjectMemoryUnavailable)),
+        "Projektgedächtnis konnte für Sitzung {SessionId} nicht verarbeitet werden.");
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _speechGate = new(1, 1);
     private CancellationTokenSource? _activeCancellation;
@@ -105,6 +116,7 @@ public sealed partial class GoAiAssistantService(
     private string? _activeServerRunId;
     private string? _activeSessionId;
     private string? _activeCodingWorkspace;
+    private PromptTriggerAction? _activeRunAction;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _codingWorkspaces = new(StringComparer.Ordinal);
     private int _explicitCancellation;
     private int _startupRunsStopped;
@@ -154,9 +166,10 @@ public sealed partial class GoAiAssistantService(
         {
             var session = await chats.GetSessionAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
+            var action = trigger?.Trigger.Action;
+            _activeRunAction = action;
             var historyBeforePrompt = await chats.ListMessagesAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
             var sessionAttachments = await attachments.ListAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
-            var action = trigger?.Trigger.Action;
             var contentProfile = action == PromptTriggerAction.Audiobook
                 ? MessageContentProfile.Audiobook
                 : MessageContentProfile.General;
@@ -182,7 +195,7 @@ public sealed partial class GoAiAssistantService(
 
             try
             {
-                return action switch
+                var completed = action switch
                 {
                     PromptTriggerAction.Transcription => await CompleteTranscriptionAsync(assistant, trigger!, update, _activeCancellation.Token).ConfigureAwait(false),
                     PromptTriggerAction.VoiceInput => await CompleteVoiceInputAsync(assistant, update, _activeCancellation.Token).ConfigureAwait(false),
@@ -197,6 +210,15 @@ public sealed partial class GoAiAssistantService(
                         update,
                         _activeCancellation.Token).ConfigureAwait(false),
                 };
+                if (completed.Status == MessageStatus.Completed)
+                {
+                    await CaptureProjectMemoryAsync(
+                        session,
+                        turn.UserMessage.Content,
+                        completed.Content,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+                return completed;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && Volatile.Read(ref _explicitCancellation) == 0)
             {
@@ -230,6 +252,7 @@ public sealed partial class GoAiAssistantService(
             await FinishFileChangesAsync().ConfigureAwait(false);
             _activeServerRunId = null;
             _activeCodingWorkspace = null;
+            _activeRunAction = null;
             Volatile.Write(ref _activeSessionId, null);
             _activeCancellation?.Dispose();
             _activeCancellation = null;
@@ -252,6 +275,7 @@ public sealed partial class GoAiAssistantService(
             }
             Interlocked.Exchange(ref _explicitCancellation, 0);
             Volatile.Write(ref _activeSessionId, run.SessionId.ToString("D"));
+            _activeRunAction = run.Action;
             _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             try
             {
@@ -298,7 +322,7 @@ public sealed partial class GoAiAssistantService(
                 await StartFileChangesAsync(run, message, resume: true, update, _activeCancellation.Token).ConfigureAwait(false);
                 try
                 {
-                    _ = await StreamRunWithReconnectAsync(run, message, update, _activeCancellation.Token).ConfigureAwait(false);
+                    await StreamRunWithReconnectAsync(run, message, update, _activeCancellation.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && Volatile.Read(ref _explicitCancellation) == 0)
                 {
@@ -327,6 +351,7 @@ public sealed partial class GoAiAssistantService(
                 await FinishFileChangesAsync().ConfigureAwait(false);
                 _activeServerRunId = null;
                 _activeCodingWorkspace = null;
+                _activeRunAction = null;
                 Volatile.Write(ref _activeSessionId, null);
                 _activeCancellation?.Dispose();
                 _activeCancellation = null;
@@ -459,7 +484,7 @@ public sealed partial class GoAiAssistantService(
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(5));
-                using var client = await connection.CreateClientAsync(timeout.Token).ConfigureAwait(false);
+                using var client = await CreateClientForActionAsync(_activeRunAction, timeout.Token).ConfigureAwait(false);
                 await client.CancelRunAsync(serverRunId, timeout.Token).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is not OutOfMemoryException && !cancellationToken.IsCancellationRequested)
@@ -468,6 +493,11 @@ public sealed partial class GoAiAssistantService(
             }
         }
     }
+
+    private async Task<GoAiClient> CreateClientForActionAsync(
+        PromptTriggerAction? _,
+        CancellationToken cancellationToken) =>
+        await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
 
     public async Task CancelCurrentAndWaitAsync(CancellationToken cancellationToken = default)
     {
@@ -1017,10 +1047,10 @@ public sealed partial class GoAiAssistantService(
         Func<GoAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken)
     {
-        using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
         // Sonderdienste gelten ausschliesslich fuer den aktuell erkannten Datenbank-Trigger.
         // Medien aus einer vorherigen Nachricht duerfen keinen Folgelauf umdeuten.
         var action = trigger?.Trigger.Action;
+        using var client = await CreateClientForActionAsync(action, cancellationToken).ConfigureAwait(false);
         var isMediaAnalysis = action is PromptTriggerAction.AudioAnalysis
             or PromptTriggerAction.VideoAnalysis
             or PromptTriggerAction.ImageAnalysis;
@@ -1055,7 +1085,8 @@ public sealed partial class GoAiAssistantService(
                     || !Directory.Exists(_activeCodingWorkspace))
                     throw new InvalidOperationException("Wähle in der Projekte-Sidebar eine Sitzung mit vorhandenem Workspace.");
                 _activeCodingWorkspace = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_activeCodingWorkspace));
-                await CodingWorkspaceGit.EnsureRepositoryAsync(_activeCodingWorkspace, cancellationToken).ConfigureAwait(false);
+                if (action != PromptTriggerAction.PlanMode)
+                    await CodingWorkspaceGit.EnsureRepositoryAsync(_activeCodingWorkspace, cancellationToken).ConfigureAwait(false);
             }
             var attempt = new GoAiRunRecord(
                 Guid.NewGuid(), assistant.SessionId, assistant.Id, action, idempotencyKey, null, 0, "queued",
@@ -1353,7 +1384,7 @@ public sealed partial class GoAiAssistantService(
         GoAiClient? suppliedClient = null)
     {
         var ownsClient = suppliedClient is null;
-        var client = suppliedClient ?? await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
+        var client = suppliedClient ?? await CreateClientForActionAsync(localRun.Action, cancellationToken).ConfigureAwait(false);
         var content = assistant.Content;
         var model = localRun.SelectedModel;
         var collectedArtifacts = (await artifacts.ListForMessageAsync(
@@ -1617,6 +1648,7 @@ public sealed partial class GoAiAssistantService(
                                     "codingCompacting" => "Projektkontext wird verdichtet",
                                     "providerRetryWaiting" => "Lokales Modell vorübergehend nicht erreichbar",
                                     "responseRecovery" => "Modellantwort wird vervollständigt",
+                                    "deepResearchInterpretation" => "Deep Research: Problem verstehen",
                                     "deepResearchPlanning" => "Deep Research: Recherche planen",
                                     "deepResearchSearch" => "Deep Research: Quellen suchen",
                                     "deepResearchFetch" => "Deep Research: Quellen lesen",
@@ -1650,6 +1682,22 @@ public sealed partial class GoAiAssistantService(
                                 ContextWasCompacted: context.WasCompacted)).ConfigureAwait(false);
                         }
                         break;
+                    case RunEventTypes.ResearchCheckpointCreated:
+                        if (item.Data.TryGetProperty("result", out var researchResult)
+                            && researchResult.ValueKind == JsonValueKind.Object)
+                        {
+                            try
+                            {
+                                await PersistResearchResultAsync(assistant.SessionId, item.RunId, researchResult, cancellationToken)
+                                    .ConfigureAwait(false);
+                            }
+                            catch (Exception exception) when (exception is not OutOfMemoryException
+                                && !cancellationToken.IsCancellationRequested)
+                            {
+                                RunDiagnostic(logger, item.RunId, "Deep-Research-Checkpoint konnte nicht vollständig persistiert werden.", exception);
+                            }
+                        }
+                        break;
                     case RunEventTypes.ServerToolStarted:
                         var startedServerStepId = StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId")
                             ?? "server-" + item.Id;
@@ -1681,6 +1729,19 @@ public sealed partial class GoAiAssistantService(
                                 serverResult.ValueKind == JsonValueKind.Undefined ? item.Data : serverResult,
                                 StringProperty(item.Data, "errorCode"), StringProperty(item.Data, "errorMessage"))),
                             eventAt: item.CreatedAt, agentId: StringProperty(item.Data, "agentId")).ConfigureAwait(false);
+                        if (serverToolName == "web.deepResearch" && serverResult.ValueKind == JsonValueKind.Object)
+                        {
+                            try
+                            {
+                                await PersistResearchResultAsync(assistant.SessionId, item.RunId, serverResult, cancellationToken)
+                                    .ConfigureAwait(false);
+                            }
+                            catch (Exception exception) when (exception is not OutOfMemoryException
+                                && !cancellationToken.IsCancellationRequested)
+                            {
+                                RunDiagnostic(logger, item.RunId, "Deep-Research-Ergebnis konnte nicht vollständig persistiert werden.", exception);
+                            }
+                        }
                         var extracted = ExtractToolResultText(item.Data);
                         if (!UsesCodingAgent(localRun.Action) && !string.IsNullOrWhiteSpace(extracted))
                         {
@@ -1767,6 +1828,8 @@ public sealed partial class GoAiAssistantService(
                             FormatClientToolResultDetail(result, finalProgress), appendResult: true,
                             outputJson: SerializeClientToolOutput(result, assistant.ToolSteps?.FirstOrDefault(step => step.Id == proposal.ProposalId)?.OutputJson,
                                 finalProgress)).ConfigureAwait(false);
+                        await PersistScientificToolResultAsync(assistant.SessionId, proposal, result, cancellationToken)
+                            .ConfigureAwait(false);
                         if (proposal.Name == ClientToolNames.DocumentCreate
                             && string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase))
                         {
@@ -2156,14 +2219,26 @@ public sealed partial class GoAiAssistantService(
                     JsonSerializer.Serialize(rejected, JsonOptions), CancellationToken.None).ConfigureAwait(false);
                 return rejected;
             }
-            var result = await toolBroker.ExecuteAsync(
-                proposal,
-                localRun.SessionId,
-                localRun.AssistantMessageId,
-                codingWorkspacePath: _codingWorkspaces.GetValueOrDefault(item.RunId) ?? localRun.WorkspacePath,
-                commandProgress: commandProgress,
-                evidenceStore: evidenceStore,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+            ClientToolResult result;
+            if (!IsClientToolAllowed(localRun.Action, proposal.Name, proposal.RiskClass))
+            {
+                result = new ClientToolResult(proposal.ProposalId, "rejected",
+                    JsonSerializer.SerializeToElement(new { failed = true, planMode = true }, JsonOptions),
+                    "plan.read_only",
+                    "Der Planmodus erlaubt ausschließlich schreibgeschützte Analysewerkzeuge. Wähle zuerst „Plan implementieren“.");
+            }
+            else
+            {
+                result = await toolBroker.ExecuteAsync(
+                    proposal,
+                    localRun.SessionId,
+                    localRun.AssistantMessageId,
+                    codingWorkspacePath: _codingWorkspaces.GetValueOrDefault(item.RunId) ?? localRun.WorkspacePath,
+                    commandProgress: commandProgress,
+                    evidenceStore: evidenceStore,
+                    runAction: localRun.Action,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
             if (evidenceStore is not null && proposal.Name is not (ClientToolNames.CodingReadOutput or ClientToolNames.CodingSearchRunEvidence))
             {
                 try
@@ -2454,7 +2529,17 @@ public sealed partial class GoAiAssistantService(
         _ = sessionAttachments;
         var codingSession = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
+        var projectMemoryContext = await BuildProjectMemoryContextAsync(
+            codingSession,
+            cancellationToken).ConfigureAwait(false);
         var action = trigger?.Trigger.Action;
+        var extensionClientTools = ResolveExtensionClientTools(trigger);
+        if (extensionClientTools is { Count: > 0 })
+        {
+            originalPrompt = $"Nutze für diesen Auftrag das ausdrücklich ausgewählte Erweiterungswerkzeug "
+                + $"'{extensionClientTools[0].Name}'. Führe es aus, statt seine Wirkung nur zu beschreiben.\n\n"
+                + originalPrompt;
+        }
         if (action == PromptTriggerAction.DocumentCreate) originalPrompt = "Lies, bearbeite oder erstelle die angeforderten Dokumente direkt mit document.read/document.create und geeigneten Workspace-Werkzeugen. Prüfe das Ergebnis. Dokumentauftrag: " + originalPrompt;
         var audiobook = action == PromptTriggerAction.Audiobook;
         if (UsesCodingAgent(action))
@@ -2474,6 +2559,14 @@ public sealed partial class GoAiAssistantService(
                 && string.Equals(model.Id, codingModel, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException("Das ausgewählte Coding-AI-Modell ist nicht verfügbar.");
             var codingPrompt = originalPrompt;
+            if (action == PromptTriggerAction.PlanMode)
+                codingPrompt = BuildPlanModePrompt(codingPrompt);
+            if (!string.IsNullOrWhiteSpace(projectMemoryContext))
+            {
+                codingPrompt = projectMemoryContext
+                    + "\n\nAKTUELLER BENUTZERAUFTRAG\n"
+                    + codingPrompt;
+            }
             var attachedDocuments = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
             if (attachedDocuments.Count > 0)
                 codingPrompt += "\n\n" + BuildCodingDocumentCatalog(attachedDocuments);
@@ -2486,6 +2579,9 @@ public sealed partial class GoAiAssistantService(
             codingMessages.Add(new RunMessage("user", codingParts));
             var serverCapabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
             var codingConfiguration = NegotiateCodingOptions(serverCapabilities);
+            var researchOptions = CreateDeepResearchOptions(trigger, coding: true, sessionId);
+            await EnsureResearchProjectAsync(researchOptions, codingSession, originalPrompt, _activeCodingWorkspace,
+                cancellationToken).ConfigureAwait(false);
             return new RunRequest(
                 GoAiProtocol.Version,
                 RunMode.Coding,
@@ -2494,7 +2590,7 @@ public sealed partial class GoAiAssistantService(
                 ClientCapabilities: codingConfiguration.Capabilities.Concat(WorkspaceClientCapabilities).Distinct().ToArray(),
                 Limits: CreateChatRunLimits(availableCodingModel.ContextTokens, unlimitedDuration: true),
                 SessionId: sessionId.ToString("D"),
-                AllowedServerTools: GetAllowedServerTools(PromptTriggerAction.Coding),
+                AllowedServerTools: GetAllowedServerTools(action),
                 PreferredCodingModelId: codingModel,
                 CodingOptions: serverCapabilities.SupportsCodingSessionContext ? (codingConfiguration.Options ?? new CodingRunOptions()) with
                 {
@@ -2502,7 +2598,9 @@ public sealed partial class GoAiAssistantService(
                     ContinueSessionContext = historyBeforePrompt.Count > 0,
                 } : codingConfiguration.Options,
                 ReasoningEffort: await ResolveRequestedReasoningAsync(client, codingModel, "coding", cancellationToken).ConfigureAwait(false),
-                DeepResearch: trigger?.DeepResearch == true);
+                DeepResearch: trigger?.DeepResearch == true,
+                ClientTools: extensionClientTools,
+                ResearchOptions: researchOptions);
         }
         var contextProfile = audiobook
             ? SessionContextProfile.Audiobook
@@ -2565,6 +2663,12 @@ public sealed partial class GoAiAssistantService(
             trigger,
             hasDocumentContext: documentContext is not null,
             hasAudiobookHistory);
+        if (!string.IsNullOrWhiteSpace(projectMemoryContext))
+        {
+            transformed = projectMemoryContext
+                + "\n\nAKTUELLER BENUTZERAUFTRAG\n"
+                + transformed;
+        }
         var latestParts = new List<ContentPart> { new("text", Text: transformed) };
         foreach (var item in uploaded)
         {
@@ -2585,7 +2689,7 @@ public sealed partial class GoAiAssistantService(
             "documentIo", "documents", "visual-tools",
         };
         if (!string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath) && Directory.Exists(codingSession.CodingWorkspacePath))
-            capabilities.UnionWith(["coding", "coding.evidence", "workspace"]);
+            capabilities.UnionWith(["coding", "coding.evidence", "coding.process", "workspace", "workspace.open"]);
         if (documentContext?.Descriptor.DocumentCount > 0)
         {
             capabilities.Add("documents");
@@ -2596,6 +2700,32 @@ public sealed partial class GoAiAssistantService(
             or PromptTriggerAction.Audiobook
                 ? RunMode.General
                 : RunMode.Auto;
+        var isScienceSession = codingSession.ChatMode == ChatMode.ClaudeScience;
+        var scienceResearch = isScienceSession && (trigger?.DeepResearch == true || ShouldAutoResearch(originalPrompt));
+        var generalResearchOptions = CreateDeepResearchOptions(trigger, coding: false, sessionId,
+            force: scienceResearch, sandboxResearch: isScienceSession);
+        if (isScienceSession && scienceResearch && researchSandbox is not null)
+        {
+            await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Forschungssandbox vorbereiten",
+                Detail: "Isolierten Runner und Projektbereich prüfen.")).ConfigureAwait(false);
+            var sandboxStatus = await researchSandbox.PrepareRuntimeAsync(cancellationToken).ConfigureAwait(false);
+            if (sandboxStatus.IsReady) capabilities.Add("research.sandbox");
+            else await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Forschungssandbox nicht bereit",
+                Detail: sandboxStatus.Detail ?? sandboxStatus.State)).ConfigureAwait(false);
+            if (!sandboxStatus.IsReady && generalResearchOptions is not null)
+                generalResearchOptions = generalResearchOptions with { AutonomyLevel = ResearchAutonomyLevel.ReadOnlyResearch };
+        }
+        else if (isScienceSession && scienceResearch && generalResearchOptions is not null)
+            generalResearchOptions = generalResearchOptions with { AutonomyLevel = ResearchAutonomyLevel.ReadOnlyResearch };
+        if (isScienceSession && researchSandbox is not null)
+        {
+            var sandboxStatus = await researchSandbox.PrepareRuntimeAsync(cancellationToken).ConfigureAwait(false);
+            if (sandboxStatus.IsReady) capabilities.Add("research.sandbox");
+            else await update(new(GoAiAssistantUpdateKind.Status, assistant, Status: "Forschungssandbox nicht bereit",
+                Detail: sandboxStatus.Detail ?? sandboxStatus.State)).ConfigureAwait(false);
+        }
+        await EnsureResearchProjectAsync(generalResearchOptions, codingSession, originalPrompt, null,
+            cancellationToken).ConfigureAwait(false);
         return new RunRequest(
             GoAiProtocol.Version,
             mode,
@@ -2616,14 +2746,86 @@ public sealed partial class GoAiAssistantService(
                 && Directory.Exists(codingSession.CodingWorkspacePath)
                 ? Path.GetFullPath(codingSession.CodingWorkspacePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                 : null,
-            DeepResearch: trigger?.DeepResearch == true);
+            DeepResearch: trigger?.DeepResearch == true || scienceResearch,
+            ClientTools: extensionClientTools,
+            ResearchOptions: generalResearchOptions);
+    }
+
+    private async Task<string> BuildProjectMemoryContextAsync(
+        ChatSession session,
+        CancellationToken cancellationToken)
+    {
+        if (projectMemory is null) return string.Empty;
+        try
+        {
+            var scope = await ResolveProjectMemoryScopeAsync(session, cancellationToken).ConfigureAwait(false);
+            if (scope is null) return string.Empty;
+            var entries = await projectMemory.ListAsync(scope, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return ProjectMemoryContextFormatter.Format(entries);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException
+            && !cancellationToken.IsCancellationRequested)
+        {
+            ProjectMemoryUnavailable(logger, session.Id.ToString("D"), exception);
+            return string.Empty;
+        }
+    }
+
+    private async Task CaptureProjectMemoryAsync(
+        ChatSession session,
+        string userText,
+        string assistantText,
+        CancellationToken cancellationToken)
+    {
+        if (projectMemory is null) return;
+        try
+        {
+            var scope = await ResolveProjectMemoryScopeAsync(session, cancellationToken).ConfigureAwait(false);
+            if (scope is null) return;
+            var candidates = ProjectMemoryAutoCapturePolicy.FindCandidates(
+                scope,
+                userText,
+                assistantText,
+                $"session/{session.Id:D}");
+            foreach (var candidate in candidates)
+            {
+                _ = await projectMemory.CreateIfAutoCaptureEnabledAsync(
+                    candidate,
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException
+            && !cancellationToken.IsCancellationRequested)
+        {
+            // A completed AI response remains completed even when the optional
+            // shared memory database is temporarily unavailable.
+            ProjectMemoryUnavailable(logger, session.Id.ToString("D"), exception);
+        }
+    }
+
+    private async Task<ProjectMemoryScope?> ResolveProjectMemoryScopeAsync(
+        ChatSession session,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(session.CodingWorkspacePath))
+        {
+            return ProjectMemoryScope.FromWorkspace(session.CodingWorkspacePath);
+        }
+        if (session.SessionGroupId is not { } groupId) return null;
+        var group = (await chats.ListSessionGroupsAsync(session.ChatMode, cancellationToken).ConfigureAwait(false))
+            .FirstOrDefault(item => item.Id == groupId);
+        return !string.IsNullOrWhiteSpace(group?.WorkspacePath)
+            ? ProjectMemoryScope.FromWorkspace(group.WorkspacePath, group.Id.ToString("D"))
+            : group is null
+                ? null
+                : ProjectMemoryScope.FromProjectId(group.Id.ToString("D"));
     }
 
     internal static string? ResolvePreferredModel(AppSettings current) =>
         current.SelectedModel?.Trim();
 
     internal static bool UsesCodingAgent(PromptTriggerAction? action) =>
-        action is PromptTriggerAction.Coding;
+        action is PromptTriggerAction.Coding or PromptTriggerAction.PlanMode;
 
     internal static string BuildCodingDocumentCatalog(IReadOnlyList<StoredDocument> attachedDocuments) =>
         "GO_DOCUMENT_ATTACHMENTS\nDie Sitzung enthält " + attachedDocuments.Count.ToString(CultureInfo.InvariantCulture)
@@ -2716,7 +2918,392 @@ public sealed partial class GoAiAssistantService(
         return messages;
     }
 
-    internal static readonly string[] WorkspaceClientCapabilities = ["documentIo", "documents", "visual-tools", "workspace"];
+    internal static readonly string[] WorkspaceClientCapabilities =
+        ["documentIo", "documents", "visual-tools", "workspace", "coding.process", "workspace.open"];
+
+    private IReadOnlyList<ToolDescriptor>? ResolveExtensionClientTools(PromptTriggerMatch? trigger)
+    {
+        var actionId = trigger?.Trigger.ExtensionActionId;
+        if (string.IsNullOrWhiteSpace(actionId)
+            || actionId.StartsWith("builtin.", StringComparison.Ordinal)
+            || extensionActions is null
+            || !extensionActions.TryGetTool(actionId, out var descriptor)
+            || descriptor is null)
+            return null;
+        var risk = descriptor.RiskClass switch
+        {
+            ExtensionToolRiskClass.ReadOnly => ToolRiskClass.ReadOnly,
+            ExtensionToolRiskClass.LocalMutation => ToolRiskClass.LocalMutation,
+            ExtensionToolRiskClass.Process => ToolRiskClass.Process,
+            _ => throw new InvalidOperationException("Die Risikoklasse des Erweiterungswerkzeugs ist ungültig."),
+        };
+        return
+        [
+            new ToolDescriptor(
+                descriptor.ModelToolName,
+                descriptor.Description,
+                risk,
+                descriptor.InputSchema.Clone(),
+                descriptor.TimeoutSeconds,
+                descriptor.MaximumOutputBytes),
+        ];
+    }
+
+    private static DeepResearchOptions? CreateDeepResearchOptions(
+        PromptTriggerMatch? trigger,
+        bool coding,
+        Guid sessionId,
+        bool force = false,
+        bool sandboxResearch = false)
+    {
+        if (trigger?.DeepResearch != true && !force) return null;
+        var profile = (trigger?.DeepResearchProfile ?? DeepResearchProfiles.Auto) switch
+        {
+            DeepResearchProfiles.Web => DeepResearchProfile.Web,
+            DeepResearchProfiles.ScientificEvidence => DeepResearchProfile.ScientificEvidence,
+            DeepResearchProfiles.SystematicReview => DeepResearchProfile.SystematicReview,
+            DeepResearchProfiles.ScopingReview => DeepResearchProfile.ScopingReview,
+            DeepResearchProfiles.LiteratureUpdate => DeepResearchProfile.LiteratureUpdate,
+            DeepResearchProfiles.ReplicationAudit => DeepResearchProfile.ReplicationAudit,
+            DeepResearchProfiles.OpenProblem => DeepResearchProfile.OpenProblem,
+            DeepResearchProfiles.MathematicalInvestigation => DeepResearchProfile.MathematicalInvestigation,
+            _ => DeepResearchProfile.Auto,
+        };
+        return new(
+            Profile: profile,
+            ProjectId: $"research-{sessionId:N}",
+            AutonomyLevel: coding
+                ? ResearchAutonomyLevel.CodingWorkspaceResearch
+                : sandboxResearch ? ResearchAutonomyLevel.SandboxResearch : ResearchAutonomyLevel.ReadOnlyResearch,
+            VerificationLevel: ResearchVerificationLevel.MultiPath);
+    }
+
+    internal static bool ShouldAutoResearch(string? prompt)
+    {
+        var text = prompt?.Trim() ?? string.Empty;
+        if (text.Length > 700) return true;
+        return Regex.IsMatch(text,
+            @"\b(deep research|systematic review|scoping review|literature review|meta-analysis|paper|publication|primary source|sources|source|cite|state of the art|research landscape|hypothesis|replication|prove|derive|counterexample|dataset|statistical|experiment|scientific|latest studies|evidence comparison|quellen|zitier|systematisch|literatur|metaanalyse|publikation|primärquelle|forschungsstand|hypothese|replikation|beweis|herleitung|gegenbeispiel|datensatz|statistik|experiment|wissenschaftlich|studien|evidenz)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    private async Task EnsureResearchProjectAsync(
+        DeepResearchOptions? options,
+        ChatSession session,
+        string originalQuestion,
+        string? workspacePath,
+        CancellationToken cancellationToken)
+    {
+        if (options is null || scientificResearch is null || string.IsNullOrWhiteSpace(options.ProjectId)) return;
+        if (session.ChatMode == ChatMode.ClaudeScience)
+        {
+            if (researchSandbox is not null)
+            {
+                var layout = await researchSandbox.EnsureProjectAsync(options.ProjectId, cancellationToken).ConfigureAwait(false);
+                workspacePath = layout.RootPath;
+            }
+        }
+        var now = DateTimeOffset.UtcNow;
+        var project = new ScientificResearchProject(
+            options.ProjectId,
+            session.Id,
+            DeepResearchProfileNames.ToProtocolName(options.Profile),
+            originalQuestion,
+            originalQuestion,
+            options.AutonomyLevel switch
+            {
+                ResearchAutonomyLevel.CodingWorkspaceResearch => "codingWorkspaceResearch",
+                ResearchAutonomyLevel.SandboxResearch => "sandboxResearch",
+                _ => "readOnlyResearch",
+            },
+            options.VerificationLevel switch
+            {
+                ResearchVerificationLevel.Standard => "standard",
+                ResearchVerificationLevel.FormalWherePossible => "formalWherePossible",
+                _ => "multiPath",
+            },
+            "active",
+            checked((int)(options.ProtocolVersion ?? 1)),
+            1,
+            now,
+            now,
+            workspacePath is null ? null : Path.GetFullPath(workspacePath));
+        await scientificResearch.UpsertProjectAsync(project, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task PersistResearchResultAsync(
+        Guid sessionId,
+        string runId,
+        JsonElement result,
+        CancellationToken cancellationToken)
+    {
+        if (scientificResearch is null) return;
+        var projectId = StringProperty(result, "projectId");
+        if (string.IsNullOrWhiteSpace(projectId)) projectId = $"research-{sessionId:N}";
+        var existing = await scientificResearch.GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
+        if (existing is null || existing.SessionId != sessionId) return;
+        var now = DateTimeOffset.UtcNow;
+        var revision = existing.Revision + 1;
+        var interpreted = result.TryGetProperty("problem", out var problem)
+            ? StringProperty(problem, "interpretedQuestion") ?? existing.InterpretedQuestion
+            : existing.InterpretedQuestion;
+        var checkpointId = result.TryGetProperty("checkpoint", out var checkpoint)
+            ? StringProperty(checkpoint, "id") : null;
+        var conclusion = StringProperty(result, "conclusionStatus") ?? "unresolved";
+        await scientificResearch.UpsertProjectAsync(existing with
+        {
+            Profile = StringProperty(result, "profile") ?? existing.Profile,
+            InterpretedQuestion = interpreted,
+            Status = conclusion,
+            Revision = revision,
+            UpdatedAt = now,
+            LatestCheckpointId = checkpointId ?? existing.LatestCheckpointId,
+        }, cancellationToken).ConfigureAwait(false);
+
+        if (result.TryGetProperty("researchGraph", out var graph) && graph.ValueKind == JsonValueKind.Object)
+        {
+            var nodes = new List<ResearchPlanNode>();
+            var edges = new List<ResearchPlanEdge>();
+            if (graph.TryGetProperty("nodes", out var graphNodes) && graphNodes.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var node in graphNodes.EnumerateArray().Take(256))
+                {
+                    var id = StringProperty(node, "id");
+                    var nodeType = StringProperty(node, "nodeType");
+                    var title = StringProperty(node, "title");
+                    var status = StringProperty(node, "status") ?? "unresolved";
+                    if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(nodeType) || string.IsNullOrWhiteSpace(title)
+                        || !ResearchNodeStatuses.All.Contains(status)) continue;
+                    nodes.Add(new(projectId + ":" + id, projectId, nodeType, title, status,
+                        node.TryGetProperty("priority", out var priority) && priority.TryGetInt32(out var priorityValue) ? priorityValue : 0,
+                        node.TryGetProperty("confidence", out var confidence) && confidence.TryGetDouble(out var confidenceValue)
+                            ? Math.Clamp(confidenceValue, 0, 1) : 0,
+                        "[]", "[]", 0, now, now, checkpointId, node.GetRawText()));
+                }
+            }
+            if (graph.TryGetProperty("edges", out var graphEdges) && graphEdges.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var edge in graphEdges.EnumerateArray().Take(512))
+                {
+                    var id = StringProperty(edge, "id");
+                    var from = StringProperty(edge, "fromNodeId");
+                    var to = StringProperty(edge, "toNodeId");
+                    var edgeType = StringProperty(edge, "edgeType");
+                    if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(from)
+                        && !string.IsNullOrWhiteSpace(to) && !string.IsNullOrWhiteSpace(edgeType))
+                        edges.Add(new(projectId + ":" + id, projectId, projectId + ":" + from, projectId + ":" + to, edgeType, now));
+                }
+            }
+            if (nodes.Count > 0) await scientificResearch.SaveGraphAsync(projectId, nodes, edges, cancellationToken).ConfigureAwait(false);
+        }
+        await scientificResearch.SaveResultSnapshotAsync(projectId,
+            CreateResearchResultSnapshot(projectId, result, conclusion, now), cancellationToken).ConfigureAwait(false);
+        await scientificResearch.SaveArchiveSnapshotAsync(projectId,
+            CreateResearchArchiveSnapshot(projectId, runId, revision, existing.ProtocolVersion, result, conclusion, now),
+            cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(checkpointId))
+        {
+            await scientificResearch.SaveCheckpointAsync(new(checkpointId, projectId, runId, revision,
+                StringProperty(checkpoint, "phase") ?? "research", result.GetRawText(), now), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static ResearchResultSnapshot CreateResearchResultSnapshot(
+        string projectId, JsonElement result, string conclusionStatus, DateTimeOffset now)
+    {
+        var hypotheses = new List<ResearchHypothesis>();
+        if (result.TryGetProperty("hypotheses", out var hypothesisItems) && hypothesisItems.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in hypothesisItems.EnumerateArray().Take(64))
+            {
+                var statement = item.ValueKind == JsonValueKind.String ? item.GetString() : StringProperty(item, "statement");
+                if (string.IsNullOrWhiteSpace(statement)) continue;
+                var id = ResearchRecordId(projectId, "hypothesis", statement);
+                hypotheses.Add(new(id, projectId, statement, "newCandidateSolution", "provisionallySupported", .35,
+                    item.GetRawText(), now, FindGraphNodeId(result, "hypothesis", statement, projectId)));
+            }
+        }
+
+        var claims = new List<ResearchClaim>();
+        if (result.TryGetProperty("findings", out var findingItems) && findingItems.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in findingItems.EnumerateArray().Take(128))
+            {
+                var statement = StringProperty(item, "claim");
+                if (string.IsNullOrWhiteSpace(statement)) continue;
+                claims.Add(new(ResearchRecordId(projectId, "claim", statement), projectId, statement, "sourceReported",
+                    conclusionStatus, conclusionStatus == "stronglySupported" ? .8 : .6, item.GetRawText(), now));
+            }
+        }
+
+        var verifications = new List<ResearchVerification>();
+        if (result.TryGetProperty("verificationPlan", out var verificationItems) && verificationItems.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in verificationItems.EnumerateArray().Take(64))
+            {
+                var method = item.ValueKind == JsonValueKind.String ? item.GetString() : StringProperty(item, "method");
+                if (string.IsNullOrWhiteSpace(method)) continue;
+                verifications.Add(new(ResearchRecordId(projectId, "verification", method), projectId, "project", projectId,
+                    "robustness", method, "planned", item.GetRawText(), now));
+            }
+        }
+        if (result.TryGetProperty("verifications", out var completedVerifications) && completedVerifications.ValueKind == JsonValueKind.Array)
+        {
+            var findingArray = result.TryGetProperty("findings", out var findings) && findings.ValueKind == JsonValueKind.Array
+                ? findings.EnumerateArray().ToArray() : [];
+            foreach (var item in completedVerifications.EnumerateArray().Take(128))
+            {
+                var method = StringProperty(item, "method");
+                if (string.IsNullOrWhiteSpace(method) || !item.TryGetProperty("claimIndex", out var indexValue)
+                    || !indexValue.TryGetInt32(out var index) || index < 0 || index >= findingArray.Length) continue;
+                var statement = StringProperty(findingArray[index], "claim") ?? "claim-" + index.ToString(CultureInfo.InvariantCulture);
+                var claimId = ResearchRecordId(projectId, "claim", statement);
+                verifications.Add(new(ResearchRecordId(projectId, "verification-completed", claimId + "\n" + method),
+                    projectId, "claim", claimId, "multiPath", method, StringProperty(item, "status") ?? "unresolved",
+                    item.GetRawText(), now));
+            }
+        }
+
+        var experiments = new List<ResearchExperiment>();
+        if (result.TryGetProperty("experiments", out var experimentItems) && experimentItems.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in experimentItems.EnumerateArray().Take(64))
+            {
+                var experimentId = StringProperty(item, "experimentId") ?? StringProperty(item, "id");
+                if (string.IsNullOrWhiteSpace(experimentId)) continue;
+                experiments.Add(new(ResearchRecordId(projectId, "experiment", experimentId), projectId,
+                    StringProperty(item, "environmentLock") ?? "", JsonProperty(item, "sourceFiles", "[]"),
+                    JsonProperty(item, "randomSeeds", "[]"), JsonProperty(item, "inputDataHashes", "[]"),
+                    StringProperty(item, "command") ?? "", JsonProperty(item, "resourceLimits", "{}"),
+                    StringProperty(item, "stdoutEvidence") ?? "", StringProperty(item, "stderrEvidence") ?? "",
+                    JsonProperty(item, "resultArtifacts", "[]"), StringProperty(item, "verificationStatus") ?? "unresolved",
+                    now, now));
+            }
+        }
+        return new(hypotheses, experiments, verifications, claims);
+    }
+
+    private static ResearchArchiveSnapshot CreateResearchArchiveSnapshot(string projectId, string runId, long revision,
+        int protocolVersion, JsonElement result, string conclusionStatus, DateTimeOffset now)
+    {
+        var works = new List<ResearchLiteratureEntry>();
+        var sourceToWork = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (result.TryGetProperty("sources", out var sources) && sources.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var source in sources.EnumerateArray().Take(256))
+            {
+                var sourceId = StringProperty(source, "id"); var title = StringProperty(source, "title");
+                var url = StringProperty(source, "url");
+                if (string.IsNullOrWhiteSpace(sourceId) || string.IsNullOrWhiteSpace(title)
+                    || !Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) continue;
+                var canonical = uri.GetComponents(UriComponents.HttpRequestUrl, UriFormat.UriEscaped).TrimEnd('/');
+                var workId = ResearchRecordId(projectId, "work", canonical.ToLowerInvariant());
+                sourceToWork[sourceId] = workId;
+                works.Add(new(workId, projectId, title, canonical, "retrievedSource", source.GetRawText(),
+                    "included", "fullTextExcerpt", now));
+            }
+        }
+        var evidence = new List<ResearchEvidenceRecord>();
+        if (result.TryGetProperty("findings", out var findings) && findings.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var finding in findings.EnumerateArray().Take(512))
+            {
+                var sourceId = StringProperty(finding, "sourceId"); var excerpt = StringProperty(finding, "excerpt");
+                var statement = StringProperty(finding, "claim");
+                if (string.IsNullOrWhiteSpace(sourceId) || string.IsNullOrWhiteSpace(excerpt)
+                    || string.IsNullOrWhiteSpace(statement) || !sourceToWork.TryGetValue(sourceId, out var workId)) continue;
+                var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(excerpt)));
+                evidence.Add(new(ResearchRecordId(projectId, "evidence", workId + "\n" + hash), projectId, workId,
+                    excerpt, statement, hash, "verifiedExcerpt", JsonSerializer.Serialize(new { sourceId }, JsonOptions), now));
+            }
+        }
+        var protocolJson = JsonSerializer.Serialize(new
+        {
+            profile = StringProperty(result, "profile"),
+            problem = result.TryGetProperty("problem", out var problem) ? problem.Clone() : (JsonElement?)null,
+            plan = result.TryGetProperty("plan", out var plan) ? plan.Clone() : (JsonElement?)null,
+            verificationPlan = result.TryGetProperty("verificationPlan", out var verification) ? verification.Clone() : (JsonElement?)null,
+        }, JsonOptions);
+        var report = BuildScientificResearchMarkdown(result, conclusionStatus);
+        var reportId = ResearchRecordId(projectId, "report", revision.ToString(CultureInfo.InvariantCulture));
+        var manifest = JsonSerializer.Serialize(new
+        {
+            projectId, runId, revision, protocolVersion, conclusionStatus,
+            works = works.Count, evidence = evidence.Count, createdAt = now,
+            resultSha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(result.GetRawText()))),
+        }, JsonOptions);
+        return new(protocolVersion, protocolJson, works, evidence, reportId, "scientificMarkdown",
+            conclusionStatus, report, manifest, "research.result.persisted", manifest, runId, revision, now);
+    }
+
+    private static string BuildScientificResearchMarkdown(JsonElement result, string conclusionStatus)
+    {
+        var builder = new StringBuilder("# Deep Research\n\n");
+        builder.Append("**Status:** `").Append(conclusionStatus).Append("`\n\n");
+        if (result.TryGetProperty("problem", out var problem))
+            builder.Append("## Problemformulierung\n\n").Append(StringProperty(problem, "interpretedQuestion") ?? "Nicht angegeben").Append("\n\n");
+        builder.Append("## Ergebnisse\n\n");
+        if (result.TryGetProperty("findings", out var findings) && findings.ValueKind == JsonValueKind.Array)
+            foreach (var item in findings.EnumerateArray()) builder.Append("- ").Append(StringProperty(item, "claim") ?? "Unbenannter Befund").Append('\n');
+        builder.Append("\n## Quellen\n\n");
+        if (result.TryGetProperty("sources", out var sources) && sources.ValueKind == JsonValueKind.Array)
+            foreach (var item in sources.EnumerateArray()) builder.Append("- [").Append(StringProperty(item, "title") ?? "Quelle").Append("](").Append(StringProperty(item, "url") ?? "").Append(")\n");
+        builder.Append("\n## Grenzen und offene Fragen\n\n");
+        if (result.TryGetProperty("uncertainties", out var uncertainties) && uncertainties.ValueKind == JsonValueKind.Array)
+            foreach (var item in uncertainties.EnumerateArray()) if (item.ValueKind == JsonValueKind.String) builder.Append("- ").Append(item.GetString()).Append('\n');
+        return builder.ToString();
+    }
+
+    private async Task PersistScientificToolResultAsync(Guid sessionId, ToolProposal proposal,
+        ClientToolResult result, CancellationToken cancellationToken)
+    {
+        if (scientificResearch is null || proposal.Name is not (ClientToolNames.MathSymbolic
+            or ClientToolNames.MathNumeric or ClientToolNames.MathSmt or ClientToolNames.MathFormalProof
+            or ClientToolNames.ResearchCodeExecute or ClientToolNames.ResearchCodeTest or ClientToolNames.ResearchCodeBenchmark)) return;
+        var projectId = StringProperty(result.Result, "projectId") ?? StringProperty(proposal.Arguments, "projectId");
+        var experimentId = StringProperty(result.Result, "experimentId");
+        if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(experimentId)) return;
+        var project = await scientificResearch.GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
+        if (project is null || project.SessionId != sessionId) return;
+        var now = DateTimeOffset.UtcNow;
+        var commandText = proposal.Name + " " + proposal.Arguments.GetRawText();
+        if (commandText.Length > 16_000) commandText = commandText[..16_000];
+        var evidence = result.Result.GetRawText();
+        if (evidence.Length > 100_000) evidence = evidence[..100_000];
+        var artifacts = result.Result.TryGetProperty("manifestPath", out var manifest) && manifest.ValueKind == JsonValueKind.String
+            ? JsonSerializer.Serialize(new[] { manifest.GetString() }, JsonOptions) : "[]";
+        await scientificResearch.SaveExperimentAsync(new(
+            ResearchRecordId(projectId, "experiment", experimentId), projectId,
+            StringProperty(result.Result, "environmentLock") ?? StringProperty(result.Result, "toolchain") ?? proposal.Name,
+            result.Result.TryGetProperty("generatedSource", out var generated) && generated.ValueKind == JsonValueKind.String
+                ? JsonSerializer.Serialize(new[] { generated.GetString() }, JsonOptions) : "[]",
+            proposal.Arguments.TryGetProperty("randomSeed", out var seed) ? "[" + seed.GetRawText() + "]" : "[]",
+            "{}", commandText,
+            JsonProperty(result.Result, "resourceLimits", "{}"), evidence,
+            result.Message ?? "", artifacts,
+            StringProperty(result.Result, "verificationStatus") ?? result.Status,
+            now, now), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string? FindGraphNodeId(JsonElement result, string nodeType, string title, string projectId)
+    {
+        if (!result.TryGetProperty("researchGraph", out var graph) || graph.ValueKind != JsonValueKind.Object
+            || !graph.TryGetProperty("nodes", out var nodes) || nodes.ValueKind != JsonValueKind.Array) return null;
+        foreach (var node in nodes.EnumerateArray())
+            if (string.Equals(StringProperty(node, "nodeType"), nodeType, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(StringProperty(node, "title"), title, StringComparison.Ordinal)
+                && StringProperty(node, "id") is { Length: > 0 } id
+                && ResearchNodeStatuses.All.Contains(StringProperty(node, "status") ?? "unresolved"))
+                return projectId + ":" + id;
+        return null;
+    }
+
+    private static string JsonProperty(JsonElement item, string propertyName, string fallback) =>
+        item.ValueKind == JsonValueKind.Object && item.TryGetProperty(propertyName, out var value)
+            ? value.GetRawText() : fallback;
+
+    private static string ResearchRecordId(string projectId, string kind, string value) =>
+        kind + "-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(projectId + "\n" + kind + "\n" + value)))[..24];
 
     internal static IReadOnlyList<string> GetAllowedServerTools(
         PromptTriggerAction? action,
@@ -2724,9 +3311,16 @@ public sealed partial class GoAiAssistantService(
     {
         PromptTriggerAction.WebSearch => ["web.search", "web.fetch"],
         PromptTriggerAction.Coding => ["web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze", "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve"],
+        PromptTriggerAction.PlanMode => ["web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze", "math.evaluate", "context.retrieve"],
         PromptTriggerAction.Audiobook => [],
         _ => ["math.evaluate", "context.embed", "context.retrieve", "web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze", "image.generate", "speech.synthesize"],
     };
+
+    internal static bool IsClientToolAllowed(PromptTriggerAction? action, ToolRiskClass riskClass) =>
+        action != PromptTriggerAction.PlanMode || riskClass == ToolRiskClass.ReadOnly;
+
+    internal static bool IsClientToolAllowed(PromptTriggerAction? action, string name, ToolRiskClass riskClass) =>
+        IsClientToolAllowed(action, riskClass);
 
     internal static string BuildWebResearchPrompt(string prompt)
     {
@@ -2737,6 +3331,18 @@ public sealed partial class GoAiAssistantService(
             + "nicht abgerufenen Inhalte.\n\nRechercheauftrag:\n"
             + task;
     }
+
+    internal static string BuildPlanModePrompt(string prompt) =>
+        "PLANMODUS – VERBINDLICHE REGELN\n"
+        + "Analysiere den Auftrag und den Workspace gründlich. Nutze nur schreibgeschützte Werkzeuge wie coding.list, coding.search, coding.read, coding.gitDiff und Dokument-/Medienanalyse. "
+        + "Führe keine Befehle aus, schreibe oder ändere keine Datei und starte keine Anwendung. Behaupte keine Umsetzung.\n"
+        + "Wenn eine Entscheidung fehlt, antworte mit einer kurzen Erklärung und genau einem maschinenlesbaren Block am Ende:\n"
+        + "```assistant-plan\n{\"kind\":\"questions\",\"questions\":[{\"id\":\"q1\",\"text\":\"Frage\",\"options\":[{\"id\":\"a\",\"label\":\"Empfohlen\",\"description\":\"Auswirkung\"}],\"allowFreeText\":true}]}\n```\n"
+        + "Stelle höchstens drei notwendige Fragen gleichzeitig und warte danach ohne Zeitlimit auf die Antwort.\n"
+        + "Sobald der Plan eindeutig ist, liefere einen konkreten, prüfbaren Umsetzungsplan und genau diesen Block am Ende:\n"
+        + "```assistant-plan\n{\"kind\":\"plan\",\"title\":\"Plan\"}\n```\n"
+        + "Änderungen dürfen erst nach der UI-Aktion „Plan implementieren“ erfolgen.\n\nBENUTZERAUFTRAG\n"
+        + prompt.Trim();
 
     internal static string RemoveDocumentEvidenceFooter(string content)
     {

@@ -1,7 +1,9 @@
 using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
 using GoAi.Contracts;
+using GoWinUI.Core.Chat;
 using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Extensions;
 using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
@@ -42,9 +44,11 @@ public sealed partial class AssistantPage : Page, IDisposable
         + "Permissions-Policy: camera=(), microphone=(), geolocation=(), clipboard-read=(), clipboard-write=(), usb=(), serial=()\r\n"
         + "Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
         + "img-src data: blob:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; "
-        + "frame-ancestors https://go.local; sandbox allow-scripts\r\n";
+        + "frame-ancestors https://assistant.local; sandbox allow-scripts\r\n";
 
     private readonly AssistantCoordinator _coordinator;
+    private readonly AssistantRuntimeProfile _runtimeProfile;
+    private readonly IAssistantRunScheduler _runScheduler;
     private readonly GoAiAssistantService _goAi;
     private readonly SettingsCoordinator _settings;
     private readonly ShellViewModel _shell;
@@ -83,6 +87,8 @@ public sealed partial class AssistantPage : Page, IDisposable
         InitializeComponent();
         NavigationCacheMode = NavigationCacheMode.Required;
         _coordinator = App.Current.GetService<AssistantCoordinator>();
+        _runtimeProfile = App.Current.GetService<AssistantRuntimeProfile>();
+        _runScheduler = App.Current.GetService<IAssistantRunScheduler>();
         _goAi = App.Current.GetService<GoAiAssistantService>();
         _settings = App.Current.GetService<SettingsCoordinator>();
         _shell = App.Current.GetService<ShellViewModel>();
@@ -118,6 +124,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         _microphone.TurnChanged += OnMicrophoneTurnChanged;
         _audioCapture.Changed += OnAudioCaptureChanged;
         _screenClips.Changed += OnScreenClipChanged;
+        _runScheduler.Changed += OnAssistantRunScheduleChanged;
         var initializationStage = "Plattformprüfung";
         try
         {
@@ -125,7 +132,7 @@ public sealed partial class AssistantPage : Page, IDisposable
                 != System.Runtime.InteropServices.Architecture.X64)
             {
                 throw new PlatformNotSupportedException(
-                    "GO v1 unterstützt WebView2 ausschließlich auf Windows x64.");
+                    $"{_runtimeProfile.ProductName} unterstützt WebView2 ausschließlich auf Windows x64.");
             }
 
             initializationStage = "Systemereignisse";
@@ -148,6 +155,8 @@ public sealed partial class AssistantPage : Page, IDisposable
             _bridge.MessageReceived += OnBridgeMessageReceived;
             _bridge.ReadFromContextRequested += OnReadFromContextRequested;
             _bridge.ReadFromContextValidator = ValidateReadFromContextTargetAsync;
+            _bridge.LanArtifactResolver = ResolveLanArtifactAsync;
+            _bridge.LanCodingPreviewResolver = ResolveLanCodingPreviewAsync;
             initializationStage = "Webassets";
             var webRoot = ApplicationAssets.ResolvePath("Assets", "Web");
             var userDataFolder = Path.Combine(App.Current.DataDirectory, "WebView2");
@@ -158,7 +167,7 @@ public sealed partial class AssistantPage : Page, IDisposable
                 return;
             }
             webView.CoreWebView2.AddWebResourceRequestedFilter(
-                "https://go-coding-preview.local/coding/*", CoreWebView2WebResourceContext.All,
+                "https://assistant-coding-preview.local/coding/*", CoreWebView2WebResourceContext.All,
                 CoreWebView2WebResourceRequestSourceKinds.All);
             webView.CoreWebView2.WebResourceRequested += OnCodingPreviewResourceRequested;
             webView.CoreWebView2.FrameNavigationStarting += OnCodingFrameNavigationStarting;
@@ -218,6 +227,42 @@ public sealed partial class AssistantPage : Page, IDisposable
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             AppLog.AssistantRequestFailed(_logger, exception, "navigation.refresh");
+        }
+        finally
+        {
+            if (locked)
+            {
+                _chatBridgeGate.Release();
+            }
+        }
+    }
+
+    internal async Task RefreshForExternalActivationAsync()
+    {
+        if (_assistantWebView?.CoreWebView2 is null || _bridge is not { } bridge)
+        {
+            return;
+        }
+
+        var locked = false;
+        try
+        {
+            await _chatBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
+            locked = true;
+            var snapshot = await _coordinator.BuildSnapshotAsync(
+                _lifetime?.Token ?? CancellationToken.None);
+            if (!_disposed)
+            {
+                await bridge.PostAsync("state.snapshot", snapshot);
+            }
+        }
+        catch (OperationCanceledException) when (_disposed || _lifetime?.IsCancellationRequested == true)
+        {
+            // Window shutdown cancels a pending external-activation refresh.
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "external.activation.refresh");
         }
         finally
         {
@@ -288,6 +333,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         _microphone.TurnChanged -= OnMicrophoneTurnChanged;
         _audioCapture.Changed -= OnAudioCaptureChanged;
         _screenClips.Changed -= OnScreenClipChanged;
+        _runScheduler.Changed -= OnAssistantRunScheduleChanged;
         _activeSpeechRequestCancellation?.Cancel();
         _activeSpeechRequestCancellation?.Dispose();
         _activeSpeechRequestCancellation = null;
@@ -306,6 +352,8 @@ public sealed partial class AssistantPage : Page, IDisposable
             _bridge.MessageReceived -= OnBridgeMessageReceived;
             _bridge.ReadFromContextRequested -= OnReadFromContextRequested;
             _bridge.ReadFromContextValidator = null;
+            _bridge.LanArtifactResolver = null;
+            _bridge.LanCodingPreviewResolver = null;
             _bridge.Dispose();
             _bridge = null;
         }
@@ -378,16 +426,22 @@ public sealed partial class AssistantPage : Page, IDisposable
 
             if (updatesAiState && _goAi.IsRunning)
             {
-                updatesAiState = false;
                 var steerSession = args.Envelope.Payload.GetProperty("sessionId").GetGuid();
-                var steerPrompt = args.Envelope.Payload.GetProperty("prompt").GetString() ?? "";
-                var receipt = await _goAi.SteerAsync(steerSession, steerPrompt, args.Envelope.RequestId,
-                    _goAi.ActiveRunId, _lifetime?.Token ?? CancellationToken.None);
-                await bridge.PostAsync("chat.steer.accepted", new { sessionId = steerSession,
-                    inputId = receipt.InputId, runId = receipt.RunId }, args.Envelope.RequestId);
-                return;
+                if (_goAi.ActiveSessionId == steerSession)
+                {
+                    updatesAiState = false;
+                    var steerPrompt = args.Envelope.Payload.GetProperty("prompt").GetString() ?? "";
+                    var receipt = await _goAi.SteerAsync(steerSession, steerPrompt, args.Envelope.RequestId,
+                        _goAi.ActiveRunId, _lifetime?.Token ?? CancellationToken.None);
+                    await bridge.PostAsync("chat.steer.accepted", new { sessionId = steerSession,
+                        inputId = receipt.InputId, runId = receipt.RunId }, args.Envelope.RequestId);
+                    return;
+                }
             }
-            if (updatesAiState && _chatBridgeGate.CurrentCount == 0)
+            if (updatesAiState
+                && TryReadGuid(args.Envelope.Payload, "sessionId", out var preparingSessionId)
+                && _runScheduler.IsActiveSession(preparingSessionId)
+                && !_goAi.IsRunning)
             {
                 updatesAiState = false;
                 throw new InvalidOperationException("Der Auftrag wird noch vorbereitet. Die neue Eingabe bleibt erhalten; Umlenken ist möglich, sobald der Lauf bereit ist.");
@@ -399,8 +453,7 @@ public sealed partial class AssistantPage : Page, IDisposable
                 microphoneMessageLocked = true;
             }
 
-            if (args.Envelope.Type.StartsWith("audioCapture.", StringComparison.Ordinal)
-                || (args.Envelope.Type == "chat.send" && !isSpeechRequest))
+            if (args.Envelope.Type.StartsWith("audioCapture.", StringComparison.Ordinal))
             {
                 await _audioCaptureBridgeGate.WaitAsync(_lifetime?.Token ?? CancellationToken.None);
                 audioCaptureMessageLocked = true;
@@ -410,12 +463,6 @@ public sealed partial class AssistantPage : Page, IDisposable
             {
                 if (!isSpeechRequest)
                 {
-                    if (!await _chatBridgeGate.WaitAsync(0, _lifetime?.Token ?? CancellationToken.None))
-                    {
-                        updatesAiState = false;
-                        throw new InvalidOperationException("Ein Auftrag wird bereits bearbeitet. Verwende Umlenken; die Eingabe bleibt erhalten.");
-                    }
-                    chatMessageLocked = true;
                     if (_screenClips.Current.IsRecording)
                     {
                         var promptSessionId = TryReadGuid(args.Envelope.Payload, "sessionId", out var requestedSessionId)
@@ -446,15 +493,19 @@ public sealed partial class AssistantPage : Page, IDisposable
             switch (args.Envelope.Type)
             {
                 case "session.workspaceCreate":
-                    if (_goAi.IsRunning)
+                    if (_goAi.IsRunning || !_runScheduler.Snapshot.IsIdle)
                         throw new InvalidOperationException("Beende zuerst den laufenden Auftrag, bevor du ein Projekt öffnest.");
+                    var requestedWorkspaceMode = AssistantCoordinator.ParseChatMode(
+                        ReadOptionalText(args.Envelope.Payload, "chatMode", 16)
+                        ?? ReadOptionalText(args.Envelope.Payload, "mode", 16)
+                        ?? _settings.Current.SelectedChatMode.ToString());
                     var projectPicker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
                     projectPicker.FileTypeFilter.Add("*");
                     InitializePicker(projectPicker);
                     var projectFolder = await projectPicker.PickSingleFolderAsync();
                     if (projectFolder is not null)
-                        await CommitCodingWorkspaceAsync(_chatBridgeGate, () => _goAi.IsRunning,
-                            token => _coordinator.CreateWorkspaceSessionAsync(projectFolder.Path,
+                        await CommitCodingWorkspaceAsync(_chatBridgeGate, () => _goAi.IsRunning || !_runScheduler.Snapshot.IsIdle,
+                            token => _coordinator.CreateWorkspaceSessionAsync(projectFolder.Path, requestedWorkspaceMode,
                                 (type, payload, requestId) => bridge.PostAsync(type, payload, requestId),
                                 args.Envelope.RequestId, token), _lifetime?.Token ?? CancellationToken.None);
                     break;
@@ -464,9 +515,42 @@ public sealed partial class AssistantPage : Page, IDisposable
                 case "document.paste":
                     await PasteDocumentsAsync(args.Envelope, bridge);
                     break;
-                case "chat.exportPdf":
-                    await ExportPdfAsync(args.Envelope, bridge, selectedMessageOnly: false);
+                case "document.upload":
+                    await UploadBrowserDocumentsAsync(args.Envelope, bridge);
                     break;
+                case "action.invoke":
+                {
+                    var actionId = ReadRequiredText(args.Envelope.Payload, "actionId", 256);
+                    switch (actionId)
+                    {
+                        case BuiltInActionIds.AttachFilesAndFolders:
+                            await PickDocumentAsync(args.Envelope, bridge);
+                            break;
+                        case BuiltInActionIds.ExportChatPdf:
+                            await ExportPdfAsync(args.Envelope, bridge, selectedMessageOnly: false);
+                            break;
+                        case BuiltInActionIds.OpenWorkflowLibrary:
+                            await _coordinator.HandleAsync(
+                                args.Envelope with { Type = "workflow.list" },
+                                (type, payload, requestId) => bridge.PostAsync(type, payload, requestId),
+                                _lifetime?.Token ?? CancellationToken.None);
+                            break;
+                        case BuiltInActionIds.LiveCaptions:
+                            await _liveCaptions.StartAsync(
+                                LiveCaptionMode.Transcribe,
+                                _lifetime?.Token ?? CancellationToken.None);
+                            await bridge.PostAsync("caption.changed", _liveCaptions.Current, args.Envelope.RequestId);
+                            break;
+                        default:
+                            await _coordinator.HandleAsync(
+                                args.Envelope,
+                                (type, payload, requestId) => bridge.PostAsync(type, payload, requestId),
+                                _lifetime?.Token ?? CancellationToken.None);
+                            return;
+                    }
+                    await bridge.PostAsync("action.completed", new { actionId }, args.Envelope.RequestId);
+                    break;
+                }
                 case "message.exportPdf":
                     await ExportPdfAsync(args.Envelope, bridge, selectedMessageOnly: true);
                     break;
@@ -630,7 +714,7 @@ public sealed partial class AssistantPage : Page, IDisposable
             }
             if (updatesAiState)
             {
-                await SetShellAiStateAsync(false);
+                await SetShellAiStateAsync(_goAi.IsRunning || !_runScheduler.Snapshot.IsIdle);
             }
         }
     }
@@ -1230,6 +1314,27 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
     }
 
+    private async void OnAssistantRunScheduleChanged(
+        object? sender,
+        AssistantRunScheduleChangedEventArgs args)
+    {
+        try
+        {
+            await SetShellAiStateAsync(!args.Snapshot.IsIdle || _goAi.IsRunning);
+            if (!_disposed && _bridge is { } bridge)
+            {
+                await bridge.PostAsync("queue.changed", new
+                {
+                    runQueue = _coordinator.BuildRunQueueSnapshot(),
+                });
+            }
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.AssistantRequestFailed(_logger, exception, "queue.update");
+        }
+    }
+
     private Task SetShellAiStateAsync(bool isRunning)
     {
         if (_disposed)
@@ -1347,6 +1452,84 @@ public sealed partial class AssistantPage : Page, IDisposable
             envelope.RequestId);
     }
 
+    private async Task UploadBrowserDocumentsAsync(WebBridgeEnvelope envelope, AssistantWebBridge bridge)
+    {
+        if (!TryReadGuid(envelope.Payload, "sessionId", out var sessionId)
+            || !envelope.Payload.TryGetProperty("files", out var filesElement)
+            || filesElement.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("Der Browser-Upload ist unvollständig.");
+        var files = filesElement.EnumerateArray().ToArray();
+        if (files.Length is < 1 or > 32)
+            throw new InvalidOperationException("Wähle zwischen einer und 32 Dateien aus.");
+        var pendingNames = new List<string>(files.Length);
+        var decoded = new List<(string Name, string ContentType, byte[] Bytes)>(files.Length);
+        long totalBytes = 0;
+        foreach (var file in files)
+        {
+            var suppliedName = ReadRequiredText(file, "fileName", 512);
+            var fileName = Path.GetFileName(suppliedName);
+            if (string.IsNullOrWhiteSpace(fileName) || !string.Equals(fileName, suppliedName, StringComparison.Ordinal))
+                throw new InvalidOperationException("Ein Dateiname im Browser-Upload ist ungültig.");
+            var contentType = ReadOptionalText(file, "contentType", 256) ?? "application/octet-stream";
+            var base64 = ReadRequiredText(file, "base64", 48_000_000);
+            byte[] bytes;
+            try { bytes = Convert.FromBase64String(base64); }
+            catch (FormatException) { throw new InvalidOperationException("Eine Browser-Datei ist nicht gültig codiert."); }
+            totalBytes += bytes.LongLength;
+            if (bytes.Length == 0 || bytes.Length > 32 * 1024 * 1024 || totalBytes > 48 * 1024 * 1024)
+                throw new InvalidOperationException("Der Browser-Upload überschreitet das Größenlimit.");
+            pendingNames.Add(fileName);
+            decoded.Add((fileName, contentType, bytes));
+        }
+        await bridge.PostAsync("document.import.started", new { files = pendingNames }, envelope.RequestId);
+        try
+        {
+            foreach (var file in decoded)
+            {
+                await using var stream = new MemoryStream(file.Bytes, writable: false);
+                var extension = Path.GetExtension(file.Name);
+                if (_coordinator.SupportedDocumentExtensions.Contains(extension))
+                    await _coordinator.ImportDocumentAsync(sessionId, file.Name, stream, _lifetime?.Token ?? CancellationToken.None);
+                else
+                    await _coordinator.ImportAttachmentAsync(sessionId, file.Name,
+                        ResolveAttachmentContentType(file.Name, file.ContentType), stream,
+                        _lifetime?.Token ?? CancellationToken.None);
+                pendingNames.Remove(file.Name);
+                await bridge.PostAsync("document.import.progress", new { remaining = pendingNames }, envelope.RequestId);
+            }
+        }
+        finally
+        {
+            await bridge.PostAsync("document.import.completed", new { }, envelope.RequestId);
+        }
+        await bridge.PostAsync("document.changed",
+            await _coordinator.BuildSnapshotAsync(_lifetime?.Token ?? CancellationToken.None), envelope.RequestId);
+    }
+
+    private async Task<LanArtifactResource?> ResolveLanArtifactAsync(Guid artifactId, CancellationToken cancellationToken)
+    {
+        var artifact = await _artifacts.GetAsync(artifactId, cancellationToken);
+        if (artifact is null) return null;
+        return new(await _blobs.OpenReadAsync(artifact.BlobId, cancellationToken),
+            artifact.ContentType, artifact.FileName);
+    }
+
+    private Task<string?> ResolveLanCodingPreviewAsync(
+        Guid messageId, string stepId, CancellationToken cancellationToken)
+    {
+        var uri = $"https://assistant-coding-preview.local/coding/{messageId:D}/{Uri.EscapeDataString(stepId)}";
+        return ResolveLanCodingPreviewForMessageAsync(messageId, uri, cancellationToken);
+    }
+
+    private async Task<string?> ResolveLanCodingPreviewForMessageAsync(
+        Guid messageId, string uri, CancellationToken cancellationToken)
+    {
+        var message = await _chats.GetMessageAsync(messageId, cancellationToken);
+        return message is null
+            ? null
+            : await GetCodingPreviewHtmlAsync(_chats, message.SessionId, uri, cancellationToken);
+    }
+
     private async Task ImportStorageFilesAsync(
         Guid sessionId,
         IEnumerable<StorageFile> sourceFiles,
@@ -1423,7 +1606,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
         var selected = await SelectCaptureTargetAsync(
             "Screenshot aufnehmen",
-            "GO erstellt genau einen Screenshot der gewählten Quelle und fügt ihn als lokalen Sitzungsanhang hinzu.");
+            $"{_runtimeProfile.ProductName} erstellt genau einen Screenshot der gewählten Quelle und fügt ihn als lokalen Sitzungsanhang hinzu.");
         if (selected is null)
         {
             await bridge.PostAsync("capture.cancelled", new { action = "imageAnalysis" }, envelope.RequestId);
@@ -1482,7 +1665,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
         var selected = await SelectCaptureTargetAsync(
             "Bildschirmclip aufnehmen",
-            "GO nimmt die gewählte Quelle bewusst für maximal 30 Sekunden mit zwei Bildern pro Sekunde und ohne Ton auf. Der Clip bleibt lokal, bis du ihn mit einem AI-Auftrag temporär hochlädst.");
+            $"{_runtimeProfile.ProductName} nimmt die gewählte Quelle bewusst für maximal 30 Sekunden mit zwei Bildern pro Sekunde und ohne Ton auf. Der Clip bleibt lokal, bis du ihn mit einem AI-Auftrag temporär hochlädst.");
         if (selected is null)
         {
             await bridge.PostAsync("capture.cancelled", new { action = "videoAnalysis" }, envelope.RequestId);
@@ -1609,7 +1792,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         stepId = string.Empty;
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
             || uri.Scheme != Uri.UriSchemeHttps || !uri.IsDefaultPort
-            || !string.Equals(uri.Host, "go-coding-preview.local", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(uri.Host, "assistant-coding-preview.local", StringComparison.OrdinalIgnoreCase)
             || uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0)
         {
             return false;
@@ -1891,8 +2074,8 @@ public sealed partial class AssistantPage : Page, IDisposable
             {
                 SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
                 SuggestedFileName = selectedMessageOnly
-                    ? $"GO-Nachricht-{DateTime.Now:yyyy-MM-dd-HHmm}"
-                    : $"GO-Chat-{DateTime.Now:yyyy-MM-dd-HHmm}",
+                    ? $"{FileNamePrefix(_runtimeProfile.ProductName)}-Nachricht-{DateTime.Now:yyyy-MM-dd-HHmm}"
+                    : $"{FileNamePrefix(_runtimeProfile.ProductName)}-Chat-{DateTime.Now:yyyy-MM-dd-HHmm}",
                 DefaultFileExtension = ".pdf",
             };
             picker.FileTypeChoices.Add("PDF-Dokument", new List<string> { ".pdf" });
@@ -1950,6 +2133,14 @@ public sealed partial class AssistantPage : Page, IDisposable
 
             _exportGate.Release();
         }
+    }
+
+    private static string FileNamePrefix(string productName)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var value = new string(productName.Trim().Select(character => invalid.Contains(character) ? '-' : character).ToArray())
+            .Trim(' ', '.', '-');
+        return string.IsNullOrWhiteSpace(value) ? "AI-Assistent" : value;
     }
 
     private static void ConfigureBookPdfPrintSettings(CoreWebView2PrintSettings printSettings)

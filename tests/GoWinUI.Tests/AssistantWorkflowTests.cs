@@ -87,18 +87,38 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public void PersistentSessionToolIsAcceptedByNativeAndWebBridgeContracts()
+    public void PersistentExtensionActionUsesTheGenericBridgeContract()
     {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.tool"));
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("action.invoke"));
+        Assert.False(AssistantWebBridge.IsIncomingTypeAllowed("session.tool"));
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        Assert.Contains("\"session.tool\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("\"action.invoke\"", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"session.tool\"", bridge, StringComparison.Ordinal);
 
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.Contains("bridge.js?v=20260919-agents-1", html, StringComparison.Ordinal);
+        Assert.Contains("bridge.js?v=20260927-science-workbench-1", html, StringComparison.Ordinal);
 
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("post(\"session.tool\"", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"action.invoke\"", app, StringComparison.Ordinal);
+        Assert.Contains("builtin.audiobook/create", app, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ScientificWorkbenchBridgeContractIsBidirectionalAndHostAuthoritative()
+    {
+        foreach (var action in new[] { "research.list", "research.open", "research.export" })
+            Assert.True(AssistantWebBridge.IsIncomingTypeAllowed(action));
+        foreach (var message in new[] { "research.snapshot", "research.exported" })
+            Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed(message));
+
+        var json = JsonSerializer.Serialize(AssistantWebBridge.BuildProtocolContract());
+        using var contract = JsonDocument.Parse(json);
+        Assert.Equal(AssistantWebBridge.ProtocolVersion, contract.RootElement.GetProperty("version").GetInt32());
+        Assert.Contains(contract.RootElement.GetProperty("clientActions").EnumerateArray(),
+            item => item.GetString() == "research.list");
+        Assert.Contains(contract.RootElement.GetProperty("hostEvents").EnumerateArray(),
+            item => item.GetString() == "research.snapshot");
     }
 
     /*
@@ -123,24 +143,23 @@ public sealed class AssistantWorkflowTests
     */
 
     [Fact]
-    public void SessionPinUsesDescriptiveGermanLabelsAcrossTheWebViewContract()
+    public void SessionPinAndHeaderActionsAreAbsentAcrossTheWebViewContract()
     {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.pin"));
+        Assert.False(AssistantWebBridge.IsIncomingTypeAllowed("session.pin"));
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        Assert.Contains("\"session.pin\"", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"session.pin\"", bridge, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"chat.exportPdf\"", bridge, StringComparison.Ordinal);
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.Contains("title=\"Sitzung anpinnen\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("chat-header", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("id=\"chat-heading\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("header-actions", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Sitzung anpinnen", html, StringComparison.Ordinal);
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("session?.isPinned ? \"Sitzung loslösen\" : \"Sitzung anpinnen\"", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"session.pin\"", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("className = `session-pin", app, StringComparison.Ordinal);
-        Assert.Contains("item.append(open, remove)", app, StringComparison.Ordinal);
-        Assert.Contains("session.isPinned ? \" pinned\"", app, StringComparison.Ordinal);
-        Assert.Contains("state.sessions.some(session => !session.isPinned)", app, StringComparison.Ordinal);
-        Assert.Contains("Angepinnte Sitzungen bleiben erhalten", app, StringComparison.Ordinal);
-        Assert.Contains("Alle nicht angepinnten Sitzungen löschen", html, StringComparison.Ordinal);
-        Assert.Contains("class=\"pdf-chip\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("post(\"session.pin\"", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("session.isPinned", app, StringComparison.Ordinal);
+        Assert.Contains("builtin.documents/export-chat-pdf", app, StringComparison.Ordinal);
+        Assert.Contains("builtin.workflows/open-library", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -160,6 +179,7 @@ public sealed class AssistantWorkflowTests
     public void ComposerPasteRoutesFilesAndImagesThroughTheNativeAttachmentImport()
     {
         Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("document.paste"));
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("document.upload"));
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
@@ -167,11 +187,14 @@ public sealed class AssistantWorkflowTests
             FindRepositoryRoot(), "src", "GoWinUI.App", "Pages", "AssistantPage.xaml.cs"));
 
         Assert.Contains("\"document.paste\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("\"document.upload\"", bridge, StringComparison.Ordinal);
+        Assert.Contains("uploadFiles(files, state.activeSessionId)", app, StringComparison.Ordinal);
         Assert.Contains("elements.prompt.addEventListener(\"paste\"", app, StringComparison.Ordinal);
         Assert.Contains("clipboard.files.length > 0", app, StringComparison.Ordinal);
         Assert.Contains("item.kind === \"file\"", app, StringComparison.Ordinal);
         Assert.Contains("post(\"document.paste\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
         Assert.Contains("case \"document.paste\":", page, StringComparison.Ordinal);
+        Assert.Contains("case \"document.upload\":", page, StringComparison.Ordinal);
         Assert.Contains("StandardDataFormats.StorageItems", page, StringComparison.Ordinal);
         Assert.Contains("StandardDataFormats.Bitmap", page, StringComparison.Ordinal);
         Assert.Contains("ImportStorageFilesAsync(sessionId, files", page, StringComparison.Ordinal);
@@ -286,8 +309,9 @@ public sealed class AssistantWorkflowTests
         Assert.DoesNotContain("renderVoiceFeedback()", app, StringComparison.Ordinal);
         Assert.DoesNotContain("id=\"capture-screen\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("id=\"capture-clip\"", html, StringComparison.Ordinal);
-        Assert.Contains("data-tool-action=\"webSearch\"", html, StringComparison.Ordinal);
-        Assert.Contains("data-tool-action=\"imageGeneration\"", html, StringComparison.Ordinal);
+        Assert.Contains("builtin.web/web-search", app, StringComparison.Ordinal);
+        Assert.Contains("builtin.image/generate", app, StringComparison.Ordinal);
+        Assert.Contains("renderActionMenu()", app, StringComparison.Ordinal);
         Assert.Contains("Vorlesen", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.speak\", {", app, StringComparison.Ordinal);
         Assert.Contains("messageId: String(message.id)", app, StringComparison.Ordinal);
@@ -463,9 +487,9 @@ public sealed class AssistantWorkflowTests
         var voice = File.ReadAllText(Path.Combine(webRoot, "voice.js"));
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
 
-        Assert.Contains("data-tool-action=\"audioAnalysis\"", html, StringComparison.Ordinal);
-        Assert.Contains("data-tool-action=\"videoAnalysis\"", html, StringComparison.Ordinal);
-        Assert.Contains("data-tool-action=\"imageAnalysis\"", html, StringComparison.Ordinal);
+        Assert.Contains("builtin.media/audio-analysis", app, StringComparison.Ordinal);
+        Assert.Contains("builtin.media/video-analysis", app, StringComparison.Ordinal);
+        Assert.Contains("builtin.media/image-analysis", app, StringComparison.Ordinal);
         Assert.DoesNotContain("data-tool-immediate=\"screen.capture\"", html, StringComparison.Ordinal);
         Assert.DoesNotContain("data-tool-immediate=\"screenClip.toggle\"", html, StringComparison.Ordinal);
         Assert.Contains("beginMediaCapture(action)", app, StringComparison.Ordinal);
@@ -1191,10 +1215,10 @@ public sealed class AssistantWorkflowTests
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("media-src 'self' https://go-preview.local", html, StringComparison.Ordinal);
+        Assert.Contains("media-src 'self' https://assistant-preview.local", html, StringComparison.Ordinal);
         Assert.Contains("mediaType.startsWith(\"audio/\") || mediaType.startsWith(\"video/\")", app, StringComparison.Ordinal);
-        Assert.Contains("audio.src = payload.url", app, StringComparison.Ordinal);
-        Assert.Contains("video.src = payload.url", app, StringComparison.Ordinal);
+        Assert.Contains("audio.src = previewUrl", app, StringComparison.Ordinal);
+        Assert.Contains("video.src = previewUrl", app, StringComparison.Ordinal);
         Assert.Contains("Audio speichern", app, StringComparison.Ordinal);
     }
 
@@ -1292,18 +1316,21 @@ public sealed class AssistantWorkflowTests
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("new Set([\"audiobook\", \"coding\"])", app, StringComparison.Ordinal);
-        Assert.Contains("!persistentToolActions.has(state.selectedToolAction)", app, StringComparison.Ordinal);
+        Assert.Contains(
+            "new Set([\"builtin.audiobook/create\", \"builtin.coding/plan-mode\"])",
+            app,
+            StringComparison.Ordinal);
+        Assert.Contains("!persistentExtensionActionIds.has(previousExtensionActionId)", app, StringComparison.Ordinal);
         Assert.Contains("clearCompletedOneShotToolAction();", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.completed\":", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.cancelled\":", app, StringComparison.Ordinal);
         Assert.Contains("case \"chat.failed\":", app, StringComparison.Ordinal);
 
-        // A Coding chip or project-folder snapshot may arrive before session.draft is saved.
+        // A mode or project-folder snapshot may arrive before session.draft is saved.
         // Only opening another session may replace the live text, including a cleared draft.
         var snapshotBlock = app[
             app.IndexOf("function applySnapshot(payload)", StringComparison.Ordinal)..
-            app.IndexOf("function renderSessionPin()", StringComparison.Ordinal)];
+            app.IndexOf("function applyConversationSnapshot(payload)", StringComparison.Ordinal)];
         var draftAssignments = System.Text.RegularExpressions.Regex.Matches(
             snapshotBlock,
             @"setPromptValue\(");
@@ -1588,9 +1615,9 @@ public sealed class AssistantWorkflowTests
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
 
-        Assert.Contains("data-tool-action=\"audiobook\"", html, StringComparison.Ordinal);
-        Assert.Contains("Hörbuch erstellen", html, StringComparison.Ordinal);
-        Assert.Contains("audiobook: [\"Hörbuch erstellen\"", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("data-tool-action=\"audiobook\"", html, StringComparison.Ordinal);
+        Assert.Contains("builtin.audiobook/create", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("displayName: \"Hörbuch erstellen\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain("payload.message?.contentProfile !== \"audiobook\"", app, StringComparison.Ordinal);
     }
 
@@ -1774,9 +1801,10 @@ public sealed class AssistantWorkflowTests
             IsAiConnectionEnabled = true, SelectedModel = "general-a", SelectedCodingModel = "coding-a",
         });
         var chats = environment.Get<IChatRepository>();
-        var active = await chats.CreateSessionAsync("Aktiv");
-        var other = await chats.CreateSessionAsync("Andere Sitzung");
-        if (coding) await chats.SetCodingWorkspacePathAsync(active.Id, environment.Directory, activateCoding: true);
+        var mode = coding ? ChatMode.Coding : ChatMode.General;
+        var active = await chats.CreateSessionAsync("Aktiv", mode);
+        var other = await chats.CreateSessionAsync("Andere Sitzung", mode);
+        if (coding) await chats.SetCodingWorkspacePathAsync(active.Id, environment.Directory);
         var message = await chats.AddMessageAsync(active.Id, ChatRole.Assistant, "", MessageStatus.Streaming);
         var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
         await coordinator.EmitGoAiUpdateAsync(new(GoAiAssistantUpdateKind.Status, message,
@@ -1817,28 +1845,42 @@ public sealed class AssistantWorkflowTests
         Assert.Equal(12345, completed.GetProperty("contextUsed").GetInt32());
     }
 
-    [Fact]
-    public async Task ProjectPlusCreatesVisibleSessionInSameWorkspaceWithoutChangingExistingHistory()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProjectPlusCreatesModeOwnedWorkspaceSessionWithoutChangingExistingHistory(bool coding)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
         var chats = environment.Get<IChatRepository>();
-        var first = await chats.CreateSessionAsync("Bisherige Sitzung");
-        await chats.SetCodingWorkspacePathAsync(first.Id, environment.Directory, activateCoding: true);
-        var group = Assert.Single(await chats.ListSessionGroupsAsync());
+        var mode = coding ? ChatMode.Coding : ChatMode.General;
+        var first = await chats.CreateSessionAsync("Bisherige Sitzung", mode);
+        await chats.SetCodingWorkspacePathAsync(first.Id, environment.Directory, activateCoding: coding);
+        var group = Assert.Single(await chats.ListSessionGroupsAsync(mode));
         await chats.SetSessionGroupCollapsedAsync(group.Id, true);
-        await chats.SetPinnedAsync(first.Id, true);
         var message = await chats.AddMessageAsync(first.Id, ChatRole.User, "Erhalten", MessageStatus.Completed);
+        await settings.UpdateAsync(current => current with
+        {
+            SelectedChatMode = mode,
+            ActiveGeneralSessionId = coding ? current.ActiveGeneralSessionId : first.Id,
+            ActiveCodingSessionId = coding ? first.Id : current.ActiveCodingSessionId,
+            ActiveSessionId = first.Id,
+        });
         var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
-        await HandleAsync(coordinator, "session.projectCreate", new { workspacePath = environment.Directory });
-        var created = (await chats.ListSessionsAsync()).Single(session => session.Id != first.Id);
+        await HandleAsync(coordinator, "session.projectCreate", new
+        {
+            workspacePath = environment.Directory,
+            chatMode = coding ? "coding" : "general",
+        });
+        var created = (await chats.ListSessionsAsync(mode)).Single(session => session.Id != first.Id);
         Assert.Equal(created.Id, settings.Current.ActiveSessionId);
         Assert.Equal(group.Id, created.SessionGroupId);
         Assert.Equal(environment.Directory, created.CodingWorkspacePath);
-        Assert.Null(created.PersistentToolAction);
-        Assert.False(Assert.Single(await chats.ListSessionGroupsAsync()).IsCollapsed);
-        Assert.True((await chats.GetSessionAsync(first.Id))!.IsPinned);
+        Assert.Null(created.PersistentExtensionActionId);
+        Assert.False(Assert.Single(await chats.ListSessionGroupsAsync(mode)).IsCollapsed);
+        Assert.Equal(mode, created.ChatMode);
+        Assert.Equal(mode, (await chats.GetSessionAsync(first.Id))!.ChatMode);
         Assert.NotNull(await chats.GetMessageAsync(message.Id));
     }
 
@@ -1945,26 +1987,31 @@ public sealed class AssistantWorkflowTests
     }
 
     [Fact]
-    public async Task BulkSessionDeletionPreservesPinnedSessionsUntilExplicitlyDeleted()
+    public async Task BulkSessionDeletionOnlyDeletesSessionsInTheSelectedMode()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
         var chats = environment.Get<IChatRepository>();
-        var pinned = await chats.CreateSessionAsync("Angepinnte Sitzung");
-        await chats.SetPinnedAsync(pinned.Id, true);
-        var pinnedMessage = await chats.AddMessageAsync(
-            pinned.Id,
+        var coding = await chats.CreateSessionAsync("Coding-Sitzung", ChatMode.Coding);
+        var codingMessage = await chats.AddMessageAsync(
+            coding.Id,
             ChatRole.Assistant,
             "Dieser Inhalt muss erhalten bleiben.",
             MessageStatus.Completed);
-        var unpinned = await chats.CreateSessionAsync("Normale Sitzung");
+        var general = await chats.CreateSessionAsync("General-Sitzung", ChatMode.General);
         await chats.AddMessageAsync(
-            unpinned.Id,
+            general.Id,
             ChatRole.Assistant,
             "Dieser Inhalt darf gesammelt gelöscht werden.",
             MessageStatus.Completed);
-        await settings.UpdateAsync(current => current with { ActiveSessionId = unpinned.Id });
+        await settings.UpdateAsync(current => current with
+        {
+            SelectedChatMode = ChatMode.General,
+            ActiveGeneralSessionId = general.Id,
+            ActiveCodingSessionId = coding.Id,
+            ActiveSessionId = general.Id,
+        });
         var coordinator = CreateCoordinator(
             environment,
             settings,
@@ -1972,24 +2019,94 @@ public sealed class AssistantWorkflowTests
 
         await HandleAsync(coordinator, "session.clear", new { });
 
-        var remaining = Assert.Single(await chats.ListSessionsAsync());
-        Assert.Equal(pinned.Id, remaining.Id);
-        Assert.True(remaining.IsPinned);
-        Assert.Equal(pinned.Id, settings.Current.ActiveSessionId);
-        Assert.NotNull(await chats.GetMessageAsync(pinnedMessage.Id));
-        Assert.Null(await chats.GetSessionAsync(unpinned.Id));
+        Assert.Equal(coding.Id, Assert.Single(await chats.ListSessionsAsync(ChatMode.Coding)).Id);
+        var replacement = Assert.Single(await chats.ListSessionsAsync(ChatMode.General));
+        Assert.Equal(replacement.Id, settings.Current.ActiveSessionId);
+        Assert.Equal(replacement.Id, settings.Current.ActiveGeneralSessionId);
+        Assert.Equal(coding.Id, settings.Current.ActiveCodingSessionId);
+        Assert.NotNull(await chats.GetMessageAsync(codingMessage.Id));
+        Assert.Null(await chats.GetSessionAsync(general.Id));
         Assert.Equal(
-            "Alle nicht angepinnten AI-Sitzungen gelöscht",
+            "Alle AI-Sitzungen der Ansicht „General“ gelöscht",
             settings.Current.LastActivityText);
+    }
 
-        await HandleAsync(coordinator, "session.clear", new { });
-        Assert.Equal(pinned.Id, Assert.Single(await chats.ListSessionsAsync()).Id);
-        Assert.Equal(pinned.Id, settings.Current.ActiveSessionId);
+    [Fact]
+    public async Task BulkSessionDeletionUsesTheConfirmedModeAfterTheViewChanged()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var general = await chats.CreateSessionAsync("General löschen", ChatMode.General);
+        var coding = await chats.CreateSessionAsync("Coding behalten", ChatMode.Coding);
+        await settings.UpdateAsync(current => current with
+        {
+            // Simulate a mode switch completing after the General confirmation
+            // dialog opened but before its session.clear request is handled.
+            SelectedChatMode = ChatMode.Coding,
+            ActiveGeneralSessionId = general.Id,
+            ActiveCodingSessionId = coding.Id,
+            ActiveSessionId = coding.Id,
+        });
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
 
-        await HandleAsync(coordinator, "session.delete", new { sessionId = pinned.Id });
-        Assert.Null(await chats.GetSessionAsync(pinned.Id));
-        Assert.NotEqual(pinned.Id, settings.Current.ActiveSessionId);
-        Assert.NotNull(await chats.GetSessionAsync(Assert.IsType<Guid>(settings.Current.ActiveSessionId)));
+        await HandleAsync(coordinator, "session.clear", new { chatMode = "general" });
+
+        Assert.Empty(await chats.ListSessionsAsync(ChatMode.General));
+        Assert.Equal(coding.Id, Assert.Single(await chats.ListSessionsAsync(ChatMode.Coding)).Id);
+        Assert.Equal(ChatMode.Coding, settings.Current.SelectedChatMode);
+        Assert.Null(settings.Current.ActiveGeneralSessionId);
+        Assert.Equal(coding.Id, settings.Current.ActiveCodingSessionId);
+        Assert.Equal(coding.Id, settings.Current.ActiveSessionId);
+        Assert.Equal(
+            "Alle AI-Sitzungen der Ansicht „General“ gelöscht",
+            settings.Current.LastActivityText);
+    }
+
+    [Fact]
+    public async Task ModeSwitchSnapshotsContainOnlyModeOwnedSessionsProjectsAndWorkspace()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var generalWorkspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "General Workspace")).FullName;
+        var codingWorkspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "Coding Workspace")).FullName;
+        var general = await chats.CreateSessionAsync("General-Sitzung", ChatMode.General);
+        var coding = await chats.CreateSessionAsync("Coding-Sitzung", ChatMode.Coding);
+        await chats.SetCodingWorkspacePathAsync(general.Id, generalWorkspace, activateCoding: false);
+        await chats.SetCodingWorkspacePathAsync(coding.Id, codingWorkspace, activateCoding: true);
+        await settings.UpdateAsync(current => current with
+        {
+            SelectedChatMode = ChatMode.General,
+            ActiveGeneralSessionId = general.Id,
+            ActiveCodingSessionId = coding.Id,
+            ActiveSessionId = general.Id,
+        });
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+
+        var generalSnapshot = JsonSerializer.SerializeToElement(
+            await coordinator.BuildSnapshotAsync(),
+            JsonSerializerOptions.Web);
+        Assert.Equal("general", generalSnapshot.GetProperty("chatMode").GetString());
+        Assert.Equal(general.Id, Assert.Single(generalSnapshot.GetProperty("sessions").EnumerateArray()).GetProperty("id").GetGuid());
+        var generalGroup = Assert.Single(generalSnapshot.GetProperty("sessionGroups").EnumerateArray());
+        Assert.Equal("general", generalGroup.GetProperty("chatMode").GetString());
+        Assert.Equal(generalWorkspace, generalSnapshot.GetProperty("workspacePath").GetString());
+
+        await HandleAsync(coordinator, "mode.switch", new { chatMode = "coding" });
+        var codingSnapshot = JsonSerializer.SerializeToElement(
+            await coordinator.BuildSnapshotAsync(),
+            JsonSerializerOptions.Web);
+        Assert.Equal("coding", codingSnapshot.GetProperty("chatMode").GetString());
+        Assert.Equal(coding.Id, Assert.Single(codingSnapshot.GetProperty("sessions").EnumerateArray()).GetProperty("id").GetGuid());
+        var codingGroup = Assert.Single(codingSnapshot.GetProperty("sessionGroups").EnumerateArray());
+        Assert.Equal("coding", codingGroup.GetProperty("chatMode").GetString());
+        Assert.Equal(codingWorkspace, codingSnapshot.GetProperty("workspacePath").GetString());
+        Assert.NotEqual(generalGroup.GetProperty("id").GetGuid(), codingGroup.GetProperty("id").GetGuid());
+        Assert.Equal(general.Id, settings.Current.ActiveGeneralSessionId);
+        Assert.Equal(coding.Id, settings.Current.ActiveCodingSessionId);
     }
 
     private static RecentActivityService CreateRecentActivity(SettingsCoordinator settings)
@@ -2146,7 +2263,7 @@ public sealed class AssistantWorkflowTests
 
         var completion = JsonSerializer.SerializeToElement(
             await coordinator.BuildSessionSidebarSnapshotAsync(true), JsonSerializerOptions.Web);
-        Assert.Equal("groupingCompleted,sessions,sessionGroups",
+        Assert.Equal("groupingCompleted,productName,assistantTitle,productIdentity,chatMode,selectedChatMode,sessions,sessionGroups",
             string.Join(",", completion.EnumerateObject().Select(property => property.Name)));
         Assert.True(completion.GetProperty("groupingCompleted").GetBoolean());
         Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("session.grouped"));
@@ -2163,7 +2280,7 @@ public sealed class AssistantWorkflowTests
         var item = Assert.Single(events);
         Assert.Equal("session.grouped", item.Type);
         Assert.False(item.Data.GetProperty("groupingCompleted").GetBoolean());
-        Assert.Equal("groupingCompleted,sessions,sessionGroups",
+        Assert.Equal("groupingCompleted,productName,assistantTitle,productIdentity,chatMode,selectedChatMode,sessions,sessionGroups",
             string.Join(",", item.Data.EnumerateObject().Select(property => property.Name)));
         Assert.Equal(second.Id, settings.Current.ActiveSessionId);
         Assert.Equal("Noch nicht gesendeter Entwurf", (await chats.GetSessionAsync(second.Id))!.Draft);

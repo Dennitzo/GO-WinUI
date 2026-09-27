@@ -49,16 +49,23 @@ public sealed class GoAiConnectionService(
         }
     }
 
-    public async Task<GoAiClient> CreateClientAsync(CancellationToken cancellationToken = default)
+    public Task<GoAiClient> CreateClientAsync(CancellationToken cancellationToken = default) =>
+        CreateClientAsync(baseAddressOverride: null, ensureProfileNativeRuntime: true, cancellationToken);
+
+    internal async Task<GoAiClient> CreateClientAsync(
+        Uri? baseAddressOverride,
+        bool ensureProfileNativeRuntime,
+        CancellationToken cancellationToken = default)
     {
         var connectionModeToken = GetConnectionModeToken();
-        if (!Uri.TryCreate(settings.Current.GoAiServerUrl.TrimEnd('/') + "/", UriKind.Absolute, out var baseAddress)
+        var addressText = baseAddressOverride?.AbsoluteUri ?? settings.Current.GoAiServerUrl;
+        if (!Uri.TryCreate(addressText.TrimEnd('/') + "/", UriKind.Absolute, out var baseAddress)
             || baseAddress.Scheme is not ("http" or "https"))
         {
             throw new InvalidOperationException("Die Docker-Gatewayadresse ist ungültig.");
         }
 
-        if (nativeRuntime is not null)
+        if (ensureProfileNativeRuntime && nativeRuntime is not null)
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, connectionModeToken);
             try

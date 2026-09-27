@@ -24,16 +24,18 @@ public sealed class LocalCodingToolExecutor
     private readonly string _rootPrefix;
     private readonly Func<CodingCommandProgress, Task>? _commandProgress;
     private readonly CodingRunEvidenceStore.CodingEvidenceCapture? _evidence;
+    private readonly CodingProcessLimits? _processLimits;
     private readonly StringComparison _pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
     public LocalCodingToolExecutor(string workspaceRoot, Func<CodingCommandProgress, Task>? commandProgress = null,
-        CodingRunEvidenceStore.CodingEvidenceCapture? evidence = null)
+        CodingRunEvidenceStore.CodingEvidenceCapture? evidence = null, CodingProcessLimits? processLimits = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRoot);
         _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspaceRoot));
         _rootPrefix = Path.EndsInDirectorySeparator(_root) ? _root : _root + Path.DirectorySeparatorChar;
         _commandProgress = commandProgress;
         _evidence = evidence;
+        _processLimits = processLimits;
         if (!Directory.Exists(_root)) throw new DirectoryNotFoundException("Der Coding-Projektordner existiert nicht.");
         RejectReparsePoints(_root);
     }
@@ -390,7 +392,7 @@ public sealed class LocalCodingToolExecutor
         startInfo.Environment["CI"] = "true";
         startInfo.Environment["NO_COLOR"] = "1";
         using var process = new Process { StartInfo = startInfo };
-        using var processJob = OperatingSystem.IsWindows() ? WindowsProcessJob.Create() : null;
+        using var processJob = OperatingSystem.IsWindows() ? WindowsProcessJob.Create(_processLimits) : null;
         var started = Stopwatch.StartNew();
         process.Start();
         try { processJob?.Assign(process); }

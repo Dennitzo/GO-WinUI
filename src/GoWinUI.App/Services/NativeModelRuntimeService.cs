@@ -16,34 +16,46 @@ public sealed class NativeModelRuntimeService : IDisposable
     private readonly Func<CancellationToken, Task> _stop;
     private readonly Func<Uri, CancellationToken, Task<bool?>> _gatewayIdle;
     private readonly TimeSpan _shutdownDrainTimeout;
+    private readonly string _runtimeEndpoint;
     private int _stopping;
     private bool _stopped;
     private DateTimeOffset _nextProbe;
     private Exception? _lastFailure;
 
     public NativeModelRuntimeService()
-        : this(IsLocalGateway, ProbeAsync, StartInstalledRuntimeAsync, () => DateTimeOffset.UtcNow) { }
+        : this(AssistantRuntimeProfile.Resolve()) { }
+
+    public NativeModelRuntimeService(AssistantRuntimeProfile profile)
+        : this(
+            IsLocalGateway,
+            token => ProbeAsync(profile.NativePort, token),
+            token => RunInstalledRuntimeAsync(profile, "Start", token),
+            () => DateTimeOffset.UtcNow,
+            token => RunInstalledRuntimeAsync(profile, "Stop", token),
+            runtimeEndpoint: $"http://127.0.0.1:{profile.NativePort}") { }
 
     internal NativeModelRuntimeService(Func<Uri, bool> isLocalGateway,
         Func<CancellationToken, Task<bool>> probe, Func<CancellationToken, Task> start,
         Func<DateTimeOffset>? now = null, Func<CancellationToken, Task>? stop = null,
-        Func<Uri, CancellationToken, Task<bool?>>? gatewayIdle = null, TimeSpan? shutdownDrainTimeout = null)
+        Func<Uri, CancellationToken, Task<bool?>>? gatewayIdle = null, TimeSpan? shutdownDrainTimeout = null,
+        string runtimeEndpoint = "http://127.0.0.1:8081")
     {
         _isLocalGateway = isLocalGateway;
         _probe = probe;
         _start = start;
-        _stop = stop ?? (token => RunInstalledRuntimeAsync("Stop", token));
+        _stop = stop ?? StopDefaultRuntimeAsync;
         _gatewayIdle = gatewayIdle ?? ProbeGatewayIdleAsync;
         _shutdownDrainTimeout = shutdownDrainTimeout ?? TimeSpan.FromSeconds(15);
         if (_shutdownDrainTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(shutdownDrainTimeout));
         _now = now ?? (() => DateTimeOffset.UtcNow);
+        _runtimeEndpoint = runtimeEndpoint;
     }
 
     public async Task EnsureStartedAsync(Uri gateway, CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _stopping) != 0) return;
         // Publish smoke checks use an isolated data profile and must not start shared AI services.
-        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GO_SMOKE_INSTANCE_KEY"))
+        if (AutostartDisabled()
             || !_isLocalGateway(gateway)) return;
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -60,7 +72,7 @@ public sealed class NativeModelRuntimeService : IDisposable
             {
                 await _start(cancellationToken).ConfigureAwait(false);
                 if (!await _probe(cancellationToken).ConfigureAwait(false))
-                    throw new InvalidOperationException("Windows llama.cpp wurde gestartet, ist auf http://127.0.0.1:8081 aber noch nicht erreichbar.");
+                    throw new InvalidOperationException($"Windows llama.cpp wurde gestartet, ist auf {_runtimeEndpoint} aber noch nicht erreichbar.");
             }
             _lastFailure = null;
             _nextProbe = _now().AddSeconds(5);
@@ -80,7 +92,7 @@ public sealed class NativeModelRuntimeService : IDisposable
     public async Task StopAsync(Uri gateway, CancellationToken cancellationToken = default)
     {
         BeginShutdown();
-        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GO_SMOKE_INSTANCE_KEY"))
+        if (AutostartDisabled()
             || !_isLocalGateway(gateway)) return;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -157,34 +169,42 @@ public sealed class NativeModelRuntimeService : IDisposable
             .Any(item => item.Address.MapToIPv6().Equals(address.MapToIPv6()));
     }
 
-    private static async Task<bool> ProbeAsync(CancellationToken cancellationToken)
+    private static bool AutostartDisabled() =>
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASSISTANT_DISABLE_RUNTIME_AUTOSTART"))
+        || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GO_SMOKE_INSTANCE_KEY"));
+
+    private static Task StopDefaultRuntimeAsync(CancellationToken cancellationToken) =>
+        RunInstalledRuntimeAsync(AssistantRuntimeProfile.Resolve(), "Stop", cancellationToken);
+
+    private static async Task<bool> ProbeAsync(int port, CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(2));
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false });
         try
         {
-            using var response = await http.GetAsync("http://127.0.0.1:8081/health", timeout.Token).ConfigureAwait(false);
+            using var response = await http.GetAsync($"http://127.0.0.1:{port}/health", timeout.Token).ConfigureAwait(false);
             return response.IsSuccessStatusCode;
         }
         catch (HttpRequestException) { return false; }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return false; }
     }
 
-    private static Task StartInstalledRuntimeAsync(CancellationToken cancellationToken) => RunInstalledRuntimeAsync("Start", cancellationToken);
-
-    private static async Task RunInstalledRuntimeAsync(string action, CancellationToken cancellationToken)
+    private static async Task RunInstalledRuntimeAsync(
+        AssistantRuntimeProfile profile,
+        string action,
+        CancellationToken cancellationToken)
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var stateDirectory = Path.Combine(userProfile, ".go-winui", "native-runtime");
+        var stateDirectory = profile.NativeStateDirectory;
         // Use stable paths instead of the single-file extraction directory. The supervisor remains
         // identifiable for shutdown and across application updates.
         var supportDirectory = Path.Combine(stateDirectory, "support");
-        foreach (var relative in new[] { Path.Combine("windows", "manage-coding-llama.ps1"), Path.Combine("workers", "coding", "session_cache.py"), Path.Combine("workers", "coding", "catalog.py") })
+        foreach (var relative in new[] { Path.Combine("windows", "manage-coding-llama.ps1"), Path.Combine("windows", "manage-llama-server.ps1"), Path.Combine("workers", "coding", "session_cache.py"), Path.Combine("workers", "coding", "catalog.py") })
         {
             var source = ApplicationAssets.ResolvePath("Assets", "NativeRuntime", relative);
             if (!File.Exists(source))
-                throw new FileNotFoundException("Die portable GO-Version enthält die Hilfsdateien für Windows llama.cpp nicht. GO bitte vollständig aktualisieren.", source);
+                throw new FileNotFoundException("Die portable Anwendung enthält die Hilfsdateien für Windows llama.cpp nicht. Bitte die Anwendung vollständig aktualisieren.", source);
             var destination = Path.Combine(supportDirectory, relative);
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
             var contents = await File.ReadAllBytesAsync(source, cancellationToken).ConfigureAwait(false);
@@ -197,6 +217,10 @@ public sealed class NativeModelRuntimeService : IDisposable
             }
         }
 
+        if (string.Equals(action, "Start", StringComparison.OrdinalIgnoreCase)
+            && !profile.HasExplicitNativeBinaryPath)
+            profile = profile with { NativeBinaryPath = await EnsureOfficialLlamaRuntimeAsync(profile, supportDirectory, cancellationToken).ConfigureAwait(false) };
+
         var info = new ProcessStartInfo
         {
             FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"),
@@ -207,9 +231,8 @@ public sealed class NativeModelRuntimeService : IDisposable
         // A detached Python/llama descendant can inherit pipe handles even after the
         // PowerShell launcher exits. Never wait for its process-lifetime stdout EOF.
         var errorFile = Path.Combine(stateDirectory, "startup-" + Guid.NewGuid().ToString("N") + ".error.txt");
-        foreach (var argument in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
-            Path.Combine(supportDirectory, "windows", "manage-coding-llama.ps1"), "-Action", action, "-StateDirectory", stateDirectory,
-            "-ModelRoot", ResolveModelRoot(userProfile), "-ErrorFile", errorFile }) info.ArgumentList.Add(argument);
+        foreach (var argument in BuildRuntimeManagerArguments(profile, action, supportDirectory, errorFile, userProfile))
+            info.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = info };
         if (!process.Start()) throw new InvalidOperationException("Der Starthelfer für Windows llama.cpp konnte nicht gestartet werden.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -231,9 +254,85 @@ public sealed class NativeModelRuntimeService : IDisposable
         }
     }
 
+    private static async Task<string> EnsureOfficialLlamaRuntimeAsync(
+        AssistantRuntimeProfile profile,
+        string supportDirectory,
+        CancellationToken cancellationToken)
+    {
+        var installRoot = Environment.GetEnvironmentVariable("ASSISTANT_LLAMA_INSTALL_ROOT");
+        if (string.IsNullOrWhiteSpace(installRoot))
+            installRoot = Path.Combine(profile.DataDirectory, "NativeRuntime", "llama.cpp");
+        installRoot = Path.GetFullPath(installRoot);
+        var resolvedPathFile = Path.Combine(profile.NativeStateDirectory, "official-llama-server.path");
+        var updater = Path.Combine(supportDirectory, "windows", "manage-llama-server.ps1");
+        var info = new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = supportDirectory,
+        };
+        foreach (var argument in BuildRuntimeUpdaterArguments(updater, installRoot, resolvedPathFile))
+            info.ArgumentList.Add(argument);
+        using var process = new Process { StartInfo = info };
+        if (!process.Start()) throw new InvalidOperationException("Der GitHub-Updater für Windows llama.cpp konnte nicht gestartet werden.");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMinutes(30));
+        try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            throw new InvalidOperationException("Das automatische llama.cpp-Update hat das Zeitlimit von 30 Minuten überschritten.");
+        }
+        if (process.ExitCode != 0 || !File.Exists(resolvedPathFile))
+            throw new InvalidOperationException($"Das automatische llama.cpp-Update ist fehlgeschlagen (Exitcode {process.ExitCode}).");
+        var binary = (await File.ReadAllTextAsync(resolvedPathFile, cancellationToken).ConfigureAwait(false)).Trim();
+        if (string.IsNullOrWhiteSpace(binary) || !Path.IsPathFullyQualified(binary) || !File.Exists(binary)
+            || !string.Equals(Path.GetFileName(binary), "llama-server.exe", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Der llama.cpp-Updater lieferte keinen gültigen nativen Serverpfad.");
+        var root = installRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        binary = Path.GetFullPath(binary);
+        if (!binary.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Der llama.cpp-Updater lieferte einen Pfad außerhalb seines Installationsverzeichnisses.");
+        return binary;
+    }
+
+    internal static string[] BuildRuntimeUpdaterArguments(string updater, string installRoot, string resolvedPathFile) =>
+    [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", updater,
+        "-Action", "Update", "-InstallRoot", installRoot, "-ResolvedPathFile", resolvedPathFile, "-SkipFirewall",
+    ];
+
+    internal static string[] BuildRuntimeManagerArguments(
+        AssistantRuntimeProfile profile,
+        string action,
+        string supportDirectory,
+        string errorFile,
+        string userProfile)
+    {
+        return
+        [
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+            Path.Combine(supportDirectory, "windows", "manage-coding-llama.ps1"),
+            "-Action", action,
+            "-StateDirectory", profile.NativeStateDirectory,
+            "-ModelRoot", ResolveModelRoot(userProfile, profile),
+            "-BinaryPath", profile.NativeBinaryPath,
+            "-Port", profile.NativePort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "-ErrorFile", errorFile,
+        ];
+    }
+
     internal static string ResolveModelRoot(string userProfile)
     {
-        var stackEnvironment = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GO-AI-Stack", "stack.env");
+        return ResolveModelRoot(userProfile, AssistantRuntimeProfile.Resolve());
+    }
+
+    private static string ResolveModelRoot(string userProfile, AssistantRuntimeProfile profile)
+    {
+        var stackEnvironment = Path.Combine(profile.StackDataRoot, "stack.env");
+        if (!File.Exists(stackEnvironment))
+            stackEnvironment = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GO-AI-Stack", "stack.env");
         IEnumerable<string> values = File.Exists(stackEnvironment) ? File.ReadLines(stackEnvironment) : [];
         var configured = values.FirstOrDefault(line => line.StartsWith("GO_AI_NATIVE_MODEL_ROOT=", StringComparison.Ordinal))
             ?? values.FirstOrDefault(line => line.StartsWith("GO_AI_CODING_MODEL_ROOT=", StringComparison.Ordinal));

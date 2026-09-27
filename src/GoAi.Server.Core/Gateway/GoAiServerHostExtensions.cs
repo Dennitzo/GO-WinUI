@@ -48,6 +48,7 @@ public static class GoAiServerHostExtensions
         services.AddSingleton<ServiceProbeService>();
         services.AddSingleton<ServerMetricsService>();
         services.AddSingleton<WebResearchService>();
+        services.AddSingleton<ScientificMetadataService>();
         services.AddSingleton<UtteranceIntentService>();
         services.AddSingleton<WorkerOrchestrator>();
         services.AddSingleton<LiveCaptionService>();

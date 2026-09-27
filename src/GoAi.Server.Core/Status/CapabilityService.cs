@@ -100,7 +100,16 @@ public sealed class CapabilityService
             10_000,
             true),
         SupportsCodingSessionContext: true,
-        SupportsRunSteering: true);
+        SupportsRunSteering: true,
+        Extensions:
+        [
+            new("builtin.web", "1.0.0", "active", ["web.search", "web.fetch", "web.deepResearch"]),
+            new("builtin.media", "1.0.0", "active", ["media.inspect", "media.analyze"]),
+            new("builtin.image", "1.0.0", "active", ["image.generate"]),
+            new("builtin.speech", "1.0.0", "active", ["speech.synthesize"]),
+            new("builtin.context", "1.0.0", "active", ["math.evaluate", "context.embed", "context.retrieve"]),
+            new("builtin.coding", "1.0.0", "active", ["coding.updatePlan"]),
+        ]);
 
     private static ModelCapability CreateModelCapability(
         string modelId,

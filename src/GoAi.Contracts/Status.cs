@@ -19,7 +19,16 @@ public sealed record CapabilitySnapshot(
     int UploadChunkSize,
     LiveCaptionCapability? LiveCaptions = null,
     bool SupportsCodingSessionContext = false,
-    bool SupportsRunSteering = false);
+    bool SupportsRunSteering = false,
+    IReadOnlyList<ExtensionCapability>? Extensions = null);
+
+public sealed record ExtensionCapability(
+    string Id,
+    string Version,
+    string State,
+    IReadOnlyList<string> Tools,
+    string? PackageDigest = null,
+    string? DisabledReason = null);
 
 public sealed record LiveCaptionCapability(
     bool Available,

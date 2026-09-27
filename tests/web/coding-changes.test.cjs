@@ -47,7 +47,8 @@ function harness() {
   for (const script of ["coding-timeline.js", "coding-changes.js"])
     vm.runInContext(fs.readFileSync(path.join(webRoot, script), "utf8"), context, { filename: script });
   for (const name of ["renderCodingChanges", "applyCodingChanges", "updateContextStripVisibility",
-    "sortCommittedMessages", "conversationMessagesDiffer", "applyConversationSnapshot", "handleHostMessage", "belongsToActiveSession", "persistMeasuredContext",
+    "sortCommittedMessages", "conversationMessagesDiffer", "applyConversationSnapshot", "isTerminalMessageStatus",
+    "upsertLiveMessage", "applyLiveDelta", "handleHostMessage", "belongsToActiveSession", "persistMeasuredContext",
     "cleanStatusMetadata", "uniqueStatusParts", "renderSpeechStatus"])
     loadAppFunction(context, name);
   context.renderMessages = () => context.renderCodingChanges();
@@ -286,10 +287,10 @@ test("the changes overview has one responsive outer scroller and all required ca
   assert.match(css, /focus-visible/);
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
   for (const asset of ["styles.css", "coding-changes.css", "coding-timeline.css", "bridge.js", "coding-timeline.js", "coding-changes.js", "app.js"]) {
-    const revision = asset === "app.js" ? "20260920-tools-1"
-      : asset === "styles.css" ? "20260920-tools-1"
+    const revision = asset === "app.js" ? "20260927-science-workbench-1"
+      : asset === "styles.css" ? "20260927-science-workbench-1"
       : asset === "coding-timeline.js" ? "20260920-artifacts-1"
-      : asset === "bridge.js" ? "20260919-agents-1" : "20260913-3";
+      : asset === "bridge.js" ? "20260927-science-workbench-1" : "20260913-3";
     assert.ok(html.includes(`${asset}?v=${revision}`), `${asset} must use the deployed cache revision`);
   }
   assert.ok(html.indexOf('src="coding-timeline.js') < html.indexOf('src="coding-changes.js'));

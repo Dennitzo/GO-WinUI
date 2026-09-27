@@ -3,6 +3,7 @@ using GoWinUI.App.Pages;
 using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
 using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Extensions;
 using GoWinUI.Core.Models;
 using System.Security.Cryptography;
 
@@ -285,6 +286,34 @@ public sealed class AiClientPersistenceTests
         Assert.Equal(PromptTriggerAction.ImageGeneration, editor.ToModel().Action);
         editor.ApplySaved(editor.ToModel() with { Revision = 5 });
         Assert.False(editor.IsDirty);
+    }
+
+    [Fact]
+    public void TriggerEditorUsesCanonicalActionIdsAndPreservesThirdPartyTriggers()
+    {
+        var now = DateTimeOffset.UtcNow;
+        const string thirdPartyAction = "com.example.assistant/sample-action";
+        var source = new PromptTrigger(
+            Guid.NewGuid(), PromptTriggerAction.Extension, "Erweitere", "Beschreibung",
+            PromptTriggerMatchMode.Prefix, true, 100, 4, now, now, thirdPartyAction);
+
+        var editor = new PromptTriggerEditorItem(source);
+
+        Assert.DoesNotContain(PromptTriggerEditorItem.AvailableActions,
+            option => option.Value == PromptTriggerAction.Extension);
+        Assert.Equal(thirdPartyAction, editor.ExtensionActionId);
+        Assert.Equal(thirdPartyAction, editor.SelectedActionOption?.ExtensionActionId);
+        Assert.Equal(thirdPartyAction, editor.ToModel().ExtensionActionId);
+        Assert.False(editor.IsDirty);
+
+        var imageGeneration = Assert.Single(
+            editor.ActionOptions,
+            option => option.Value == PromptTriggerAction.ImageGeneration);
+        editor.SelectedActionOption = imageGeneration;
+
+        Assert.Equal(BuiltInActionIds.GenerateImage, editor.ExtensionActionId);
+        Assert.Equal(BuiltInActionIds.GenerateImage, editor.ToModel().ExtensionActionId);
+        Assert.True(editor.IsDirty);
     }
 
     [Fact]

@@ -3,6 +3,7 @@ using GoAi.Server.Core.Coding;
 using GoAi.Server.Core.Models;
 using GoAi.Server.Core.Policies;
 using GoAi.Server.Core.Runtime;
+using GoAi.Server.Core.Research;
 using GoAi.Server.Core.Workers;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
@@ -38,6 +39,7 @@ public sealed partial class RunProcessor : BackgroundService
     private readonly AgentToolExecutor _toolExecutor;
     private readonly GoAiServerOptions _options;
     private readonly ServerRuntimeState _runtime;
+    private readonly ScientificMetadataService _scientificMetadata;
     private readonly Dictionary<string, CancellationTokenSource> _activeRuns = new(StringComparer.Ordinal);
     private readonly object _activeGate = new();
 
@@ -51,7 +53,8 @@ public sealed partial class RunProcessor : BackgroundService
         AgentToolCatalog toolCatalog,
         AgentToolExecutor toolExecutor,
         IOptions<GoAiServerOptions> options,
-        ServerRuntimeState runtime)
+        ServerRuntimeState runtime,
+        ScientificMetadataService scientificMetadata)
     {
         _queue = queue;
         _repository = repository;
@@ -63,6 +66,7 @@ public sealed partial class RunProcessor : BackgroundService
         _toolExecutor = toolExecutor;
         _options = options.Value;
         _runtime = runtime;
+        _scientificMetadata = scientificMetadata;
     }
 
     public bool Cancel(string runId)
@@ -264,7 +268,7 @@ public sealed partial class RunProcessor : BackgroundService
                 checkpoint = checkpoint with { Messages = continued, PreserveSessionPromptPrefix = true };
             }
             if (isCoding && request.DeepResearch)
-                checkpoint = ScheduleExplicitDeepResearch(checkpoint, runId, ExtractOriginalTask(request));
+                checkpoint = ScheduleExplicitDeepResearch(checkpoint, runId, ExtractOriginalTask(request), request.ResearchOptions);
             await _repository.AppendEventAsync(
                 runId,
                 RunEventTypes.QueueChanged,
@@ -368,27 +372,57 @@ public sealed partial class RunProcessor : BackgroundService
                         cancellationToken).ConfigureAwait(false);
                 }
                 contextLength = ResolveLoadedContextLength(contextLength, preparation);
-                research = await StagedWebResearchPipeline.ExecuteAsync(
-                    researchTask,
-                    selection.ModelId,
-                    selection.Role,
-                    searchTool,
-                    fetchTool,
-                    (modelRequest, token) => ExecuteStagedWebResearchModelAsync(
+                if (request.DeepResearch)
+                {
+                    var scheduled = ScheduleExplicitDeepResearch(
+                        new AgentRunCheckpoint([], 0, 0, 0, 0), runId, researchTask, request.ResearchOptions);
+                    var arguments = scheduled.ActiveToolCalls![0].Arguments;
+                    var advanced = await ExecuteCodingDeepResearchAsync(runId, "general-research", arguments,
+                        selection.ModelId, selection.Role, contextLength, CodingDeepResearchPipeline.MaximumModelCalls,
+                        CodingDeepResearchPipeline.MaximumToolCalls, effectiveTools, request.ReasoningEffort,
+                        schedulerLeaseAlreadyHeld: true, cancellationToken: cancellationToken)
+                        .ConfigureAwait(false);
+                    var payload = advanced.Result.Result;
+                    await _repository.AppendEventAsync(runId, RunEventTypes.ResearchCheckpointCreated, new
+                    {
+                        projectId = request.ResearchOptions?.ProjectId ?? "research-" + runId,
                         runId,
-                        modelRequest,
-                        request.ReasoningEffort,
+                        revision = 1,
+                        timestamp = DateTimeOffset.UtcNow,
+                        result = payload,
+                    }, cancellationToken).ConfigureAwait(false);
+                    var sourceCount = payload.TryGetProperty("sources", out var advancedSources)
+                        && advancedSources.ValueKind == JsonValueKind.Array ? advancedSources.GetArrayLength() : 0;
+                    var planCount = payload.TryGetProperty("plan", out var advancedPlan)
+                        && advancedPlan.ValueKind == JsonValueKind.Array ? advancedPlan.GetArrayLength() : 0;
+                    research = new("[GO_SCIENTIFIC_RESEARCH_DOSSIER]\n" + payload.GetRawText(),
+                        advanced.ModelCalls, advanced.ToolCalls, advanced.InputTokens, advanced.OutputTokens,
+                        planCount, sourceCount, false);
+                }
+                else
+                {
+                    research = await StagedWebResearchPipeline.ExecuteAsync(
+                        researchTask,
+                        selection.ModelId,
+                        selection.Role,
+                        searchTool,
+                        fetchTool,
+                        (modelRequest, token) => ExecuteStagedWebResearchModelAsync(
+                            runId,
+                            modelRequest,
+                            request.ReasoningEffort,
+                            contextLength,
+                            token),
+                        (call, token) => ExecuteStagedWebResearchToolAsync(
+                            runId,
+                            call,
+                            effectiveTools,
+                            CreateServerToolOperationId(runId, "general-research", roundCount, researchToolOrdinal++, call.Id),
+                            token),
+                        _toolCatalog.Validate,
                         contextLength,
-                        token),
-                    (call, token) => ExecuteStagedWebResearchToolAsync(
-                        runId,
-                        call,
-                        effectiveTools,
-                        CreateServerToolOperationId(runId, "general-research", roundCount, researchToolOrdinal++, call.Id),
-                        token),
-                    _toolCatalog.Validate,
-                    contextLength,
-                    cancellationToken).ConfigureAwait(false);
+                        cancellationToken).ConfigureAwait(false);
+                }
             }
 
             messages.Add(new LmChatMessage(
@@ -542,8 +576,8 @@ public sealed partial class RunProcessor : BackgroundService
                         else if (tool.Name == CodingDeepResearchPipeline.ToolName)
                         {
                             var research = await ExecuteCodingDeepResearchAsync(runId, operationId, call.Arguments, selection.ModelId,
-                                contextLength, CodingRunBudget.Remaining(maximumModelRounds, roundCount + 1), CodingRunBudget.Remaining(maximumToolCalls, toolCallCount),
-                                effectiveTools, request.ReasoningEffort, cancellationToken).ConfigureAwait(false);
+                                selection.Role, contextLength, CodingRunBudget.Remaining(maximumModelRounds, roundCount + 1), CodingRunBudget.Remaining(maximumToolCalls, toolCallCount),
+                                effectiveTools, request.ReasoningEffort, cancellationToken: cancellationToken).ConfigureAwait(false);
                             roundCount += research.ModelCalls;
                             toolCallCount += research.ToolCalls;
                             inputTokens += research.InputTokens;
@@ -593,6 +627,19 @@ public sealed partial class RunProcessor : BackgroundService
                         if (workingState is not null && tool.Name != CodingWorkingStateTools.PlanTool)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());
                         nextToolIndex++;
+                        if (request.DeepResearch && tool.Name == CodingDeepResearchPipeline.ToolName)
+                        {
+                            // The user explicitly selected Deep Research. Its pipeline has already planned, searched,
+                            // fetched originals, synthesized evidence and classified uncertainty. Returning that
+                            // verified report directly prevents the outer Coding loop from starting a second,
+                            // unbounded research cascade and exhausting the context before it can answer.
+                            deepResearchCompleted = true;
+                            await SaveCheckpointAsync().ConfigureAwait(false);
+                            var report = RenderExplicitDeepResearchReport(result.Result);
+                            if (await CompleteRunAsync(report, textWasStreamed: false).ConfigureAwait(false)) return;
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (!await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
+                        }
                         await SaveCheckpointAsync().ConfigureAwait(false);
                         continue;
                     }
@@ -654,7 +701,7 @@ public sealed partial class RunProcessor : BackgroundService
             var effort = _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
             var selectableTools = budgetSummary ? [] : availableTools.ToArray();
             var modelTools = CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding);
-            // A turn following go.selectTool has exactly one purpose: emit the
+            // A turn following assistant.selectTool has exactly one purpose: emit the
             // selected structured call. Some local models narrate that intent
             // before (or instead of) returning JSON. Keep this protocol-only
             // turn out of the visible answer, including its private reasoning.
@@ -1135,15 +1182,12 @@ public sealed partial class RunProcessor : BackgroundService
             if (!isCoding && selectedToolName is null && response.ToolCalls.Count > 0)
             {
                 if (response.ToolCalls.Count != 1
-                    || !string.Equals(
-                        response.ToolCalls[0].Name,
-                        AgentToolCatalog.SelectorToolName,
-                        StringComparison.Ordinal))
+                    || !AgentToolCatalog.IsSelectorToolName(response.ToolCalls[0].Name))
                 {
                     messages.Add(new LmChatMessage(
                         "system",
                         "Der letzte Toolauswahl-Turn war ungültig und wird nicht ausgeführt. Wähle aus der angebotenen Namensliste "
-                        + "genau einen Eintrag mit go.selectTool; danach liefert GO ausschließlich dessen vollständiges Schema."));
+                        + $"genau einen Eintrag mit {AgentToolCatalog.SelectorToolName}; danach liefert der Assistent ausschließlich dessen vollständiges Schema."));
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     continue;
                 }
@@ -1354,6 +1398,102 @@ public sealed partial class RunProcessor : BackgroundService
         }
     }
 
+    internal static string RenderExplicitDeepResearchReport(JsonElement result)
+    {
+        static string Text(JsonElement owner, string name, string fallback = "") =>
+            owner.ValueKind == JsonValueKind.Object
+            && owner.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(value.GetString()) ? value.GetString()! : fallback;
+        static IEnumerable<string> Texts(JsonElement owner, string name) =>
+            owner.ValueKind == JsonValueKind.Object
+            && owner.TryGetProperty(name, out var values)
+            && values.ValueKind == JsonValueKind.Array
+                ? values.EnumerateArray().Where(static item => item.ValueKind == JsonValueKind.String)
+                    .Select(static item => item.GetString()!).Where(static value => !string.IsNullOrWhiteSpace(value))
+                : [];
+        static string Inline(string value) => value.Replace("\r", " ", StringComparison.Ordinal)
+            .Replace("\n", " ", StringComparison.Ordinal).Trim();
+
+        var sources = result.TryGetProperty("sources", out var sourceArray) && sourceArray.ValueKind == JsonValueKind.Array
+            ? sourceArray.EnumerateArray().Select(source => new
+            {
+                Id = Text(source, "id"),
+                Title = Inline(Text(source, "title", "Originalquelle")),
+                Url = Text(source, "url"),
+            }).Where(static source => Uri.TryCreate(source.Url, UriKind.Absolute, out var uri)
+                && uri.Scheme is "http" or "https").ToArray()
+            : [];
+        var sourceById = sources.Where(static source => source.Id.Length > 0)
+            .ToDictionary(static source => source.Id, StringComparer.Ordinal);
+        var builder = new StringBuilder();
+        builder.AppendLine("## Forschungsbericht").AppendLine();
+        var status = Text(result, "conclusionStatus", result.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True
+            ? "stronglySupported" : "unresolved");
+        builder.Append("**Abschlussstatus:** `").Append(status).AppendLine("`").AppendLine();
+        if (result.TryGetProperty("problem", out var problem))
+        {
+            var interpreted = Text(problem, "interpretedQuestion", Text(problem, "originalQuestion"));
+            if (interpreted.Length > 0) builder.AppendLine("### Präzise Fragestellung").AppendLine().AppendLine(interpreted).AppendLine();
+            var assumptions = Texts(problem, "assumptions").ToArray();
+            if (assumptions.Length > 0)
+            {
+                builder.AppendLine("### Annahmen").AppendLine();
+                foreach (var item in assumptions) builder.Append("- ").AppendLine(Inline(item));
+                builder.AppendLine();
+            }
+        }
+        var hypotheses = Texts(result, "hypotheses").ToArray();
+        if (hypotheses.Length > 0)
+        {
+            builder.AppendLine("### Geprüfte Hypothesen").AppendLine();
+            foreach (var item in hypotheses) builder.Append("- ").AppendLine(Inline(item));
+            builder.AppendLine();
+        }
+        builder.AppendLine("### Belegte Befunde").AppendLine();
+        var findingCount = 0;
+        if (result.TryGetProperty("findings", out var findings) && findings.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var finding in findings.EnumerateArray())
+            {
+                var claim = Text(finding, "claim");
+                if (claim.Length == 0) continue;
+                findingCount++;
+                builder.Append(findingCount).Append(". ").AppendLine(Inline(claim));
+                var excerpt = Text(finding, "excerpt");
+                if (excerpt.Length > 0) builder.Append("   - Belegstelle: “").Append(Inline(excerpt)).AppendLine("”");
+                var sourceId = Text(finding, "sourceId");
+                if (sourceById.TryGetValue(sourceId, out var source))
+                    builder.Append("   - Quelle: [").Append(source.Title.Replace("]", "\\]", StringComparison.Ordinal))
+                        .Append("](").Append(source.Url).AppendLine(")");
+            }
+        }
+        if (findingCount == 0) builder.AppendLine("Keine hinreichend belegte Aussage konnte bestätigt werden.");
+        builder.AppendLine();
+        var verification = Texts(result, "verificationPlan").ToArray();
+        if (verification.Length > 0)
+        {
+            builder.AppendLine("### Verifikation").AppendLine();
+            foreach (var item in verification) builder.Append("- ").AppendLine(Inline(item));
+            builder.AppendLine();
+        }
+        var uncertainties = Texts(result, "uncertainties").ToArray();
+        if (uncertainties.Length > 0)
+        {
+            builder.AppendLine("### Grenzen und offene Punkte").AppendLine();
+            foreach (var item in uncertainties) builder.Append("- ").AppendLine(Inline(item));
+            builder.AppendLine();
+        }
+        if (sources.Length > 0)
+        {
+            builder.AppendLine("### Geprüfte Originalquellen").AppendLine();
+            foreach (var source in sources)
+                builder.Append("- [").Append(source.Title.Replace("]", "\\]", StringComparison.Ordinal))
+                    .Append("](").Append(source.Url).AppendLine(")");
+        }
+        return builder.ToString().TrimEnd();
+    }
+
     private async Task ProcessImageGenerationAsync(
         string runId,
         RunWorkload workload,
@@ -1528,9 +1668,41 @@ public sealed partial class RunProcessor : BackgroundService
     }
 
     private async Task<CodingDeepResearchExecution> ExecuteCodingDeepResearchAsync(
-        string runId, string parentOperationId, JsonElement arguments, string modelId, int contextLength, int remainingModelCalls,
-        int remainingToolCalls, IReadOnlyList<AgentToolSpec> effectiveTools, string? reasoningEffort, CancellationToken cancellationToken)
+        string runId, string parentOperationId, JsonElement arguments, string modelId, string modelRole, int contextLength, int remainingModelCalls,
+        int remainingToolCalls, IReadOnlyList<AgentToolSpec> effectiveTools, string? reasoningEffort,
+        bool schedulerLeaseAlreadyHeld = false, CancellationToken cancellationToken = default)
     {
+        var researchTask = arguments.GetProperty("task").GetString()!;
+        var autonomyName = arguments.TryGetProperty("autonomyLevel", out var autonomyValue) ? autonomyValue.GetString() : null;
+        var researchOptions = new DeepResearchOptions(
+            Profile: arguments.TryGetProperty("profile", out var profile)
+                ? DeepResearchProfileNames.Parse(profile.GetString())
+                : DeepResearchProfile.Auto,
+            ProjectId: arguments.TryGetProperty("projectId", out var projectId) ? projectId.GetString() : null,
+            AutonomyLevel: string.Equals(autonomyName, "codingWorkspaceResearch", StringComparison.OrdinalIgnoreCase)
+                    ? ResearchAutonomyLevel.CodingWorkspaceResearch
+                    : string.Equals(autonomyName, "sandboxResearch", StringComparison.OrdinalIgnoreCase)
+                            ? ResearchAutonomyLevel.SandboxResearch
+                    : ResearchAutonomyLevel.ReadOnlyResearch,
+            VerificationLevel: arguments.TryGetProperty("verificationLevel", out var verification)
+                ? verification.GetString() switch
+                {
+                    "formalWherePossible" => ResearchVerificationLevel.FormalWherePossible,
+                    "standard" => ResearchVerificationLevel.Standard,
+                    _ => ResearchVerificationLevel.MultiPath,
+                }
+                : ResearchVerificationLevel.MultiPath,
+            MaximumWorks: arguments.TryGetProperty("maximumWorks", out var works) ? works.GetInt32() : null,
+            MaximumFullTexts: arguments.TryGetProperty("maximumFullTexts", out var fullTexts) ? fullTexts.GetInt32() : null,
+            ResumeCheckpointId: arguments.TryGetProperty("resumeCheckpointId", out var resume) ? resume.GetString() : null,
+            ProtocolVersion: arguments.TryGetProperty("protocolVersion", out var protocol) ? protocol.GetInt64() : null,
+            PreferredLanguages: arguments.TryGetProperty("preferredLanguages", out var languages) && languages.ValueKind == JsonValueKind.Array
+                ? languages.EnumerateArray().Select(static value => value.GetString()!).ToArray() : null,
+            UpdateSince: arguments.TryGetProperty("updateSince", out var since) ? since.GetDateTimeOffset() : null);
+        var metadataCandidates = await _scientificMetadata.ResolveAsync(researchTask,
+            CodingDeepResearchPipeline.ResolveProfile(researchTask, researchOptions.Profile), cancellationToken).ConfigureAwait(false);
+        if (researchOptions.MaximumWorks is { } maximumWorks)
+            metadataCandidates = metadataCandidates.Take(maximumWorks).ToArray();
         var searchTool = _toolCatalog.Resolve("web.search", effectiveTools);
         var fetchTool = _toolCatalog.Resolve("web.fetch", effectiveTools);
         var researchToolOrdinal = 0;
@@ -1539,32 +1711,63 @@ public sealed partial class RunProcessor : BackgroundService
         var heartbeat = PublishCodingHeartbeatAsync(runId, 0, heartbeatCancellation.Token, "deepResearchWaiting");
         try
         {
-            await using (var preparationLease = await _scheduler.AcquireAsync("coding-deep-research", runId,
-                GpuLeaseMode.Shared, cancellationToken).ConfigureAwait(false))
+            async Task PrepareResearchModelAsync(CancellationToken token)
             {
-                var preparation = await _workers.PrepareLmModelWithStatusAsync(modelId, contextLength, null, cancellationToken).ConfigureAwait(false);
+                var preparation = await _workers.PrepareLmModelWithStatusAsync(modelId, contextLength, null, token).ConfigureAwait(false);
                 contextLength = ResolveLoadedContextLength(contextLength, preparation);
             }
-            return await CodingDeepResearchPipeline.ExecuteAsync(
-                arguments.GetProperty("task").GetString()!,
+
+            if (schedulerLeaseAlreadyHeld)
+            {
+                await PrepareResearchModelAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await using var preparationLease = await _scheduler.AcquireAsync("coding-deep-research", runId,
+                    GpuLeaseMode.Shared, cancellationToken).ConfigureAwait(false);
+                await PrepareResearchModelAsync(cancellationToken).ConfigureAwait(false);
+            }
+            return await CodingDeepResearchPipeline.ExecuteWithOptionsAsync(
+                researchTask,
                 arguments.TryGetProperty("maximumSearches", out var searches) ? searches.GetInt32() : 3,
-                arguments.TryGetProperty("maximumSources", out var sources) ? sources.GetInt32() : 4,
-                modelId, contextLength, remainingModelCalls, remainingToolCalls, searchTool, fetchTool,
+                arguments.TryGetProperty("maximumSources", out var sources) ? sources.GetInt32()
+                    : researchOptions.MaximumFullTexts is { } requestedFullTexts ? Math.Clamp(requestedFullTexts, 2, 6) : 4,
+                modelId, contextLength, modelRole, remainingModelCalls, remainingToolCalls, searchTool, fetchTool,
                 async (request, token) =>
                 {
+                    if (schedulerLeaseAlreadyHeld)
+                    {
+                        await PrepareResearchModelAsync(token).ConfigureAwait(false);
+                        return await ExecuteStagedWebResearchModelAsync(runId, request, reasoningEffort, contextLength, token).ConfigureAwait(false);
+                    }
                     await using var lease = await _scheduler.AcquireAsync("coding-deep-research", runId,
                         GpuLeaseMode.Shared, token).ConfigureAwait(false);
-                    var preparation = await _workers.PrepareLmModelWithStatusAsync(modelId, contextLength, null, token).ConfigureAwait(false);
-                    contextLength = ResolveLoadedContextLength(contextLength, preparation);
+                    await PrepareResearchModelAsync(token).ConfigureAwait(false);
                     // The pipeline's cancellation budget and the common model deadline remain authoritative.
                     return await ExecuteStagedWebResearchModelAsync(runId, request, reasoningEffort, contextLength, token).ConfigureAwait(false);
                 },
                 (call, token) => ExecuteStagedWebResearchToolAsync(runId, call, effectiveTools,
                     CreateServerToolOperationId(runId, parentOperationId, 0, researchToolOrdinal++, call.Id), token),
                 _toolCatalog.Validate,
-                (progress, token) => _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
-                    new ModelGenerationEvent(progress.State, CodingDeepResearchPipeline.ToolName), token),
-                cancellationToken).ConfigureAwait(false);
+                async (progress, token) =>
+                {
+                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                        new ModelGenerationEvent(progress.State, CodingDeepResearchPipeline.ToolName), token).ConfigureAwait(false);
+                    var researchEventType = progress.State switch
+                    {
+                        "deepResearchInterpretation" => RunEventTypes.ResearchProblemInterpreted,
+                        "deepResearchPlanning" => RunEventTypes.ResearchPlanUpdated,
+                        "deepResearchSearch" => RunEventTypes.ResearchSearchCompleted,
+                        "deepResearchFetch" => RunEventTypes.ResearchEvidenceExtracted,
+                        "deepResearchSynthesis" => RunEventTypes.ResearchVerificationUpdated,
+                        "deepResearchCompleted" => RunEventTypes.ResearchReportCompleted,
+                        _ => RunEventTypes.ResearchWarning,
+                    };
+                    await _repository.AppendEventAsync(runId, researchEventType,
+                        new ResearchProgressEvent(researchOptions.ProjectId ?? "research-" + runId, progress.State, 1,
+                            progress.Completed, progress.Total, DateTimeOffset.UtcNow), token).ConfigureAwait(false);
+                },
+                researchOptions, metadataCandidates, cancellationToken).ConfigureAwait(false);
         }
         catch (RunSteeringBoundaryException)
         {
@@ -1997,7 +2200,7 @@ public sealed partial class RunProcessor : BackgroundService
             var root = document.RootElement;
             if (root.ValueKind == JsonValueKind.Object
                 && root.TryGetProperty("schema", out var schema)
-                && string.Equals(schema.GetString(), "go.ai.agent.response.v1", StringComparison.Ordinal)
+                && (schema.GetString() is "assistant.agent.response.v1" or "go.ai.agent.response.v1")
                 && root.TryGetProperty("type", out var type)
                 && string.Equals(type.GetString(), "message", StringComparison.Ordinal)
                 && root.TryGetProperty("message", out var messageElement)

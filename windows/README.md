@@ -11,28 +11,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1
 
 ## Native Modelle und Docker-Gateway
 
-General, Coding, Vision und Embedding laufen unter Windows mit der vorhandenen Unsloth-Installation von
-`llama-server.exe`. Die GGUF-Dateien werden direkt aus dem lokalen Hugging-Face-Cache gelesen. Docker betreibt
+General, Coding, Vision und Embedding laufen unter Windows mit einem von GO verwalteten offiziellen
+`llama-server.exe` aus dem GitHub-Repository `ggml-org/llama.cpp`. Die GGUF-Dateien werden direkt aus dem
+lokalen Hugging-Face-Cache gelesen. Docker betreibt
 das GO-Gateway sowie die Sprach-, Bild- und Recherche-Worker. Der Gatewayzugriff auf die native Modellruntime
 erfolgt über `http://host.docker.internal:8081`; der GO-Client verbindet sich mit dem Gateway auf Port 8080.
 
-Die portable `GO.exe` startet die native Laufzeit bei aktivierter AI-Verbindung automatisch, wenn der
-konfigurierte Gateway auf diesem PC läuft. Die erforderlichen Hilfsdateien sind in der EXE enthalten;
+Die portable `GO.exe` prüft beim Start einer noch nicht laufenden nativen Laufzeit automatisch die aktuelle
+GitHub-Version, lädt die offiziellen Windows-CUDA-Archive und verifiziert deren von GitHub veröffentlichte
+SHA-256-Digests. Vollständig installierte Versionen bleiben getrennt erhalten. Ist GitHub vorübergehend nicht
+erreichbar, wird die zuletzt vollständig geprüfte Version verwendet. Eine laufende Modellinstanz wird durch
+ein Update nicht beendet; die neue Version gilt ab dem nächsten Start. Die erforderlichen Hilfsdateien sind
+in der EXE enthalten;
 der Start funktioniert auch außerhalb des Repository-Verzeichnisses und nach einem Windows-Neustart.
 Die Modellkataloge werden beim Öffnen der Einstellungen geladen. Ein bereits laufender Server wird wiederverwendet.
 
 Alle folgenden Befehle werden im Repository-Verzeichnis ausgeführt. Benötigt werden Docker Desktop,
-die für GO verwendete .NET-SDK-Version und die installierte Unsloth-Runtime mit Python und llama.cpp.
+die für GO verwendete .NET-SDK-Version und Python für den lokalen Modellkatalog. Eine externe llama.cpp-
+Installation ist nicht erforderlich.
 
 | Einstellung | Standard |
 |---|---|
 | Native Modellablage | `%USERPROFILE%\.cache\huggingface\hub` |
-| Native Serverdatei | `%USERPROFILE%\.unsloth\llama.cpp\build\bin\Release\llama-server.exe` |
+| Native Serverdatei | `<Assistent-Datenverzeichnis>\NativeRuntime\llama.cpp\versions\<GitHub-Tag>\llama-server.exe` |
 | Unsloth-Python | `%USERPROFILE%\.unsloth\studio\unsloth_studio\Scripts\python.exe` |
 | Native Prozessdaten und Logs | `%USERPROFILE%\.go-winui\native-runtime` |
 | Stackdaten (`DataRoot`) | `%PROGRAMDATA%\GO-AI-Stack` |
 | Sprach- und Bildmodelle (`ModelRoot`) | `<DataRoot>\Models` |
 | Compose-Umgebung | `<DataRoot>\stack.env` |
+
+`ASSISTANT_LLAMA_INSTALL_ROOT` legt bei Bedarf einen anderen verwalteten Installationsordner fest.
+`ASSISTANT_NATIVE_BINARY_PATH` bleibt ein expliziter Administrator-Override; bei gesetztem Wert wird das
+automatische GitHub-Update bewusst übersprungen.
 
 `-NativeModelRoot` wählt bei den Stackskripten einen anderen Cacheordner. Diesen Wert beim Bauen, Starten,
 Deployen und Aktualisieren konsistent übergeben. `-ModelRoot` bezeichnet bei diesen Skripten die separaten

@@ -49,6 +49,15 @@ public static class ClientToolNames
     public const string CodingRenderHtml = "coding.renderHtml";
     public const string CodingReadOutput = "coding.readOutput";
     public const string CodingSearchRunEvidence = "coding.searchRunEvidence";
+    public const string MathSymbolic = "math.symbolic";
+    public const string MathNumeric = "math.numeric";
+    public const string MathSmt = "math.smt";
+    public const string MathFormalProof = "math.formalProof";
+    public const string ResearchCodeWrite = "research.code.write";
+    public const string ResearchCodeExecute = "research.code.execute";
+    public const string ResearchCodeTest = "research.code.test";
+    public const string ResearchCodeBenchmark = "research.code.benchmark";
+    public const string ResearchCodeRestore = "research.code.restore";
     public const string DocumentRead = "document.read";
     public const string DocumentCreate = "document.create";
     public const string DocumentsList = "documents.list";

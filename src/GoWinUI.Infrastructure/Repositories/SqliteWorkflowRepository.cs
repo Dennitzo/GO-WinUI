@@ -158,12 +158,13 @@ public sealed class SqliteWorkflowRepository(SqliteDatabase database) : IWorkflo
         }
 
         var schema = schemaElement.GetString();
-        if (string.Equals(schema, "go.general.workflow.v1", StringComparison.Ordinal))
+        if (string.Equals(schema, "assistant.workflow.v1", StringComparison.Ordinal)
+            || string.Equals(schema, "go.general.workflow.v1", StringComparison.Ordinal))
         {
             if (!root.TryGetProperty("blocks", out var blocks)
                 || blocks.ValueKind != JsonValueKind.Array)
             {
-                throw new ArgumentException("GO-Workflows benötigen ein 'blocks'-Array.", nameof(workflow));
+                throw new ArgumentException("Assistant-Workflows benötigen ein 'blocks'-Array.", nameof(workflow));
             }
         }
         else if (string.Equals(schema, "barebone.general.workflow.v1", StringComparison.Ordinal))

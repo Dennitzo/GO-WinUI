@@ -6,6 +6,8 @@ using GoAi.Contracts;
 using GoWinUI.Core.Contracts;
 using GoWinUI.Core.Models;
 using GoWinUI.Core.Coding;
+using GoWinUI.Core.Extensions;
+using GoWinUI.App.Services.Extensions;
 
 namespace GoWinUI.App.Services;
 
@@ -18,7 +20,10 @@ public sealed class LocalToolBroker(
     GoAiConnectionService connection,
     IDocumentIngestor documents,
     LocalDocumentToolService documentTools,
-    IChatRepository chats)
+    IChatRepository chats,
+    IExtensionActionCatalog? extensionActions = null,
+    IExtensionRuntimeService? extensionRuntime = null,
+    GoWinUI.Core.Research.IResearchSandboxService? researchSandbox = null)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = GoAiProtocol.CreateJsonOptions();
@@ -31,30 +36,72 @@ public sealed class LocalToolBroker(
         string? codingWorkspacePath = null,
         Func<CodingCommandProgress, Task>? commandProgress = null,
         CodingRunEvidenceStore? evidenceStore = null,
+        PromptTriggerAction? runAction = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            ValidateProposal(proposal);
+            ExtensionToolDescriptor? extensionTool = null;
+            if (extensionActions?.TryGetToolByModelName(proposal.Name, out var registeredTool) == true
+                && registeredTool is not null
+                && !registeredTool.ActionId.StartsWith("builtin.", StringComparison.Ordinal))
+                extensionTool = registeredTool;
+            ValidateProposal(proposal, extensionTool: extensionTool);
+            if (extensionTool is not null)
+            {
+                if (extensionRuntime is null)
+                    throw new InvalidOperationException("Der ExtensionHost ist für das vorgeschlagene Modellwerkzeug nicht verfügbar.");
+                var workspaceRoot = await ResolveWorkspaceRootAsync(
+                    sessionId, codingWorkspacePath, cancellationToken).ConfigureAwait(false);
+                var extensionResult = await extensionRuntime.InvokeAsync(
+                    extensionTool.ActionId,
+                    proposal.Arguments,
+                    workspaceRoot,
+                    cancellationToken).ConfigureAwait(false);
+                return Result(proposal, "completed", Bounded(extensionResult));
+            }
             if (WorkspaceTools.IsLocal(proposal.Name))
             {
-                var workspaceResult = await new WorkspaceToolService(connection).ExecuteAsync(proposal, codingWorkspacePath, commandProgress, cancellationToken).ConfigureAwait(false);
+                var workspaceResult = await new WorkspaceToolService(connection).ExecuteAsync(
+                    proposal,
+                    codingWorkspacePath,
+                    commandProgress,
+                    cancellationToken).ConfigureAwait(false);
                 var workspaceJson = JsonSerializer.SerializeToElement(workspaceResult, JsonOptions);
                 var failed = workspaceJson.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False;
                 return Result(proposal, failed ? "failed" : "completed", workspaceResult,
                     failed ? "client.workspace_tool_failed" : null, failed ? "Workspace-Werkzeug fehlgeschlagen; Belege beachten." : null);
             }
             var coding = proposal.Name.StartsWith("coding.", StringComparison.Ordinal);
-            if (coding && string.IsNullOrWhiteSpace(codingWorkspacePath))
+            var scientific = proposal.Name.StartsWith("math.", StringComparison.Ordinal)
+                || proposal.Name.StartsWith("research.code.", StringComparison.Ordinal);
+            if (scientific && await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false) is { ChatMode: ChatMode.ClaudeScience } scienceSession)
             {
-                throw new InvalidOperationException("Dieser Lauf hat keinen ausgewählten Coding-Projektordner.");
+                return Result(proposal, "completed", await ExecuteScienceSandboxToolAsync(
+                    proposal, scienceSession, cancellationToken).ConfigureAwait(false));
+            }
+            if ((coding || scientific) && string.IsNullOrWhiteSpace(codingWorkspacePath))
+            {
+                throw new InvalidOperationException("Ausführbare Forschung benötigt einen ausgewählten Coding-Projektordner.");
             }
 
-            if (coding)
+            if (coding || scientific)
             {
                 if (evidenceStore is not null && (evidenceStore.SessionId != sessionId || evidenceStore.RootRunId != proposal.RunId))
                     throw new UnauthorizedAccessException("Der Werkzeugbelegspeicher gehört nicht zu dieser Sitzung und diesem Lauf.");
+                if (scientific)
+                {
+                    using var scientificEvidence = evidenceStore?.BeginStep(proposal.ProposalId, proposal.Name, proposal.Arguments);
+                    var scientificResult = await new ScientificResearchToolExecutor(codingWorkspacePath!, commandProgress, scientificEvidence)
+                        .ExecuteAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false);
+                    scientificEvidence?.SetResult(scientificResult);
+                    if (scientificResult.TryGetProperty("success", out var scientificSuccess)
+                        && scientificSuccess.ValueKind == JsonValueKind.False)
+                        return Result(proposal, "failed", scientificResult, "client.scientific_tool_failed",
+                            "Das wissenschaftliche Werkzeug meldete einen Fehler oder Restore-Konflikt.");
+                    return Result(proposal, "completed", scientificResult);
+                }
                 if (proposal.Name == "coding.readOutput")
                 {
                     var store = evidenceStore ?? throw new InvalidOperationException("Für diesen Lauf ist kein Werkzeugbelegspeicher verfügbar.");
@@ -149,9 +196,117 @@ public sealed class LocalToolBroker(
         }
     }
 
+    private async Task<object> ExecuteScienceSandboxToolAsync(ToolProposal proposal, ChatSession session, CancellationToken cancellationToken)
+    {
+        var sandbox = researchSandbox ?? throw new InvalidOperationException("Die isolierte Claude-Science-Sandbox ist nicht verfügbar. Das Tool fällt nicht auf Windows-Prozessausführung zurück.");
+        var projectId = "research-" + session.Id.ToString("N");
+        ScientificResearchToolExecutor.ValidateArguments(proposal.Name, proposal.Arguments);
+        var requestedProjectId = proposal.Arguments.GetProperty("projectId").GetString();
+        if (!string.Equals(requestedProjectId, projectId, StringComparison.Ordinal))
+            throw new UnauthorizedAccessException("Das Forschungswerkzeug darf nur die Sandbox dieser Sitzung verwenden.");
+
+        if (proposal.Name == ClientToolNames.ResearchCodeWrite)
+        {
+            var change = await sandbox.WriteTextAsync(projectId,
+                proposal.Arguments.GetProperty("path").GetString()!,
+                proposal.Arguments.GetProperty("content").GetString()!,
+                proposal.Arguments.TryGetProperty("expectedSha256", out var expected) ? expected.GetString() : null,
+                cancellationToken).ConfigureAwait(false);
+            return new { success = true, projectId, changeSetId = change.ChangeSetId, file = change.RelativePath,
+                change.BeforeSha256, change.AfterSha256, change.IsNewFile, root = "work/" };
+        }
+        if (proposal.Name == ClientToolNames.ResearchCodeRestore)
+        {
+            var changeSetId = proposal.Arguments.GetProperty("changeSetId").GetString()!;
+            await sandbox.RestoreChangeSetAsync(projectId, changeSetId, cancellationToken).ConfigureAwait(false);
+            return new { success = true, projectId, changeSetId, verificationStatus = "restored" };
+        }
+        if (proposal.Name == ClientToolNames.MathFormalProof)
+            return new { success = false, blocked = true, verificationStatus = "unavailable",
+                reason = "Für diese Runner-Version ist Lean 4 noch nicht installiert; es wird kein formaler Beweis behauptet." };
+
+        string script;
+        var arguments = Array.Empty<string>();
+        var workingDirectory = ".";
+        var timeout = proposal.Arguments.TryGetProperty("timeoutSeconds", out var timeoutElement) && timeoutElement.TryGetInt32(out var timeoutValue)
+            ? Math.Clamp(timeoutValue, 1, 7200) : 600;
+        string scriptPath;
+        if (proposal.Name == ClientToolNames.MathSymbolic)
+        {
+            var expression = JsonSerializer.Serialize(proposal.Arguments.GetProperty("expression").GetString());
+            var operation = JsonSerializer.Serialize(proposal.Arguments.GetProperty("operation").GetString());
+            var symbol = JsonSerializer.Serialize(proposal.Arguments.TryGetProperty("symbol", out var symbolValue) ? symbolValue.GetString() ?? "x" : "x");
+            script = $$"""
+                import json, sympy as sp
+                expression = {{expression}}
+                operation = {{operation}}
+                symbol = sp.Symbol({{symbol}})
+                value = sp.sympify(expression)
+                result = {"simplify": lambda: sp.simplify(value), "factor": lambda: sp.factor(value), "expand": lambda: sp.expand(value), "solve": lambda: sp.solve(value, symbol), "differentiate": lambda: sp.diff(value, symbol), "integrate": lambda: sp.integrate(value, symbol)}[operation]()
+                print(json.dumps({"success": True, "result": str(result), "latex": sp.latex(result), "sympyVersion": sp.__version__}))
+                """;
+            scriptPath = "generated/" + Guid.NewGuid().ToString("N") + ".py";
+        }
+        else if (proposal.Name == ClientToolNames.MathNumeric)
+        {
+            var expression = JsonSerializer.Serialize(proposal.Arguments.GetProperty("expression").GetString());
+            var precision = proposal.Arguments.TryGetProperty("precision", out var precisionValue) && precisionValue.TryGetInt32(out var digits)
+                ? Math.Clamp(digits, 15, 1000) : 80;
+            script = $$$"""
+                import json, mpmath as mp
+                mp.mp.dps = {{{precision}}}
+                expression = {{{expression}}}
+                namespace = {name: getattr(mp, name) for name in dir(mp) if not name.startswith("_")}
+                result = eval(expression, {"__builtins__": {}}, namespace)
+                print(json.dumps({"success": True, "result": str(result), "precision": mp.mp.dps, "mpmathVersion": mp.__version__}))
+                """;
+            scriptPath = "generated/" + Guid.NewGuid().ToString("N") + ".py";
+        }
+        else if (proposal.Name == ClientToolNames.MathSmt)
+        {
+            script = proposal.Arguments.GetProperty("source").GetString()!;
+            scriptPath = "generated/" + Guid.NewGuid().ToString("N") + ".py";
+        }
+        else
+        {
+            var requestedExecutable = proposal.Arguments.GetProperty("executable").GetString();
+            if (requestedExecutable is not ("python" or "python3" or "python3.12"))
+                throw new UnauthorizedAccessException("Die Claude-Science-Sandbox akzeptiert in dieser Runner-Version ausschließlich Python-Skripte.");
+            if (!proposal.Arguments.TryGetProperty("arguments", out var supplied) || supplied.GetArrayLength() == 0)
+                throw new ArgumentException("Gib als erstes Argument einen relativen Python-Skriptpfad unter work an.");
+            scriptPath = supplied[0].GetString()!;
+            arguments = supplied.EnumerateArray().Skip(1).Select(static item => item.GetString()!).ToArray();
+            workingDirectory = proposal.Arguments.TryGetProperty("workingDirectory", out var cwd) ? cwd.GetString() ?? "." : ".";
+            script = string.Empty;
+        }
+
+        if (!string.IsNullOrEmpty(script))
+        {
+            var change = await sandbox.WriteTextAsync(projectId, scriptPath, script, cancellationToken: cancellationToken).ConfigureAwait(false);
+            _ = change;
+        }
+        var repetitions = proposal.Name == ClientToolNames.ResearchCodeBenchmark
+            && proposal.Arguments.TryGetProperty("repetitions", out var reps) && reps.TryGetInt32(out var repCount)
+            ? Math.Clamp(repCount, 2, 20) : 1;
+        var results = new List<GoWinUI.Core.Research.ResearchSandboxRunResult>(repetitions);
+        for (var index = 0; index < repetitions; index++)
+        {
+            results.Add(await sandbox.RunPythonAsync(projectId, scriptPath, arguments, timeout, workingDirectory, cancellationToken).ConfigureAwait(false));
+        }
+        return new { success = results.All(static run => run.ExitCode == 0 && !run.TimedOut), projectId,
+            experimentId = proposal.Arguments.TryGetProperty("experimentId", out var experiment) ? experiment.GetString() : null,
+            processIsolation = "Docker cgroup and read-only container filesystem", networkIsolation = "Docker network none",
+            resourceLimits = new { cpuCores = 16, memory = "48g", projectStorage = "100g", maximumStageSeconds = 7200 },
+            verificationStatus = results.All(static run => run.ExitCode == 0 && !run.TimedOut) ? "ProcessSucceeded" : "ProcessFailed",
+            runs = results.Select(static run => new { run.RunId, run.ExitCode, run.TimedOut, run.StandardOutput, run.StandardError, run.StartedAt, run.CompletedAt, run.Command }) };
+    }
+
     private static int CodingResultLimit(JsonElement arguments) => arguments.TryGetProperty("maximumResults", out var maximum) ? maximum.GetInt32() : 5;
 
-    internal static void ValidateProposal(ToolProposal proposal, DateTimeOffset? currentTime = null)
+    internal static void ValidateProposal(
+        ToolProposal proposal,
+        DateTimeOffset? currentTime = null,
+        ExtensionToolDescriptor? extensionTool = null)
     {
         ArgumentNullException.ThrowIfNull(proposal);
         ValidateIdentifier(proposal.ProposalId, "proposalId");
@@ -180,10 +335,21 @@ public sealed class LocalToolBroker(
                 or "coding.readOutput" or "coding.searchRunEvidence" => ToolRiskClass.ReadOnly,
             "coding.write" or "coding.edit" or "coding.undo" => ToolRiskClass.LocalMutation,
             "coding.command" or WorkspaceTools.Open => ToolRiskClass.Process,
+            ClientToolNames.ResearchCodeWrite or ClientToolNames.ResearchCodeRestore => ToolRiskClass.LocalMutation,
+            ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt
+                or ClientToolNames.MathFormalProof or ClientToolNames.ResearchCodeExecute
+                or ClientToolNames.ResearchCodeTest or ClientToolNames.ResearchCodeBenchmark => ToolRiskClass.Process,
             WorkspaceTools.ImageInput => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentRead or ClientToolNames.DocumentsList
                 or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentCreate => ToolRiskClass.LocalMutation,
+            _ when extensionTool is not null => extensionTool.RiskClass switch
+            {
+                ExtensionToolRiskClass.ReadOnly => ToolRiskClass.ReadOnly,
+                ExtensionToolRiskClass.LocalMutation => ToolRiskClass.LocalMutation,
+                ExtensionToolRiskClass.Process => ToolRiskClass.Process,
+                _ => throw new InvalidDataException("Die Risikoklasse des Erweiterungswerkzeugs ist ungültig."),
+            },
             _ => throw new InvalidDataException($"Das Clientwerkzeug '{proposal.Name}' ist nicht freigegeben."),
         };
         if (proposal.RiskClass != expectedRisk)
@@ -193,7 +359,18 @@ public sealed class LocalToolBroker(
         }
 
         var arguments = proposal.Arguments;
+        if (extensionTool is not null)
+        {
+            ValidateExtensionArguments(extensionTool, arguments);
+            return;
+        }
         if (WorkspaceTools.IsLocal(proposal.Name)) { WorkspaceTools.Validate(proposal.Name, arguments); return; }
+        if (proposal.Name.StartsWith("math.", StringComparison.Ordinal)
+            || proposal.Name.StartsWith("research.code.", StringComparison.Ordinal))
+        {
+            ScientificResearchToolExecutor.ValidateArguments(proposal.Name, arguments);
+            return;
+        }
         switch (proposal.Name)
         {
             case "coding.readOutput":
@@ -294,6 +471,35 @@ public sealed class LocalToolBroker(
                 ValidateInteger(arguments, "endPage", 1, 1_000_000);
                 break;
         }
+    }
+
+    private async Task<string?> ResolveWorkspaceRootAsync(
+        Guid sessionId,
+        string? suppliedWorkspace,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(suppliedWorkspace) && Directory.Exists(suppliedWorkspace))
+            return Path.GetFullPath(suppliedWorkspace);
+        var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Die Sitzung des Erweiterungswerkzeugs wurde nicht gefunden.");
+        if (!string.IsNullOrWhiteSpace(session.CodingWorkspacePath) && Directory.Exists(session.CodingWorkspacePath))
+            return Path.GetFullPath(session.CodingWorkspacePath);
+        if (session.SessionGroupId is not { } groupId) return null;
+        var group = (await chats.ListSessionGroupsAsync(session.ChatMode, cancellationToken).ConfigureAwait(false))
+            .SingleOrDefault(item => item.Id == groupId);
+        return !string.IsNullOrWhiteSpace(group?.WorkspacePath) && Directory.Exists(group.WorkspacePath)
+            ? Path.GetFullPath(group.WorkspacePath)
+            : null;
+    }
+
+    private static void ValidateExtensionArguments(ExtensionToolDescriptor tool, JsonElement arguments)
+    {
+        var schema = tool.InputSchema;
+        var allowed = schema.GetProperty("properties").EnumerateObject()
+            .Select(static property => property.Name).ToHashSet(StringComparer.Ordinal);
+        var required = schema.GetProperty("required").EnumerateArray()
+            .Select(static item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
+        ValidateProperties(arguments, required, allowed);
     }
 
     private async Task<object> ListDocumentsAsync(Guid sessionId, CancellationToken cancellationToken)

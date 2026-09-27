@@ -106,6 +106,8 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             AiProvider = AiProviderKind.GoAiServer,
             IsAiConnectionEnabled = settings.Version < 13
                 || settings.IsAiConnectionEnabled,
+            IsAutomaticSpeechEnabled = settings.Version < 21
+                || settings.IsAutomaticSpeechEnabled,
             GoAiServerUrl = goAiServerUrl.TrimEnd('/'),
             GoAiProtocolVersion = string.IsNullOrWhiteSpace(settings.GoAiProtocolVersion)
                 ? "1.0"
@@ -129,6 +131,9 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             NavigationPaneWidth = Math.Clamp(settings.NavigationPaneWidth, 280, 520),
             Language = string.IsNullOrWhiteSpace(settings.Language) ? "de-DE" : settings.Language,
             LastRoute = string.IsNullOrWhiteSpace(settings.LastRoute) ? "assistant" : settings.LastRoute,
+            SelectedChatMode = Enum.IsDefined(settings.SelectedChatMode)
+                ? settings.SelectedChatMode
+                : ChatMode.General,
             LastActivityText = lastActivityAt is null ? null : lastActivityText,
             LastActivityAt = lastActivityAt,
             Window = window,

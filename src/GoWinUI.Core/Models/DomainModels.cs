@@ -2,7 +2,7 @@ namespace GoWinUI.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
-public enum PersistentToolAction { Audiobook, Coding }
+public enum ChatMode { General, Coding, ClaudeScience }
 public enum MessageContentProfile { General, Audiobook }
 public enum SessionContextProfile { General, Audiobook }
 public enum ProjectStatus { Active, Archived }
@@ -14,11 +14,10 @@ public sealed record ChatSession(
     string Title,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
+    ChatMode ChatMode,
     Guid? SelectedWorkflowId = null,
     string Draft = "",
-    bool IsPinned = false,
-    DateTimeOffset? PinnedAt = null,
-    PersistentToolAction? PersistentToolAction = null,
+    string? PersistentExtensionActionId = null,
     long ConversationRevision = 0,
     string? CodingWorkspacePath = null,
     Guid? SessionGroupId = null);
@@ -28,7 +27,8 @@ public sealed record ChatSessionGroup(
     string Name,
     bool IsCollapsed = false,
     DateTimeOffset CreatedAt = default,
-    string? WorkspacePath = null);
+    string? WorkspacePath = null,
+    ChatMode ChatMode = ChatMode.General);
 
 public sealed record SessionGroupAssignment(
     Guid? Id,
@@ -295,7 +295,7 @@ public sealed record WindowPlacement(
 
 public sealed record AppSettings
 {
-    public const int CurrentVersion = 19;
+    public const int CurrentVersion = 21;
     public const string DefaultSelectedModel = "gpt-oss-120b";
     public const string DefaultAccentColor = "#A970FF";
     public const string DefaultBackgroundColor = "#6B6872";
@@ -303,6 +303,7 @@ public sealed record AppSettings
 
     public int Version { get; init; } = CurrentVersion;
     public bool IsAiConnectionEnabled { get; init; } = true;
+    public bool IsAutomaticSpeechEnabled { get; init; } = true;
     public AiProviderKind AiProvider { get; init; } = AiProviderKind.GoAiServer;
     public string GoAiServerUrl { get; init; } = "http://192.168.0.67:8080";
     public string GoAiProtocolVersion { get; init; } = "1.0";
@@ -324,6 +325,12 @@ public sealed record AppSettings
     public bool IsNavigationPaneOpen { get; init; } = true;
     public bool IsAssistantSessionPaneOpen { get; init; } = true;
     public string LastRoute { get; init; } = "assistant";
+    public ChatMode SelectedChatMode { get; init; } = ChatMode.General;
+    public Guid? ActiveGeneralSessionId { get; init; }
+    public Guid? ActiveCodingSessionId { get; init; }
+    public Guid? ActiveClaudeScienceSessionId { get; init; }
+    // Compatibility alias for call sites that have not yet moved to the two
+    // mode-specific pointers. The coordinator keeps it synchronized.
     public Guid? ActiveSessionId { get; init; }
     public Guid? ActiveProjectId { get; init; }
     public string? LastActivityText { get; init; }

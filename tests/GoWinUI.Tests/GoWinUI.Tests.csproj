@@ -8,14 +8,15 @@
     <RootNamespace>GoWinUI.Tests</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="DocumentFormat.OpenXml" />
     <ProjectReference Include="..\..\src\GoWinUI.App\GoWinUI.App.csproj" />
     <ProjectReference Include="..\..\src\GoWinUI.Core\GoWinUI.Core.csproj" />
     <ProjectReference Include="..\..\src\GoWinUI.Infrastructure\GoWinUI.Infrastructure.csproj" />
+    <ProjectReference Include="..\ExtensionHost.TestExtension\ExtensionHost.TestExtension.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\ExtensionHost\ExtensionHost.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="PdfPig" />
     <PackageReference Include="xunit" />
@@ -24,4 +25,24 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
   </ItemGroup>
+
+  <Target Name="CopyExtensionHostTestArtifacts" AfterTargets="Build">
+    <ItemGroup>
+      <_ExtensionHostTestArtifacts Include="..\..\src\ExtensionHost\bin\$(Configuration)\net10.0\ExtensionHost.*" />
+      <_ExtensionHostTestArtifacts Include="..\..\src\ExtensionHost\bin\$(Configuration)\net10.0\GoWinUI.Core.dll" />
+      <_ExtensionHostFixtureArtifacts Include="..\ExtensionHost.TestExtension\bin\$(Configuration)\net10.0\ExtensionHost.TestExtension.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ExtensionHostTestArtifacts)"
+          DestinationFolder="$(OutDir)ExtensionHost"
+          SkipUnchangedFiles="true"
+          Condition="'@(_ExtensionHostTestArtifacts)' != ''" />
+    <Copy SourceFiles="@(_ExtensionHostFixtureArtifacts)"
+          DestinationFolder="$(OutDir)ExtensionHost.TestExtension"
+          SkipUnchangedFiles="true"
+          Condition="'@(_ExtensionHostFixtureArtifacts)' != ''" />
+    <Copy SourceFiles="$(OutDir)GoWinUI.Core.dll"
+          DestinationFolder="$(OutDir)ExtensionHost.TestExtension"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(OutDir)GoWinUI.Core.dll')" />
+  </Target>
 </Project>

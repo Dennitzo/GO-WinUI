@@ -65,13 +65,16 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
         }
 
         var modelStatus = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
-        if (!modelStatus.ProviderReachable)
-        {
-            throw new InvalidOperationException("Die Kontextlänge des ausgewählten General-AI-Modells konnte nicht ermittelt werden.");
-        }
         var selectedModel = modelStatus.Models.FirstOrDefault(item =>
-            item.Downloaded && string.Equals(item.Id, modelId, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidOperationException($"Das ausgewählte General-AI-Modell '{modelId}' ist nicht verfügbar.");
+            item.Downloaded && string.Equals(item.Id, modelId, StringComparison.OrdinalIgnoreCase));
+        if (selectedModel is null)
+        {
+            if (!modelStatus.ProviderReachable)
+            {
+                throw new InvalidOperationException("Die Kontextlänge des ausgewählten General-AI-Modells konnte nicht ermittelt werden.");
+            }
+            throw new InvalidOperationException($"Das ausgewählte General-AI-Modell '{modelId}' ist nicht verfügbar.");
+        }
         var contextLength = Math.Max(2_048, selectedModel.ContextTokens);
 
         var pages = new List<DocumentPage>();
