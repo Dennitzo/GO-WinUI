@@ -714,6 +714,9 @@ paths:
                   type: string
                 prompt:
                   type: string
+                preferredModelId:
+                  type: string
+                  description: Optionale exakte Modellkennung für die Medienanalyse.
                 options:
                   type: object
                   additionalProperties:
@@ -858,19 +861,29 @@ components:
           type: array
           maxItems: 16
           items:
-            enum: [screenCapture, documents, documentIo, workspace, visual-tools, pdf, coding, coding.evidence]
+            enum: [screenCapture, documents, documentIo, workspace, visual-tools, pdf, coding, coding.evidence, coding.process, workspace.open]
         allowedServerTools:
           type: array
           maxItems: 32
           description: >-
             Coding can select web.search, web.fetch and web.deepResearch autonomously.
-            web.deepResearch requires Coding mode and both web.search and web.fetch in this list.
+            web.deepResearch uses web.search and web.fetch from this list.
             Its arguments are task (1-4000 characters), maximumSearches (2-3, default 3),
-            maximumSources (2-6, default 4). Research is limited to 8 model turns, 9 web calls
-            and 420 seconds within the remaining run budget. Results retain verified source URLs,
-            verbatim evidence, uncertainties and provider=searxng/isFallback=false.
+            maximumSources (2-6, default 4), profile, autonomyLevel and verificationLevel.
+            A research project has no total wall-clock deadline; each model and connector call remains
+            bounded and the project continues from persisted checkpoints. Results retain verified source
+            URLs, verbatim evidence, uncertainties and provider=searxng/isFallback=false.
           items:
             enum: [web.search, web.fetch, web.deepResearch, media.inspect, media.analyze, image.generate, speech.synthesize, math.evaluate, context.embed, context.retrieve]
+        clientTools:
+          type: array
+          maxItems: 16
+          description: >-
+            Produktneutrale, vom Desktop verifizierte Erweiterungswerkzeuge. Der Gateway
+            stellt ausschließlich diese Schemata dem Modell bereit; die Ausführung erfolgt
+            nach einem Tool-Vorschlag lokal im isolierten ExtensionHost.
+          items:
+            $ref: "#/components/schemas/ToolDescriptor"
         limits:
           $ref: "#/components/schemas/RunLimits"
         sessionId:
@@ -894,6 +907,81 @@ components:
           $ref: "#/components/schemas/SessionContextDescriptor"
         conversationProfile:
           enum: [general, audiobook]
+        deepResearch:
+          type: boolean
+          default: false
+        researchOptions:
+          $ref: "#/components/schemas/DeepResearchOptions"
+    DeepResearchOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        profile:
+          enum: [auto, web, scientificEvidence, systematicReview, scopingReview, literatureUpdate, replicationAudit, openProblem, mathematicalInvestigation]
+          default: auto
+        projectId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        protocolVersion:
+          type: integer
+          minimum: 1
+        resumeCheckpointId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        autonomyLevel:
+          enum: [readOnlyResearch, codingWorkspaceResearch]
+          default: readOnlyResearch
+        verificationLevel:
+          enum: [standard, multiPath, formalWherePossible]
+          default: multiPath
+        maximumWorks:
+          type: integer
+          minimum: 1
+          maximum: 10000
+        maximumFullTexts:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        preferredLanguages:
+          type: array
+          maxItems: 16
+          items:
+            type: string
+            minLength: 1
+            maxLength: 16
+        updateSince:
+          type: string
+          format: date-time
+    ToolDescriptor:
+      type: object
+      additionalProperties: false
+      required: [name, description, riskClass, inputSchema, timeoutSeconds, maximumOutputBytes]
+      properties:
+        name:
+          type: string
+          pattern: "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$"
+          maxLength: 128
+        description:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        riskClass:
+          enum: [readOnly, localMutation, process]
+        inputSchema:
+          type: object
+          description: >-
+            Begrenztes JSON-Schema mit type=object, additionalProperties=false,
+            properties und optionaler required-Liste.
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 7200
+        maximumOutputBytes:
+          type: integer
+          minimum: 1024
+          maximum: 67108864
     DocumentContextDescriptor:
       type: object
       additionalProperties: false
@@ -1130,6 +1218,32 @@ components:
           const: 8388608
         liveCaptions:
           $ref: "#/components/schemas/LiveCaptionCapability"
+        extensions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExtensionCapability"
+    ExtensionCapability:
+      type: object
+      additionalProperties: false
+      required: [id, version, state, tools]
+      properties:
+        id:
+          type: string
+        version:
+          type: string
+        state:
+          type: string
+          enum: [active, disabled, pending, quarantined]
+        tools:
+          type: array
+          items:
+            type: string
+        packageDigest:
+          type: string
+          nullable: true
+        disabledReason:
+          type: string
+          nullable: true
     LiveCaptionCapability:
       type: object
       additionalProperties: false

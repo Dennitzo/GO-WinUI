@@ -22,6 +22,10 @@ services:
       - "8080:8080"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    environment:
+      ASSISTANT_LAN_WEB_UPSTREAM: ${ASSISTANT_LAN_WEB_UPSTREAM:-host.docker.internal:8090}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     tmpfs:
       - /tmp:size=64m,mode=1777
       - /data:size=16m,mode=0700

@@ -112,6 +112,9 @@ public sealed class ProtocolTests
 
         Assert.Contains(ClientToolNames.DocumentRead, snapshot.ClientTools);
         Assert.Contains(ClientToolNames.DocumentCreate, snapshot.ClientTools);
+        var extensions = Assert.IsAssignableFrom<IReadOnlyList<ExtensionCapability>>(snapshot.Extensions);
+        Assert.Contains(extensions, extension => extension.Id == "builtin.web" && extension.Tools.Contains("web.search"));
+        Assert.All(extensions, extension => Assert.DoesNotContain("go", extension.Id, StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

@@ -33,11 +33,12 @@ public sealed class ClientRestartRequestTests
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Erhaltener Kontext nach Neustart");
+        var session = await chats.CreateSessionAsync(
+            "Erhaltener Kontext nach Neustart",
+            coding ? ChatMode.Coding : ChatMode.General);
         var workspace = Path.Combine(environment.Directory, "workspace");
         Directory.CreateDirectory(workspace);
-        await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: coding);
-        await chats.SetPinnedAsync(session.Id, true);
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace);
         await chats.AddMessageAsync(session.Id, ChatRole.User, "Prüfe src/cache.cs und merke dir den Befund.", MessageStatus.Completed);
         var assistant = await chats.AddMessageAsync(session.Id, ChatRole.Assistant,
             "Die Datei enthält eine wiederverwendbare Sitzungskennung. Der nächste Schritt ist ein Fortsetzungstest.", previousStatus);
@@ -122,7 +123,7 @@ public sealed class ClientRestartRequestTests
         await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantWebBridge.ProtocolVersion, "session.open", "reopen",
             JsonSerializer.SerializeToElement(new { sessionId })), static (_, _, _) => Task.CompletedTask);
         Assert.Equal(sessionId, settings.Current.ActiveSessionId);
-        Assert.True((await chats.GetSessionAsync(sessionId))?.IsPinned);
+        Assert.Equal(coding ? ChatMode.Coding : ChatMode.General, (await chats.GetSessionAsync(sessionId))?.ChatMode);
 
         var history = await chats.ListMessagesAsync(sessionId);
         var assistant = (await chats.GetMessageAsync(assistantId))!;

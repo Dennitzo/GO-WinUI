@@ -484,11 +484,11 @@ public sealed class ModelRuntimeClientTests
         _ = await client.CompleteChatAsync(
             NativeModelCatalog.Qwen38Id,
             [new LmChatMessage("user", "Wähle das Werkzeug.")],
-            [new LmToolDefinition("go.selectTool", "Werkzeug wählen", schema)],
+            [new LmToolDefinition("assistant.selectTool", "Werkzeug wählen", schema)],
             modelRole: "general",
             reasoningEffort: "none",
             requireToolCall: true,
-            requiredToolName: "go.selectTool");
+            requiredToolName: "assistant.selectTool");
 
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
         Assert.False(body.RootElement.TryGetProperty("reasoning_effort", out _));
@@ -670,7 +670,7 @@ public sealed class ModelRuntimeClientTests
 
         var structured = new IncrementalVisibleTextGate(enabled: true);
         Assert.Null(structured.Push("  {\"schema\":"));
-        Assert.Null(structured.Push("\"go.ai.agent.response.v1\"}"));
+        Assert.Null(structured.Push("\"assistant.agent.response.v1\"}"));
         Assert.Null(structured.Flush());
         Assert.False(structured.HasStreamed);
     }

@@ -18,6 +18,10 @@ param(
 
     [string] $TensorSplit = '1,1',
 
+    [string] $ResolvedPathFile,
+
+    [string] $GitHubApiBase = 'https://api.github.com',
+
     [switch] $SkipFirewall,
 
     [ValidateRange(1, 3600)]
@@ -32,6 +36,21 @@ $firewallRuleName = "GO llama.cpp Server $Port (Private LAN)"
 $pidPath = Join-Path $InstallRoot 'llama-server.pid'
 $statePath = Join-Path $InstallRoot 'server-state.json'
 $logDirectory = Join-Path $InstallRoot 'logs'
+$updateLock = $null
+
+function Enter-UpdateLock {
+    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    $lockPath = Join-Path $InstallRoot 'update.lock'
+    $deadline = [DateTimeOffset]::Now.AddMinutes(2)
+    while ([DateTimeOffset]::Now -lt $deadline) {
+        try {
+            return [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        } catch [IO.IOException] {
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    throw "Another llama.cpp update still owns '$lockPath'."
+}
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -59,7 +78,8 @@ function Get-Utf8ResponseText {
 }
 
 function Get-LatestBinaryRelease {
-    $release = Invoke-GitHubRequest -Uri "https://api.github.com/repos/$repository/releases/latest"
+    $apiBase = $GitHubApiBase.TrimEnd('/')
+    $release = Invoke-GitHubRequest -Uri "$apiBase/repos/$repository/releases/latest"
     $pointerAsset = @($release.assets | Where-Object { $_.name -eq 'nightly-tag.txt' } | Select-Object -First 1)
     if ($pointerAsset.Count -eq 0) {
         return $release
@@ -71,7 +91,7 @@ function Get-LatestBinaryRelease {
         throw "The llama.cpp nightly release pointer returned an invalid tag: '$tag'."
     }
 
-    return Invoke-GitHubRequest -Uri "https://api.github.com/repos/$repository/releases/tags/$tag"
+    return Invoke-GitHubRequest -Uri "$apiBase/repos/$repository/releases/tags/$tag"
 }
 
 function Get-RequiredAsset {
@@ -95,8 +115,7 @@ function Assert-AssetDigest {
 
     $digest = [string] $Asset.digest
     if ([string]::IsNullOrWhiteSpace($digest)) {
-        Write-Warning "GitHub did not publish a digest for '$($Asset.name)'; only HTTPS transport and asset length were verified."
-        return
+        throw "GitHub did not publish a SHA-256 digest for '$($Asset.name)'. Automatic installation was refused."
     }
     if ($digest -notmatch '^sha256:(?<hash>[0-9a-fA-F]{64})$') {
         throw "Unsupported GitHub asset digest: $digest"
@@ -129,7 +148,10 @@ function Receive-ReleaseAsset {
         New-Item -ItemType File -Path $partial -Force | Out-Null
     }
     if ((Get-Item -LiteralPath $partial).Length -gt [long] $Asset.size) {
-        throw "The partial download is larger than the GitHub asset: $partial"
+        $quarantine = "$partial.corrupt-" + [DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss')
+        Move-Item -LiteralPath $partial -Destination $quarantine
+        New-Item -ItemType File -Path $partial -Force | Out-Null
+        Write-Warning "An oversized partial download was quarantined as '$quarantine'."
     }
 
     Write-Host "Downloading $($Asset.name) ..." -ForegroundColor Cyan
@@ -172,6 +194,8 @@ function Install-LatestLlamaServer {
     $cudaAsset = Get-RequiredAsset -Release $release -Name $cudaName
     $downloadDirectory = Join-Path $InstallRoot 'downloads'
     $versionDirectory = Join-Path (Join-Path $InstallRoot 'versions') $tag
+    $binaryZip = Join-Path $downloadDirectory $binaryName
+    $cudaZip = Join-Path $downloadDirectory $cudaName
     New-Item -ItemType Directory -Path $downloadDirectory -Force | Out-Null
 
     $installedServer = Get-ChildItem -LiteralPath $versionDirectory -Filter 'llama-server.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -180,8 +204,6 @@ function Install-LatestLlamaServer {
             throw "An incomplete version directory exists: $versionDirectory"
         }
 
-        $binaryZip = Join-Path $downloadDirectory $binaryName
-        $cudaZip = Join-Path $downloadDirectory $cudaName
         Receive-ReleaseAsset -Asset $binaryAsset -Destination $binaryZip
         Receive-ReleaseAsset -Asset $cudaAsset -Destination $cudaZip
 
@@ -208,6 +230,26 @@ function Install-LatestLlamaServer {
         Remove-Item -LiteralPath $staging -Recurse -Force
     }
 
+    $serverSha256 = (Get-FileHash -LiteralPath $installedServer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $previousManifestPath = Join-Path $InstallRoot 'current-release.json'
+    $previousManifest = if (Test-Path -LiteralPath $previousManifestPath -PathType Leaf) {
+        try { Get-Content -LiteralPath $previousManifestPath -Raw | ConvertFrom-Json } catch { $null }
+    } else { $null }
+    $previousServerHash = if ($null -ne $previousManifest -and
+        $null -ne $previousManifest.PSObject.Properties['serverSha256']) { [string]$previousManifest.serverSha256 } else { '' }
+    if ($null -ne $previousManifest -and [string]$previousManifest.releaseTag -eq $tag -and
+        -not [string]::IsNullOrWhiteSpace($previousServerHash)) {
+        if (-not [string]::Equals($serverSha256, [string]$previousManifest.serverSha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The installed llama-server.exe differs from the verified manifest for '$tag'."
+        }
+    } else {
+        if (-not (Test-Path -LiteralPath $binaryZip -PathType Leaf) -or -not (Test-Path -LiteralPath $cudaZip -PathType Leaf)) {
+            throw "The installed llama.cpp version '$tag' has no verifiable manifest or release archives."
+        }
+        Assert-AssetDigest -Asset $binaryAsset -Path $binaryZip
+        Assert-AssetDigest -Asset $cudaAsset -Path $cudaZip
+    }
+
     $metadata = [ordered]@{
         repository = $repository
         releaseTag = $tag
@@ -215,11 +257,45 @@ function Install-LatestLlamaServer {
         publishedAt = [string] $release.published_at
         cudaVersion = $CudaVersion
         serverPath = $installedServer.FullName
+        serverSha256 = $serverSha256
+        binaryAssetDigest = [string] $binaryAsset.digest
+        cudaAssetDigest = [string] $cudaAsset.digest
         installedAt = [DateTimeOffset]::Now.ToString('O')
     }
     $metadata | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $InstallRoot 'current-release.json') -Encoding UTF8
     Write-Host "llama.cpp $tag is ready: $($installedServer.FullName)" -ForegroundColor Green
     return $installedServer.FullName
+}
+
+function Get-InstalledLlamaServer {
+    $manifestPath = Join-Path $InstallRoot 'current-release.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $null }
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $candidate = [string] $manifest.serverPath
+        $expectedHash = [string] $manifest.serverSha256
+        if ([string]::IsNullOrWhiteSpace($candidate) -or -not [IO.Path]::IsPathRooted($candidate) -or
+            -not (Test-Path -LiteralPath $candidate -PathType Leaf) -or
+            [IO.Path]::GetFileName($candidate) -ne 'llama-server.exe' -or
+            $expectedHash -notmatch '^[0-9a-fA-F]{64}$') { return $null }
+        $root = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') + '\'
+        $resolved = [IO.Path]::GetFullPath($candidate)
+        if (-not $resolved.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+        $actualHash = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash
+        if (-not [string]::Equals($actualHash, $expectedHash, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+        return $resolved
+    } catch { return $null }
+}
+
+function Write-ResolvedServerPath {
+    param([Parameter(Mandatory = $true)] [string] $ServerPath)
+    if ([string]::IsNullOrWhiteSpace($ResolvedPathFile)) { return }
+    $target = [IO.Path]::GetFullPath($ResolvedPathFile)
+    $directory = Split-Path $target -Parent
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = $target + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    [IO.File]::WriteAllText($temporary, [IO.Path]::GetFullPath($ServerPath), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporary -Destination $target -Force
 }
 
 function Set-LanFirewallRule {
@@ -418,7 +494,19 @@ switch ($Action) {
         Set-LanFirewallRule
     }
     'Update' {
-        [void] (Install-LatestLlamaServer)
+        $updateLock = Enter-UpdateLock
+        try {
+            try {
+                $resolvedServer = Install-LatestLlamaServer
+            } catch {
+                $resolvedServer = Get-InstalledLlamaServer
+                if ($null -eq $resolvedServer) { throw }
+                Write-Warning "GitHub update check failed; continuing with the last verified llama.cpp installation. $($_.Exception.Message)"
+            }
+            Write-ResolvedServerPath -ServerPath $resolvedServer
+        } finally {
+            if ($null -ne $updateLock) { $updateLock.Dispose() }
+        }
     }
     'Start' {
         Start-LlamaServer

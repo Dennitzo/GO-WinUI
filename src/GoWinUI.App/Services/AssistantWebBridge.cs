@@ -5,31 +5,38 @@ using Microsoft.Extensions.Logging;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
 
 namespace GoWinUI.App.Services;
 
 public sealed class AssistantWebBridge : IDisposable
 {
+    private static readonly Action<ILogger, Exception?> LogLanHostUnavailable = LoggerMessage.Define(
+        LogLevel.Warning,
+        new EventId(9410, "AssistantLanHostUnavailable"),
+        "Die LAN-Browseroberfläche konnte nicht gestartet werden; die Desktop-WebView bleibt verfügbar.");
     public const int ProtocolVersion = 1;
-    public const string VirtualHost = "go.local";
-    private const int MaximumIncomingMessageLength = 1_048_576;
+    public const string VirtualHost = "assistant.local";
+    private const int MaximumIncomingMessageLength = 100_663_296;
     private const int MaximumOutgoingMessageLength = 16_777_216;
     private static readonly HashSet<string> AllowedIncomingTypes = new(StringComparer.Ordinal)
     {
         "app.ready", "conversation.refresh", "chat.send", "chat.steer", "chat.cancel", "session.create", "session.open",
         "reasoning.get", "reasoning.set",
-        "session.rename", "session.pin", "session.delete", "session.clear", "session.draft", "session.groupCollapse", "session.projectCreate", "session.workspaceCreate", "document.pick", "document.paste",
+        "session.rename", "session.delete", "session.clear", "session.draft", "session.groupCollapse", "session.projectCreate", "session.workspaceCreate", "mode.switch", "action.invoke", "document.pick", "document.paste", "document.upload",
         "document.remove", "attachment.remove", "workflow.list", "workflow.insert", "workflow.create",
         "workflow.update", "workflow.delete",
-        "workflow.createFromMessage", "chat.exportPdf", "message.exportPdf", "message.copy",
+        "workflow.createFromMessage", "message.exportPdf", "message.copy",
+        "memory.list", "memory.create", "memory.update", "memory.pin", "memory.confirm", "memory.delete", "memory.autoCapture",
+        "research.list", "research.open", "research.export",
         "artifact.save", "artifact.preview", "artifact.open", "screen.capture", "screenClip.start", "screenClip.stop", "screenClip.cancel",
         "audioCapture.start", "audioCapture.stop", "audioCapture.cancel",
         "microphone.start", "microphone.audio", "microphone.speak", "microphone.stopSpeech", "microphone.toggleSpeechPause", "microphone.stop", "microphone.cancel",
-        "liveCaption.start", "liveCaption.stop", "session.tool", "ui.sessionPane", "external.open",
+        "liveCaption.start", "liveCaption.stop", "ui.sessionPane", "external.open",
     };
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
-        "state.snapshot", "chat.started", "chat.delta", "chat.completed",
+        "state.snapshot", "chat.queued", "queue.changed", "chat.started", "chat.delta", "chat.completed",
         "chat.cancelled", "chat.failed", "session.changed", "session.grouped", "workflow.snapshot",
         "workflow.changed", "workflow.draft", "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
         "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
@@ -37,6 +44,17 @@ public sealed class AssistantWebBridge : IDisposable
         "conversation.snapshot", "conversation.messageCommitted", "coding.changes",
         "reasoning.snapshot",
         "chat.steer.accepted",
+        "action.completed", "memory.snapshot", "memory.changed", "research.snapshot", "research.exported",
+    };
+    private static readonly HashSet<string> ClientScopedOutgoingTypes = new(StringComparer.Ordinal)
+    {
+        "state.snapshot", "conversation.snapshot",
+        "session.changed", "session.grouped", "workflow.snapshot", "workflow.draft",
+        "document.changed", "document.import.started", "document.import.progress", "document.import.completed",
+        "draft.saved", "speech.status", "speech.progress", "caption.changed", "screenClip.changed",
+        "audioCapture.changed", "capture.required", "capture.cancelled", "microphone.changed",
+        "microphone.transcript", "artifact.previewReady", "host.error",
+        "reasoning.snapshot", "chat.steer.accepted", "action.completed", "memory.snapshot", "research.snapshot", "research.exported",
     };
     private static readonly HashSet<string> ReadableBlockKinds = new(StringComparer.Ordinal)
     {
@@ -55,6 +73,9 @@ public sealed class AssistantWebBridge : IDisposable
     private ReadFromContextTarget? _activeReadFromContextTarget;
     private bool _initialized;
     private bool _disposed;
+    private AssistantLanWebHost? _lanHost;
+    private readonly ConcurrentDictionary<string, string> _requestClients = new(StringComparer.Ordinal);
+    private readonly ConcurrentQueue<string> _requestClientOrder = new();
 
     public AssistantWebBridge(WebView2 webView, ILogger<AssistantWebBridge> logger)
     {
@@ -69,9 +90,22 @@ public sealed class AssistantWebBridge : IDisposable
 
     public Func<ReadFromContextTarget, CancellationToken, Task<bool>>? ReadFromContextValidator { get; set; }
 
+    internal Func<Guid, CancellationToken, Task<LanArtifactResource?>>? LanArtifactResolver { get; set; }
+
+    internal Func<Guid, string, CancellationToken, Task<string?>>? LanCodingPreviewResolver { get; set; }
+
     internal static bool IsIncomingTypeAllowed(string type) => AllowedIncomingTypes.Contains(type);
 
     internal static bool IsOutgoingTypeAllowed(string type) => AllowedOutgoingTypes.Contains(type);
+
+    internal static bool IsClientScopedOutgoingType(string type) => ClientScopedOutgoingTypes.Contains(type);
+
+    internal static object BuildProtocolContract() => new
+    {
+        version = ProtocolVersion,
+        clientActions = AllowedIncomingTypes.Order(StringComparer.Ordinal).ToArray(),
+        hostEvents = AllowedOutgoingTypes.Order(StringComparer.Ordinal).ToArray(),
+    };
 
     public async Task InitializeAsync(string webRoot, string userDataFolder, string? previewRoot = null)
     {
@@ -99,7 +133,7 @@ public sealed class AssistantWebBridge : IDisposable
         {
             // A stale/locked profile must not prevent the rest of the desktop app from opening.
             // Keep the configured directory as the first choice so the profile remains persistent.
-            var fallbackFolder = Path.Combine(Path.GetTempPath(), "GO", "WebView2", Guid.NewGuid().ToString("N"));
+            var fallbackFolder = Path.Combine(Path.GetTempPath(), "LocalAssistant", "WebView2", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(fallbackFolder);
             AppLog.WebViewProfileFallback(_logger, exception);
             environment = await CoreWebView2Environment.CreateWithOptionsAsync(null, fallbackFolder, null);
@@ -133,6 +167,23 @@ public sealed class AssistantWebBridge : IDisposable
         core.ProcessFailed += OnProcessFailed;
         core.ContextMenuRequested += OnContextMenuRequested;
         _initialized = true;
+        var dataDirectory = Directory.GetParent(userDataFolder)?.FullName ?? userDataFolder;
+        _lanHost = new AssistantLanWebHost(dataDirectory, _logger);
+        _lanHost.MessageReceived += OnLanMessageReceived;
+        _lanHost.ArtifactResolver = LanArtifactResolver;
+        _lanHost.CodingPreviewResolver = LanCodingPreviewResolver;
+        try
+        {
+            await _lanHost.StartAsync(webRoot, previewRoot);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            var lanHost = _lanHost;
+            _lanHost = null;
+            lanHost.MessageReceived -= OnLanMessageReceived;
+            await lanHost.DisposeAsync();
+            LogLanHostUnavailable(_logger, exception);
+        }
     }
 
     public void NavigateToApp()
@@ -158,11 +209,12 @@ public sealed class AssistantWebBridge : IDisposable
             throw new ArgumentOutOfRangeException(nameof(type), type, "Unbekannter ausgehender Bridge-Typ.");
         }
 
+        var effectiveRequestId = string.IsNullOrWhiteSpace(requestId) ? Guid.NewGuid().ToString("D") : requestId;
         var envelope = new
         {
             version = ProtocolVersion,
             type,
-            requestId = string.IsNullOrWhiteSpace(requestId) ? Guid.NewGuid().ToString("D") : requestId,
+            requestId = effectiveRequestId,
             payload,
         };
         var json = JsonSerializer.Serialize(envelope, SerializerOptions);
@@ -171,10 +223,24 @@ public sealed class AssistantWebBridge : IDisposable
             throw new InvalidOperationException("Die ausgehende WebView-Nachricht überschreitet das Größenlimit.");
         }
 
+        var clientScoped = false;
+        string? targetClientId = null;
+        if (IsClientScopedOutgoingType(type)
+            && _requestClients.TryGetValue(effectiveRequestId, out var resolvedClientId))
+        {
+            clientScoped = true;
+            targetClientId = resolvedClientId;
+        }
+        if (clientScoped && targetClientId != "desktop")
+        {
+            return _lanHost?.SendToClientAsync(targetClientId!, json) ?? Task.CompletedTask;
+        }
+
+        var broadcastToLan = !clientScoped;
         if (_dispatcher.HasThreadAccess)
         {
             PostOnUiThread(json);
-            return Task.CompletedTask;
+            return broadcastToLan ? BroadcastToLanAsync(json) : Task.CompletedTask;
         }
 
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -201,7 +267,7 @@ public sealed class AssistantWebBridge : IDisposable
             }
         }
 
-        return completion.Task;
+        return broadcastToLan ? CompleteAndBroadcastAsync(completion.Task, json) : completion.Task;
     }
 
     public async Task PostErrorAsync(string message, string? requestId = null)
@@ -232,6 +298,13 @@ public sealed class AssistantWebBridge : IDisposable
         }
         _activeReadFromContextTarget = null;
         ReadFromContextValidator = null;
+        if (_lanHost is not null)
+        {
+            var lanHost = _lanHost;
+            lanHost.MessageReceived -= OnLanMessageReceived;
+            _ = DisposeLanHostAsync(lanHost);
+            _lanHost = null;
+        }
     }
 
     private void PostOnUiThread(string json)
@@ -242,6 +315,26 @@ public sealed class AssistantWebBridge : IDisposable
         }
 
         _webView.CoreWebView2?.PostWebMessageAsJson(json);
+    }
+
+    private async Task CompleteAndBroadcastAsync(Task nativePost, string json)
+    {
+        await nativePost.ConfigureAwait(false);
+        await BroadcastToLanAsync(json).ConfigureAwait(false);
+    }
+
+    private Task BroadcastToLanAsync(string json) =>
+        _lanHost?.BroadcastAsync(json) ?? Task.CompletedTask;
+
+    private static async Task DisposeLanHostAsync(AssistantLanWebHost host) =>
+        await host.DisposeAsync().ConfigureAwait(false);
+
+    private void OnLanMessageReceived(object? sender, WebBridgeMessageEventArgs args)
+    {
+        if (_disposed) return;
+        if (!string.IsNullOrWhiteSpace(args.Envelope.ClientId))
+            RegisterRequestClient(args.Envelope.RequestId, args.Envelope.ClientId);
+        _dispatcher.TryEnqueue(() => MessageReceived?.Invoke(this, args));
     }
 
     private async void OnWebMessageReceived(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
@@ -261,18 +354,14 @@ public sealed class AssistantWebBridge : IDisposable
                 throw new JsonException("Die Bridge-Nachricht überschreitet das Größenlimit.");
             }
 
-            var envelope = JsonSerializer.Deserialize<WebBridgeEnvelope>(json, SerializerOptions)
-                ?? throw new JsonException("Leere Bridge-Nachricht.");
-            if (envelope.Version != ProtocolVersion
-                || !IsIncomingTypeAllowed(envelope.Type)
-                || string.IsNullOrWhiteSpace(envelope.RequestId)
-                || envelope.RequestId.Length > 128
-                || envelope.Payload.ValueKind is not JsonValueKind.Object)
+            if (!TryParseIncomingEnvelope(json, out var envelope))
             {
                 throw new JsonException("Ungültiger Bridge-Vertrag.");
             }
 
-            MessageReceived?.Invoke(this, new WebBridgeMessageEventArgs(envelope));
+            var desktopEnvelope = envelope! with { ClientId = "desktop" };
+            RegisterRequestClient(desktopEnvelope.RequestId, desktopEnvelope.ClientId);
+            MessageReceived?.Invoke(this, new WebBridgeMessageEventArgs(desktopEnvelope));
         }
         catch (Exception exception) when (exception is JsonException or InvalidOperationException)
         {
@@ -280,6 +369,44 @@ public sealed class AssistantWebBridge : IDisposable
             await PostErrorAsync("Ungültige Nachricht aus der Chat-Oberfläche.");
         }
     }
+
+    internal static bool TryParseIncomingEnvelope(string json, out WebBridgeEnvelope? envelope)
+    {
+        envelope = null;
+        if (json.Length > MaximumIncomingMessageLength) return false;
+        try
+        {
+            envelope = JsonSerializer.Deserialize<WebBridgeEnvelope>(json, SerializerOptions);
+            return envelope is not null
+                && envelope.Version == ProtocolVersion
+                && IsIncomingTypeAllowed(envelope.Type)
+                && !string.IsNullOrWhiteSpace(envelope.RequestId)
+                && envelope.RequestId.Length <= 128
+                && IsValidClientId(envelope.ClientId)
+                && envelope.Payload.ValueKind == JsonValueKind.Object;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private void RegisterRequestClient(string requestId, string clientId)
+    {
+        if (!_requestClients.TryAdd(requestId, clientId))
+        {
+            _requestClients[requestId] = clientId;
+            return;
+        }
+        _requestClientOrder.Enqueue(requestId);
+        while (_requestClients.Count > 4096 && _requestClientOrder.TryDequeue(out var expired))
+            _requestClients.TryRemove(expired, out _);
+    }
+
+    private static bool IsValidClientId(string? clientId) =>
+        clientId is null
+        || clientId is { Length: > 0 and <= 128 }
+        && clientId.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.');
 
     private void OnNavigationStarting(CoreWebView2 sender, CoreWebView2NavigationStartingEventArgs args)
     {

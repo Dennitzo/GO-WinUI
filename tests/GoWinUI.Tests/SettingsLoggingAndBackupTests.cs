@@ -108,6 +108,20 @@ public sealed class SettingsLoggingAndBackupTests
         Assert.False((await settings.LoadAsync()).IsAiConnectionEnabled);
     }
 
+    [Fact]
+    public async Task AutomaticSpeechDefaultsOnAndCurrentSettingsCanDisableIt()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var settings = environment.Get<ISettingsStore>();
+        Assert.True((await settings.LoadAsync()).IsAutomaticSpeechEnabled);
+
+        await settings.SaveAsync(new AppSettings { Version = 20, IsAutomaticSpeechEnabled = false });
+        Assert.True((await settings.LoadAsync()).IsAutomaticSpeechEnabled);
+
+        await settings.SaveAsync(new AppSettings { IsAutomaticSpeechEnabled = false });
+        Assert.False((await settings.LoadAsync()).IsAutomaticSpeechEnabled);
+    }
+
     [Theory]
     [InlineData("vendor/new-general-model:q8_0")]
     [InlineData("coding/gpt-oss-120b-MXFP4~f00a")]

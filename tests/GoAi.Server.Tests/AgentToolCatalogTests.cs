@@ -6,6 +6,7 @@ namespace GoAi.Server.Tests;
 
 public sealed class AgentToolCatalogTests
 {
+    private static readonly string[] RequiredQueryProperties = ["query"];
     [Fact]
     public void CompactSelectorExposesNamesWithoutFullToolSchemas()
     {
@@ -24,6 +25,9 @@ public sealed class AgentToolCatalogTests
             Assert.Contains(tool.Description[..Math.Min(180, tool.Description.Length)], selector.Description, StringComparison.Ordinal);
         });
         Assert.Contains(": ", selector.Description, StringComparison.Ordinal);
+        Assert.Equal("assistant.selectTool", selector.Name);
+        Assert.True(AgentToolCatalog.IsSelectorToolName(selector.Name));
+        Assert.True(AgentToolCatalog.IsSelectorToolName(AgentToolCatalog.LegacySelectorToolName));
     }
 
     [Fact]
@@ -74,6 +78,39 @@ public sealed class AgentToolCatalogTests
         var withDocumentIo = catalog.GetAvailableTools(CreateRequest(["documentIo"]));
         Assert.Contains(withDocumentIo, static tool => tool.Name == ClientToolNames.DocumentRead);
         Assert.Contains(withDocumentIo, static tool => tool.Name == ClientToolNames.DocumentCreate);
+    }
+
+    [Fact]
+    public void ProcessAndWorkspaceOpenToolsRequireTheirExplicitCapabilities()
+    {
+        var catalog = new AgentToolCatalog();
+        var restricted = catalog.GetAvailableTools(CreateRequest(["coding", "workspace", "visual-tools"]) with { Mode = RunMode.Coding });
+        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.CodingRead);
+        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.CodingEdit);
+        Assert.Contains(restricted, static tool => tool.Name == WorkspaceTools.ImageInput);
+        Assert.DoesNotContain(restricted, static tool => tool.Name == ClientToolNames.CodingCommand);
+        Assert.DoesNotContain(restricted, static tool => tool.Name == ClientToolNames.MathSymbolic);
+        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.ResearchCodeWrite);
+        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.ResearchCodeRestore);
+        Assert.DoesNotContain(restricted, static tool => tool.Name == WorkspaceTools.Open);
+
+        var normal = catalog.GetAvailableTools(CreateRequest(
+            ["coding", "workspace", "coding.process", "workspace.open"]) with { Mode = RunMode.Coding });
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.CodingCommand);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathSymbolic);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathNumeric);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathSmt);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathFormalProof);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.ResearchCodeExecute);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.ResearchCodeTest);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.ResearchCodeBenchmark);
+        Assert.Contains(normal, static tool => tool.Name == WorkspaceTools.Open);
+
+        var general = catalog.GetAvailableTools(CreateRequest(
+            ["coding", "workspace", "coding.process", "workspace.open"]) with { Mode = RunMode.General });
+        Assert.DoesNotContain(general, static tool => tool.Name.StartsWith("research.code.", StringComparison.Ordinal));
+        Assert.DoesNotContain(general, static tool => tool.Name is ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric
+            or ClientToolNames.MathSmt or ClientToolNames.MathFormalProof);
     }
 
     [Fact]
@@ -220,6 +257,44 @@ public sealed class AgentToolCatalogTests
         };
 
         Assert.Empty(new AgentToolCatalog().GetAvailableTools(request));
+    }
+
+    [Fact]
+    public void DynamicClientToolIsAdvertisedResolvedAndValidated()
+    {
+        var descriptor = new ToolDescriptor(
+            "com.example.lookup",
+            "Liest einen begrenzten lokalen Datensatz.",
+            ToolRiskClass.ReadOnly,
+            JsonSerializer.SerializeToElement(new
+            {
+                type = "object",
+                properties = new
+                {
+                    query = new { type = "string" },
+                },
+                required = RequiredQueryProperties,
+                additionalProperties = false,
+            }),
+            TimeoutSeconds: 30,
+            MaximumOutputBytes: 16_384);
+        var request = CreateRequest([]) with { ClientTools = [descriptor] };
+        var catalog = new AgentToolCatalog();
+
+        var available = catalog.GetAvailableTools(request);
+        var tool = catalog.Resolve(descriptor.Name, available);
+
+        Assert.False(tool.ServerSide);
+        Assert.Equal(descriptor.Description, tool.Description);
+        Assert.Equal(descriptor.RiskClass, tool.RiskClass);
+        Assert.Equal(descriptor.InputSchema.GetRawText(), tool.Schema.GetRawText());
+        catalog.Validate(tool, JsonSerializer.SerializeToElement(new { query = "status" }));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(
+            tool,
+            JsonSerializer.SerializeToElement(new { query = "status", unexpected = true })));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(
+            tool,
+            JsonSerializer.SerializeToElement(new { })));
     }
 
     private static RunRequest CreateRequest(IReadOnlyList<string>? capabilities) => new(

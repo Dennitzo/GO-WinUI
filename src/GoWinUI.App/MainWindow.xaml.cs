@@ -110,6 +110,31 @@ public sealed partial class MainWindow : Window
         Activate();
     }
 
+    internal async Task OpenAssistantSessionAsync(bool refreshSession)
+    {
+        _suppressSelection = true;
+        try
+        {
+            RootNavigation.SelectedItem = RootNavigation.MenuItems
+                .OfType<NavigationViewItem>()
+                .FirstOrDefault(item => string.Equals(item.Tag as string, "assistant", StringComparison.Ordinal));
+        }
+        finally
+        {
+            _suppressSelection = false;
+        }
+
+        if (ContentFrame.CurrentSourcePageType != typeof(AssistantPage))
+        {
+            ContentFrame.Navigate(typeof(AssistantPage));
+        }
+
+        if (refreshSession && ContentFrame.Content is AssistantPage assistantPage)
+        {
+            await assistantPage.RefreshForExternalActivationAsync();
+        }
+    }
+
     private void ConfigureTitleBar()
     {
         var titleBar = _appWindow.TitleBar;

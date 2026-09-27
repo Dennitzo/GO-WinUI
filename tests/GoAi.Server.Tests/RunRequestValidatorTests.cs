@@ -1,11 +1,13 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Gateway;
 using GoAi.Server.Core.Runs;
+using System.Text.Json;
 
 namespace GoAi.Server.Tests;
 
 public sealed class RunRequestValidatorTests
 {
+    private static readonly string[] RequiredQueryProperties = ["query"];
     [Theory]
     [InlineData(null)]
     [InlineData(0)]
@@ -191,4 +193,115 @@ public sealed class RunRequestValidatorTests
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
             request with { AllowedServerTools = ["web.search"] }));
     }
+
+    [Fact]
+    public void ValidDynamicClientToolIsAccepted()
+    {
+        var request = CreateRequestWithClientTools(
+        [
+            CreateDynamicTool("com.example.lookup"),
+        ]);
+
+        RunRequestValidator.Validate(request);
+    }
+
+    [Fact]
+    public void ExplicitCodingProcessAndWorkspaceOpenCapabilitiesAreAccepted()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Coding,
+            [new RunMessage("user", [new ContentPart("text", "Prüfe das Projekt.")])],
+            ClientCapabilities: ["coding", "coding.process", "workspace", "workspace.open"]);
+
+        RunRequestValidator.Validate(request);
+    }
+
+    [Fact]
+    public void ClaudeScienceSandboxCapabilityIsAcceptedOnlyWithSandboxResearch()
+    {
+        var request = new RunRequest(
+            GoAiProtocol.Version,
+            RunMode.Auto,
+            [new RunMessage("user", [new ContentPart("text", "Prüfe die Hypothese reproduzierbar.")])],
+            ClientCapabilities: ["research.sandbox"],
+            AllowedServerTools: ["web.search", "web.fetch"],
+            DeepResearch: true,
+            ResearchOptions: new(
+                ProjectId: "research-fixture",
+                AutonomyLevel: ResearchAutonomyLevel.SandboxResearch));
+
+        RunRequestValidator.Validate(request);
+
+        var missingCapability = Assert.Throws<ArgumentException>(() =>
+            RunRequestValidator.Validate(request with { ClientCapabilities = [] }));
+        Assert.Contains("research.sandbox", missingCapability.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReservedDynamicClientToolNameIsRejected()
+    {
+        var request = CreateRequestWithClientTools(
+        [
+            CreateDynamicTool("web.search"),
+        ]);
+
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request));
+    }
+
+    [Fact]
+    public void PermissiveDynamicClientToolSchemaIsRejected()
+    {
+        var permissiveSchema = JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            properties = new
+            {
+                query = new { type = "string" },
+            },
+            required = RequiredQueryProperties,
+            additionalProperties = true,
+        });
+        var request = CreateRequestWithClientTools(
+        [
+            CreateDynamicTool("com.example.lookup", permissiveSchema),
+        ]);
+
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request));
+    }
+
+    [Fact]
+    public void DuplicateDynamicClientToolNameIsRejected()
+    {
+        var request = CreateRequestWithClientTools(
+        [
+            CreateDynamicTool("com.example.lookup"),
+            CreateDynamicTool("com.example.lookup"),
+        ]);
+
+        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request));
+    }
+
+    private static RunRequest CreateRequestWithClientTools(IReadOnlyList<ToolDescriptor> clientTools) => new(
+        GoAiProtocol.Version,
+        RunMode.General,
+        [new RunMessage("user", [new ContentPart("text", "Nutze die Erweiterung.")])],
+        ClientTools: clientTools);
+
+    private static ToolDescriptor CreateDynamicTool(string name, JsonElement? inputSchema = null) => new(
+        name,
+        "Liest einen begrenzten lokalen Datensatz.",
+        ToolRiskClass.ReadOnly,
+        inputSchema ?? JsonSerializer.SerializeToElement(new
+        {
+            type = "object",
+            properties = new
+            {
+                query = new { type = "string" },
+            },
+            required = RequiredQueryProperties,
+            additionalProperties = false,
+        }),
+        TimeoutSeconds: 30,
+        MaximumOutputBytes: 16_384);
 }

@@ -52,16 +52,21 @@ function harness({ speech = false, codingToolStepsExpanded = false } = {}) {
       }
       return list;
     },
-    messageCopyIcon: "copy", messagePdfIcon: "pdf", messageDoneIcon: "done"
+    messageCopyIcon: "copy", messagePdfIcon: "pdf", messageDoneIcon: "done",
+    persistMeasuredContext: () => {}, renderContext: () => {}, renderStatus: () => {},
+    renderScienceWorkbench: () => {}
   });
   for (const name of ["visibleModelLabel", "codingToolLabel", "codingStepState", "normalizeCodingStep", "recordCodingActivity", "compareReasoningStepUpdates",
     "createCodingActivity", "mergeCodingToolSteps", "codingPreviewHtml", "openCodingPreview", "closeCodingPreview", "enhanceCodingCodeBlocks", "renderCodingWorkspace", "renderCodingChanges", "applyCodingChanges", "cleanStatusMetadata",
     "uniqueStatusParts", "isTerminalMessageStatus", "statusLabel", "runStatusText", "sanitizeVisibleMessageContent", "createMessage",
     "createMessageFooter", "createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "scrollMessageToTop", "renderMessages", "renderCodingMessages",
     "conversationMessagesDiffer", "sortCommittedMessages", "pruneTerminalMessageRunStatuses", "requestConversationRefresh", "acceptCommittedRevision",
-    "applyCommittedMessage", "applyConversationSnapshot", "preparePdfMedia", "preparePdfMessage"]) {
+    "applyCommittedMessage", "applyConversationSnapshot", "belongsToActiveSession", "upsertLiveMessage", "applyLiveDelta", "handleHostMessage",
+    "preparePdfMedia", "preparePdfMessage"]) {
     const start = app.indexOf(`  function ${name}(`);
-    const next = app.indexOf(name === "preparePdfMessage" ? "\n  globalThis.goPrepareBookPdf" : "\n  function ", start + 1);
+    const next = app.indexOf(name === "preparePdfMessage"
+      ? "\n  globalThis.goPrepareBookPdf"
+      : name === "handleHostMessage" ? "\n\n  restoreSessionsCollapsed();" : "\n  function ", start + 1);
     assert.ok(start >= 0 && next > start, `production ${name} exists`);
     vm.runInContext(app.slice(start, next), context);
   }
@@ -304,6 +309,76 @@ test("assistant headers use the Coding presentation in General and show accurate
   assert.ok(!captionMeta.textContent.includes("Denkt nach"));
 });
 
+test("live delta and committed text updates preserve the status, spinner and streaming cursor nodes", () => {
+  const { context, state, elements } = harness();
+  state.selectedToolAction = null;
+  state.chatMode = "general";
+  state.isRunning = true;
+  state.conversationRevision = 0;
+  state.messageRunStatus.set("answer-1", { status: "Denkt nach", detail: "5.299 Token", model: "local-model" });
+  state.messages = [message({
+    sessionId: "session-a", content: "Ich", status: "streaming", revision: 0,
+    createdAt: "2026-09-27T09:54:00Z"
+  })];
+  context.renderMessages(false);
+
+  const article = elements.messageList.querySelector('[data-message-id="answer-1"]');
+  const statusHeader = article.querySelector(".message-meta");
+  const statusActivity = statusHeader.querySelector(".message-meta__activity");
+  const statusLabel = statusHeader.querySelector(".message-status");
+  const statusDetail = statusHeader.querySelector(".message-meta__detail");
+  const spinner = statusHeader.querySelector(".message-status-spinner");
+  const cursor = article.querySelector(".message-content.stream-cursor");
+  assert.ok(statusHeader && statusActivity && spinner && cursor);
+
+  const assertStableLiveDom = expectedText => {
+    const current = elements.messageList.querySelector('[data-message-id="answer-1"]');
+    assert.equal(current, article, "the live assistant article remains mounted");
+    assert.equal(current.querySelector(".message-meta"), statusHeader, "the status header is not recreated");
+    assert.equal(current.querySelector(".message-meta__activity"), statusActivity, "the live status is not recreated");
+    assert.equal(current.querySelector(".message-status"), statusLabel, "the live status label keeps its DOM node");
+    assert.equal(current.querySelector(".message-meta__detail"), statusDetail, "the token detail keeps its DOM node");
+    assert.equal(current.querySelector(".message-status-spinner"), spinner, "the spinner animation keeps its DOM node");
+    assert.equal(current.querySelector(".message-content.stream-cursor"), cursor, "the streaming cursor keeps its DOM node");
+    assert.equal(current.querySelectorAll(".message-status-spinner").length, 1);
+    assert.equal(current.querySelectorAll(".message-content.stream-cursor").length, 1);
+    assert.equal(cursor.textContent, expectedText);
+  };
+  assertStableLiveDom("Ich");
+
+  const emit = (type, payload) => context.handleHostMessage({ detail: { type, payload } });
+  emit("chat.delta", { sessionId: "session-a", messageId: "answer-1", content: "Ich denke" });
+  assertStableLiveDom("Ich denke");
+  emit("chat.delta", { sessionId: "session-a", messageId: "answer-1", content: "Ich denke weiter" });
+  assertStableLiveDom("Ich denke weiter");
+
+  emit("conversation.messageCommitted", {
+    sessionId: "session-a", conversationRevision: 1,
+    message: { ...state.messages[0], content: "Ich denke weiter und", status: "streaming", revision: 1 }
+  });
+  assertStableLiveDom("Ich denke weiter und");
+  emit("conversation.messageCommitted", {
+    sessionId: "session-a", conversationRevision: 2,
+    message: { ...state.messages[0], content: "Ich denke weiter und antworte", status: "streaming", revision: 2 }
+  });
+  assertStableLiveDom("Ich denke weiter und antworte");
+
+  emit("status.changed", {
+    sessionId: "session-a", messageId: "answer-1",
+    runStatus: "Modell generiert", runDetail: "5.303 Token", contextUsed: 5303
+  });
+  assertStableLiveDom("Ich denke weiter und antworte");
+  assert.equal(statusActivity.querySelector(".message-status").textContent, "Modell generiert");
+  assert.equal(statusActivity.querySelector(".message-meta__detail").textContent, "5.303 Token");
+
+  emit("status.changed", {
+    sessionId: "session-a", messageId: "answer-1",
+    runStatus: "Modell generiert", runDetail: "5.307 Token", contextUsed: 5307
+  });
+  assertStableLiveDom("Ich denke weiter und antworte");
+  assert.equal(statusActivity.querySelector(".message-meta__detail").textContent, "5.307 Token");
+});
+
 test("stored HTML creates an isolated frame only after a click and survives message rerenders", () => {
   const { context, state } = harness({ codingToolStepsExpanded: true });
   const html = "<script>parent.goBridge.post('session.clear', {});</script><button onclick=\"this.textContent='OK'\">Test</button>";
@@ -320,7 +395,7 @@ test("stored HTML creates an isolated frame only after a click and survives mess
   const frame = dialog.querySelector("iframe");
   assert.equal(frame.attributes.sandbox, "allow-scripts");
   assert.equal(frame.attributes.referrerpolicy, "no-referrer");
-  assert.equal(frame.src, "https://go-coding-preview.local/coding/answer-1/html%20%231");
+  assert.equal(frame.src, "https://assistant-coding-preview.local/coding/answer-1/html%20%231");
   assert.equal(frame.srcdoc, undefined);
   assert.equal(frame.textContent, "");
   context.createCodingActivity(message({ toolSteps: [tool] }));
@@ -343,7 +418,7 @@ test("only successful HTML steps offer previews, and stale session buttons canno
   assert.equal(context.document.body.childNodes.length, 0);
   assert.match(app, /if \(sessionChanged\) \{ closeCodingPreview\(\); state\.changesSummary = null; \}/);
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
-  assert.ok(html.includes("frame-src https://go-coding-preview.local;"));
+  assert.ok(html.includes("frame-src 'self' https://assistant-coding-preview.local;"));
   assert.ok(html.includes("script-src 'self';"), "app script policy stays strict");
 });
 
@@ -352,7 +427,7 @@ test("Coding and General share one header and no duplicate composer status", () 
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
   const css = fs.readFileSync(path.join(webRoot, "styles.css"), "utf8")
     + fs.readFileSync(path.join(webRoot, "coding-timeline.css"), "utf8");
-  assert.match(html, /<h1 id="chat-heading">AI Assistent<\/h1>/);
+  assert.doesNotMatch(html, /chat-header|id="chat-heading"/);
   assert.doesNotMatch(html, /agent-tabs|Hauptagent|Subagent/);
   assert.doesNotMatch(app, /goAgentTabs|selectedAgentTab|subagent\.start/);
   assert.doesNotMatch(html, /id="coding-(?:project|model)"/);

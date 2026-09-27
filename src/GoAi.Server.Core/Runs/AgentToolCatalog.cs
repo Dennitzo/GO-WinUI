@@ -9,7 +9,8 @@ namespace GoAi.Server.Core.Runs;
 
 public sealed partial class AgentToolCatalog
 {
-    public const string SelectorToolName = "go.selectTool";
+    public const string SelectorToolName = "assistant.selectTool";
+    public const string LegacySelectorToolName = "go.selectTool";
     private static readonly string[] SelectorRequiredProperties = ["name"];
     private static readonly string[] DefaultServerTools =
     [
@@ -37,12 +38,21 @@ public sealed partial class AgentToolCatalog
         if (names.Contains(CodingWorkingStateTools.PlanTool))
             throw new ArgumentException("Coding state tools are selected by coding capabilities/options, not server-tool permissions.");
         var capabilities = request.ClientCapabilities ?? [];
-        if (HasCapability(capabilities, "coding") && (request.Mode == RunMode.Coding || HasCapability(capabilities, "workspace")))
+        var codingEnabled = HasCapability(capabilities, "coding")
+            && (request.Mode == RunMode.Coding || HasCapability(capabilities, "workspace"));
+        if (codingEnabled)
         {
-            names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => tool.Name is not ("coding.readOutput" or "coding.searchRunEvidence")
-                || HasCapability(capabilities, "coding.evidence")).Select(static tool => tool.Name));
+            names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => tool.RiskClass != ToolRiskClass.Process
+                && (request.Mode == RunMode.Coding || !IsScientificExecutionTool(tool.Name))
+                && (tool.Name is not ("coding.readOutput" or "coding.searchRunEvidence")
+                || HasCapability(capabilities, "coding.evidence"))).Select(static tool => tool.Name));
             names.Add(CodingWorkingStateTools.PlanTool);
         }
+        if (codingEnabled && HasCapability(capabilities, "coding.process"))
+            names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => tool.RiskClass == ToolRiskClass.Process
+                && (request.Mode == RunMode.Coding || !IsScientificExecutionTool(tool.Name))).Select(static tool => tool.Name));
+        if (HasCapability(capabilities, "research.sandbox"))
+            names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => IsScientificExecutionTool(tool.Name)).Select(static tool => tool.Name));
         if (HasCapability(capabilities, "documentIo"))
         {
             names.UnionWith([ClientToolNames.DocumentRead, ClientToolNames.DocumentCreate]);
@@ -52,25 +62,31 @@ public sealed partial class AgentToolCatalog
             names.UnionWith([ClientToolNames.DocumentsList, ClientToolNames.DocumentsSearch, ClientToolNames.DocumentsReadPages]);
         }
         if (HasCapability(capabilities, "visual-tools")) names.Add(WorkspaceTools.ImageInput);
-        if (HasCapability(capabilities, "workspace")) names.Add(WorkspaceTools.Open);
+        if (HasCapability(capabilities, "workspace") && HasCapability(capabilities, "workspace.open")) names.Add(WorkspaceTools.Open);
         // PDF bytes are never model-generated. document.create edits a bounded
         // canonical source and delegates rendering to GO's deterministic path.
-
-        return names
+        var result = names
             .OrderBy(static name => name, StringComparer.Ordinal)
             .Select(name => _tools[name])
-            .ToArray();
+            .ToList();
+        foreach (var descriptor in request.ClientTools ?? [])
+        {
+            if (IsReservedToolName(descriptor.Name)
+                || result.Any(tool => string.Equals(tool.Name, descriptor.Name, StringComparison.Ordinal)))
+                throw new ArgumentException($"Dynamic client tool collides with a reserved tool: {descriptor.Name}");
+            result.Add(CreateDynamicClientTool(descriptor));
+        }
+        return result.OrderBy(static tool => tool.Name, StringComparer.Ordinal).ToArray();
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Resolution intentionally stays on the catalog service API.")]
     public AgentToolSpec Resolve(string name, IReadOnlyList<AgentToolSpec> available)
     {
-        if (!_tools.TryGetValue(name, out var registered)
-            || !available.Contains(registered))
-        {
+        _ = _tools; // Keep resolution on the catalog instance so future registrations remain scoped to it.
+        var registered = available.SingleOrDefault(tool => string.Equals(tool.Name, name, StringComparison.Ordinal));
+        if (registered is null)
             throw new InvalidOperationException($"Unknown or unavailable structured tool: {name}");
-        }
-        var tool = registered;
-        return tool;
+        return registered;
     }
 
     public static LmToolDefinition CreateSelectorDefinition(IReadOnlyList<AgentToolSpec> available)
@@ -99,7 +115,7 @@ public sealed partial class AgentToolCatalog
         }, GoAiProtocol.CreateJsonOptions());
         return new LmToolDefinition(
             SelectorToolName,
-            "Wähle genau einen Werkzeugnamen. GO stellt im nächsten Modellturn ausschließlich Beschreibung und vollständiges Schema dieses Werkzeugs bereit.\n" + catalog,
+            "Wähle genau einen Werkzeugnamen. Der Assistent stellt im nächsten Modellturn ausschließlich Beschreibung und vollständiges Schema dieses Werkzeugs bereit.\n" + catalog,
             schema);
     }
 
@@ -111,17 +127,25 @@ public sealed partial class AgentToolCatalog
             || value.ValueKind != JsonValueKind.String
             || string.IsNullOrWhiteSpace(value.GetString()))
         {
-            throw new ArgumentException("go.selectTool requires exactly one non-empty string property named 'name'.");
+            throw new ArgumentException("assistant.selectTool requires exactly one non-empty string property named 'name'.");
         }
         return Resolve(value.GetString()!, available);
     }
 
+    public static bool IsSelectorToolName(string? name) =>
+        string.Equals(name, SelectorToolName, StringComparison.Ordinal)
+        || string.Equals(name, LegacySelectorToolName, StringComparison.Ordinal);
+
+    public static bool IsReservedToolName(string? name) =>
+        IsSelectorToolName(name) || name is not null && CreateTools().ContainsKey(name);
+
+    private static bool IsScientificExecutionTool(string name) => name.StartsWith("research.code.", StringComparison.Ordinal)
+        || name is ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt or ClientToolNames.MathFormalProof;
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Validation intentionally stays on the catalog service API.")]
     public void Validate(AgentToolSpec tool, JsonElement arguments)
     {
-        if (!_tools.ContainsKey(tool.Name))
-        {
-            throw new InvalidOperationException("Tool is not registered.");
-        }
+        _ = _tools; // Validation belongs to the same catalog instance as discovery and resolution.
         if (arguments.ValueKind != JsonValueKind.Object)
         {
             throw new ArgumentException($"Tool {tool.Name} requires an object argument.");
@@ -147,6 +171,25 @@ public sealed partial class AgentToolCatalog
         ValidateToolSpecific(tool.Name, arguments);
     }
 
+    private static AgentToolSpec CreateDynamicClientTool(ToolDescriptor descriptor)
+    {
+        var schema = descriptor.InputSchema;
+        var required = schema.TryGetProperty("required", out var requiredElement)
+            ? requiredElement.EnumerateArray().Select(static item => item.GetString()!).ToHashSet(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal);
+        var allowed = schema.TryGetProperty("properties", out var propertiesElement)
+            ? propertiesElement.EnumerateObject().Select(static property => property.Name).ToHashSet(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal);
+        return new AgentToolSpec(
+            descriptor.Name,
+            descriptor.Description,
+            descriptor.RiskClass,
+            ServerSide: false,
+            schema.Clone(),
+            required,
+            allowed);
+    }
+
     private static void ValidateToolSpecific(string name, JsonElement value)
     {
         if (WorkspaceTools.IsLocal(name)) { WorkspaceTools.Validate(name, value); return; }
@@ -160,12 +203,36 @@ public sealed partial class AgentToolCatalog
             CodingToolCatalog.Validate(name, value);
             return;
         }
+        if (name is ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt
+            or ClientToolNames.MathFormalProof or ClientToolNames.ResearchCodeWrite
+            or ClientToolNames.ResearchCodeExecute or ClientToolNames.ResearchCodeTest
+            or ClientToolNames.ResearchCodeBenchmark or ClientToolNames.ResearchCodeRestore)
+        {
+            CodingToolCatalog.Validate(name, value);
+            return;
+        }
         switch (name)
         {
             case CodingDeepResearchPipeline.ToolName:
                 RequireString(value, "task", 1, 4_000);
                 OptionalInteger(value, "maximumSearches", 2, 3);
                 OptionalInteger(value, "maximumSources", 2, 6);
+                OptionalInteger(value, "maximumWorks", 1, 10_000);
+                OptionalInteger(value, "maximumFullTexts", 1, 1_000);
+                OptionalString(value, "projectId", 1, 128);
+                OptionalString(value, "resumeCheckpointId", 1, 128);
+                OptionalInteger(value, "protocolVersion", 1, int.MaxValue);
+                if (value.TryGetProperty("preferredLanguages", out var languages)
+                    && (languages.ValueKind != JsonValueKind.Array || languages.GetArrayLength() > 16
+                        || languages.EnumerateArray().Any(static item => item.ValueKind != JsonValueKind.String
+                            || item.GetString()!.Length is < 2 or > 16)))
+                    throw new ArgumentException("preferredLanguages is invalid.");
+                if (value.TryGetProperty("updateSince", out var since)
+                    && (since.ValueKind != JsonValueKind.String || !since.TryGetDateTimeOffset(out _)))
+                    throw new ArgumentException("updateSince is invalid.");
+                OptionalEnum(value, "profile", DeepResearchProfileNames.All);
+                OptionalEnum(value, "autonomyLevel", ["readOnlyResearch", "codingWorkspaceResearch", "sandboxResearch"]);
+                OptionalEnum(value, "verificationLevel", ["standard", "multiPath", "formalWherePossible"]);
                 break;
             case "speech.synthesize":
                 RequireString(value, "text", 1, 20_000);
@@ -290,8 +357,8 @@ public sealed partial class AgentToolCatalog
         {
             Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Für aktuelle Fakten nutze profile=general; für konkrete Bildwünsche nutze profile=images und präzise Motive. Bildtreffer enthalten die Quellseite in url und die Bildadresse in thumbnailUrl; nur passende HTTPS-Bildadressen als Markdown-Bild anzeigen. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern zu genau einem Aspekt. Keine Sammelabfragen. Technische Profile suchen sprachübergreifend, die Antwort bleibt deutsch. Alle Profile bleiben bei SearXNG ohne Anbieter-Fallback und lassen gesperrte Engines aus. Bei leeren Treffern verkürze die Abfrage oder prüfe bekannte Originalquellen mit web.fetch.", ToolRiskClass.ReadOnly, WebSearchSchema()),
             Server("web.fetch", "Durchsuche eine öffentliche HTTP(S)-Quelle SSRF-geschützt nach konkreten Phrasen. Bevorzuge queries und bündele bis zu acht unabhängig zu suchende Phrasen in einem Abruf. Zurückgegeben werden ausschließlich begrenzte Trefferfenster aus Webseiten, PDF-, DOCX- und RTF-Dokumenten, niemals die gesamte Quelle. Ohne Suchphrase liefert das Werkzeug nur eine kurze Vorschau und fordert eine gezielte Wiederholung an. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, WebFetchSchema()),
-            Server(CodingDeepResearchPipeline.ToolName, "Recherchiere komplexe Coding-Fragen autonom: plane mehrere Teilfragen, suche über SearXNG, prüfe Originalquellen und liefere eine belegte Synthese mit Quellen und Unsicherheiten. Nutze dies für Architekturvergleiche, aktuelle API-/Versionsfragen oder widersprüchliche Informationen. Für eine einzelne Frage reichen web.search und web.fetch. Task enthält nur die öffentliche technische Frage, keine Zugangsdaten oder lokalen Dateiinhalte. Grenzen: 2–3 geplante Suchfragen mit höchstens einer verkürzten Wiederholung bei leeren Treffern, 2–6 Quellen, maximal 8 Modellturns, insgesamt 9 Webaufrufe und 7 Minuten innerhalb des verbleibenden Laufbudgets.", ToolRiskClass.ReadOnly, Parse("""
-                {"type":"object","properties":{"task":{"type":"string","minLength":1,"maxLength":4000},"maximumSearches":{"type":"integer","minimum":2,"maximum":3,"default":3,"description":"Anzahl geplanter Suchfragen; bei leeren Treffern höchstens eine kürzere Wiederholung je Frage innerhalb des gemeinsamen Webbudgets."},"maximumSources":{"type":"integer","minimum":2,"maximum":6,"default":4}},"required":["task"],"additionalProperties":false}
+            Server(CodingDeepResearchPipeline.ToolName, "Bearbeite komplexe Web-, Wissenschafts-, Mathematik- und Forschungsfragen autonom. Interpretiere das Problem, plane komplementäre Suchen, prüfe Originalquellen, entwickle Hypothesen, suche Gegenbelege und liefere eine epistemisch klassifizierte Synthese. Im Coding-Modus darf der äußere Agent anschließend reproduzierbare Berechnungen und Experimente im autorisierten Workspace ausführen. Suchtreffer sind nie Belege; nenne Unsicherheiten und ungelöste Punkte ausdrücklich.", ToolRiskClass.ReadOnly, Parse("""
+                {"type":"object","properties":{"task":{"type":"string","minLength":1,"maxLength":4000},"profile":{"type":"string","enum":["auto","web","scientificEvidence","systematicReview","scopingReview","literatureUpdate","replicationAudit","openProblem","mathematicalInvestigation"],"default":"auto"},"autonomyLevel":{"type":"string","enum":["readOnlyResearch","codingWorkspaceResearch","sandboxResearch"],"default":"readOnlyResearch"},"verificationLevel":{"type":"string","enum":["standard","multiPath","formalWherePossible"],"default":"multiPath"},"projectId":{"type":"string","minLength":1,"maxLength":128},"resumeCheckpointId":{"type":"string","minLength":1,"maxLength":128},"protocolVersion":{"type":"integer","minimum":1},"preferredLanguages":{"type":"array","maxItems":16,"items":{"type":"string","minLength":2,"maxLength":16}},"updateSince":{"type":"string","format":"date-time"},"maximumSearches":{"type":"integer","minimum":2,"maximum":3,"default":3},"maximumSources":{"type":"integer","minimum":2,"maximum":6,"default":4},"maximumWorks":{"type":"integer","minimum":1,"maximum":10000},"maximumFullTexts":{"type":"integer","minimum":1,"maximum":1000}},"required":["task"],"additionalProperties":false}
                 """)),
             Server("media.inspect", "Extrahiere sichere Metadaten, Audio und zeitcodierte Frames eines Uploads.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem ausgewählten Vision-Modell. Die Analyse erhält das tatsächliche Bild und protokolliert die verwendete Modell-ID. Trenne sichtbare Merkmale klar von Annahmen und beantworte die konkrete Prüffrage.", ToolRiskClass.ReadOnly, MediaSchema()),

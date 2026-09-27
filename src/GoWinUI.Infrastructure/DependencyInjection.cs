@@ -5,10 +5,12 @@ using GoWinUI.Infrastructure.Documents;
 using GoWinUI.Infrastructure.Logging;
 using GoWinUI.Infrastructure.Projects;
 using GoWinUI.Infrastructure.Repositories;
+using GoWinUI.Infrastructure.Research;
 using GoWinUI.Infrastructure.Settings;
 using GoWinUI.Infrastructure.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using GoWinUI.Core.Research;
 
 namespace GoWinUI.Infrastructure;
 
@@ -32,6 +34,8 @@ public static class DependencyInjection
         services.AddSingleton<IGeneratedDocumentRepository, SqliteGeneratedDocumentRepository>();
         services.AddSingleton<IGoAiRunRepository, SqliteGoAiRunRepository>();
         services.AddSingleton<IClientToolExecutionRepository, SqliteClientToolExecutionRepository>();
+        services.AddSingleton<IScientificResearchRepository, SqliteScientificResearchRepository>();
+        services.AddSingleton<IScientificResearchExportService, ScientificResearchExportService>();
         services.AddSingleton<IProjectRepository, SqliteProjectRepository>();
         services.AddSingleton<IProjectAssetWorkingCopyService, ProjectAssetWorkingCopyService>();
         services.AddSingleton<IBinaryObjectStore, SqliteBinaryObjectStore>();

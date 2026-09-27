@@ -26,19 +26,20 @@
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <ExtensionHostPublishDir>$(MSBuildProjectDirectory)\obj\extension-host-publish\</ExtensionHostPublishDir>
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\GoAi.Client\GoAi.Client.csproj" />
     <ProjectReference Include="..\GoAi.Contracts\GoAi.Contracts.csproj" />
+    <ProjectReference Include="..\ExtensionHost\ExtensionHost.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\GoWinUI.Core\GoWinUI.Core.csproj" />
     <ProjectReference Include="..\GoWinUI.Infrastructure\GoWinUI.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Debug" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <PackageReference Include="Microsoft.WindowsAppSDK" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
@@ -62,6 +63,13 @@
     <Content Include="..\..\windows\manage-coding-llama.ps1">
       <Link>Assets\NativeRuntime\windows\manage-coding-llama.ps1</Link>
       <TargetPath>Assets\NativeRuntime\windows\manage-coding-llama.ps1</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="..\..\windows\manage-llama-server.ps1">
+      <Link>Assets\NativeRuntime\windows\manage-llama-server.ps1</Link>
+      <TargetPath>Assets\NativeRuntime\windows\manage-llama-server.ps1</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
@@ -91,4 +99,57 @@
       <_Parameter1>GoWinUI.Tests</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\deploy\go-ai\research-runner\Dockerfile" Link="research-runner\Dockerfile"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\deploy\go-ai\research-runner\requirements.lock" Link="research-runner\requirements.lock"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="CopyExtensionHostArtifacts" AfterTargets="Build">
+    <ItemGroup>
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Configuration)\net10.0\ExtensionHost.*" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Configuration)\net10.0\GoWinUI.Core.dll"
+                               Condition="Exists('..\ExtensionHost\bin\$(Configuration)\net10.0\GoWinUI.Core.dll')" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Configuration)\net10.0\$(RuntimeIdentifier)\ExtensionHost.*" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Configuration)\net10.0\$(RuntimeIdentifier)\GoWinUI.Core.dll"
+                               Condition="Exists('..\ExtensionHost\bin\$(Configuration)\net10.0\$(RuntimeIdentifier)\GoWinUI.Core.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ExtensionHostArtifacts)"
+          DestinationFolder="$(OutDir)ExtensionHost"
+          SkipUnchangedFiles="true"
+          Condition="'@(_ExtensionHostArtifacts)' != ''" />
+  </Target>
+
+  <Target Name="CopyPublishedExtensionHostArtifacts" AfterTargets="Publish" Condition="'$(PublishDir)' != '' and '$(Configuration)' != 'Portable'">
+    <ItemGroup>
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Configuration)\net10.0\ExtensionHost.*" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Configuration)\net10.0\GoWinUI.Core.dll"
+                                         Condition="Exists('..\ExtensionHost\bin\$(Configuration)\net10.0\GoWinUI.Core.dll')" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Configuration)\net10.0\$(RuntimeIdentifier)\ExtensionHost.*" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Configuration)\net10.0\$(RuntimeIdentifier)\GoWinUI.Core.dll"
+                                         Condition="Exists('..\ExtensionHost\bin\$(Configuration)\net10.0\$(RuntimeIdentifier)\GoWinUI.Core.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PublishedExtensionHostArtifacts)"
+          DestinationFolder="$(PublishDir)ExtensionHost"
+          SkipUnchangedFiles="true"
+          Condition="'@(_PublishedExtensionHostArtifacts)' != ''" />
+  </Target>
+
+  <Target Name="PublishPortableExtensionHost" AfterTargets="Publish" Condition="'$(Configuration)' == 'Portable' and '$(PublishDir)' != ''">
+    <RemoveDir Directories="$(ExtensionHostPublishDir)" />
+    <MSBuild Projects="..\ExtensionHost\ExtensionHost.csproj"
+             Targets="Publish"
+             BuildInParallel="false"
+             Properties="Configuration=Release;RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=true;PublishTrimmed=false;PublishDir=$(ExtensionHostPublishDir)" />
+    <Error Condition="!Exists('$(ExtensionHostPublishDir)ExtensionHost.exe')"
+           Text="Der portable, eigenständige ExtensionHost wurde nicht erzeugt." />
+    <ItemGroup>
+      <_PortableExtensionHostArtifacts Include="$(ExtensionHostPublishDir)**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PortableExtensionHostArtifacts)"
+          DestinationFiles="@(_PortableExtensionHostArtifacts->'$(PublishDir)ExtensionHost\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>

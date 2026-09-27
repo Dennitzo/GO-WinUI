@@ -1,5 +1,8 @@
 using GoAi.Contracts;
 using GoAi.Server.Core.Configuration;
+using GoAi.Server.Core.Runs;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace GoAi.Server.Core.Gateway;
 
@@ -14,6 +17,9 @@ public static class RunRequestValidator
         "pdf",
         "coding",
         "coding.evidence",
+        "coding.process",
+        "workspace.open",
+        "research.sandbox",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
@@ -31,6 +37,7 @@ public static class RunRequestValidator
             || request.Workload is { Kind: not RunWorkloadKind.Conversation }
             || request.ConversationProfile is ConversationProfile.Audiobook or ConversationProfile.ContextPreparation))
             throw new ArgumentException("Deep Research benötigt einen General-/Coding-Dialog mit ausdrücklich erlaubter Websuche und Quellenabruf.");
+        ValidateResearchOptions(request);
         if (!string.Equals(request.ProtocolVersion, GoAiProtocol.Version, StringComparison.Ordinal))
         {
             throw new ArgumentException($"Unsupported protocolVersion. Expected {GoAiProtocol.Version}.");
@@ -65,6 +72,7 @@ public static class RunRequestValidator
             && (request.Mode != RunMode.General
                 || request.AllowedServerTools is not { Count: 0 }
                 || request.ClientCapabilities is not { Count: 0 }
+                || request.ClientTools is not null
                 || request.DocumentContext is not null))
         {
             throw new ArgumentException(
@@ -150,6 +158,7 @@ public static class RunRequestValidator
                     ? "The run contains an empty client capability."
                     : $"The run contains the unknown client capability '{unknownCapability}'.");
         }
+        ValidateClientTools(request.ClientTools);
         if (request.AllowedServerTools is { Count: > 32 }
             || request.AllowedServerTools?.Any(tool =>
                 string.IsNullOrWhiteSpace(tool) || !ServerTools.Contains(tool)) == true)
@@ -248,6 +257,96 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("timeoutSeconds must be 0 for Coding or at least 30; finite non-Coding limits support up to 14400 seconds.");
         }
+    }
+
+    private static void ValidateResearchOptions(RunRequest request)
+    {
+        if (request.ResearchOptions is not { } options) return;
+        if (!request.DeepResearch)
+            throw new ArgumentException("researchOptions requires Deep Research.");
+        if (!Enum.IsDefined(options.Profile)
+            || !Enum.IsDefined(options.AutonomyLevel)
+            || !Enum.IsDefined(options.VerificationLevel))
+            throw new ArgumentException("Deep Research contains an unknown profile, autonomy, or verification level.");
+        if (options.AutonomyLevel == ResearchAutonomyLevel.CodingWorkspaceResearch
+            && (request.Mode != RunMode.Coding
+                || string.IsNullOrWhiteSpace(request.CodingOptions?.WorkspacePath)))
+            throw new ArgumentException("Executable Deep Research requires Coding mode and an assigned workspace.");
+        if (options.AutonomyLevel == ResearchAutonomyLevel.SandboxResearch
+            && (request.Mode is not (RunMode.General or RunMode.Auto)
+                || !(request.ClientCapabilities ?? []).Contains("research.sandbox", StringComparer.OrdinalIgnoreCase)))
+            throw new ArgumentException("Sandbox research requires a prepared, client-scoped research.sandbox runtime.");
+        if (options.ProjectId is { } projectId
+            && (projectId.Length is < 1 or > 128 || projectId.Any(char.IsControl)))
+            throw new ArgumentException("researchOptions.projectId is invalid.");
+        if (options.ResumeCheckpointId is { } checkpointId
+            && (checkpointId.Length is < 1 or > 128 || checkpointId.Any(char.IsControl)))
+            throw new ArgumentException("researchOptions.resumeCheckpointId is invalid.");
+        if (options.ProtocolVersion is < 1
+            || options.MaximumWorks is < 1 or > 10_000
+            || options.MaximumFullTexts is < 1 or > 1_000
+            || options.PreferredLanguages is { Count: > 16 }
+            || options.PreferredLanguages?.Any(static language =>
+                string.IsNullOrWhiteSpace(language) || language.Length > 16 || language.Any(char.IsControl)) == true)
+            throw new ArgumentException("Deep Research options exceed their protocol limits.");
+    }
+
+    private static void ValidateClientTools(IReadOnlyList<ToolDescriptor>? tools)
+    {
+        if (tools is null) return;
+        if (tools.Count is < 1 or > 16)
+            throw new ArgumentException("Dynamic client tools must contain between one and 16 descriptors.");
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var tool in tools)
+        {
+            if (tool is null
+                || string.IsNullOrWhiteSpace(tool.Name)
+                || tool.Name.Length > 160
+                || !Regex.IsMatch(tool.Name, "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$", RegexOptions.CultureInvariant)
+                || tool.Name.StartsWith("go.", StringComparison.OrdinalIgnoreCase)
+                || tool.Name.Contains("gowinui", StringComparison.OrdinalIgnoreCase)
+                || !names.Add(tool.Name)
+                || AgentToolCatalog.IsReservedToolName(tool.Name))
+                throw new ArgumentException("A dynamic client tool has an invalid, duplicate, or reserved name.");
+            if (string.IsNullOrWhiteSpace(tool.Description)
+                || tool.Description.Length > 300
+                || !string.Equals(tool.Description, tool.Description.Trim(), StringComparison.Ordinal))
+                throw new ArgumentException($"Dynamic client tool '{tool.Name}' has an invalid description.");
+            if (tool.RiskClass is not (ToolRiskClass.ReadOnly or ToolRiskClass.LocalMutation or ToolRiskClass.Process)
+                || tool.TimeoutSeconds is < 1 or > 7_200
+                || tool.MaximumOutputBytes is < 1_024 or > 64 * 1024 * 1024)
+                throw new ArgumentException($"Dynamic client tool '{tool.Name}' has invalid execution limits.");
+            ValidateClientToolSchema(tool.Name, tool.InputSchema);
+        }
+    }
+
+    private static void ValidateClientToolSchema(string name, JsonElement schema)
+    {
+        if (schema.ValueKind != JsonValueKind.Object || schema.GetRawText().Length > 65_536)
+            throw new ArgumentException($"Dynamic client tool '{name}' has an invalid input schema.");
+        if (schema.EnumerateObject().Any(static property => property.Name is not
+            ("type" or "properties" or "required" or "additionalProperties" or "description")))
+            throw new ArgumentException($"Dynamic client tool '{name}' uses unsupported schema keywords.");
+        if (!schema.TryGetProperty("type", out var type)
+            || type.ValueKind != JsonValueKind.String
+            || !string.Equals(type.GetString(), "object", StringComparison.Ordinal)
+            || !schema.TryGetProperty("properties", out var properties)
+            || properties.ValueKind != JsonValueKind.Object
+            || properties.EnumerateObject().Count() > 64
+            || !schema.TryGetProperty("additionalProperties", out var additional)
+            || additional.ValueKind != JsonValueKind.False)
+            throw new ArgumentException($"Dynamic client tool '{name}' must use a bounded object schema with additionalProperties=false.");
+        var propertyNames = properties.EnumerateObject().Select(static property => property.Name).ToHashSet(StringComparer.Ordinal);
+        if (propertyNames.Any(static property => string.IsNullOrWhiteSpace(property) || property.Length > 80))
+            throw new ArgumentException($"Dynamic client tool '{name}' has an invalid property name.");
+        if (!schema.TryGetProperty("required", out var required) || required.ValueKind != JsonValueKind.Array
+            || required.GetArrayLength() > propertyNames.Count)
+            throw new ArgumentException($"Dynamic client tool '{name}' must declare a bounded required array.");
+        var requiredNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in required.EnumerateArray())
+            if (item.ValueKind != JsonValueKind.String || item.GetString() is not { } requiredName
+                || !propertyNames.Contains(requiredName) || !requiredNames.Add(requiredName))
+                throw new ArgumentException($"Dynamic client tool '{name}' has an invalid required property.");
     }
 
     private static void ValidateIds(IReadOnlyList<string>? ids, string prefix)

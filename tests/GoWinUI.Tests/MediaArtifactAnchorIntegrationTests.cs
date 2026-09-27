@@ -33,9 +33,11 @@ public sealed class MediaArtifactAnchorIntegrationTests
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         var runs = environment.Get<IGoAiRunRepository>();
-        var session = await chats.CreateSessionAsync("Persistente Bildposition");
+        var session = await chats.CreateSessionAsync(
+            "Persistente Bildposition",
+            coding ? ChatMode.Coding : ChatMode.General);
         var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "workspace")).FullName;
-        if (coding) await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: true);
+        if (coding) await chats.SetCodingWorkspacePathAsync(session.Id, workspace);
         var turn = await chats.AddTurnAsync(session.Id, "Analysiere das Bild und arbeite danach weiter.");
         await chats.UpdateMessageAsync(turn.AssistantMessage.Id, Prefix, MessageStatus.Streaming);
         await chats.SaveToolStepAsync(turn.AssistantMessage.Id, new(FirstStep, "media.analyze", "completed",

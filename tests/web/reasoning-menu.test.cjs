@@ -68,7 +68,7 @@ test("model switches reject stale responses and opening the menu survives its ac
   h.snapshot({ modelId: "B", selected: "low" });
   assert.equal(h.node("reasoning-menu").hidden, true);
   assert.equal(h.node("reasoning-button").title, "Reasoning: Niedrig");
-  assert.equal(h.node("reasoning-label").textContent, "Reasoning");
+  assert.equal(h.node("reasoning-button").attributes["aria-label"], "Reasoning: Niedrig");
   h.emit("chat.started", {});
   assert.equal(h.node("reasoning-button").disabled, true);
   h.emit("chat.completed", {});
@@ -125,4 +125,18 @@ test("metadata errors clear the choices and a later same-model snapshot can reco
   assert.equal(h.node("reasoning-button").disabled, false);
   assert.equal(h.node("reasoning-button").title, "Reasoning: Ein");
   assert.deepEqual(h.node("reasoning-options").children.map(item => item.textContent), ["Ein"]);
+});
+
+test("a completed run refreshes reasoning after the native runtime recovered", () => {
+  const h = harness();
+  h.emit("state.snapshot", { reasoningModelId: "A", reasoningRole: "general" });
+  h.emit("host.error", { message: "Runtime wird gestartet" }, "1");
+  const sentBefore = h.sent.length;
+
+  h.emit("chat.started", {});
+  h.emit("chat.completed", {});
+
+  assert.equal(h.sent.length, sentBefore + 1);
+  assert.equal(h.sent.at(-1).type, "reasoning.get");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.sent.at(-1).payload)), { modelId: "A", role: "general" });
 });

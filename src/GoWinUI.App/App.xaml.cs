@@ -1,15 +1,22 @@
 using GoWinUI.App.Services;
+using GoWinUI.App.Services.Extensions;
 using GoWinUI.App.ViewModels;
 using GoAi.Contracts;
+using GoWinUI.Core.Chat;
 using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Extensions;
+using GoWinUI.Core.Memory;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure;
+using GoWinUI.Infrastructure.Extensions;
+using GoWinUI.Infrastructure.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.Windows.AppLifecycle;
+using System.Collections.Concurrent;
 using System.Globalization;
 using Windows.UI.ViewManagement;
 
@@ -43,6 +50,8 @@ public partial class App : Application
         "NavigationViewSelectionIndicatorForeground",
     ];
     private readonly IHost _host;
+    private readonly ConcurrentQueue<Guid?> _pendingActivationTargets = new();
+    private readonly SemaphoreSlim _activationGate = new(1, 1);
     private AppInstance? _appInstance;
     private MainWindow? _window;
     private FrameworkElement? _themeRoot;
@@ -51,6 +60,7 @@ public partial class App : Application
     private Task? _aiAvailabilityMonitor;
     private readonly SemaphoreSlim _aiAvailabilityLifecycle = new(1, 1);
     private string? _lastLoggedAiConnectionState;
+    private int _activationReady;
     private int _shutdownStarted;
 
     public App()
@@ -60,7 +70,8 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
-        DataDirectory = ResolveDataDirectory();
+        RuntimeProfile = AssistantRuntimeProfile.Resolve();
+        DataDirectory = RuntimeProfile.DataDirectory;
         _host = Host.CreateDefaultBuilder()
             .ConfigureLogging(logging =>
             {
@@ -69,8 +80,17 @@ public partial class App : Application
             })
             .ConfigureServices(services =>
             {
+                services.AddSingleton(RuntimeProfile);
                 services.AddGoInfrastructure(options => options.DataDirectory = DataDirectory);
+                services.AddProjectMemory();
+                services.AddSingleton<IAextSignatureVerifier>(
+                    new DirectoryAextSignatureVerifier(Path.Combine(DataDirectory, "Extensions", "trusted-keys")));
+                services.AddAssistantExtensionFoundation(new(Path.Combine(DataDirectory, "Extensions")));
+                services.AddExtensionHostSupervisor();
+                services.AddAssistantRunScheduling();
                 services.AddSingleton<SettingsCoordinator>();
+                services.AddSingleton<GoWinUI.Core.Research.IResearchSandboxService, ResearchSandboxService>();
+                services.AddSingleton<AssistantSessionActivationService>();
                 services.AddSingleton<NativeModelRuntimeService>();
                 services.AddSingleton<GoAiConnectionService>();
                 services.AddSingleton<ModelCapabilityRegistry>();
@@ -99,7 +119,14 @@ public partial class App : Application
                         goAi,
                         provider.GetRequiredService<SettingsCoordinator>(),
                         provider.GetRequiredService<RecentActivityService>(),
-                        microphone);
+                        microphone,
+                        provider.GetRequiredService<AssistantRuntimeProfile>(),
+                        provider.GetRequiredService<IExtensionActionCatalog>(),
+                        provider.GetRequiredService<IExtensionRuntimeService>(),
+                        provider.GetRequiredService<IProjectMemoryStore>(),
+                        provider.GetRequiredService<IAssistantRunScheduler>(),
+                        provider.GetRequiredService<GoWinUI.Core.Research.IScientificResearchRepository>(),
+                        provider.GetRequiredService<GoWinUI.Core.Research.IScientificResearchExportService>());
                 });
                 services.AddSingleton<LogsViewModel>();
                 services.AddSingleton<SettingsViewModel>();
@@ -119,6 +146,8 @@ public partial class App : Application
     public MainWindow? MainWindow => _window;
 
     public string DataDirectory { get; }
+
+    public AssistantRuntimeProfile RuntimeProfile { get; }
 
     public string AccentColor { get; private set; } = AppSettings.DefaultAccentColor;
 
@@ -182,24 +211,30 @@ public partial class App : Application
     {
         try
         {
+            var activationArguments = AppInstance.GetCurrent().GetActivatedEventArgs();
             _appInstance = AppInstance.FindOrRegisterForKey(GetInstanceKey());
             if (!_appInstance.IsCurrent)
             {
-                await _appInstance.RedirectActivationToAsync(AppInstance.GetCurrent().GetActivatedEventArgs());
+                await _appInstance.RedirectActivationToAsync(activationArguments);
                 Environment.Exit(0);
                 return;
             }
 
             _appInstance.Activated += OnAppInstanceActivated;
+            TryRegisterSessionProtocol();
             await _host.StartAsync();
             var database = GetService<IGoDatabase>();
             await database.InitializeAsync();
+            await GetService<IProjectMemoryStore>().InitializeAsync();
             _ = await GetService<IChatRepository>().MarkStreamingMessagesInterruptedAsync();
             var settings = GetService<SettingsCoordinator>();
             await settings.InitializeAsync();
-            await settings.UpdateAsync(static current => current);
+            await settings.UpdateAsync(current => ApplyRuntimeProfile(current, RuntimeProfile));
             await GetService<GoAiAssistantService>().StopPersistedRunsAtStartupAsync();
             _ = await GetService<IChatRepository>().DeleteEmptyTerminalMessagesAsync();
+            await ApplySessionActivationAsync(
+                GetTargetSessionId(activationArguments),
+                navigateToAssistant: false);
 
             var shell = GetService<ShellViewModel>();
             shell.IsAiConnectionEnabled = settings.Current.IsAiConnectionEnabled;
@@ -218,6 +253,11 @@ public partial class App : Application
             _window.Closed += OnWindowClosed;
             _window.BeforeCloseAsync = PrepareShutdownAsync;
             _window.Activate();
+            Volatile.Write(ref _activationReady, 1);
+            while (_pendingActivationTargets.TryDequeue(out var targetSessionId))
+            {
+                await ApplySessionActivationAsync(targetSessionId, navigateToAssistant: true);
+            }
             await ApplyAiConnectionModeAsync(settings.Current.IsAiConnectionEnabled);
         }
         catch (Exception exception)
@@ -275,7 +315,87 @@ public partial class App : Application
 
     private void OnAppInstanceActivated(object? sender, AppActivationArguments args)
     {
-        _window?.DispatcherQueue.TryEnqueue(() => _window.BringToForeground());
+        var targetSessionId = GetTargetSessionId(args);
+        var window = _window;
+        if (Volatile.Read(ref _activationReady) == 0 || window is null)
+        {
+            _pendingActivationTargets.Enqueue(targetSessionId);
+            return;
+        }
+
+        _ = window.DispatcherQueue.TryEnqueue(() =>
+        {
+            _ = ApplySessionActivationAsync(targetSessionId, navigateToAssistant: true);
+        });
+    }
+
+    private async Task ApplySessionActivationAsync(Guid? targetSessionId, bool navigateToAssistant)
+    {
+        await _activationGate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            AssistantSessionActivation? activation = null;
+            if (targetSessionId is { } sessionId)
+            {
+                activation = await GetService<AssistantSessionActivationService>()
+                    .ActivateAsync(sessionId)
+                    .ConfigureAwait(true);
+            }
+
+            if (navigateToAssistant && activation is not null && _window is { } window)
+            {
+                await window.OpenAssistantSessionAsync(activation.SessionChanged).ConfigureAwait(true);
+            }
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.SessionActivationFailed(GetService<ILogger<App>>(), exception);
+        }
+        finally
+        {
+            _activationGate.Release();
+            if (navigateToAssistant)
+            {
+                _window?.BringToForeground();
+            }
+        }
+    }
+
+    private Guid? GetTargetSessionId(AppActivationArguments? args)
+    {
+        if (args?.Kind != ExtendedActivationKind.Protocol
+            || args.Data is not Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs protocolArgs)
+        {
+            return null;
+        }
+
+        return AssistantSessionUri.TryParse(protocolArgs.Uri, RuntimeProfile.Name, out var sessionId)
+            ? sessionId
+            : null;
+    }
+
+    private void TryRegisterSessionProtocol()
+    {
+        var executablePath = Environment.ProcessPath;
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GO_SMOKE_INSTANCE_KEY"))
+            || string.IsNullOrWhiteSpace(executablePath))
+        {
+            return;
+        }
+
+        try
+        {
+            executablePath = Path.GetFullPath(executablePath);
+            ActivationRegistrationManager.RegisterForProtocolActivation(
+                AssistantSessionUri.ProtocolScheme(RuntimeProfile.Name),
+                executablePath + ",0",
+                RuntimeProfile.ProductName,
+                executablePath);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.SessionProtocolRegistrationFailed(GetService<ILogger<App>>(), exception);
+        }
     }
 
     private async Task MonitorLocalAiAvailabilityAsync(CancellationToken cancellationToken)
@@ -548,22 +668,16 @@ public partial class App : Application
         }
     }
 
-    private static string ResolveDataDirectory()
-    {
-        var requested = Environment.GetEnvironmentVariable("GO_DATA_DIRECTORY");
-        return string.IsNullOrWhiteSpace(requested)
-            ? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "GO")
-            : Path.GetFullPath(requested);
-    }
+    private string GetInstanceKey() => RuntimeProfile.InstanceKey;
 
-    private static string GetInstanceKey()
+    internal static AppSettings ApplyRuntimeProfile(AppSettings current, AssistantRuntimeProfile profile)
     {
-        var smokeKey = Environment.GetEnvironmentVariable("GO_SMOKE_INSTANCE_KEY");
-        return string.IsNullOrWhiteSpace(smokeKey)
-            ? "GO.Main"
-            : $"GO.Smoke.{smokeKey}";
+        var explicitProfile = Environment.GetEnvironmentVariable("ASSISTANT_PROFILE");
+        var explicitGateway = Environment.GetEnvironmentVariable("ASSISTANT_GATEWAY_URL");
+        if (!profile.HasExplicitProfileSelection
+            && string.IsNullOrWhiteSpace(explicitProfile)
+            && string.IsNullOrWhiteSpace(explicitGateway)) return current;
+        return current with { GoAiServerUrl = profile.GatewayUri.AbsoluteUri.TrimEnd('/') };
     }
 
     private static IEnumerable<ResourceDictionary> EnumerateResourceDictionaries(ResourceDictionary root)

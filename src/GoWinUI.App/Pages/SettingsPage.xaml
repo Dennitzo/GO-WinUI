@@ -67,6 +67,12 @@
             Text="Offline bleibt der AI-Assistent als Oberfläche verfügbar; GO führt dabei keinerlei API-Verbindungsversuche aus."
             TextWrapping="Wrap" />
 
+          <ToggleSwitch
+            Header="Neue AI-Antworten automatisch vorlesen"
+            IsOn="{x:Bind ViewModel.IsAutomaticSpeechEnabled, Mode=TwoWay}"
+            OffContent="Aus"
+            OnContent="Ein" />
+
           <Grid ColumnSpacing="10">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="*" />

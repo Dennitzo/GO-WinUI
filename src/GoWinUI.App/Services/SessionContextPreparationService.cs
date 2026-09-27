@@ -642,14 +642,14 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             return (selectedModelId, knownContextLength.Value);
         }
         var status = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
-        if (!status.ProviderReachable)
-        {
-            throw new InvalidOperationException("Die Modellkontextlänge für den Sitzungsverlauf konnte nicht ermittelt werden.");
-        }
         var model = status.Models.FirstOrDefault(item => item.Downloaded
             && string.Equals(item.Id, selectedModelId, StringComparison.OrdinalIgnoreCase));
         if (model is null)
         {
+            if (!status.ProviderReachable)
+            {
+                throw new InvalidOperationException("Die Modellkontextlänge für den Sitzungsverlauf konnte nicht ermittelt werden.");
+            }
             throw new InvalidOperationException(
                 $"Das ausgewählte General-AI-Modell '{selectedModelId}' ist nicht verfügbar.");
         }

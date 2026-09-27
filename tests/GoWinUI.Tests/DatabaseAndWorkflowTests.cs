@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Extensions;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure;
 using GoWinUI.Infrastructure.Storage;
@@ -28,13 +29,102 @@ public sealed class DatabaseAndWorkflowTests
     }
 
     [Fact]
+    public async Task MigrationsFortyTwoAndFortyFourPromoteModesAndExtensionActionsWithoutDataLoss()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var legacyCoding = await chats.CreateSessionAsync("Legacy Coding");
+        var audiobook = await chats.CreateSessionAsync("Hörbuch");
+        var general = await chats.CreateSessionAsync("General");
+        var workspace = Path.Combine(environment.Directory, "legacy-workspace");
+        await chats.SetCodingWorkspacePathAsync(legacyCoding.Id, workspace);
+        await chats.SaveDraftAsync(legacyCoding.Id, "Ungesendeter Coding-Entwurf");
+        var message = await chats.AddMessageAsync(
+            legacyCoding.Id,
+            ChatRole.User,
+            "Dieser Inhalt muss die Migration überstehen.",
+            MessageStatus.Completed);
+        await chats.SetPersistentExtensionActionIdAsync(audiobook.Id, BuiltInActionIds.CreateAudiobook);
+
+        await using (var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                DROP TRIGGER IF EXISTS trg_chat_sessions_group_mode_insert;
+                DROP TRIGGER IF EXISTS trg_chat_sessions_group_mode_update;
+                DROP TRIGGER IF EXISTS trg_chat_session_groups_mode_update;
+                DROP INDEX IF EXISTS ix_chat_session_groups_mode_created;
+                DROP INDEX IF EXISTS ix_chat_sessions_mode_updated;
+                DROP INDEX IF EXISTS ix_chat_sessions_persistent_extension_action;
+                ALTER TABLE chat_sessions ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE chat_sessions ADD COLUMN pinned_at TEXT NULL;
+                ALTER TABLE chat_sessions ADD COLUMN persistent_tool_action TEXT NULL;
+                ALTER TABLE chat_sessions ADD COLUMN persistent_tool_variant TEXT NULL;
+                ALTER TABLE chat_sessions ADD COLUMN persistent_tool_variant_v2 TEXT NULL;
+                UPDATE chat_sessions SET persistent_tool_action='code',is_pinned=1,pinned_at=$now WHERE id=$coding;
+                UPDATE chat_sessions SET persistent_tool_action='audiobook',is_pinned=1,pinned_at=$now WHERE id=$audiobook;
+                ALTER TABLE chat_session_groups DROP COLUMN chat_mode;
+                ALTER TABLE chat_sessions DROP COLUMN chat_mode;
+                ALTER TABLE chat_sessions DROP COLUMN persistent_extension_action_id;
+                DELETE FROM schema_migrations WHERE version IN (42,44,46);
+                """;
+            command.Parameters.AddWithValue("$coding", legacyCoding.Id.ToString("D"));
+            command.Parameters.AddWithValue("$audiobook", audiobook.Id.ToString("D"));
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+            await command.ExecuteNonQueryAsync();
+        }
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            await using var migrated = new SqliteDatabase(
+                new GoInfrastructureOptions { DataDirectory = environment.Directory },
+                NullLogger<SqliteDatabase>.Instance);
+            await migrated.InitializeAsync();
+            Assert.True(await migrated.CheckIntegrityAsync());
+        }
+
+        await using var reopened = new SqliteDatabase(
+            new GoInfrastructureOptions { DataDirectory = environment.Directory },
+            NullLogger<SqliteDatabase>.Instance);
+        await reopened.InitializeAsync();
+        var repository = new GoWinUI.Infrastructure.Repositories.SqliteChatRepository(reopened);
+        var migratedCoding = Assert.IsType<ChatSession>(await repository.GetSessionAsync(legacyCoding.Id));
+        Assert.Equal(ChatMode.Coding, migratedCoding.ChatMode);
+        Assert.Null(migratedCoding.PersistentExtensionActionId);
+        Assert.Equal(workspace, migratedCoding.CodingWorkspacePath);
+        Assert.Equal("Ungesendeter Coding-Entwurf", migratedCoding.Draft);
+        Assert.Equal(message.Content, (await repository.GetMessageAsync(message.Id))?.Content);
+        Assert.Equal(BuiltInActionIds.CreateAudiobook, (await repository.GetSessionAsync(audiobook.Id))?.PersistentExtensionActionId);
+        Assert.Equal(ChatMode.General, (await repository.GetSessionAsync(audiobook.Id))?.ChatMode);
+        Assert.Equal(ChatMode.General, (await repository.GetSessionAsync(general.Id))?.ChatMode);
+        Assert.Equal(3, (await repository.ListSessionsAsync()).Count);
+
+        await using var verification = new SqliteConnection($"Data Source={reopened.DatabasePath}");
+        await verification.OpenAsync();
+        await using var verify = verification.CreateCommand();
+        verify.CommandText = "SELECT group_concat(name,',') FROM pragma_table_info('chat_sessions');";
+        var columns = Convert.ToString(
+            await verify.ExecuteScalarAsync(),
+            System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+        Assert.Contains("chat_mode", columns, StringComparison.Ordinal);
+        Assert.Contains("persistent_extension_action_id", columns, StringComparison.Ordinal);
+        Assert.DoesNotContain("is_pinned", columns, StringComparison.Ordinal);
+        Assert.DoesNotContain("pinned_at", columns, StringComparison.Ordinal);
+        Assert.DoesNotContain("persistent_tool_action", columns, StringComparison.Ordinal);
+        Assert.DoesNotContain("persistent_tool_variant", columns, StringComparison.Ordinal);
+        verify.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version IN (42,44,46);";
+        Assert.Equal(3L, (long)(await verify.ExecuteScalarAsync() ?? 0L));
+    }
+
+    [Fact]
     public async Task CustomWorkflowUsesOptimisticRevisionAndBuiltInsStayReadOnly()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var repository = environment.Get<IWorkflowRepository>();
         var now = DateTimeOffset.UtcNow;
         var created = await repository.CreateAsync(new(
-            Guid.Empty, "eigener-workflow", "Eigener Workflow", "Beschreibung", "Allgemein", "Kontext", "{\"schema\":\"go.general.workflow.v1\",\"blocks\":[]}", false, 0, now, now, ["Test"]));
+            Guid.Empty, "eigener-workflow", "Eigener Workflow", "Beschreibung", "Allgemein", "Kontext", "{\"schema\":\"assistant.workflow.v1\",\"blocks\":[]}", false, 0, now, now, ["Test"]));
         var updated = await repository.UpdateAsync(created with { Title = "Geändert" }, created.Revision);
 
         Assert.Equal(2, updated.Revision);
@@ -77,7 +167,6 @@ public sealed class DatabaseAndWorkflowTests
             await workflows.CreateAsync(userCopy with { Id = seedId, Slug = seedId.ToString("N"), Title = "LegacySeed" });
         }
         var seededSession = await chats.CreateSessionAsync("Bestehender Workflow-Chat");
-        await chats.SetPinnedAsync(seededSession.Id, true);
         var message = await chats.AddMessageAsync(seededSession.Id, ChatRole.Assistant, "Gespeicherter Workflow-Inhalt", MessageStatus.Completed);
         var customSession = await chats.CreateSessionAsync("Eigener Workflow");
 
@@ -122,7 +211,6 @@ public sealed class DatabaseAndWorkflowTests
         Assert.Empty(await workflows.ListAsync("LegacySeed"));
         Assert.Equal(2, (await chats.ListSessionsAsync()).Count);
         var preserved = Assert.IsType<ChatSession>(await chats.GetSessionAsync(seededSession.Id));
-        Assert.True(preserved.IsPinned);
         Assert.Null(preserved.SelectedWorkflowId);
         Assert.Equal(message.Content, (await chats.GetMessageAsync(message.Id))?.Content);
         Assert.Equal(userCopy.Id, (await chats.GetSessionAsync(customSession.Id))?.SelectedWorkflowId);
@@ -177,7 +265,6 @@ public sealed class DatabaseAndWorkflowTests
         var secondRoot = Path.Combine(environment.Directory, "projekt-b");
         await chats.SetCodingWorkspacePathAsync(first.Id, $"  {firstRoot}  ");
         await chats.SetCodingWorkspacePathAsync(second.Id, secondRoot);
-        await chats.SetPinnedAsync(first.Id, true);
         var message = await chats.AddMessageAsync(first.Id, ChatRole.User, "Nachricht aus A", MessageStatus.Completed);
 
         await using var reopened = new SqliteDatabase(
@@ -190,7 +277,6 @@ public sealed class DatabaseAndWorkflowTests
         var snapshotRepository = new GoWinUI.Infrastructure.Repositories.SqliteConversationSnapshotRepository(reopened);
         Assert.Equal(firstRoot, (await snapshotRepository.GetAsync(first.Id))?.Session.CodingWorkspacePath);
         Assert.Equal(message.Id, Assert.Single(await repository.ListMessagesAsync(first.Id)).Id);
-        Assert.True((await repository.GetSessionAsync(first.Id))?.IsPinned);
 
         await repository.SetCodingWorkspacePathAsync(first.Id, null);
         Assert.Null((await repository.GetSessionAsync(first.Id))?.CodingWorkspacePath);
@@ -203,8 +289,7 @@ public sealed class DatabaseAndWorkflowTests
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Bestehendes Coding-Projekt");
-        await chats.SetPersistentToolActionAsync(session.Id, PersistentToolAction.Coding);
+        var session = await chats.CreateSessionAsync("Bestehendes Coding-Projekt", ChatMode.Coding);
         var message = await chats.AddMessageAsync(session.Id, ChatRole.User, "Gespeicherter Inhalt", MessageStatus.Completed);
         await using (var connection = new SqliteConnection($"Data Source={environment.Get<IGoDatabase>().DatabasePath}"))
         {
@@ -224,7 +309,8 @@ public sealed class DatabaseAndWorkflowTests
 
         var restored = Assert.IsType<ChatSession>(await chats.GetSessionAsync(session.Id));
         Assert.Null(restored.CodingWorkspacePath);
-        Assert.Equal(PersistentToolAction.Coding, restored.PersistentToolAction);
+        Assert.Equal(ChatMode.Coding, restored.ChatMode);
+        Assert.Null(restored.PersistentExtensionActionId);
         Assert.Equal(session.Title, restored.Title);
         Assert.Equal(message.Id, Assert.Single(await chats.ListMessagesAsync(session.Id)).Id);
     }

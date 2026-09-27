@@ -66,7 +66,8 @@ internal static class GeneralSessionContext
         && Same(previous.DocumentContext, current.DocumentContext)
         && Same(previous.UploadIds, current.UploadIds) && Same(previous.ArtifactIds, current.ArtifactIds)
         && Same(previous.AllowedServerTools, current.AllowedServerTools)
-        && Same(previous.ClientCapabilities, current.ClientCapabilities);
+        && Same(previous.ClientCapabilities, current.ClientCapabilities)
+        && Same(previous.ClientTools, current.ClientTools);
 
     private static bool Same<T>(T previous, T current) => JsonSerializer.Serialize(previous) == JsonSerializer.Serialize(current);
 }

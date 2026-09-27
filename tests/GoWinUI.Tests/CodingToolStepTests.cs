@@ -204,6 +204,24 @@ public sealed class CodingToolStepTests
     }
 
     [Fact]
+    public void PlanModeUsesCodingAgentButOnlyReadOnlyServerTools()
+    {
+        Assert.True(GoAiAssistantService.UsesCodingAgent(PromptTriggerAction.PlanMode));
+        var tools = GoAiAssistantService.GetAllowedServerTools(PromptTriggerAction.PlanMode);
+        Assert.Contains("web.search", tools);
+        Assert.Contains("media.analyze", tools);
+        Assert.DoesNotContain("image.generate", tools);
+        Assert.DoesNotContain("context.embed", tools);
+        Assert.True(GoAiAssistantService.IsClientToolAllowed(PromptTriggerAction.PlanMode, ToolRiskClass.ReadOnly));
+        Assert.False(GoAiAssistantService.IsClientToolAllowed(PromptTriggerAction.PlanMode, ToolRiskClass.LocalMutation));
+        Assert.False(GoAiAssistantService.IsClientToolAllowed(PromptTriggerAction.PlanMode, ToolRiskClass.Process));
+        var prompt = GoAiAssistantService.BuildPlanModePrompt("Prüfe das Projekt");
+        Assert.Contains("keine Datei", prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("assistant-plan", prompt, StringComparison.Ordinal);
+        Assert.Contains("Plan implementieren", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TerminalDetailsKeepArgumentsExitCodeAndBothOutputTailsVisible()
     {
         var proposal = new ToolProposal("command", "run", ClientToolNames.CodingCommand,

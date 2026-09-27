@@ -11,7 +11,6 @@ function harness() {
     getBoundingClientRect() { return { height: parseFloat(this.style.height) }; },
     get scrollHeight() { return layout.contentHeight; } };
   const elements = { prompt, chatPane: { getBoundingClientRect: () => ({ top: 20, bottom: layout.paneHeight + 20, height: layout.paneHeight }) },
-    chatHeader: { getBoundingClientRect: () => ({ height: 56 }) },
     composerRegion: { getBoundingClientRect: () => ({ height: parseFloat(prompt.style.height) + layout.overhead }) } };
   const frames = [];
   const context = vm.createContext({ elements, innerHeight: 1000, getComputedStyle: () => ({ minHeight: "58px" }),
@@ -36,7 +35,7 @@ test("draft grows to show all lines, then scrolls only within the available wind
   layout.contentHeight = 1400;
   prompt.scrollTop = 200;
   context.resizePrompt();
-  assert.equal(prompt.style.height, "620px");
+  assert.equal(prompt.style.height, "676px");
   assert.equal(prompt.style.overflowY, "auto");
   assert.equal(prompt.scrollTop, 200, "resizing a long draft retains its reading position");
   layout.contentHeight = 58;
@@ -53,15 +52,15 @@ test("window resize, wrapped controls and the visual viewport reserve actual usa
   layout.paneHeight = 500;
   layout.overhead = 148;
   context.resizePrompt();
-  assert.equal(prompt.style.height, "284px");
+  assert.equal(prompt.style.height, "340px");
   context.visualViewport = { offsetTop: 0, height: 430 };
   context.resizePrompt();
-  assert.equal(prompt.style.height, "194px");
+  assert.equal(prompt.style.height, "250px");
   layout.paneHeight = 1000;
   delete context.visualViewport;
   layout.overhead = 112;
   context.resizePrompt();
-  assert.equal(prompt.style.height, "800px");
+  assert.equal(prompt.style.height, "856px");
 });
 
 test("restoring and clearing programmatic drafts coalesces layout work and respects new wrapping", () => {

@@ -59,7 +59,73 @@ public sealed record RunRequest(
     string? PreferredCodingModelId = null,
     CodingRunOptions? CodingOptions = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? WorkspacePath = null,
-    bool DeepResearch = false);
+    bool DeepResearch = false,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<ToolDescriptor>? ClientTools = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] DeepResearchOptions? ResearchOptions = null);
+
+public enum DeepResearchProfile
+{
+    Auto,
+    Web,
+    ScientificEvidence,
+    SystematicReview,
+    ScopingReview,
+    LiteratureUpdate,
+    ReplicationAudit,
+    OpenProblem,
+    MathematicalInvestigation,
+}
+
+public static class DeepResearchProfileNames
+{
+    public static IReadOnlyList<string> All { get; } =
+    [
+        "auto", "web", "scientificEvidence", "systematicReview", "scopingReview",
+        "literatureUpdate", "replicationAudit", "openProblem", "mathematicalInvestigation",
+    ];
+
+    public static DeepResearchProfile Parse(string? value) => value switch
+    {
+        "web" => DeepResearchProfile.Web,
+        "scientificEvidence" => DeepResearchProfile.ScientificEvidence,
+        "systematicReview" => DeepResearchProfile.SystematicReview,
+        "scopingReview" => DeepResearchProfile.ScopingReview,
+        "literatureUpdate" => DeepResearchProfile.LiteratureUpdate,
+        "replicationAudit" => DeepResearchProfile.ReplicationAudit,
+        "openProblem" => DeepResearchProfile.OpenProblem,
+        "mathematicalInvestigation" => DeepResearchProfile.MathematicalInvestigation,
+        _ => DeepResearchProfile.Auto,
+    };
+
+    public static string ToProtocolName(DeepResearchProfile value) =>
+        JsonNamingPolicy.CamelCase.ConvertName(value.ToString());
+}
+
+public enum ResearchAutonomyLevel
+{
+    ReadOnlyResearch,
+    CodingWorkspaceResearch,
+    SandboxResearch,
+}
+
+public enum ResearchVerificationLevel
+{
+    Standard,
+    MultiPath,
+    FormalWherePossible,
+}
+
+public sealed record DeepResearchOptions(
+    DeepResearchProfile Profile = DeepResearchProfile.Auto,
+    string? ProjectId = null,
+    long? ProtocolVersion = null,
+    string? ResumeCheckpointId = null,
+    ResearchAutonomyLevel AutonomyLevel = ResearchAutonomyLevel.ReadOnlyResearch,
+    ResearchVerificationLevel VerificationLevel = ResearchVerificationLevel.MultiPath,
+    int? MaximumWorks = null,
+    int? MaximumFullTexts = null,
+    IReadOnlyList<string>? PreferredLanguages = null,
+    DateTimeOffset? UpdateSince = null);
 
 public sealed record CodingRunOptions(
     bool UseWorkingState = true,
@@ -158,7 +224,31 @@ public static class RunEventTypes
     public const string RunFailed = "run.failed";
     public const string RunCancelled = "run.cancelled";
     public const string CodingMetrics = "coding.metrics";
+    public const string ResearchProfileSelected = "research.profile.selected";
+    public const string ResearchProblemInterpreted = "research.problem.interpreted";
+    public const string ResearchProtocolUpdated = "research.protocol.updated";
+    public const string ResearchPlanUpdated = "research.plan.updated";
+    public const string ResearchSearchCompleted = "research.search.completed";
+    public const string ResearchWorkResolved = "research.work.resolved";
+    public const string ResearchScreeningUpdated = "research.screening.updated";
+    public const string ResearchEvidenceExtracted = "research.evidence.extracted";
+    public const string ResearchHypothesisUpdated = "research.hypothesis.updated";
+    public const string ResearchDerivationUpdated = "research.derivation.updated";
+    public const string ResearchExperimentUpdated = "research.experiment.updated";
+    public const string ResearchVerificationUpdated = "research.verification.updated";
+    public const string ResearchClaimUpdated = "research.claim.updated";
+    public const string ResearchCheckpointCreated = "research.checkpoint.created";
+    public const string ResearchReportCompleted = "research.report.completed";
+    public const string ResearchWarning = "research.warning";
 }
+
+public sealed record ResearchProgressEvent(
+    string ProjectId,
+    string State,
+    long Revision,
+    int Completed,
+    int Total,
+    DateTimeOffset Timestamp);
 
 public sealed record TextDeltaEvent(string Delta, int? ReplaceFrom = null, string? AgentId = null,
     int Round = 0, string Phase = "main", string? State = null);

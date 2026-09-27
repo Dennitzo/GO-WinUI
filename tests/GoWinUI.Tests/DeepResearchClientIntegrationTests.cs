@@ -25,10 +25,12 @@ public sealed class DeepResearchClientIntegrationTests
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         var documents = environment.Get<IDocumentIngestor>();
-        var session = await chats.CreateSessionAsync("Recherche im bestehenden Projekt");
+        var session = await chats.CreateSessionAsync(
+            "Recherche im bestehenden Projekt",
+            coding ? ChatMode.Coding : ChatMode.General);
         var workspace = Path.Combine(environment.Directory, "workspace");
         Directory.CreateDirectory(workspace);
-        await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: coding);
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace);
         await environment.Get<ISettingsStore>().SaveAsync(new AppSettings
         {
             IsAiConnectionEnabled = true,
@@ -41,7 +43,7 @@ public sealed class DeepResearchClientIntegrationTests
         await settings.InitializeAsync();
         var requests = new List<RunRequest>();
         using var connection = new GoAiConnectionService(settings, NullLogger<GoAiConnectionService>.Instance,
-            () => new RequestCaptureHandler(requests));
+            () => new RequestCaptureHandler(requests, catalogAvailableWhileRuntimeOffline: !coding));
         var broker = new LocalToolBroker(connection, documents, null!, chats);
         using var microphone = new MicrophoneTranscriptionService(connection, settings,
             NullLogger<MicrophoneTranscriptionService>.Instance);
@@ -69,6 +71,7 @@ public sealed class DeepResearchClientIntegrationTests
                 ["prompt"] = prompt,
             };
             if (selection.HasValue) payload["deepResearch"] = selection.Value;
+            if (selection == true) payload["deepResearchProfile"] = "mathematicalInvestigation";
             var before = requests.Count;
             await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantWebBridge.ProtocolVersion,
                     "chat.send", Guid.NewGuid().ToString("D"), JsonSerializer.SerializeToElement(payload)),
@@ -77,6 +80,15 @@ public sealed class DeepResearchClientIntegrationTests
             Assert.Equal(before + 1, requests.Count);
             var sent = requests[^1];
             Assert.Equal(selection == true, sent.DeepResearch);
+            if (selection == true)
+            {
+                Assert.Equal(DeepResearchProfile.MathematicalInvestigation, sent.ResearchOptions?.Profile);
+                Assert.Equal($"research-{session.Id:N}", sent.ResearchOptions?.ProjectId);
+                Assert.Equal(coding ? ResearchAutonomyLevel.CodingWorkspaceResearch : ResearchAutonomyLevel.ReadOnlyResearch,
+                    sent.ResearchOptions?.AutonomyLevel);
+                Assert.Equal(ResearchVerificationLevel.MultiPath, sent.ResearchOptions?.VerificationLevel);
+            }
+            else Assert.Null(sent.ResearchOptions);
             Assert.Equal(session.Id.ToString("D"), sent.SessionId);
             Assert.Contains("web.search", sent.AllowedServerTools!);
             Assert.Contains("web.fetch", sent.AllowedServerTools!);
@@ -100,23 +112,36 @@ public sealed class DeepResearchClientIntegrationTests
             }
             var stored = await chats.GetSessionAsync(session.Id, deadline.Token);
             Assert.Equal(workspace, stored?.CodingWorkspacePath);
-            Assert.Equal(coding ? PersistentToolAction.Coding : (PersistentToolAction?)null, stored?.PersistentToolAction);
+            Assert.Equal(coding ? ChatMode.Coding : ChatMode.General, stored?.ChatMode);
+            Assert.Null(stored?.PersistentExtensionActionId);
             var messages = await chats.ListMessagesAsync(session.Id, deadline.Token);
             Assert.Equal(MessageStatus.Failed, messages[^1].Status);
             Assert.Equal(CaptureError, messages[^1].Error);
         }
     }
 
-    private sealed class RequestCaptureHandler(List<RunRequest> requests) : HttpMessageHandler
+    private sealed class RequestCaptureHandler(
+        List<RunRequest> requests,
+        bool catalogAvailableWhileRuntimeOffline = false) : HttpMessageHandler
     {
         private static readonly JsonSerializerOptions Json = GoAiProtocol.CreateJsonOptions();
+        private int _modelStatusRequests;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             var path = request.RequestUri!.AbsolutePath;
             var now = DateTimeOffset.UtcNow;
             if (path == "/v1/models/status")
-                return Response(new ModelStatusSnapshot(true, "fixture", Models(), now));
+            {
+                // The catalog remains authoritative for request budgeting while the native
+                // process is unloaded or restarting. A first prompt must still reach the run
+                // endpoint so the gateway can load the selected model on demand.
+                var providerReachable = !catalogAvailableWhileRuntimeOffline
+                    || Interlocked.Increment(ref _modelStatusRequests) > 1;
+                return Response(new ModelStatusSnapshot(providerReachable, "fixture", Models(), now,
+                    providerReachable ? null : "modelRuntime.unreachable",
+                    providerReachable ? null : "fixture runtime is intentionally offline"));
+            }
             if (path == "/v1/models/coding")
                 return Response(new CodingModelCatalogResponse(Models().Where(static model => model.Role == "coding").ToArray(),
                     "fixture", true, null, now));

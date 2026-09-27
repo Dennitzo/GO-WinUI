@@ -5,6 +5,7 @@ using GoWinUI.App.Services;
 using GoWinUI.App.ViewModels;
 using GoWinUI.Core.Coding;
 using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Models;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace GoWinUI.Tests;
@@ -301,14 +302,13 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task CommittedSessionDeletionCleansOnlyItsEvidenceAndRetainsPinnedSessions(bool bulkDelete)
+    public async Task CommittedSessionDeletionCleansOnlyItsEvidenceAndRetainsOtherModes(bool bulkDelete)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
-        var retained = await chats.CreateSessionAsync("Pinned retained");
-        await chats.SetPinnedAsync(retained.Id, true);
-        var target = await chats.CreateSessionAsync("Delete target");
-        var other = await chats.CreateSessionAsync("Other session");
+        var retained = await chats.CreateSessionAsync("Coding retained", ChatMode.Coding);
+        var target = await chats.CreateSessionAsync("Delete target", ChatMode.General);
+        var other = await chats.CreateSessionAsync("Other General session", ChatMode.General);
         foreach (var session in new[] { retained, target, other })
         {
             var evidence = new CodingRunEvidenceStore(environment.Directory, session.Id, "run-" + session.Id.ToString("N"));
@@ -316,7 +316,13 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
         }
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
-        await settings.UpdateAsync(current => current with { ActiveSessionId = retained.Id });
+        await settings.UpdateAsync(current => current with
+        {
+            SelectedChatMode = ChatMode.General,
+            ActiveGeneralSessionId = target.Id,
+            ActiveCodingSessionId = retained.Id,
+            ActiveSessionId = target.Id,
+        });
         var activity = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         var coordinator = new AssistantCoordinator(chats, environment.Get<IWorkflowRepository>(), environment.Get<IDocumentIngestor>(),
             environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
@@ -328,7 +334,7 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
         var cache = Path.Combine(environment.Directory, "Cache", "CodingRuns");
         Assert.False(Directory.Exists(Path.Combine(cache, "run-" + target.Id.ToString("N"))));
         Assert.True(Directory.Exists(Path.Combine(cache, "run-" + retained.Id.ToString("N"))));
-        Assert.True((await chats.GetSessionAsync(retained.Id))!.IsPinned);
+        Assert.Equal(ChatMode.Coding, (await chats.GetSessionAsync(retained.Id))!.ChatMode);
         Assert.Equal(!bulkDelete, Directory.Exists(Path.Combine(cache, "run-" + other.Id.ToString("N"))));
     }
 

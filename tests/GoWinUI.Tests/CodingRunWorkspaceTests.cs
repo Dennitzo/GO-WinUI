@@ -20,7 +20,7 @@ public sealed class CodingRunWorkspaceTests
         var otherWorkspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "other-project")).FullName;
         var chats = environment.Get<IChatRepository>();
         var runs = environment.Get<IGoAiRunRepository>();
-        var session = await chats.CreateSessionAsync("Durable project binding");
+        var session = await chats.CreateSessionAsync("Durable project binding", ChatMode.Coding);
         await chats.SetCodingWorkspacePathAsync(session.Id, firstWorkspace, activateCoding: true);
         var turn = await chats.AddTurnAsync(session.Id, "Keep working in this project");
         var initial = await runs.BeginAttemptAsync(Create(session.Id, turn.AssistantMessage.Id, firstWorkspace));
@@ -57,7 +57,7 @@ public sealed class CodingRunWorkspaceTests
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         var runs = environment.Get<IGoAiRunRepository>();
-        var session = await chats.CreateSessionAsync("Legacy project is unknown");
+        var session = await chats.CreateSessionAsync("Legacy project is unknown", ChatMode.Coding);
         await chats.SetCodingWorkspacePathAsync(session.Id, environment.Directory, activateCoding: true);
         var turn = await chats.AddTurnAsync(session.Id, "Old task");
         var original = await runs.CreateAsync(Create(session.Id, turn.AssistantMessage.Id, null));
@@ -87,7 +87,7 @@ public sealed class CodingRunWorkspaceTests
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         var runs = environment.Get<IGoAiRunRepository>();
-        var session = await chats.CreateSessionAsync("Legacy resume");
+        var session = await chats.CreateSessionAsync("Legacy resume", ChatMode.Coding);
         await chats.SetCodingWorkspacePathAsync(session.Id, environment.Directory, activateCoding: true);
         var turn = await chats.AddTurnAsync(session.Id, "Do not guess the old project");
         var legacy = await runs.CreateAsync(Create(session.Id, turn.AssistantMessage.Id, null) with

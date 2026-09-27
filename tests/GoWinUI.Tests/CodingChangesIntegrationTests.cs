@@ -158,7 +158,7 @@ public sealed class CodingChangesIntegrationTests
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Changes persistence");
+        var session = await chats.CreateSessionAsync("Changes persistence", ChatMode.Coding);
         var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "project")).FullName;
         await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: true);
         var turn = await chats.AddTurnAsync(session.Id, "Modify a file");
@@ -241,11 +241,9 @@ public sealed class CodingChangesIntegrationTests
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
-        var retained = await chats.CreateSessionAsync("Pinned retained");
-        await chats.SetPinnedAsync(retained.Id, true);
-        var target = await chats.CreateSessionAsync("Delete target");
-        if (!bulkDelete) await chats.SetPinnedAsync(target.Id, true); // Explicit deletion is still supported.
-        var other = await chats.CreateSessionAsync("Other unpinned session");
+        var retained = await chats.CreateSessionAsync("Coding retained", ChatMode.Coding);
+        var target = await chats.CreateSessionAsync("Delete target", ChatMode.General);
+        var other = await chats.CreateSessionAsync("Other General session", ChatMode.General);
         var retainedStorage = CodingChangesMonitor.StorageDirectory(environment.Directory, retained.Id, Guid.NewGuid());
         var targetStorage = CodingChangesMonitor.StorageDirectory(environment.Directory, target.Id, Guid.NewGuid());
         var otherStorage = CodingChangesMonitor.StorageDirectory(environment.Directory, other.Id, Guid.NewGuid());
@@ -259,7 +257,13 @@ public sealed class CodingChangesIntegrationTests
         await File.WriteAllTextAsync(unrelated, "retain unrelated cache");
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
-        await settings.UpdateAsync(current => current with { ActiveSessionId = retained.Id });
+        await settings.UpdateAsync(current => current with
+        {
+            SelectedChatMode = ChatMode.General,
+            ActiveGeneralSessionId = target.Id,
+            ActiveCodingSessionId = retained.Id,
+            ActiveSessionId = target.Id,
+        });
         var activity = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         var coordinator = new AssistantCoordinator(chats, environment.Get<IWorkflowRepository>(), environment.Get<IDocumentIngestor>(),
             environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
@@ -270,7 +274,7 @@ public sealed class CodingChangesIntegrationTests
 
         Assert.Null(await chats.GetSessionAsync(target.Id));
         Assert.False(Directory.Exists(Path.GetDirectoryName(targetStorage)));
-        Assert.True((await chats.GetSessionAsync(retained.Id))!.IsPinned);
+        Assert.Equal(ChatMode.Coding, (await chats.GetSessionAsync(retained.Id))!.ChatMode);
         Assert.Equal("fixture baseline", await File.ReadAllTextAsync(Path.Combine(retainedStorage, "baseline.json")));
         Assert.Equal("original fixture bytes", await File.ReadAllTextAsync(Path.Combine(retainedStorage, "blobs", "fixture")));
         Assert.Equal(!bulkDelete, await chats.GetSessionAsync(other.Id) is not null);

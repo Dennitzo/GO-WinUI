@@ -25,6 +25,12 @@ internal static partial class AppLog
     [LoggerMessage(EventId = 1006, Level = LogLevel.Information, Message = "GO-AI-Verbindungsstatus geändert: {State}")]
     public static partial void LocalAiConnectionStateChanged(ILogger logger, string state);
 
+    [LoggerMessage(EventId = 1007, Level = LogLevel.Warning, Message = "External session activation failed")]
+    public static partial void SessionActivationFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1008, Level = LogLevel.Warning, Message = "Session URI protocol registration failed")]
+    public static partial void SessionProtocolRegistrationFailed(ILogger logger, Exception exception);
+
     [LoggerMessage(EventId = 1100, Level = LogLevel.Error, Message = "WebView2 initialization failed")]
     public static partial void WebViewInitializationFailed(ILogger logger, Exception exception);
 

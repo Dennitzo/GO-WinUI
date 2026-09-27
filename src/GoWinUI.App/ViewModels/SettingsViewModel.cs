@@ -55,6 +55,9 @@ public sealed partial class SettingsViewModel(
     public partial bool IsAiConnectionEnabled { get; set; }
 
     [ObservableProperty]
+    public partial bool IsAutomaticSpeechEnabled { get; set; } = true;
+
+    [ObservableProperty]
     public partial string LiveCaptionLanguage { get; set; } = "auto";
 
     [ObservableProperty]
@@ -111,6 +114,7 @@ public sealed partial class SettingsViewModel(
     {
         var current = settings.Current;
         IsAiConnectionEnabled = current.IsAiConnectionEnabled;
+        IsAutomaticSpeechEnabled = current.IsAutomaticSpeechEnabled;
         GoAiServerUrl = current.GoAiServerUrl;
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel ?? AppSettings.DefaultSelectedModel;
@@ -206,6 +210,7 @@ public sealed partial class SettingsViewModel(
         await settings.UpdateAsync(current => current with
         {
             IsAiConnectionEnabled = IsAiConnectionEnabled,
+            IsAutomaticSpeechEnabled = IsAutomaticSpeechEnabled,
             GoAiServerUrl = goAiUri.ToString().TrimEnd('/'),
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
             SelectedModel = generalModel,

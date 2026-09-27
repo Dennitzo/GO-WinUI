@@ -5,6 +5,47 @@ namespace GoWinUI.Tests;
 public sealed class NativeModelRuntimeServiceTests
 {
     [Fact]
+    public void RuntimeManagerUsesTheResolvedBinaryStateAndPort()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "native-profile-" + Guid.NewGuid().ToString("N"));
+        var profile = new AssistantRuntimeProfile(
+            "stable",
+            "AI Assistent",
+            Path.Combine(root, "app"),
+            new Uri("http://127.0.0.1:8080"),
+            8081,
+            8082,
+            Path.Combine(root, "state"),
+            Path.Combine(root, "stack", "bin", "llama-server.exe"),
+            Path.Combine(root, "stack"),
+            "LocalAssistant.stable");
+
+        var arguments = NativeModelRuntimeService.BuildRuntimeManagerArguments(
+            profile,
+            "Start",
+            Path.Combine(root, "support"),
+            Path.Combine(root, "startup.error.txt"),
+            Path.Combine(root, "user"));
+
+        Assert.Equal(profile.NativeStateDirectory, ReadOption(arguments, "-StateDirectory"));
+        Assert.Equal(profile.NativeBinaryPath, ReadOption(arguments, "-BinaryPath"));
+        Assert.Equal("8081", ReadOption(arguments, "-Port"));
+        Assert.DoesNotContain("-CudaVisibleDevices", arguments);
+    }
+
+    [Fact]
+    public void RuntimeUpdaterUsesProductOwnedInstallRootAndResultFile()
+    {
+        var arguments = NativeModelRuntimeService.BuildRuntimeUpdaterArguments(
+            @"C:\app\manage-llama-server.ps1", @"C:\data\llama.cpp", @"C:\state\resolved.path");
+
+        Assert.Equal("Update", ReadOption(arguments, "-Action"));
+        Assert.Equal(@"C:\data\llama.cpp", ReadOption(arguments, "-InstallRoot"));
+        Assert.Equal(@"C:\state\resolved.path", ReadOption(arguments, "-ResolvedPathFile"));
+        Assert.Contains("-SkipFirewall", arguments);
+    }
+
+    [Fact]
     public async Task ShutdownStopsOnceAndPreventsRestart()
     {
         var stops = 0;
@@ -142,5 +183,12 @@ public sealed class NativeModelRuntimeServiceTests
         await service.EnsureStartedAsync(new Uri("http://localhost:8080"), CancellationToken.None);
         Assert.Equal(2, starts);
         Assert.True(running);
+    }
+
+    private static string ReadOption(string[] arguments, string option)
+    {
+        var index = Array.IndexOf(arguments, option);
+        Assert.InRange(index, 0, arguments.Length - 2);
+        return arguments[index + 1];
     }
 }

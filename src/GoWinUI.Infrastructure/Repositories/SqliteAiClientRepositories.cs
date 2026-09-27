@@ -1,4 +1,5 @@
 using GoWinUI.Core.Contracts;
+using GoWinUI.Core.Extensions;
 using GoWinUI.Core.Models;
 using GoWinUI.Infrastructure.Storage;
 using Microsoft.Data.Sqlite;
@@ -15,7 +16,7 @@ public sealed class SqlitePromptTriggerRepository(SqliteDatabase database) : IPr
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id, action, phrase, description, match_mode, is_enabled, priority, revision, created_at, updated_at
+            SELECT id, extension_action_id, action, phrase, description, match_mode, is_enabled, priority, revision, created_at, updated_at
             FROM prompt_triggers
             ORDER BY priority DESC, length(phrase) DESC, phrase COLLATE NOCASE;
             """;
@@ -27,7 +28,7 @@ public sealed class SqlitePromptTriggerRepository(SqliteDatabase database) : IPr
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id, action, phrase, description, match_mode, is_enabled, priority, revision, created_at, updated_at
+            SELECT id, extension_action_id, action, phrase, description, match_mode, is_enabled, priority, revision, created_at, updated_at
             FROM prompt_triggers WHERE id=$id;
             """;
         command.Parameters.AddWithValue("$id", id.ToString("D"));
@@ -37,6 +38,7 @@ public sealed class SqlitePromptTriggerRepository(SqliteDatabase database) : IPr
     public async Task<PromptTrigger> CreateAsync(PromptTrigger trigger, CancellationToken cancellationToken = default)
     {
         Validate(trigger);
+        trigger = CanonicalizeForWrite(trigger);
         var now = DateTimeOffset.UtcNow;
         var created = trigger with
         {
@@ -53,8 +55,8 @@ public sealed class SqlitePromptTriggerRepository(SqliteDatabase database) : IPr
             command.Transaction = transaction;
             command.CommandText = """
                 INSERT INTO prompt_triggers
-                    (id, action, phrase, description, match_mode, is_enabled, priority, revision, created_at, updated_at)
-                VALUES($id, $action, $phrase, $description, $mode, $enabled, $priority, 1, $created, $updated);
+                    (id, extension_action_id, phrase, description, match_mode, is_enabled, priority, revision, created_at, updated_at)
+                VALUES($id, $extensionAction, $phrase, $description, $mode, $enabled, $priority, 1, $created, $updated);
                 """;
             Bind(command, created);
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
@@ -68,6 +70,7 @@ public sealed class SqlitePromptTriggerRepository(SqliteDatabase database) : IPr
         CancellationToken cancellationToken = default)
     {
         Validate(trigger);
+        trigger = CanonicalizeForWrite(trigger);
         var updated = trigger with
         {
             Phrase = trigger.Phrase.Trim(),
@@ -81,7 +84,7 @@ public sealed class SqlitePromptTriggerRepository(SqliteDatabase database) : IPr
             command.Transaction = transaction;
             command.CommandText = """
                 UPDATE prompt_triggers
-                SET action=$action, phrase=$phrase, description=$description, match_mode=$mode,
+                SET extension_action_id=$extensionAction, phrase=$phrase, description=$description, match_mode=$mode,
                     is_enabled=$enabled, priority=$priority, revision=$revision, updated_at=$updated
                 WHERE id=$id AND revision=$expected;
                 """;
@@ -169,6 +172,10 @@ public sealed class SqlitePromptTriggerRepository(SqliteDatabase database) : IPr
 
     private static void Validate(PromptTrigger trigger)
     {
+        if (!Enum.IsDefined(trigger.Action))
+        {
+            throw new ArgumentOutOfRangeException(nameof(trigger), trigger.Action, "Die Promptaktion ist ungültig.");
+        }
         if (string.IsNullOrWhiteSpace(trigger.Phrase) || trigger.Phrase.Trim().Length > 160)
         {
             throw new ArgumentException("Eine Triggerphrase muss 1 bis 160 Zeichen enthalten.", nameof(trigger));
@@ -184,7 +191,8 @@ public sealed class SqlitePromptTriggerRepository(SqliteDatabase database) : IPr
     private static void Bind(SqliteCommand command, PromptTrigger trigger)
     {
         command.Parameters.AddWithValue("$id", trigger.Id.ToString("D"));
-        command.Parameters.AddWithValue("$action", ToStorage(trigger.Action));
+        command.Parameters.AddWithValue("$extensionAction", trigger.ExtensionActionId
+            ?? throw new InvalidOperationException("Die kanonische extensionActionId fehlt."));
         command.Parameters.AddWithValue("$phrase", trigger.Phrase);
         command.Parameters.AddWithValue("$description", trigger.Description);
         command.Parameters.AddWithValue("$mode", ToStorage(trigger.MatchMode));
@@ -203,19 +211,64 @@ public sealed class SqlitePromptTriggerRepository(SqliteDatabase database) : IPr
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
+            var legacyAction = reader.IsDBNull(2)
+                ? (PromptTriggerAction?)null
+                : ParseEnum<PromptTriggerAction>(reader.GetString(2));
+            var extensionActionId = ResolveExtensionActionIdForRead(
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                legacyAction);
             items.Add(new PromptTrigger(
                 Guid.Parse(reader.GetString(0)),
-                ParseEnum<PromptTriggerAction>(reader.GetString(1)),
-                reader.GetString(2),
+                ResolveActionForRead(extensionActionId),
                 reader.GetString(3),
-                ParseEnum<PromptTriggerMatchMode>(reader.GetString(4)),
-                reader.GetInt64(5) != 0,
-                reader.GetInt32(6),
-                reader.GetInt64(7),
-                ParseDate(reader.GetString(8)),
-                ParseDate(reader.GetString(9))));
+                reader.GetString(4),
+                ParseEnum<PromptTriggerMatchMode>(reader.GetString(5)),
+                reader.GetInt64(6) != 0,
+                reader.GetInt32(7),
+                reader.GetInt64(8),
+                ParseDate(reader.GetString(9)),
+                ParseDate(reader.GetString(10)),
+                extensionActionId));
         }
         return items;
+    }
+
+    private static PromptTrigger CanonicalizeForWrite(PromptTrigger trigger)
+    {
+        var resolved = PromptActionExtensionIds.ResolveForWrite(trigger.Action, trigger.ExtensionActionId);
+        return trigger with { Action = resolved.Action, ExtensionActionId = resolved.ExtensionActionId };
+    }
+
+    private static string ResolveExtensionActionIdForRead(
+        string? extensionActionId,
+        PromptTriggerAction? legacyAction)
+    {
+        if (string.IsNullOrWhiteSpace(extensionActionId))
+        {
+            if (legacyAction is null || legacyAction == PromptTriggerAction.Extension)
+                throw new InvalidDataException("Der Prompttrigger besitzt weder eine extensionActionId noch eine lesbare Legacy-Aktion.");
+            return PromptActionExtensionIds.FromPromptAction(legacyAction.Value);
+        }
+        try
+        {
+            return PromptActionExtensionIds.EnsureValid(extensionActionId);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException("Die gespeicherte Prompt-Extension-Aktion ist ungültig.", exception);
+        }
+    }
+
+    private static PromptTriggerAction ResolveActionForRead(string extensionActionId)
+    {
+        try
+        {
+            return PromptActionExtensionIds.ResolveForRead(extensionActionId);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException("Die gespeicherte Prompt-Extension-Aktion ist ungültig.", exception);
+        }
     }
 
     internal static string ToStorage<T>(T value) where T : struct, Enum
@@ -747,20 +800,20 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
 {
     public async Task<GoAiRunRecord> CreateAsync(GoAiRunRecord run, CancellationToken cancellationToken = default)
     {
-        run = run with { WorkspacePath = NormalizeWorkspace(run.WorkspacePath) };
+        run = NormalizeForWrite(run) with { WorkspacePath = NormalizeWorkspace(run.WorkspacePath) };
         await database.WriteAsync(async (connection, transaction, token) =>
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = """
                 INSERT INTO go_ai_runs
-                    (id, session_id, assistant_message_id, action, idempotency_key, server_run_id,
+                    (id, session_id, assistant_message_id, extension_action_id, action, idempotency_key, server_run_id,
                      last_event_id, state, selected_model, error_code, created_at, updated_at, workspace_path)
-                VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated, $workspace);
+                VALUES($id, $session, $message, $extensionAction, $action, $key, $server, $event, $state, $model, $error, $created, $updated, $workspace);
                 """;
             Bind(command, run);
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
-            await PersistSessionToolAsync(connection, transaction, run, token).ConfigureAwait(false);
+            await PersistSessionExtensionActionAsync(connection, transaction, run, token).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
         return run;
     }
@@ -770,7 +823,7 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
         {
-            run = run with { WorkspacePath = NormalizeWorkspace(run.WorkspacePath) };
+            run = NormalizeForWrite(run) with { WorkspacePath = NormalizeWorkspace(run.WorkspacePath) };
             await using (var validateAnchor = connection.CreateCommand())
             {
                 validateAnchor.Transaction = transaction;
@@ -804,10 +857,11 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
                 command.Transaction = transaction;
                 command.CommandText = """
                     INSERT INTO go_ai_runs
-                        (id, session_id, assistant_message_id, action, idempotency_key, server_run_id,
+                        (id, session_id, assistant_message_id, extension_action_id, action, idempotency_key, server_run_id,
                          last_event_id, state, selected_model, error_code, created_at, updated_at, workspace_path)
-                    VALUES($id, $session, $message, $action, $key, $server, $event, $state, $model, $error, $created, $updated, $workspace)
+                    VALUES($id, $session, $message, $extensionAction, $action, $key, $server, $event, $state, $model, $error, $created, $updated, $workspace)
                     ON CONFLICT(assistant_message_id) DO UPDATE SET
+                        extension_action_id=excluded.extension_action_id,
                         action=excluded.action,
                         idempotency_key=excluded.idempotency_key,
                         server_run_id=NULL,
@@ -819,7 +873,7 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
                     """;
                 Bind(command, run);
                 await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
-                await PersistSessionToolAsync(connection, transaction, run, token).ConfigureAwait(false);
+                await PersistSessionExtensionActionAsync(connection, transaction, run, token).ConfigureAwait(false);
             }
 
             await using (var resetAnchor = connection.CreateCommand())
@@ -967,6 +1021,7 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         command.Parameters.AddWithValue("$id", run.Id.ToString("D"));
         command.Parameters.AddWithValue("$session", run.SessionId.ToString("D"));
         command.Parameters.AddWithValue("$message", run.AssistantMessageId.ToString("D"));
+        command.Parameters.AddWithValue("$extensionAction", (object?)run.ExtensionActionId ?? DBNull.Value);
         command.Parameters.AddWithValue("$action", run.Action is null ? DBNull.Value : SqlitePromptTriggerRepository.ToStorage(run.Action.Value));
         command.Parameters.AddWithValue("$key", run.IdempotencyKey);
         command.Parameters.AddWithValue("$server", (object?)run.ServerRunId ?? DBNull.Value);
@@ -979,33 +1034,24 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         command.Parameters.AddWithValue("$workspace", (object?)run.WorkspacePath ?? DBNull.Value);
     }
 
-    private static async Task PersistSessionToolAsync(
+    private static async Task PersistSessionExtensionActionAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         GoAiRunRecord run,
         CancellationToken cancellationToken)
     {
-        var persistent = run.Action switch
-        {
-            PromptTriggerAction.Coding => (Action: "code", Variant: (string?)null),
-            PromptTriggerAction.Audiobook => (Action: "audiobook", Variant: (string?)null),
-            _ => ((string Action, string? Variant)?)null,
-        };
-        if (persistent is null) return;
+        if (!string.Equals(run.ExtensionActionId, BuiltInActionIds.CreateAudiobook, StringComparison.Ordinal)) return;
 
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
             UPDATE chat_sessions
-            SET persistent_tool_action=$action,
-                persistent_tool_variant=NULL,
-                persistent_tool_variant_v2=$variant,
+            SET persistent_extension_action_id=$extensionActionId,
                 updated_at=$updated
             WHERE id=$session;
             """;
         command.Parameters.AddWithValue("$session", run.SessionId.ToString("D"));
-        command.Parameters.AddWithValue("$action", persistent.Value.Action);
-        command.Parameters.AddWithValue("$variant", (object?)persistent.Value.Variant ?? DBNull.Value);
+        command.Parameters.AddWithValue("$extensionActionId", run.ExtensionActionId);
         command.Parameters.AddWithValue("$updated", SqlitePromptTriggerRepository.Format(run.UpdatedAt));
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -1018,25 +1064,75 @@ public sealed class SqliteGoAiRunRepository(SqliteDatabase database) : IGoAiRunR
         return Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspace));
     }
 
+    private static GoAiRunRecord NormalizeForWrite(GoAiRunRecord run)
+    {
+        var extensionActionId = run.ExtensionActionId;
+        var action = run.Action;
+        if (string.IsNullOrWhiteSpace(extensionActionId))
+        {
+            extensionActionId = action is null ? null : PromptActionExtensionIds.FromPromptAction(action.Value);
+        }
+        else
+        {
+            PromptActionExtensionIds.EnsureValid(extensionActionId);
+            if (PromptActionExtensionIds.TryGetPromptAction(extensionActionId, out var mappedAction))
+            {
+                if (action is not null && action.Value != mappedAction)
+                    throw new ArgumentException("Promptaktion und Extension-ID widersprechen sich.", nameof(run));
+                action = mappedAction;
+            }
+            else if (action is not null)
+            {
+                throw new ArgumentException("Eine unbekannte Extension-ID darf keinen Legacy-Promptaktionsadapter angeben.", nameof(run));
+            }
+        }
+        return run with { Action = action, ExtensionActionId = extensionActionId };
+    }
+
+    private static (PromptTriggerAction? Action, string? ExtensionActionId) ResolveRunActionForRead(
+        string? extensionActionId,
+        PromptTriggerAction? legacyAction)
+    {
+        if (string.IsNullOrWhiteSpace(extensionActionId))
+            return (legacyAction, legacyAction is null ? null : PromptActionExtensionIds.FromPromptAction(legacyAction.Value));
+        try
+        {
+            PromptActionExtensionIds.EnsureValid(extensionActionId);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException("Die gespeicherte Lauf-Extension-Aktion ist ungültig.", exception);
+        }
+        if (!PromptActionExtensionIds.TryGetPromptAction(extensionActionId, out var mappedAction))
+            return (null, extensionActionId);
+        if (legacyAction is not null && legacyAction.Value != mappedAction)
+            throw new InvalidDataException($"Laufaktion und Extension-ID widersprechen sich ('{legacyAction}' / '{extensionActionId}').");
+        return (mappedAction, extensionActionId);
+    }
+
     private static async Task<IReadOnlyList<GoAiRunRecord>> ReadAsync(SqliteCommand command, CancellationToken cancellationToken)
     {
         var items = new List<GoAiRunRecord>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
+            var resolvedAction = ResolveRunActionForRead(
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : SqlitePromptTriggerRepository.ParseEnum<PromptTriggerAction>(reader.GetString(4)));
             items.Add(new GoAiRunRecord(
                 Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)),
-                reader.IsDBNull(3) ? null : SqlitePromptTriggerRepository.ParseEnum<PromptTriggerAction>(reader.GetString(3)),
-                reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetInt64(6), reader.GetString(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9),
-                SqlitePromptTriggerRepository.ParseDate(reader.GetString(10)),
-                SqlitePromptTriggerRepository.ParseDate(reader.GetString(11)), reader.IsDBNull(12) ? null : reader.GetString(12)));
+                resolvedAction.Action,
+                reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.GetInt64(7), reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10),
+                SqlitePromptTriggerRepository.ParseDate(reader.GetString(11)),
+                SqlitePromptTriggerRepository.ParseDate(reader.GetString(12)), reader.IsDBNull(13) ? null : reader.GetString(13),
+                resolvedAction.ExtensionActionId));
         }
         return items;
     }
 
     private const string SelectSql = """
-        SELECT r.id, r.session_id, r.assistant_message_id, r.action, r.idempotency_key, r.server_run_id,
+        SELECT r.id, r.session_id, r.assistant_message_id, r.extension_action_id, r.action, r.idempotency_key, r.server_run_id,
                r.last_event_id, r.state, r.selected_model, r.error_code, r.created_at, r.updated_at, r.workspace_path
         FROM go_ai_runs r
         """;

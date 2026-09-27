@@ -13,12 +13,14 @@ namespace GoWinUI.Core.Coding;
 internal sealed partial class WindowsProcessJob : IDisposable
 {
     private const uint KillOnJobClose = 0x00002000;
+    private const uint ActiveProcess = 0x00000008;
+    private const uint JobMemory = 0x00000200;
     private const int ExtendedLimitInformation = 9;
     private readonly SafeJobHandle _handle;
 
     private WindowsProcessJob(SafeJobHandle handle) => _handle = handle;
 
-    public static WindowsProcessJob Create()
+    public static WindowsProcessJob Create(CodingProcessLimits? limits = null)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Process jobs require Windows.");
         var handle = CreateJobObjectW(0, 0);
@@ -28,9 +30,17 @@ internal sealed partial class WindowsProcessJob : IDisposable
             handle.Dispose();
             throw new Win32Exception(error, "Der Coding-Prozessjob konnte nicht erstellt werden.");
         }
+        var flags = KillOnJobClose;
+        if (limits?.MaximumActiveProcesses is > 0) flags |= ActiveProcess;
+        if (limits?.MaximumJobMemoryBytes is > 0) flags |= JobMemory;
         var information = new JobExtendedLimitInformation
         {
-            BasicLimitInformation = new JobBasicLimitInformation { LimitFlags = KillOnJobClose },
+            BasicLimitInformation = new JobBasicLimitInformation
+            {
+                LimitFlags = flags,
+                ActiveProcessLimit = limits?.MaximumActiveProcesses ?? 0,
+            },
+            JobMemoryLimit = (nuint)(limits?.MaximumJobMemoryBytes ?? 0),
         };
         if (SetInformationJobObject(handle, ExtendedLimitInformation, in information, (uint)Marshal.SizeOf<JobExtendedLimitInformation>()) == 0)
         {
@@ -109,3 +119,5 @@ internal sealed partial class WindowsProcessJob : IDisposable
         public nuint PeakJobMemoryUsed;
     }
 }
+
+public sealed record CodingProcessLimits(ulong MaximumJobMemoryBytes, uint MaximumActiveProcesses);

@@ -26,7 +26,7 @@ public sealed class CodingResearchLiveTests(ITestOutputHelper output)
     private async Task RunConfiguredTaskAsync(bool requireDeepResearch)
     {
         if (Environment.GetEnvironmentVariable("GO_AI_CODING_RESEARCH_LIVE") != "1") return;
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(12));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(35));
         using var http = new HttpClient
         {
             BaseAddress = new Uri((Environment.GetEnvironmentVariable("GO_AI_SERVER_URL") ?? "http://127.0.0.1:8080").TrimEnd('/') + "/"),
@@ -57,8 +57,15 @@ public sealed class CodingResearchLiveTests(ITestOutputHelper output)
     {
         var accepted = await client.CreateRunAsync(new RunRequest(GoAiProtocol.Version, RunMode.Coding,
             [new("user", [new("text", prompt)])], ClientCapabilities: ["coding"],
-            Limits: new RunLimits(4_096, 32_768, 720), AllowedServerTools: AllowedResearchTools,
-            PreferredCodingModelId: modelId), "coding-research-live-" + Guid.NewGuid().ToString("N"), cancellationToken);
+            Limits: new RunLimits(4_096, 32_768, 0), AllowedServerTools: AllowedResearchTools,
+            PreferredCodingModelId: modelId,
+            DeepResearch: requireDeepResearch,
+            ResearchOptions: requireDeepResearch ? new(
+                Profile: DeepResearchProfile.ScientificEvidence,
+                ProjectId: "live-" + Guid.NewGuid().ToString("N"),
+                AutonomyLevel: ResearchAutonomyLevel.ReadOnlyResearch,
+                VerificationLevel: ResearchVerificationLevel.MultiPath) : null),
+            "coding-research-live-" + Guid.NewGuid().ToString("N"), cancellationToken);
         var runId = accepted.RunId;
         var terminal = false;
         RunFailedEvent? failure = null;
