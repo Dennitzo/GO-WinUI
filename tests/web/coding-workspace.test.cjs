@@ -64,9 +64,8 @@ function harness({ speech = false, codingToolStepsExpanded = false } = {}) {
     "applyCommittedMessage", "applyConversationSnapshot", "belongsToActiveSession", "upsertLiveMessage", "applyLiveDelta", "handleHostMessage",
     "preparePdfMedia", "preparePdfMessage"]) {
     const start = app.indexOf(`  function ${name}(`);
-    const next = app.indexOf(name === "preparePdfMessage"
-      ? "\n  globalThis.goPrepareBookPdf"
-      : name === "handleHostMessage" ? "\n\n  restoreSessionsCollapsed();" : "\n  function ", start + 1);
+    const ending = app.slice(start).match(/\r?\n {2}\}(?:\r?\n|$)/);
+    const next = ending ? start + ending.index + ending[0].length : -1;
     assert.ok(start >= 0 && next > start, `production ${name} exists`);
     vm.runInContext(app.slice(start, next), context);
   }
